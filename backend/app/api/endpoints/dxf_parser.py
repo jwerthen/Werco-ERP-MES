@@ -138,7 +138,8 @@ async def analyze_dxf(
                 block = doc.blocks.get(entity.dxf.name)
                 if block:
                     all_entities.extend(block)
-            except:
+            except Exception:
+                # Silently skip blocks that can't be accessed or don't exist
                 pass
     
     # Initialize tracking variables
@@ -295,12 +296,12 @@ async def analyze_dxf(
                         max_x = max(max_x, x)
                         min_y = min(min_y, y)
                         max_y = max(max_y, y)
-                    
+
                     # Approximate length (will be underestimate)
                     length = calculate_polyline_length(points, entity.closed)
                     total_cut_length += length * 1.1  # Add 10% for curve
-                except:
-                    warnings.append("Spline entity found - length approximated")
+                except Exception as e:
+                    warnings.append(f"Spline entity found but could not process: {str(e)}")
                     
         except Exception as e:
             warnings.append(f"Error processing {entity.dxftype()}: {str(e)}")
