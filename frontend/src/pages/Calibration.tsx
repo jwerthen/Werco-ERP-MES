@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { format, differenceInDays } from 'date-fns';
 import {
@@ -7,6 +8,7 @@ import {
   ExclamationTriangleIcon,
   CheckCircleIcon,
   ClockIcon,
+  XMarkIcon as XCircleIcon,
 } from '@heroicons/react/24/outline';
 
 interface Equipment {
@@ -52,13 +54,19 @@ const equipmentTypes = [
 ];
 
 export default function Calibration() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [equipment, setEquipment] = useState<Equipment[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [showCalibrationModal, setShowCalibrationModal] = useState(false);
   const [editingEquipment, setEditingEquipment] = useState<Equipment | null>(null);
   const [selectedEquipmentId, setSelectedEquipmentId] = useState<number | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [statusFilter, setStatusFilter] = useState<string>(() => {
+    const filter = searchParams.get('filter');
+    if (filter === 'overdue') return 'overdue';
+    if (filter === 'due') return 'due';
+    return '';
+  });
 
   const [formData, setFormData] = useState({
     equipment_id: '',
@@ -257,10 +265,17 @@ export default function Calibration() {
       </div>
 
       {/* Filter */}
-      <div className="flex gap-4">
+      <div className="flex gap-4 items-center">
         <select
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
+          onChange={(e) => {
+            setStatusFilter(e.target.value);
+            if (e.target.value) {
+              setSearchParams({ filter: e.target.value });
+            } else {
+              setSearchParams({});
+            }
+          }}
           className="input w-48"
         >
           <option value="">All Status</option>
@@ -269,6 +284,18 @@ export default function Calibration() {
           <option value="overdue">Overdue</option>
           <option value="out_of_service">Out of Service</option>
         </select>
+        {statusFilter && (
+          <button
+            onClick={() => {
+              setStatusFilter('');
+              setSearchParams({});
+            }}
+            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-werco-100 text-werco-700 rounded-full hover:bg-werco-200"
+          >
+            <XCircleIcon className="h-4 w-4" />
+            Clear filter
+          </button>
+        )}
       </div>
 
       {/* Equipment Table */}

@@ -11,7 +11,7 @@ from .document import Document, DocumentType
 from .mrp import MRPRun, MRPRequirement, MRPAction, MRPRunStatus, PlanningAction
 from .custom_field import CustomFieldDefinition, CustomFieldValue, FieldType, EntityType
 from .quality import NonConformanceReport, CorrectiveActionRequest, FirstArticleInspection, FAICharacteristic, NCRStatus, NCRDisposition, NCRSource, CARStatus, CARType, FAIStatus
-from .purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POStatus, POReceipt, ReceiptStatus
+from .purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POStatus, POReceipt, ReceiptStatus, InspectionStatus, DefectType, InspectionMethod
 from .shipping import Shipment, ShipmentStatus
 from .quote import Quote, QuoteLine, QuoteStatus
 from .customer import Customer

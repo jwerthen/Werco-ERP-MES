@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.endpoints import auth, work_centers, parts, work_orders, shop_floor, bom, routing, mrp, custom_fields, quality, inventory, purchasing, scheduling, documents, reports, shipping, quotes, users, customers, calibration, scanner, traceability, audit, quote_calculator, dxf_parser
+from app.api.endpoints import auth, work_centers, parts, work_orders, shop_floor, bom, routing, mrp, custom_fields, quality, inventory, purchasing, scheduling, documents, reports, shipping, quotes, users, customers, calibration, scanner, traceability, audit, quote_calculator, dxf_parser, admin_settings, receiving, po_upload
 
 api_router = APIRouter()
 
@@ -28,3 +28,6 @@ api_router.include_router(traceability.router, prefix="/traceability", tags=["Tr
 api_router.include_router(audit.router, prefix="/audit", tags=["Audit"])
 api_router.include_router(quote_calculator.router, prefix="/quote-calc", tags=["Quote Calculator"])
 api_router.include_router(dxf_parser.router, prefix="/dxf-parser", tags=["DXF Parser"])
+api_router.include_router(admin_settings.router, prefix="/admin/settings", tags=["Admin Settings"])
+api_router.include_router(receiving.router, prefix="/receiving", tags=["Receiving & Inspection"])
+api_router.include_router(po_upload.router, prefix="/po-upload", tags=["PO Upload"])

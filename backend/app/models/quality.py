@@ -63,7 +63,8 @@ class NonConformanceReport(Base):
     # What's affected
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=True)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
-    lot_number = Column(String(100))
+    receipt_id = Column(Integer, ForeignKey("po_receipts.id"), nullable=True)  # Link to incoming inspection
+    lot_number = Column(String(100), index=True)
     serial_number = Column(String(100))
     
     # Quantity
@@ -115,6 +116,7 @@ class NonConformanceReport(Base):
     # Relationships
     part = relationship("Part")
     work_order = relationship("WorkOrder")
+    receipt = relationship("POReceipt")
     car = relationship("CorrectiveActionRequest", back_populates="ncrs", foreign_keys=[car_id])
 
 

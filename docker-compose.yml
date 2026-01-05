@@ -30,6 +30,7 @@ services:
       SECRET_KEY: ${SECRET_KEY:-change-this-in-production-use-strong-random-key}
       CORS_ORIGINS: http://localhost:3000,http://localhost:8000
       DEBUG: "false"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       - "8000:8000"
     depends_on:

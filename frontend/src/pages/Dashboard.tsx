@@ -8,33 +8,43 @@ import {
   CalendarIcon,
   CheckCircleIcon,
   CubeIcon,
-  TruckIcon,
   WrenchScrewdriverIcon,
-  ShieldExclamationIcon
+  ShieldExclamationIcon,
+  ArrowRightIcon,
+  ArrowTrendingUpIcon,
+  ArrowTrendingDownIcon,
+  ClockIcon,
+  QrCodeIcon,
+  ChartBarIcon,
 } from '@heroicons/react/24/outline';
+import { 
+  ExclamationTriangleIcon as ExclamationTriangleSolid,
+  CheckCircleIcon as CheckCircleSolid 
+} from '@heroicons/react/24/solid';
 
 const workCenterTypeColors: Record<string, string> = {
-  fabrication: 'bg-blue-100 text-blue-800',
-  cnc_machining: 'bg-purple-100 text-purple-800',
-  paint: 'bg-yellow-100 text-yellow-800',
-  powder_coating: 'bg-orange-100 text-orange-800',
-  assembly: 'bg-green-100 text-green-800',
-  welding: 'bg-red-100 text-red-800',
-  inspection: 'bg-cyan-100 text-cyan-800',
-  shipping: 'bg-gray-100 text-gray-800',
+  fabrication: 'bg-blue-500',
+  cnc_machining: 'bg-purple-500',
+  paint: 'bg-amber-500',
+  powder_coating: 'bg-orange-500',
+  assembly: 'bg-emerald-500',
+  welding: 'bg-red-500',
+  inspection: 'bg-cyan-500',
+  shipping: 'bg-slate-500',
 };
 
-const statusColors: Record<string, string> = {
-  available: 'bg-green-500',
-  in_use: 'bg-blue-500',
-  maintenance: 'bg-yellow-500',
-  offline: 'bg-red-500',
+const statusColors: Record<string, { bg: string; dot: string; text: string }> = {
+  available: { bg: 'bg-emerald-50', dot: 'bg-emerald-500', text: 'text-emerald-700' },
+  in_use: { bg: 'bg-blue-50', dot: 'bg-blue-500', text: 'text-blue-700' },
+  maintenance: { bg: 'bg-amber-50', dot: 'bg-amber-500', text: 'text-amber-700' },
+  offline: { bg: 'bg-red-50', dot: 'bg-red-500', text: 'text-red-700' },
 };
 
 interface Alert {
   type: 'error' | 'warning' | 'info';
   message: string;
   link?: string;
+  icon?: React.ElementType;
 }
 
 export default function Dashboard() {
@@ -45,11 +55,10 @@ export default function Dashboard() {
   const [openNCRs, setOpenNCRs] = useState(0);
   const [lowInventory, setLowInventory] = useState(0);
   const [equipmentDue, setEquipmentDue] = useState(0);
-  const [pendingPOs, setPendingPOs] = useState(0);
 
   useEffect(() => {
     loadDashboard();
-    const interval = setInterval(loadDashboard, 30000); // Refresh every 30 seconds
+    const interval = setInterval(loadDashboard, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -67,53 +76,44 @@ export default function Dashboard() {
       setEquipmentDue(equipmentDueData.length || 0);
       setLowInventory(lowStockData.length || 0);
       
-      // Build alerts
       const newAlerts: Alert[] = [];
       if (dashboardData.summary.overdue > 0) {
         newAlerts.push({
           type: 'error',
           message: `${dashboardData.summary.overdue} work order(s) are overdue`,
-          link: '/work-orders'
+          link: '/work-orders',
+          icon: ClockIcon
         });
       }
       if (qualitySummary.open_ncrs > 0) {
         newAlerts.push({
           type: 'warning',
           message: `${qualitySummary.open_ncrs} open NCR(s) require attention`,
-          link: '/quality'
+          link: '/quality?filter=open',
+          icon: ShieldExclamationIcon
         });
       }
       if (equipmentDueData.length > 0) {
         const overdue = equipmentDueData.filter((e: any) => e.days_until_due < 0).length;
-        if (overdue > 0) {
-          newAlerts.push({
-            type: 'error',
-            message: `${overdue} equipment item(s) overdue for calibration`,
-            link: '/calibration'
-          });
-        } else {
-          newAlerts.push({
-            type: 'warning',
-            message: `${equipmentDueData.length} equipment item(s) due for calibration within 30 days`,
-            link: '/calibration'
-          });
-        }
+        newAlerts.push({
+          type: overdue > 0 ? 'error' : 'warning',
+          message: overdue > 0 
+            ? `${overdue} equipment item(s) overdue for calibration`
+            : `${equipmentDueData.length} equipment item(s) due for calibration within 30 days`,
+          link: overdue > 0 ? '/calibration?filter=overdue' : '/calibration?filter=due',
+          icon: WrenchScrewdriverIcon
+        });
       }
       if (lowStockData.length > 0) {
         const critical = lowStockData.filter((i: any) => i.is_critical).length;
-        if (critical > 0) {
-          newAlerts.push({
-            type: 'error',
-            message: `${critical} part(s) at critical inventory levels (below safety stock)`,
-            link: '/inventory'
-          });
-        } else {
-          newAlerts.push({
-            type: 'warning',
-            message: `${lowStockData.length} part(s) below reorder point`,
-            link: '/inventory'
-          });
-        }
+        newAlerts.push({
+          type: critical > 0 ? 'error' : 'warning',
+          message: critical > 0 
+            ? `${critical} part(s) at critical inventory levels`
+            : `${lowStockData.length} part(s) below reorder point`,
+          link: '/inventory?filter=low_stock',
+          icon: CubeIcon
+        });
       }
       setAlerts(newAlerts);
       setError('');
@@ -126,177 +126,299 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <div className="spinner h-12 w-12 mx-auto mb-4"></div>
+          <p className="text-surface-500">Loading dashboard...</p>
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
-        {error}
+      <div className="alert-danger">
+        <ExclamationTriangleSolid className="h-5 w-5 flex-shrink-0" />
+        <div>
+          <p className="font-medium">Error loading dashboard</p>
+          <p className="text-sm opacity-80">{error}</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <div className="flex gap-2">
+      {/* Page header */}
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Dashboard</h1>
+          <p className="page-subtitle">Manufacturing operations overview</p>
+        </div>
+        <div className="page-actions">
           <Link to="/scanner" className="btn-secondary">
+            <QrCodeIcon className="h-5 w-5 mr-2" />
             Scanner
           </Link>
           <Link to="/shop-floor" className="btn-primary">
+            <WrenchScrewdriverIcon className="h-5 w-5 mr-2" />
             Shop Floor
           </Link>
         </div>
       </div>
 
-      {/* Alerts Banner */}
+      {/* Alerts */}
       {alerts.length > 0 && (
         <div className="space-y-2">
-          {alerts.map((alert, idx) => (
-            <Link
-              key={idx}
-              to={alert.link || '#'}
-              className={`block p-3 rounded-lg border ${
-                alert.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' :
-                alert.type === 'warning' ? 'bg-yellow-50 border-yellow-200 text-yellow-800' :
-                'bg-blue-50 border-blue-200 text-blue-800'
-              }`}
-            >
-              <div className="flex items-center">
-                <ExclamationTriangleIcon className="h-5 w-5 mr-2" />
-                <span className="font-medium">{alert.message}</span>
-                <span className="ml-auto text-sm">View &rarr;</span>
-              </div>
-            </Link>
-          ))}
+          {alerts.map((alert, idx) => {
+            const Icon = alert.icon || ExclamationTriangleIcon;
+            return (
+              <Link
+                key={idx}
+                to={alert.link || '#'}
+                className={`
+                  group flex items-center gap-4 p-4 rounded-xl border transition-all duration-200
+                  ${alert.type === 'error' 
+                    ? 'bg-red-50 border-red-200 text-red-800 hover:bg-red-100' 
+                    : alert.type === 'warning'
+                    ? 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
+                    : 'bg-blue-50 border-blue-200 text-blue-800 hover:bg-blue-100'
+                  }
+                `}
+              >
+                <div className={`
+                  p-2 rounded-lg
+                  ${alert.type === 'error' ? 'bg-red-100' : alert.type === 'warning' ? 'bg-amber-100' : 'bg-blue-100'}
+                `}>
+                  <Icon className="h-5 w-5" />
+                </div>
+                <span className="flex-1 font-medium">{alert.message}</span>
+                <ArrowRightIcon className="h-5 w-5 opacity-50 group-hover:opacity-100 group-hover:translate-x-1 transition-all" />
+              </Link>
+            );
+          })}
         </div>
       )}
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="card flex items-center">
-          <div className="p-3 rounded-full bg-blue-100 mr-4">
-            <ClipboardDocumentListIcon className="h-8 w-8 text-blue-600" />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Active Work Orders</p>
-            <p className="text-2xl font-bold text-gray-900">{data?.summary.active_work_orders || 0}</p>
-          </div>
-        </div>
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard
+          icon={ClipboardDocumentListIcon}
+          iconBg="bg-blue-100"
+          iconColor="text-blue-600"
+          label="Active Work Orders"
+          value={data?.summary.active_work_orders || 0}
+          href="/work-orders"
+        />
+        <StatCard
+          icon={CalendarIcon}
+          iconBg="bg-amber-100"
+          iconColor="text-amber-600"
+          label="Due Today"
+          value={data?.summary.due_today || 0}
+          href="/work-orders"
+        />
+        <StatCard
+          icon={ExclamationTriangleIcon}
+          iconBg={data?.summary.overdue ? "bg-red-100" : "bg-emerald-100"}
+          iconColor={data?.summary.overdue ? "text-red-600" : "text-emerald-600"}
+          label="Overdue"
+          value={data?.summary.overdue || 0}
+          valueColor={data?.summary.overdue ? "text-red-600" : undefined}
+          href="/work-orders"
+        />
+        <StatCard
+          icon={ShieldExclamationIcon}
+          iconBg={openNCRs > 0 ? "bg-orange-100" : "bg-emerald-100"}
+          iconColor={openNCRs > 0 ? "text-orange-600" : "text-emerald-600"}
+          label="Open NCRs"
+          value={openNCRs}
+          valueColor={openNCRs > 0 ? "text-orange-600" : undefined}
+          href="/quality"
+        />
+      </div>
 
-        <div className="card flex items-center">
-          <div className="p-3 rounded-full bg-yellow-100 mr-4">
-            <CalendarIcon className="h-8 w-8 text-yellow-600" />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Due Today</p>
-            <p className="text-2xl font-bold text-gray-900">{data?.summary.due_today || 0}</p>
-          </div>
-        </div>
-
-        <div className="card flex items-center">
-          <div className={`p-3 rounded-full mr-4 ${data?.summary.overdue ? 'bg-red-100' : 'bg-green-100'}`}>
-            <ExclamationTriangleIcon className={`h-8 w-8 ${data?.summary.overdue ? 'text-red-600' : 'text-green-600'}`} />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Overdue</p>
-            <p className={`text-2xl font-bold ${data?.summary.overdue ? 'text-red-600' : 'text-gray-900'}`}>
-              {data?.summary.overdue || 0}
-            </p>
-          </div>
-        </div>
-
-        <Link to="/quality" className="card flex items-center hover:bg-gray-50">
-          <div className={`p-3 rounded-full mr-4 ${openNCRs > 0 ? 'bg-orange-100' : 'bg-green-100'}`}>
-            <ShieldExclamationIcon className={`h-8 w-8 ${openNCRs > 0 ? 'text-orange-600' : 'text-green-600'}`} />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Open NCRs</p>
-            <p className={`text-2xl font-bold ${openNCRs > 0 ? 'text-orange-600' : 'text-gray-900'}`}>
-              {openNCRs}
-            </p>
-          </div>
-        </Link>
-
-        <Link to="/calibration" className="card flex items-center hover:bg-gray-50">
-          <div className={`p-3 rounded-full mr-4 ${equipmentDue > 0 ? 'bg-yellow-100' : 'bg-green-100'}`}>
-            <WrenchScrewdriverIcon className={`h-8 w-8 ${equipmentDue > 0 ? 'text-yellow-600' : 'text-green-600'}`} />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Cal Due Soon</p>
-            <p className={`text-2xl font-bold ${equipmentDue > 0 ? 'text-yellow-600' : 'text-gray-900'}`}>
-              {equipmentDue}
-            </p>
-          </div>
-        </Link>
-
-        <Link to="/inventory" className="card flex items-center hover:bg-gray-50">
-          <div className={`p-3 rounded-full mr-4 ${lowInventory > 0 ? 'bg-red-100' : 'bg-green-100'}`}>
-            <CubeIcon className={`h-8 w-8 ${lowInventory > 0 ? 'text-red-600' : 'text-green-600'}`} />
-          </div>
-          <div>
-            <p className="text-sm text-gray-500">Low Stock</p>
-            <p className={`text-2xl font-bold ${lowInventory > 0 ? 'text-red-600' : 'text-gray-900'}`}>
-              {lowInventory}
-            </p>
-          </div>
-        </Link>
+      {/* Secondary KPIs */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+        <StatCard
+          icon={WrenchScrewdriverIcon}
+          iconBg={equipmentDue > 0 ? "bg-amber-100" : "bg-emerald-100"}
+          iconColor={equipmentDue > 0 ? "text-amber-600" : "text-emerald-600"}
+          label="Calibration Due"
+          value={equipmentDue}
+          subtitle="Within 30 days"
+          href="/calibration"
+        />
+        <StatCard
+          icon={CubeIcon}
+          iconBg={lowInventory > 0 ? "bg-red-100" : "bg-emerald-100"}
+          iconColor={lowInventory > 0 ? "text-red-600" : "text-emerald-600"}
+          label="Low Stock Items"
+          value={lowInventory}
+          valueColor={lowInventory > 0 ? "text-red-600" : undefined}
+          href="/inventory"
+        />
+        <StatCard
+          icon={CheckCircleIcon}
+          iconBg="bg-emerald-100"
+          iconColor="text-emerald-600"
+          label="Completed Today"
+          value={data?.recent_completions?.length || 0}
+          href="/work-orders"
+        />
       </div>
 
       {/* Work Center Status */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Work Center Status</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {data?.work_centers.map((wc: WorkCenterStatus) => (
-            <div key={wc.id} className="border rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-gray-900">{wc.name}</span>
-                <span className={`h-3 w-3 rounded-full ${statusColors[wc.status] || 'bg-gray-500'}`} />
-              </div>
-              <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${workCenterTypeColors[wc.type] || 'bg-gray-100'}`}>
-                {wc.type.replace('_', ' ')}
-              </span>
-              <div className="mt-3 flex justify-between text-sm">
-                <div>
-                  <span className="text-gray-500">Active: </span>
-                  <span className="font-medium">{wc.active_operations}</span>
+        <div className="card-header">
+          <div>
+            <h2 className="card-title">Work Center Status</h2>
+            <p className="card-subtitle">Real-time equipment and station status</p>
+          </div>
+          <Link to="/work-centers" className="btn-ghost btn-sm">
+            View All
+          </Link>
+        </div>
+        
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {data?.work_centers.map((wc: WorkCenterStatus) => {
+            const statusStyle = statusColors[wc.status] || statusColors.offline;
+            const typeColor = workCenterTypeColors[wc.type] || 'bg-slate-500';
+            
+            return (
+              <div 
+                key={wc.id} 
+                className={`
+                  rounded-xl border border-surface-200 p-4 transition-all duration-200
+                  hover:shadow-card-hover hover:border-surface-300
+                  ${statusStyle.bg}
+                `}
+              >
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2.5 h-2.5 rounded-full ${statusStyle.dot} animate-pulse`} />
+                    <span className={`text-xs font-semibold uppercase tracking-wide ${statusStyle.text}`}>
+                      {wc.status.replace('_', ' ')}
+                    </span>
+                  </div>
+                  <div className={`w-2 h-8 rounded-full ${typeColor}`} />
                 </div>
-                <div>
-                  <span className="text-gray-500">Queued: </span>
-                  <span className="font-medium">{wc.queued_operations}</span>
+                
+                <h3 className="font-semibold text-surface-900 mb-1">{wc.name}</h3>
+                <p className="text-xs text-surface-500 capitalize mb-3">
+                  {wc.type.replace('_', ' ')}
+                </p>
+                
+                <div className="flex items-center gap-4 text-sm">
+                  <div>
+                    <span className="text-surface-500">Active: </span>
+                    <span className="font-semibold text-surface-900">{wc.active_operations}</span>
+                  </div>
+                  <div>
+                    <span className="text-surface-500">Queue: </span>
+                    <span className="font-semibold text-surface-900">{wc.queued_operations}</span>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
       {/* Recent Completions */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Recent Completions</h2>
+        <div className="card-header">
+          <div>
+            <h2 className="card-title">Recent Completions</h2>
+            <p className="card-subtitle">Latest work order completions</p>
+          </div>
+          <Link to="/work-orders" className="btn-ghost btn-sm">
+            View All
+          </Link>
+        </div>
+        
         {data?.recent_completions.length ? (
-          <div className="space-y-3">
+          <div className="divide-y divide-surface-100">
             {data.recent_completions.map((completion, index) => (
-              <div key={index} className="flex items-center justify-between py-2 border-b last:border-0">
-                <div className="flex items-center">
-                  <CheckCircleIcon className="h-5 w-5 text-green-500 mr-3" />
-                  <span className="font-medium">{completion.work_order_number}</span>
+              <div 
+                key={index} 
+                className="flex items-center justify-between py-4 first:pt-0 last:pb-0"
+              >
+                <div className="flex items-center gap-4">
+                  <div className="p-2 rounded-lg bg-emerald-100">
+                    <CheckCircleSolid className="h-5 w-5 text-emerald-600" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-surface-900">{completion.work_order_number}</p>
+                    <p className="text-sm text-surface-500">Completed</p>
+                  </div>
                 </div>
-                <div className="text-sm text-gray-500">
-                  Qty: {completion.quantity_complete}
+                <div className="text-right">
+                  <p className="font-semibold text-surface-900 tabular-nums">
+                    {completion.quantity_complete} units
+                  </p>
+                  <p className="text-sm text-surface-500">Quantity</p>
                 </div>
               </div>
             ))}
           </div>
         ) : (
-          <p className="text-gray-500">No recent completions</p>
+          <div className="text-center py-12">
+            <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
+              <ClipboardDocumentListIcon className="h-8 w-8 text-surface-400" />
+            </div>
+            <p className="text-surface-500">No recent completions</p>
+          </div>
         )}
       </div>
     </div>
   );
+}
+
+// Stat Card Component
+interface StatCardProps {
+  icon: React.ElementType;
+  iconBg: string;
+  iconColor: string;
+  label: string;
+  value: number | string;
+  valueColor?: string;
+  subtitle?: string;
+  trend?: { value: number; isUp: boolean };
+  href?: string;
+}
+
+function StatCard({ icon: Icon, iconBg, iconColor, label, value, valueColor, subtitle, trend, href }: StatCardProps) {
+  const content = (
+    <div className="stat-card group">
+      <div className={`stat-icon ${iconBg} transition-transform group-hover:scale-110`}>
+        <Icon className={`h-7 w-7 ${iconColor}`} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="stat-label">{label}</p>
+        <p className={`stat-value ${valueColor || ''}`}>{value}</p>
+        {subtitle && <p className="text-xs text-surface-400 mt-0.5">{subtitle}</p>}
+        {trend && (
+          <div className={trend.isUp ? 'stat-trend-up' : 'stat-trend-down'}>
+            {trend.isUp ? (
+              <ArrowTrendingUpIcon className="h-4 w-4" />
+            ) : (
+              <ArrowTrendingDownIcon className="h-4 w-4" />
+            )}
+            <span>{trend.value}%</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  if (href) {
+    return (
+      <Link to={href} className="block hover:shadow-card-hover transition-shadow rounded-xl">
+        {content}
+      </Link>
+    );
+  }
+
+  return content;
 }

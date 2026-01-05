@@ -32,6 +32,9 @@ import Traceability from './pages/Traceability';
 import PrintPackingSlip from './pages/PrintPackingSlip';
 import AuditLog from './pages/AuditLog';
 import QuoteCalculator from './pages/QuoteCalculator';
+import AdminSettings from './pages/AdminSettings';
+import Receiving from './pages/Receiving';
+import POUpload from './pages/POUpload';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -45,6 +48,28 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
   }
   
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" />;
+}
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user, isAuthenticated, isLoading } = useAuth();
+  
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      </div>
+    );
+  }
+  
+  if (!isAuthenticated) {
+    return <Navigate to="/login" />;
+  }
+  
+  if (user?.role !== 'admin') {
+    return <Navigate to="/" />;
+  }
+  
+  return <>{children}</>;
 }
 
 function AppRoutes() {
@@ -149,6 +174,20 @@ function AppRoutes() {
           </Layout>
         </PrivateRoute>
       } />
+      <Route path="/receiving" element={
+        <PrivateRoute>
+          <Layout>
+            <Receiving />
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/po-upload" element={
+        <PrivateRoute>
+          <Layout>
+            <POUpload />
+          </Layout>
+        </PrivateRoute>
+      } />
       <Route path="/scheduling" element={
         <PrivateRoute>
           <Layout>
@@ -249,6 +288,13 @@ function AppRoutes() {
             <QuoteCalculator />
           </Layout>
         </PrivateRoute>
+      } />
+      <Route path="/admin/settings" element={
+        <AdminRoute>
+          <Layout>
+            <AdminSettings />
+          </Layout>
+        </AdminRoute>
       } />
     </Routes>
   );

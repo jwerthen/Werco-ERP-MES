@@ -552,11 +552,6 @@ class ApiService {
     return response.data;
   }
 
-  async getReceivingHistory(days = 30) {
-    const response = await this.api.get('/purchasing/receiving/history', { params: { days } });
-    return response.data;
-  }
-
   // Scheduling
   async getScheduledJobs(params?: { start_date?: string; end_date?: string; work_center_id?: number }) {
     const response = await this.api.get('/scheduling/jobs', { params });
@@ -911,6 +906,291 @@ class ApiService {
       headers: { 'Content-Type': 'multipart/form-data' }
     });
     return response.data;
+  }
+
+  // Admin Settings - Materials
+  async getAdminMaterials(includeInactive = false, category?: string) {
+    const response = await this.api.get('/admin/settings/materials', { 
+      params: { include_inactive: includeInactive, category } 
+    });
+    return response.data;
+  }
+
+  async createAdminMaterial(data: any) {
+    const response = await this.api.post('/admin/settings/materials', data);
+    return response.data;
+  }
+
+  async updateAdminMaterial(id: number, data: any) {
+    const response = await this.api.put(`/admin/settings/materials/${id}`, data);
+    return response.data;
+  }
+
+  async deleteAdminMaterial(id: number) {
+    const response = await this.api.delete(`/admin/settings/materials/${id}`);
+    return response.data;
+  }
+
+  // Admin Settings - Machines
+  async getAdminMachines(includeInactive = false, machineType?: string) {
+    const response = await this.api.get('/admin/settings/machines', { 
+      params: { include_inactive: includeInactive, machine_type: machineType } 
+    });
+    return response.data;
+  }
+
+  async createAdminMachine(data: any) {
+    const response = await this.api.post('/admin/settings/machines', data);
+    return response.data;
+  }
+
+  async updateAdminMachine(id: number, data: any) {
+    const response = await this.api.put(`/admin/settings/machines/${id}`, data);
+    return response.data;
+  }
+
+  async deleteAdminMachine(id: number) {
+    const response = await this.api.delete(`/admin/settings/machines/${id}`);
+    return response.data;
+  }
+
+  // Admin Settings - Finishes
+  async getAdminFinishes(includeInactive = false, category?: string) {
+    const response = await this.api.get('/admin/settings/finishes', { 
+      params: { include_inactive: includeInactive, category } 
+    });
+    return response.data;
+  }
+
+  async createAdminFinish(data: any) {
+    const response = await this.api.post('/admin/settings/finishes', data);
+    return response.data;
+  }
+
+  async updateAdminFinish(id: number, data: any) {
+    const response = await this.api.put(`/admin/settings/finishes/${id}`, data);
+    return response.data;
+  }
+
+  async deleteAdminFinish(id: number) {
+    const response = await this.api.delete(`/admin/settings/finishes/${id}`);
+    return response.data;
+  }
+
+  // Admin Settings - Labor Rates
+  async getAdminLaborRates(includeInactive = false) {
+    const response = await this.api.get('/admin/settings/labor-rates', { 
+      params: { include_inactive: includeInactive } 
+    });
+    return response.data;
+  }
+
+  async createAdminLaborRate(data: any) {
+    const response = await this.api.post('/admin/settings/labor-rates', data);
+    return response.data;
+  }
+
+  async updateAdminLaborRate(id: number, data: any) {
+    const response = await this.api.put(`/admin/settings/labor-rates/${id}`, data);
+    return response.data;
+  }
+
+  async deleteAdminLaborRate(id: number) {
+    const response = await this.api.delete(`/admin/settings/labor-rates/${id}`);
+    return response.data;
+  }
+
+  // Admin Settings - Work Center Rates
+  async getAdminWorkCenterRates(includeInactive = false) {
+    const response = await this.api.get('/admin/settings/work-center-rates', { 
+      params: { include_inactive: includeInactive } 
+    });
+    return response.data;
+  }
+
+  async updateAdminWorkCenterRate(id: number, data: { hourly_rate: number }) {
+    const response = await this.api.put(`/admin/settings/work-center-rates/${id}`, data);
+    return response.data;
+  }
+
+  // Admin Settings - Outside Services
+  async getAdminOutsideServices(includeInactive = false, processType?: string) {
+    const response = await this.api.get('/admin/settings/outside-services', { 
+      params: { include_inactive: includeInactive, process_type: processType } 
+    });
+    return response.data;
+  }
+
+  async createAdminOutsideService(data: any) {
+    const response = await this.api.post('/admin/settings/outside-services', data);
+    return response.data;
+  }
+
+  async updateAdminOutsideService(id: number, data: any) {
+    const response = await this.api.put(`/admin/settings/outside-services/${id}`, data);
+    return response.data;
+  }
+
+  async deleteAdminOutsideService(id: number) {
+    const response = await this.api.delete(`/admin/settings/outside-services/${id}`);
+    return response.data;
+  }
+
+  // Admin Settings - Overhead
+  async getAdminOverhead() {
+    const response = await this.api.get('/admin/settings/overhead');
+    return response.data;
+  }
+
+  async updateAdminOverhead(key: string, value: string, settingType: string = 'text', description?: string) {
+    const response = await this.api.put(`/admin/settings/overhead/${key}`, { 
+      value, setting_type: settingType, description 
+    });
+    return response.data;
+  }
+
+  // Admin Settings - Audit Log
+  async getSettingsAuditLog(entityType?: string, days = 30, limit = 100) {
+    const response = await this.api.get('/admin/settings/audit-log', { 
+      params: { entity_type: entityType, days, limit } 
+    });
+    return response.data;
+  }
+
+  // Admin Settings - Seed defaults
+  async seedAdminLaborRates() {
+    const response = await this.api.post('/admin/settings/seed-labor-rates');
+    return response.data;
+  }
+
+  async seedAdminOutsideServices() {
+    const response = await this.api.post('/admin/settings/seed-outside-services');
+    return response.data;
+  }
+
+  // Receiving & Inspection
+  async getOpenPOsForReceiving(vendorId?: number) {
+    const response = await this.api.get('/receiving/open-pos', { params: { vendor_id: vendorId } });
+    return response.data;
+  }
+
+  async getPOForReceiving(poId: number) {
+    const response = await this.api.get(`/receiving/po/${poId}`);
+    return response.data;
+  }
+
+  async receiveNewMaterial(data: {
+    po_line_id: number;
+    quantity_received: number;
+    lot_number: string;
+    serial_numbers?: string;
+    heat_number?: string;
+    cert_number?: string;
+    coc_attached?: boolean;
+    location_id?: number;
+    requires_inspection?: boolean;
+    packing_slip_number?: string;
+    carrier?: string;
+    tracking_number?: string;
+    notes?: string;
+    over_receive_approved?: boolean;
+  }) {
+    const response = await this.api.post('/receiving/receive', data);
+    return response.data;
+  }
+
+  async getInspectionQueue(daysBack = 30) {
+    const response = await this.api.get('/receiving/inspection-queue', { params: { days_back: daysBack } });
+    return response.data;
+  }
+
+  async getReceiptDetail(receiptId: number) {
+    const response = await this.api.get(`/receiving/receipt/${receiptId}`);
+    return response.data;
+  }
+
+  async inspectReceiptNew(receiptId: number, data: {
+    quantity_accepted: number;
+    quantity_rejected: number;
+    inspection_method: string;
+    defect_type?: string;
+    inspection_notes?: string;
+  }) {
+    const response = await this.api.post(`/receiving/inspect/${receiptId}`, data);
+    return response.data;
+  }
+
+  async getReceivingHistory(days = 30, status?: string) {
+    const response = await this.api.get('/receiving/history', { params: { days, status } });
+    return response.data;
+  }
+
+  async getReceivingStats(days = 30) {
+    const response = await this.api.get('/receiving/stats', { params: { days } });
+    return response.data;
+  }
+
+  async getReceivingLocations() {
+    const response = await this.api.get('/receiving/locations');
+    return response.data;
+  }
+
+  // PO Upload & Extraction
+  async uploadPOPdf(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post('/po-upload/upload-po', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000 // 60 second timeout for extraction
+    });
+    return response.data;
+  }
+
+  async createPOFromUpload(data: {
+    po_number: string;
+    vendor_id: number;
+    create_vendor?: boolean;
+    new_vendor_name?: string;
+    new_vendor_code?: string;
+    new_vendor_address?: string;
+    order_date?: string;
+    required_date?: string;
+    expected_date?: string;
+    payment_terms?: string;
+    shipping_method?: string;
+    ship_to?: string;
+    notes?: string;
+    line_items: Array<{
+      part_id: number;
+      part_number: string;
+      description?: string;
+      quantity_ordered: number;
+      unit_price: number;
+      line_total?: number;
+      notes?: string;
+    }>;
+    create_parts?: Array<{
+      part_number: string;
+      description?: string;
+    }>;
+    pdf_path: string;
+  }) {
+    const response = await this.api.post('/po-upload/create-from-upload', data);
+    return response.data;
+  }
+
+  async searchPartsForPO(query: string, limit = 10) {
+    const response = await this.api.get('/po-upload/search-parts', { params: { q: query, limit } });
+    return response.data;
+  }
+
+  async searchVendorsForPO(query: string, limit = 10) {
+    const response = await this.api.get('/po-upload/search-vendors', { params: { q: query, limit } });
+    return response.data;
+  }
+
+  getPOPdfUrl(path: string) {
+    return `${this.api.defaults.baseURL}/po-upload/pdf/${path}`;
   }
 }
 

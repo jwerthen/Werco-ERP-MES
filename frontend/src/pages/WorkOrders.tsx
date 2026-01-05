@@ -3,22 +3,38 @@ import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrderSummary, WorkOrderStatus } from '../types';
 import { format } from 'date-fns';
-import { PlusIcon, MagnifyingGlassIcon, FunnelIcon, Squares2X2Icon, ListBulletIcon } from '@heroicons/react/24/outline';
+import { 
+  PlusIcon, 
+  MagnifyingGlassIcon, 
+  FunnelIcon, 
+  Squares2X2Icon, 
+  ListBulletIcon,
+  ChevronRightIcon,
+  ClockIcon,
+  ExclamationTriangleIcon,
+} from '@heroicons/react/24/outline';
 
-const statusColors: Record<WorkOrderStatus, string> = {
-  draft: 'bg-gray-100 text-gray-800',
-  released: 'bg-blue-100 text-blue-800',
-  in_progress: 'bg-green-100 text-green-800',
-  on_hold: 'bg-yellow-100 text-yellow-800',
-  complete: 'bg-emerald-100 text-emerald-800',
-  closed: 'bg-gray-100 text-gray-600',
-  cancelled: 'bg-red-100 text-red-800',
+const statusConfig: Record<WorkOrderStatus, { bg: string; text: string; dot: string }> = {
+  draft: { bg: 'bg-surface-100', text: 'text-surface-700', dot: 'bg-surface-400' },
+  released: { bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500' },
+  in_progress: { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
+  on_hold: { bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500' },
+  complete: { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
+  closed: { bg: 'bg-surface-100', text: 'text-surface-500', dot: 'bg-surface-400' },
+  cancelled: { bg: 'bg-red-50', text: 'text-red-700', dot: 'bg-red-500' },
 };
 
-// Part types to exclude (COTS/hardware)
+const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
+  1: { bg: 'bg-red-100', text: 'text-red-700', label: 'Critical' },
+  2: { bg: 'bg-red-50', text: 'text-red-600', label: 'High' },
+  3: { bg: 'bg-amber-50', text: 'text-amber-700', label: 'Medium' },
+  4: { bg: 'bg-blue-50', text: 'text-blue-600', label: 'Normal' },
+  5: { bg: 'bg-surface-100', text: 'text-surface-600', label: 'Low' },
+};
+
 const EXCLUDED_PART_TYPES = ['purchased', 'hardware', 'raw_material'];
 
-type GroupBy = 'none' | 'customer' | 'part';
+type GroupBy = 'none' | 'customer' | 'part' | 'status';
 
 export default function WorkOrders() {
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
@@ -46,7 +62,6 @@ export default function WorkOrders() {
     }
   };
 
-  // Get unique customers for filter dropdown
   const customers = useMemo(() => {
     const unique = new Set(workOrders.map(wo => wo.customer_name).filter(Boolean));
     return Array.from(unique).sort() as string[];
@@ -54,17 +69,12 @@ export default function WorkOrders() {
 
   const filteredWorkOrders = useMemo(() => {
     return workOrders.filter(wo => {
-      // Hide COTS/hardware parts
       if (hideCOTS && wo.part_type && EXCLUDED_PART_TYPES.includes(wo.part_type)) {
         return false;
       }
-      
-      // Customer filter
       if (customerFilter && wo.customer_name !== customerFilter) {
         return false;
       }
-      
-      // Search filter
       if (search) {
         const searchLower = search.toLowerCase();
         return (
@@ -74,58 +84,125 @@ export default function WorkOrders() {
           wo.customer_name?.toLowerCase().includes(searchLower)
         );
       }
-      
       return true;
     });
   }, [workOrders, search, customerFilter, hideCOTS]);
 
-  // Group work orders
   const groupedWorkOrders = useMemo(() => {
     if (groupBy === 'none') return null;
     
     const groups: Record<string, WorkOrderSummary[]> = {};
     filteredWorkOrders.forEach(wo => {
-      const key = groupBy === 'customer' 
-        ? (wo.customer_name || 'No Customer')
-        : (wo.part_number || 'No Part');
+      let key: string;
+      switch (groupBy) {
+        case 'customer':
+          key = wo.customer_name || 'No Customer';
+          break;
+        case 'part':
+          key = wo.part_number || 'No Part';
+          break;
+        case 'status':
+          key = wo.status;
+          break;
+        default:
+          key = 'Unknown';
+      }
       if (!groups[key]) groups[key] = [];
       groups[key].push(wo);
     });
     
-    // Sort groups by key
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   }, [filteredWorkOrders, groupBy]);
 
+  // Stats
+  const stats = useMemo(() => {
+    const overdue = filteredWorkOrders.filter(wo => 
+      wo.due_date && new Date(wo.due_date) < new Date() && !['complete', 'closed', 'cancelled'].includes(wo.status)
+    ).length;
+    const inProgress = filteredWorkOrders.filter(wo => wo.status === 'in_progress').length;
+    const dueToday = filteredWorkOrders.filter(wo => {
+      if (!wo.due_date) return false;
+      const due = new Date(wo.due_date);
+      const today = new Date();
+      return due.toDateString() === today.toDateString();
+    }).length;
+    return { overdue, inProgress, dueToday };
+  }, [filteredWorkOrders]);
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <div className="spinner h-12 w-12 mx-auto mb-4"></div>
+          <p className="text-surface-500">Loading work orders...</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Work Orders</h1>
-        <Link to="/work-orders/new" className="btn-primary flex items-center">
-          <PlusIcon className="h-5 w-5 mr-2" />
-          New Work Order
-        </Link>
+      {/* Page Header */}
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Work Orders</h1>
+          <p className="page-subtitle">Manage and track manufacturing orders</p>
+        </div>
+        <div className="page-actions">
+          <Link to="/work-orders/new" className="btn-primary">
+            <PlusIcon className="h-5 w-5 mr-2" />
+            New Work Order
+          </Link>
+        </div>
+      </div>
+
+      {/* Quick Stats */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="card-compact flex items-center gap-4">
+          <div className={`p-3 rounded-xl ${stats.overdue > 0 ? 'bg-red-100' : 'bg-emerald-100'}`}>
+            <ExclamationTriangleIcon className={`h-6 w-6 ${stats.overdue > 0 ? 'text-red-600' : 'text-emerald-600'}`} />
+          </div>
+          <div>
+            <p className={`text-2xl font-bold ${stats.overdue > 0 ? 'text-red-600' : 'text-surface-900'}`}>
+              {stats.overdue}
+            </p>
+            <p className="text-sm text-surface-500">Overdue</p>
+          </div>
+        </div>
+        <div className="card-compact flex items-center gap-4">
+          <div className="p-3 rounded-xl bg-blue-100">
+            <Squares2X2Icon className="h-6 w-6 text-blue-600" />
+          </div>
+          <div>
+            <p className="text-2xl font-bold text-surface-900">{stats.inProgress}</p>
+            <p className="text-sm text-surface-500">In Progress</p>
+          </div>
+        </div>
+        <div className="card-compact flex items-center gap-4">
+          <div className={`p-3 rounded-xl ${stats.dueToday > 0 ? 'bg-amber-100' : 'bg-surface-100'}`}>
+            <ClockIcon className={`h-6 w-6 ${stats.dueToday > 0 ? 'text-amber-600' : 'text-surface-500'}`} />
+          </div>
+          <div>
+            <p className={`text-2xl font-bold ${stats.dueToday > 0 ? 'text-amber-600' : 'text-surface-900'}`}>
+              {stats.dueToday}
+            </p>
+            <p className="text-sm text-surface-500">Due Today</p>
+          </div>
+        </div>
       </div>
 
       {/* Filters */}
-      <div className="card p-4">
+      <div className="card">
         <div className="flex flex-col lg:flex-row gap-4">
           {/* Search */}
           <div className="relative flex-1">
-            <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+            <MagnifyingGlassIcon className="h-5 w-5 absolute left-4 top-1/2 transform -translate-y-1/2 text-surface-400" />
             <input
               type="text"
-              placeholder="Search work orders..."
+              placeholder="Search by WO#, part, or customer..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="input pl-10"
+              className="input pl-11"
             />
           </div>
           
@@ -133,7 +210,7 @@ export default function WorkOrders() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="input w-full lg:w-40"
+            className="input w-full lg:w-44"
           >
             <option value="">All Active</option>
             <option value="draft">Draft</option>
@@ -148,7 +225,7 @@ export default function WorkOrders() {
           <select
             value={customerFilter}
             onChange={(e) => setCustomerFilter(e.target.value)}
-            className="input w-full lg:w-48"
+            className="input w-full lg:w-52"
           >
             <option value="">All Customers</option>
             {customers.map(c => (
@@ -160,159 +237,173 @@ export default function WorkOrders() {
           <select
             value={groupBy}
             onChange={(e) => setGroupBy(e.target.value as GroupBy)}
-            className="input w-full lg:w-40"
+            className="input w-full lg:w-44"
           >
             <option value="none">No Grouping</option>
             <option value="customer">By Customer</option>
             <option value="part">By Part</option>
+            <option value="status">By Status</option>
           </select>
         </div>
         
         {/* Toggle Options */}
-        <div className="flex items-center gap-6 mt-3 pt-3 border-t">
-          <label className="flex items-center cursor-pointer">
+        <div className="flex items-center justify-between mt-4 pt-4 border-t border-surface-200">
+          <label className="flex items-center gap-2 cursor-pointer group">
             <input
               type="checkbox"
               checked={hideCOTS}
               onChange={(e) => setHideCOTS(e.target.checked)}
-              className="mr-2 rounded border-gray-300 text-werco-primary focus:ring-werco-primary"
+              className="checkbox"
             />
-            <span className="text-sm text-gray-700">Hide COTS/Hardware</span>
+            <span className="text-sm text-surface-600 group-hover:text-surface-900">Hide COTS/Hardware</span>
           </label>
-          <span className="text-sm text-gray-500">
-            Showing {filteredWorkOrders.length} of {workOrders.length} work orders
+          <span className="text-sm text-surface-500">
+            Showing <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {workOrders.length} work orders
           </span>
         </div>
       </div>
 
-      {/* Work Orders - Grouped or Flat */}
+      {/* Work Orders List */}
       {groupBy !== 'none' && groupedWorkOrders ? (
         // Grouped View
         <div className="space-y-4">
           {groupedWorkOrders.map(([groupName, orders]) => (
-            <div key={groupName} className="card overflow-hidden">
-              <div className="bg-gray-100 px-4 py-3 border-b">
-                <h3 className="font-semibold text-gray-900">
-                  {groupName}
-                  <span className="ml-2 text-sm font-normal text-gray-500">
-                    ({orders.length} work order{orders.length !== 1 ? 's' : ''})
+            <div key={groupName} className="card card-flush overflow-hidden">
+              <div className="bg-surface-50 px-6 py-4 border-b border-surface-200">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-surface-900 capitalize">
+                    {groupBy === 'status' ? groupName.replace('_', ' ') : groupName}
+                  </h3>
+                  <span className="badge badge-neutral">
+                    {orders.length} order{orders.length !== 1 ? 's' : ''}
                   </span>
-                </h3>
+                </div>
               </div>
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">WO #</th>
-                      {groupBy !== 'part' && (
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                      )}
-                      {groupBy !== 'customer' && (
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
-                      )}
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Due</th>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {orders.map((wo) => (
-                      <tr key={wo.id} className="hover:bg-gray-50">
-                        <td className="px-4 py-3">
-                          <Link to={`/work-orders/${wo.id}`} className="font-medium text-werco-primary hover:underline">
-                            {wo.work_order_number}
-                          </Link>
-                        </td>
-                        {groupBy !== 'part' && (
-                          <td className="px-4 py-3 text-sm">{wo.part_number}</td>
-                        )}
-                        {groupBy !== 'customer' && (
-                          <td className="px-4 py-3 text-sm">{wo.customer_name || '-'}</td>
-                        )}
-                        <td className="px-4 py-3 text-sm">
-                          {wo.quantity_complete}/{wo.quantity_ordered}
-                        </td>
-                        <td className="px-4 py-3 text-sm">
-                          {wo.due_date ? format(new Date(wo.due_date), 'MMM d') : '-'}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[wo.status]}`}>
-                            {wo.status.replace('_', ' ')}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <WorkOrderTable 
+                workOrders={orders} 
+                hideColumn={groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined}
+              />
             </div>
           ))}
         </div>
       ) : (
         // Flat Table View
-        <div className="card overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">WO #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Due Date</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Priority</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {filteredWorkOrders.map((wo) => (
-                  <tr key={wo.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-4">
-                      <Link to={`/work-orders/${wo.id}`} className="font-medium text-werco-primary hover:underline">
-                        {wo.work_order_number}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div>
-                        <div className="font-medium">{wo.part_number}</div>
-                        <div className="text-sm text-gray-500">{wo.part_name}</div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4 text-sm">{wo.customer_name || '-'}</td>
-                    <td className="px-4 py-4">
-                      <span className="font-medium">{wo.quantity_complete}</span>
-                      <span className="text-gray-500">/{wo.quantity_ordered}</span>
-                    </td>
-                    <td className="px-4 py-4 text-sm">
-                      {wo.due_date ? format(new Date(wo.due_date), 'MMM d, yyyy') : '-'}
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-sm font-bold ${
-                        wo.priority <= 2 ? 'bg-red-100 text-red-800' :
-                        wo.priority <= 5 ? 'bg-yellow-100 text-yellow-800' :
-                        'bg-gray-100 text-gray-800'
-                      }`}>
-                        {wo.priority}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[wo.status]}`}>
-                        {wo.status.replace('_', ' ')}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        <div className="card card-flush overflow-hidden">
+          <WorkOrderTable workOrders={filteredWorkOrders} />
           
           {filteredWorkOrders.length === 0 && (
-            <div className="text-center py-8 text-gray-500">
-              No work orders found
+            <div className="text-center py-16">
+              <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
+                <ListBulletIcon className="h-8 w-8 text-surface-400" />
+              </div>
+              <p className="text-surface-600 font-medium">No work orders found</p>
+              <p className="text-sm text-surface-500 mt-1">Try adjusting your filters</p>
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// Work Order Table Component
+interface WorkOrderTableProps {
+  workOrders: WorkOrderSummary[];
+  hideColumn?: 'customer' | 'part';
+}
+
+function WorkOrderTable({ workOrders, hideColumn }: WorkOrderTableProps) {
+  const isOverdue = (wo: WorkOrderSummary) => {
+    return wo.due_date && new Date(wo.due_date) < new Date() && !['complete', 'closed', 'cancelled'].includes(wo.status);
+  };
+
+  return (
+    <div className="table-container border-0">
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Work Order</th>
+            {hideColumn !== 'part' && <th>Part</th>}
+            {hideColumn !== 'customer' && <th>Customer</th>}
+            <th>Quantity</th>
+            <th>Due Date</th>
+            <th>Priority</th>
+            <th>Status</th>
+            <th className="w-12"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {workOrders.map((wo) => {
+            const status = statusConfig[wo.status] || statusConfig.draft;
+            const priority = priorityConfig[wo.priority] || priorityConfig[4];
+            const overdue = isOverdue(wo);
+            
+            return (
+              <tr key={wo.id} className={overdue ? 'bg-red-50/50' : ''}>
+                <td>
+                  <Link 
+                    to={`/work-orders/${wo.id}`} 
+                    className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
+                  >
+                    {wo.work_order_number}
+                  </Link>
+                </td>
+                {hideColumn !== 'part' && (
+                  <td>
+                    <div>
+                      <p className="font-medium text-surface-900">{wo.part_number}</p>
+                      <p className="text-sm text-surface-500 line-clamp-1">{wo.part_name}</p>
+                    </div>
+                  </td>
+                )}
+                {hideColumn !== 'customer' && (
+                  <td className="text-surface-600">{wo.customer_name || '—'}</td>
+                )}
+                <td>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-2 bg-surface-200 rounded-full overflow-hidden w-20">
+                      <div 
+                        className="h-full bg-werco-500 rounded-full transition-all"
+                        style={{ width: `${Math.min(100, (wo.quantity_complete / wo.quantity_ordered) * 100)}%` }}
+                      />
+                    </div>
+                    <span className="text-sm font-medium text-surface-700 tabular-nums">
+                      {wo.quantity_complete}/{wo.quantity_ordered}
+                    </span>
+                  </div>
+                </td>
+                <td>
+                  <span className={`text-sm font-medium ${overdue ? 'text-red-600' : 'text-surface-700'}`}>
+                    {wo.due_date ? format(new Date(wo.due_date), 'MMM d, yyyy') : '—'}
+                  </span>
+                  {overdue && (
+                    <span className="ml-2 badge badge-danger text-[10px] py-0.5">OVERDUE</span>
+                  )}
+                </td>
+                <td>
+                  <span className={`badge ${priority.bg} ${priority.text}`}>
+                    P{wo.priority}
+                  </span>
+                </td>
+                <td>
+                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${status.bg} ${status.text}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`}></span>
+                    {wo.status.replace('_', ' ')}
+                  </span>
+                </td>
+                <td>
+                  <Link 
+                    to={`/work-orders/${wo.id}`}
+                    className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
+                  >
+                    <ChevronRightIcon className="h-5 w-5" />
+                  </Link>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

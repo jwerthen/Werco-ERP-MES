@@ -16,6 +16,34 @@ class POStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class InspectionStatus(str, enum.Enum):
+    PENDING = "pending"
+    PASSED = "passed"
+    FAILED = "failed"
+    PARTIAL = "partial"
+
+
+class DefectType(str, enum.Enum):
+    DIMENSIONAL = "dimensional"
+    COSMETIC = "cosmetic"
+    MATERIAL = "material"
+    DOCUMENTATION = "documentation"
+    FUNCTIONAL = "functional"
+    CONTAMINATION = "contamination"
+    PACKAGING = "packaging"
+    OTHER = "other"
+
+
+class InspectionMethod(str, enum.Enum):
+    VISUAL = "visual"
+    DIMENSIONAL = "dimensional"
+    FUNCTIONAL = "functional"
+    DOCUMENTATION_REVIEW = "documentation_review"
+    DESTRUCTIVE = "destructive"
+    NON_DESTRUCTIVE = "non_destructive"
+    SAMPLING = "sampling"
+
+
 class Vendor(Base):
     """Supplier/Vendor master"""
     __tablename__ = "vendors"
@@ -87,6 +115,7 @@ class PurchaseOrder(Base):
     
     # Reference
     mrp_action_id = Column(Integer, nullable=True)  # If created from MRP
+    source_document_path = Column(String(500), nullable=True)  # Path to uploaded PO PDF
     
     notes = Column(Text)
     
@@ -152,26 +181,36 @@ class POReceipt(Base):
     quantity_accepted = Column(Float, default=0.0)
     quantity_rejected = Column(Float, default=0.0)
     
-    # Traceability (AS9100D)
-    lot_number = Column(String(100))
+    # Traceability (AS9100D) - lot_number REQUIRED for compliance
+    lot_number = Column(String(100), nullable=False, index=True)
     serial_numbers = Column(Text)  # Comma-separated or JSON
     heat_number = Column(String(100))  # For metals
     cert_number = Column(String(100))  # Cert of conformance
+    coc_attached = Column(Boolean, default=False)  # Certificate of Conformance attached
     
     # Location
     location_id = Column(Integer, ForeignKey("inventory_locations.id"), nullable=True)
     
-    # Inspection
+    # Inspection status and result
     status = Column(SQLEnum(ReceiptStatus), default=ReceiptStatus.PENDING_INSPECTION)
+    inspection_status = Column(SQLEnum(InspectionStatus), default=InspectionStatus.PENDING)
     requires_inspection = Column(Boolean, default=True)
+    
+    # Inspection details
     inspected_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     inspected_at = Column(DateTime, nullable=True)
+    inspection_method = Column(SQLEnum(InspectionMethod), nullable=True)
+    defect_type = Column(SQLEnum(DefectType), nullable=True)
     inspection_notes = Column(Text)
     
     # Packing slip / shipping info
     packing_slip_number = Column(String(100))
     carrier = Column(String(100))
     tracking_number = Column(String(100))
+    
+    # Over-receiving handling
+    over_receive_approved = Column(Boolean, default=False)
+    over_receive_approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     received_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     received_at = Column(DateTime, default=datetime.utcnow)
@@ -180,3 +219,5 @@ class POReceipt(Base):
     
     po_line = relationship("PurchaseOrderLine", back_populates="receipts")
     location = relationship("InventoryLocation")
+    inspector = relationship("User", foreign_keys=[inspected_by])
+    receiver = relationship("User", foreign_keys=[received_by])

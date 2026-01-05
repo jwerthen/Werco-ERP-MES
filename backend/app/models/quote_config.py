@@ -1,7 +1,27 @@
-from sqlalchemy import Column, Integer, String, Float, Text, Boolean, DateTime, JSON, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Float, Text, Boolean, DateTime, JSON, Enum as SQLEnum, ForeignKey
 from datetime import datetime
 import enum
 from app.db.database import Base
+
+
+class ProcessType(str, enum.Enum):
+    HEAT_TREAT = "heat_treat"
+    PLATING = "plating"
+    COATING = "coating"
+    MACHINING = "machining"
+    TESTING = "testing"
+    WELDING = "welding"
+    ASSEMBLY = "assembly"
+    INSPECTION = "inspection"
+    OTHER = "other"
+
+
+class CostUnit(str, enum.Enum):
+    PER_PART = "per_part"
+    PER_LB = "per_lb"
+    PER_SQFT = "per_sqft"
+    PER_HOUR = "per_hour"
+    FLAT_RATE = "flat_rate"
 
 
 class MaterialCategory(str, enum.Enum):
@@ -130,3 +150,51 @@ class QuoteSettings(Base):
 # - quantity_breaks: {"10": 0.95, "25": 0.90, "50": 0.85, "100": 0.80}
 # - standard_lead_days: 10
 # - tolerance_surcharges: {"+/-.005": 1.0, "+/-.001": 1.25, "+/-.0005": 1.5}
+
+
+class LaborRate(Base):
+    """Labor rates by job function/role"""
+    __tablename__ = "labor_rates"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)  # e.g., "Welder", "Machinist", "Assembler"
+    rate_per_hour = Column(Float, nullable=False)
+    description = Column(Text)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OutsideService(Base):
+    """Outside/vendor services with default pricing"""
+    __tablename__ = "outside_services"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)  # e.g., "Anodize - ABC Plating"
+    vendor_name = Column(String(255))  # Standalone vendor name
+    process_type = Column(SQLEnum(ProcessType), nullable=False)
+    default_cost = Column(Float, default=0.0)
+    cost_unit = Column(SQLEnum(CostUnit), default=CostUnit.PER_PART)
+    minimum_charge = Column(Float, default=0.0)
+    typical_lead_days = Column(Integer, default=5)
+    description = Column(Text)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SettingsAuditLog(Base):
+    """Audit log for all settings changes (AS9100D compliance)"""
+    __tablename__ = "settings_audit_log"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    entity_type = Column(String(50), nullable=False)  # material, machine, labor_rate, etc.
+    entity_id = Column(Integer)
+    entity_name = Column(String(255))  # For display purposes
+    action = Column(String(20), nullable=False)  # create, update, delete
+    field_changed = Column(String(100))  # Which field was changed
+    old_value = Column(Text)  # JSON string of old value
+    new_value = Column(Text)  # JSON string of new value
+    changed_by = Column(Integer, ForeignKey("users.id"))
+    changed_at = Column(DateTime, default=datetime.utcnow)
+    ip_address = Column(String(50))

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -30,6 +30,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   Cog6ToothIcon,
+  MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -41,6 +42,8 @@ interface NavItem {
   href?: string;
   icon: React.ComponentType<{ className?: string }>;
   children?: NavItem[];
+  badge?: number;
+  adminOnly?: boolean;
 }
 
 const navigation: NavItem[] = [
@@ -64,6 +67,8 @@ const navigation: NavItem[] = [
     children: [
       { name: 'Inventory', href: '/inventory', icon: ArchiveBoxIcon },
       { name: 'Purchasing', href: '/purchasing', icon: TruckIcon },
+      { name: 'Upload PO', href: '/po-upload', icon: DocumentDuplicateIcon },
+      { name: 'Receiving', href: '/receiving', icon: TruckIcon },
       { name: 'MRP', href: '/mrp', icon: CalculatorIcon },
     ]
   },
@@ -95,74 +100,113 @@ const navigation: NavItem[] = [
       { name: 'Work Centers', href: '/work-centers', icon: CogIcon },
       { name: 'Users', href: '/users', icon: UsersIcon },
       { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
+      { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
       { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },
     ]
   },
 ];
 
-function NavGroup({ item, location, onNavigate }: { item: NavItem; location: any; onNavigate?: () => void }) {
+function NavGroup({ item, location, onNavigate, collapsed, isAdmin }: { 
+  item: NavItem; 
+  location: any; 
+  onNavigate?: () => void;
+  collapsed?: boolean;
+  isAdmin?: boolean;
+}) {
+  // Filter children based on admin status
+  const visibleChildren = item.children?.filter(child => !child.adminOnly || isAdmin);
+  
   const [isOpen, setIsOpen] = useState(() => {
-    // Auto-open if current path is in this group
-    if (item.children) {
-      return item.children.some(child => location.pathname === child.href);
+    if (visibleChildren) {
+      return visibleChildren.some(child => location.pathname === child.href);
     }
     return false;
   });
 
+  // Auto-open when navigating to a child
+  useEffect(() => {
+    if (visibleChildren?.some(child => location.pathname === child.href)) {
+      setIsOpen(true);
+    }
+  }, [location.pathname, visibleChildren]);
+
+  const isActive = item.href === location.pathname;
+  const hasActiveChild = visibleChildren?.some(child => location.pathname === child.href);
+
   if (item.href) {
-    // Single item
     return (
       <Link
         to={item.href}
-        className={`flex items-center px-4 py-2.5 text-sm font-medium rounded-lg transition-colors ${
-          location.pathname === item.href
-            ? 'bg-blue-700 text-white'
-            : 'text-blue-100 hover:bg-blue-700'
-        }`}
+        className={`
+          group flex items-center gap-3 px-3 py-2.5 rounded-xl
+          text-sm font-medium transition-all duration-200
+          ${isActive 
+            ? 'bg-white/15 text-white shadow-sm' 
+            : 'text-white/70 hover:bg-white/10 hover:text-white'
+          }
+        `}
         onClick={onNavigate}
+        title={collapsed ? item.name : undefined}
       >
-        <item.icon className="h-5 w-5 mr-3 flex-shrink-0" />
-        {item.name}
+        <item.icon className={`h-5 w-5 flex-shrink-0 transition-colors ${isActive ? 'text-white' : 'text-white/60 group-hover:text-white'}`} />
+        {!collapsed && <span>{item.name}</span>}
+        {item.badge && !collapsed && (
+          <span className="ml-auto bg-accent-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">
+            {item.badge}
+          </span>
+        )}
       </Link>
     );
   }
 
-  // Group with children
   return (
     <div>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className={`w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium rounded-lg transition-colors ${
-          isOpen ? 'bg-blue-800 text-white' : 'text-blue-100 hover:bg-blue-700'
-        }`}
+        className={`
+          group w-full flex items-center gap-3 px-3 py-2.5 rounded-xl
+          text-sm font-medium transition-all duration-200
+          ${hasActiveChild 
+            ? 'bg-white/10 text-white' 
+            : 'text-white/70 hover:bg-white/10 hover:text-white'
+          }
+        `}
+        title={collapsed ? item.name : undefined}
       >
-        <div className="flex items-center">
-          <item.icon className="h-5 w-5 mr-3 flex-shrink-0" />
-          {item.name}
-        </div>
-        {isOpen ? (
-          <ChevronDownIcon className="h-4 w-4" />
-        ) : (
-          <ChevronRightIcon className="h-4 w-4" />
+        <item.icon className={`h-5 w-5 flex-shrink-0 transition-colors ${hasActiveChild ? 'text-white' : 'text-white/60 group-hover:text-white'}`} />
+        {!collapsed && (
+          <>
+            <span className="flex-1 text-left">{item.name}</span>
+            <ChevronDownIcon 
+              className={`h-4 w-4 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} 
+            />
+          </>
         )}
       </button>
-      {isOpen && item.children && (
-        <div className="mt-1 ml-4 pl-4 border-l border-blue-600 space-y-1">
-          {item.children.map((child) => (
-            <Link
-              key={child.name}
-              to={child.href!}
-              className={`flex items-center px-3 py-2 text-sm rounded-lg transition-colors ${
-                location.pathname === child.href
-                  ? 'bg-blue-700 text-white'
-                  : 'text-blue-200 hover:bg-blue-700 hover:text-white'
-              }`}
-              onClick={onNavigate}
-            >
-              <child.icon className="h-4 w-4 mr-2 flex-shrink-0" />
-              {child.name}
-            </Link>
-          ))}
+      
+      {!collapsed && isOpen && visibleChildren && visibleChildren.length > 0 && (
+        <div className="mt-1 ml-3 pl-3 border-l-2 border-white/20 space-y-0.5">
+          {visibleChildren.map((child) => {
+            const isChildActive = location.pathname === child.href;
+            return (
+              <Link
+                key={child.name}
+                to={child.href!}
+                className={`
+                  flex items-center gap-2.5 px-3 py-2 rounded-lg
+                  text-sm transition-all duration-200
+                  ${isChildActive 
+                    ? 'bg-white/15 text-white font-medium' 
+                    : 'text-white/60 hover:bg-white/10 hover:text-white'
+                  }
+                `}
+                onClick={onNavigate}
+              >
+                <child.icon className="h-4 w-4 flex-shrink-0" />
+                <span>{child.name}</span>
+              </Link>
+            );
+          })}
         </div>
       )}
     </div>
@@ -173,85 +217,195 @@ export default function Layout({ children }: LayoutProps) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  // Close sidebar on route change (mobile)
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
+
+  // Get current page title
+  const getPageTitle = () => {
+    for (const item of navigation) {
+      if (item.href === location.pathname) return item.name;
+      if (item.children) {
+        const child = item.children.find(c => c.href === location.pathname);
+        if (child) return child.name;
+      }
+    }
+    return 'Werco ERP';
+  };
 
   return (
-    <div className="min-h-screen bg-gray-100">
-      {/* Mobile sidebar */}
-      <div className={`fixed inset-0 z-40 lg:hidden ${sidebarOpen ? '' : 'hidden'}`}>
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-75" onClick={() => setSidebarOpen(false)} />
-        <div className="fixed inset-y-0 left-0 flex w-64 flex-col bg-werco-primary overflow-y-auto">
-          <div className="flex h-16 items-center justify-between px-4 bg-white flex-shrink-0">
-            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-12 w-auto" />
-            <button onClick={() => setSidebarOpen(false)} className="text-gray-600">
-              <XMarkIcon className="h-6 w-6" />
+    <div className="min-h-screen bg-surface-100">
+      {/* Mobile sidebar backdrop */}
+      {sidebarOpen && (
+        <div 
+          className="fixed inset-0 z-40 bg-surface-900/60 backdrop-blur-sm lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar */}
+      <aside 
+        className={`
+          fixed inset-y-0 left-0 z-50 w-72 
+          bg-gradient-to-b from-werco-600 via-werco-700 to-werco-800
+          transform transition-transform duration-300 ease-out
+          lg:translate-x-0
+          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+          flex flex-col
+        `}
+      >
+        {/* Logo header */}
+        <div className="flex items-center justify-between h-20 px-4 bg-white/95 backdrop-blur flex-shrink-0">
+          <Link to="/" className="flex items-center">
+            <img 
+              src="/Werco_Logo-PNG.png" 
+              alt="Werco Manufacturing" 
+              className="h-14 w-auto" 
+            />
+          </Link>
+          <button 
+            onClick={() => setSidebarOpen(false)}
+            className="lg:hidden p-2 rounded-lg text-surface-600 hover:bg-surface-100 transition-colors"
+          >
+            <XMarkIcon className="h-6 w-6" />
+          </button>
+        </div>
+
+        {/* Navigation */}
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide">
+          {navigation.map((item) => (
+            <NavGroup 
+              key={item.name} 
+              item={item} 
+              location={location} 
+              onNavigate={() => setSidebarOpen(false)}
+              isAdmin={user?.role === 'admin'}
+            />
+          ))}
+        </nav>
+
+        {/* User section */}
+        <div className="flex-shrink-0 p-4 border-t border-white/10">
+          <div className="flex items-center gap-3">
+            <div className="flex-shrink-0">
+              <div className="h-10 w-10 rounded-xl bg-white/20 flex items-center justify-center text-white font-semibold text-sm">
+                {user?.first_name?.[0]}{user?.last_name?.[0]}
+              </div>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-white truncate">
+                {user?.first_name} {user?.last_name}
+              </p>
+              <p className="text-xs text-white/60 truncate capitalize">
+                {user?.role?.replace('_', ' ')}
+              </p>
+            </div>
+            <button
+              onClick={logout}
+              className="p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+              title="Sign out"
+            >
+              <ArrowRightOnRectangleIcon className="h-5 w-5" />
             </button>
           </div>
-          <nav className="flex-1 px-2 py-4 space-y-1">
-            {navigation.map((item) => (
-              <NavGroup 
-                key={item.name} 
-                item={item} 
-                location={location} 
-                onNavigate={() => setSidebarOpen(false)}
-              />
-            ))}
-          </nav>
         </div>
-      </div>
+      </aside>
 
-      {/* Desktop sidebar */}
-      <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-64 lg:flex-col">
-        <div className="flex flex-col flex-grow bg-werco-primary overflow-y-auto">
-          <div className="flex h-20 items-center justify-center px-4 bg-white flex-shrink-0">
-            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-16 w-auto" />
-          </div>
-          <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto">
-            {navigation.map((item) => (
-              <NavGroup key={item.name} item={item} location={location} />
-            ))}
-          </nav>
-          <div className="p-4 border-t border-blue-700 flex-shrink-0">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="h-10 w-10 rounded-full bg-blue-700 flex items-center justify-center text-white font-medium">
+      {/* Main content area */}
+      <div className="lg:pl-72 flex flex-col min-h-screen">
+        {/* Top bar */}
+        <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-surface-200 shadow-sm">
+          <div className="flex items-center justify-between h-16 px-4 sm:px-6 lg:px-8">
+            {/* Mobile menu button */}
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="lg:hidden p-2 -ml-2 rounded-lg text-surface-600 hover:bg-surface-100 transition-colors"
+            >
+              <Bars3Icon className="h-6 w-6" />
+            </button>
+
+            {/* Page title (desktop) */}
+            <div className="hidden lg:block">
+              <h1 className="text-lg font-semibold text-surface-900">{getPageTitle()}</h1>
+            </div>
+
+            {/* Mobile logo */}
+            <div className="lg:hidden">
+              <img 
+                src="/Werco_Logo-PNG.png" 
+                alt="Werco Manufacturing" 
+                className="h-10 w-auto" 
+              />
+            </div>
+
+            {/* Right side actions */}
+            <div className="flex items-center gap-2">
+              {/* Quick search button */}
+              <button
+                onClick={() => setSearchOpen(true)}
+                className="p-2 rounded-lg text-surface-500 hover:text-surface-700 hover:bg-surface-100 transition-colors"
+                title="Search (Ctrl+K)"
+              >
+                <MagnifyingGlassIcon className="h-5 w-5" />
+              </button>
+
+              {/* User avatar (mobile) */}
+              <div className="lg:hidden flex items-center">
+                <div className="h-9 w-9 rounded-lg bg-werco-600 flex items-center justify-center text-white font-medium text-sm">
                   {user?.first_name?.[0]}{user?.last_name?.[0]}
                 </div>
               </div>
-              <div className="ml-3 flex-1 min-w-0">
-                <p className="text-sm font-medium text-white truncate">{user?.first_name} {user?.last_name}</p>
-                <p className="text-xs text-blue-200 truncate">{user?.role}</p>
-              </div>
-              <button
-                onClick={logout}
-                className="text-blue-200 hover:text-white flex-shrink-0"
-                title="Logout"
-              >
-                <ArrowRightOnRectangleIcon className="h-5 w-5" />
-              </button>
+            </div>
+          </div>
+        </header>
+
+        {/* Main content */}
+        <main className="flex-1 p-4 sm:p-6 lg:p-8">
+          <div className="max-w-7xl mx-auto animate-fade-in">
+            {children}
+          </div>
+        </main>
+
+        {/* Footer */}
+        <footer className="flex-shrink-0 py-4 px-6 border-t border-surface-200 bg-white">
+          <div className="max-w-7xl mx-auto flex items-center justify-between text-sm text-surface-500">
+            <span>Werco Manufacturing ERP</span>
+            <span>v1.0.0</span>
+          </div>
+        </footer>
+      </div>
+
+      {/* Search modal (placeholder for future implementation) */}
+      {searchOpen && (
+        <div 
+          className="fixed inset-0 z-50 bg-surface-900/60 backdrop-blur-sm flex items-start justify-center pt-20 px-4"
+          onClick={() => setSearchOpen(false)}
+        >
+          <div 
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden animate-slide-down"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 p-4 border-b border-surface-200">
+              <MagnifyingGlassIcon className="h-5 w-5 text-surface-400" />
+              <input
+                type="text"
+                placeholder="Search parts, work orders, customers..."
+                className="flex-1 text-base outline-none placeholder:text-surface-400"
+                autoFocus
+              />
+              <kbd className="hidden sm:inline-flex items-center px-2 py-1 text-xs font-medium text-surface-500 bg-surface-100 rounded">
+                ESC
+              </kbd>
+            </div>
+            <div className="p-4 text-sm text-surface-500 text-center">
+              Start typing to search...
             </div>
           </div>
         </div>
-      </div>
-
-      {/* Main content */}
-      <div className="lg:pl-64">
-        {/* Top bar for mobile */}
-        <div className="sticky top-0 z-10 flex h-16 bg-white shadow lg:hidden">
-          <button
-            onClick={() => setSidebarOpen(true)}
-            className="px-4 text-gray-500 focus:outline-none"
-          >
-            <Bars3Icon className="h-6 w-6" />
-          </button>
-          <div className="flex flex-1 items-center justify-center">
-            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-10 w-auto" />
-          </div>
-        </div>
-
-        <main className="p-6">
-          {children}
-        </main>
-      </div>
+      )}
     </div>
   );
 }

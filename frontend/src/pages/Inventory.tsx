@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import {
   PlusIcon,
@@ -6,7 +7,8 @@ import {
   ArrowDownTrayIcon,
   ArrowUpTrayIcon,
   ClipboardDocumentListIcon,
-  XMarkIcon
+  XMarkIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
 
 interface InventoryItem {
@@ -37,12 +39,15 @@ interface InventorySummary {
 type TabType = 'summary' | 'details' | 'receive' | 'transactions';
 
 export default function InventoryPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('summary');
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [summary, setSummary] = useState<InventorySummary[]>([]);
+  const [lowStockItems, setLowStockItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [parts, setParts] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
+  const [showLowStockOnly, setShowLowStockOnly] = useState(() => searchParams.get('filter') === 'low_stock');
   
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -62,16 +67,18 @@ export default function InventoryPage() {
 
   const loadData = async () => {
     try {
-      const [invRes, summaryRes, partsRes, locsRes] = await Promise.all([
+      const [invRes, summaryRes, partsRes, locsRes, lowStockRes] = await Promise.all([
         api.getInventory(),
         api.getInventorySummary(),
         api.getParts({ active_only: true }),
-        api.getInventoryLocations()
+        api.getInventoryLocations(),
+        api.getLowStockAlerts()
       ]);
       setInventory(invRes);
       setSummary(summaryRes);
       setParts(partsRes);
       setLocations(locsRes);
+      setLowStockItems(lowStockRes);
     } catch (err) {
       console.error('Failed to load inventory:', err);
     } finally {
@@ -146,6 +153,28 @@ export default function InventoryPage() {
         </div>
       </div>
 
+      {/* Low Stock Alert Banner */}
+      {showLowStockOnly && (
+        <div className="flex items-center justify-between p-4 bg-amber-50 border border-amber-200 rounded-xl">
+          <div className="flex items-center gap-3">
+            <ExclamationTriangleIcon className="h-5 w-5 text-amber-600" />
+            <span className="font-medium text-amber-800">
+              Showing {lowStockItems.length} low stock item(s)
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              setShowLowStockOnly(false);
+              setSearchParams({});
+            }}
+            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-amber-100 text-amber-700 rounded-full hover:bg-amber-200"
+          >
+            <XMarkIcon className="h-4 w-4" />
+            Clear filter
+          </button>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="border-b border-gray-200">
         <nav className="-mb-px flex space-x-8">
@@ -183,26 +212,33 @@ export default function InventoryPage() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {summary.map((item) => (
-                  <tr key={item.part_id} className="hover:bg-gray-50 align-top">
-                    <td className="px-4 py-3">
-                      <div className="font-medium">{item.part_number}</div>
-                      <div className="text-sm text-gray-500">{item.part_name}</div>
-                    </td>
-                    <td className="px-4 py-3 text-right font-medium">{item.total_on_hand}</td>
-                    <td className="px-4 py-3 text-right">{item.total_allocated}</td>
-                    <td className="px-4 py-3 text-right text-green-600 font-medium">{item.available}</td>
-                    <td className="px-4 py-3">
-                      {item.locations.map((loc, idx) => (
-                        <div key={idx} className="text-sm">
-                          <span className="font-mono bg-gray-100 px-1 rounded">{loc.location}</span>
-                          <span className="text-gray-600 ml-2">({loc.quantity})</span>
-                          {loc.lot_number && <span className="text-gray-400 ml-1">Lot: {loc.lot_number}</span>}
-                        </div>
-                      ))}
-                    </td>
-                  </tr>
-                ))}
+                {(showLowStockOnly 
+                  ? summary.filter(item => lowStockItems.some(ls => ls.part_id === item.part_id))
+                  : summary
+                ).map((item) => {
+                  const isLowStock = lowStockItems.some(ls => ls.part_id === item.part_id);
+                  return (
+                    <tr key={item.part_id} className={`hover:bg-gray-50 align-top ${isLowStock ? 'bg-red-50' : ''}`}>
+                      <td className="px-4 py-3">
+                        <div className="font-medium">{item.part_number}</div>
+                        <div className="text-sm text-gray-500">{item.part_name}</div>
+                        {isLowStock && <span className="text-xs text-red-600 font-medium">LOW STOCK</span>}
+                      </td>
+                      <td className="px-4 py-3 text-right font-medium">{item.total_on_hand}</td>
+                      <td className="px-4 py-3 text-right">{item.total_allocated}</td>
+                      <td className="px-4 py-3 text-right text-green-600 font-medium">{item.available}</td>
+                      <td className="px-4 py-3">
+                        {item.locations.map((loc, idx) => (
+                          <div key={idx} className="text-sm">
+                            <span className="font-mono bg-gray-100 px-1 rounded">{loc.location}</span>
+                            <span className="text-gray-600 ml-2">({loc.quantity})</span>
+                            {loc.lot_number && <span className="text-gray-400 ml-1">Lot: {loc.lot_number}</span>}
+                          </div>
+                        ))}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             {summary.length === 0 && <p className="text-center text-gray-500 py-8">No inventory on hand</p>}

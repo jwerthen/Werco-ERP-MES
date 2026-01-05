@@ -166,29 +166,41 @@ class POListResponse(BaseModel):
 class ReceiptCreate(BaseModel):
     po_line_id: int
     quantity_received: float
-    lot_number: Optional[str] = None
+    lot_number: str  # Required for AS9100D traceability
     serial_numbers: Optional[str] = None
     heat_number: Optional[str] = None
     cert_number: Optional[str] = None
+    coc_attached: bool = False
     location_id: Optional[int] = None
     requires_inspection: bool = True
     packing_slip_number: Optional[str] = None
     carrier: Optional[str] = None
     tracking_number: Optional[str] = None
     notes: Optional[str] = None
+    over_receive_approved: bool = False  # Must be true if receiving more than ordered
 
 
 class ReceiptInspection(BaseModel):
     quantity_accepted: float
     quantity_rejected: float = 0
-    status: str  # accepted, rejected, quarantine
-    inspection_notes: Optional[str] = None
+    inspection_method: str  # visual, dimensional, functional, documentation_review, etc.
+    defect_type: Optional[str] = None  # Required if quantity_rejected > 0
+    inspection_notes: Optional[str] = None  # Required if quantity_rejected > 0
 
 
 class LocationSummary(BaseModel):
     id: int
     code: str
-    name: str
+    name: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+
+
+class UserSummary(BaseModel):
+    id: int
+    full_name: str
+    employee_id: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -201,21 +213,56 @@ class ReceiptResponse(BaseModel):
     quantity_received: float
     quantity_accepted: float
     quantity_rejected: float
-    lot_number: Optional[str] = None
+    lot_number: str
     serial_numbers: Optional[str] = None
     heat_number: Optional[str] = None
     cert_number: Optional[str] = None
+    coc_attached: bool = False
     location: Optional[LocationSummary] = None
     status: str
+    inspection_status: str
     requires_inspection: bool
+    inspection_method: Optional[str] = None
+    defect_type: Optional[str] = None
     inspected_at: Optional[datetime] = None
     inspection_notes: Optional[str] = None
     packing_slip_number: Optional[str] = None
     carrier: Optional[str] = None
     tracking_number: Optional[str] = None
+    over_receive_approved: bool = False
     received_at: datetime
+    received_by: Optional[int] = None
+    inspected_by: Optional[int] = None
     notes: Optional[str] = None
     
     class Config:
         from_attributes = True
         use_enum_values = True
+
+
+class InspectionQueueItem(BaseModel):
+    receipt_id: int
+    receipt_number: str
+    po_number: str
+    po_id: int
+    vendor_name: Optional[str] = None
+    part_id: int
+    part_number: str
+    part_name: Optional[str] = None
+    quantity_received: float
+    lot_number: str
+    cert_number: Optional[str] = None
+    coc_attached: bool = False
+    received_at: datetime
+    received_by_name: Optional[str] = None
+    location_code: Optional[str] = None
+    days_pending: int = 0
+
+
+class InspectionResultResponse(BaseModel):
+    receipt: ReceiptResponse
+    inventory_created: bool = False
+    inventory_item_id: Optional[int] = None
+    ncr_created: bool = False
+    ncr_number: Optional[str] = None
+    ncr_id: Optional[int] = None

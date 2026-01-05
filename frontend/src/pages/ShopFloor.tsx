@@ -7,7 +7,11 @@ import {
   StopIcon,
   ClockIcon,
   CheckCircleIcon,
+  XMarkIcon,
+  WrenchScrewdriverIcon,
+  ArrowPathIcon,
 } from '@heroicons/react/24/solid';
+import { QueueListIcon } from '@heroicons/react/24/outline';
 
 export default function ShopFloor() {
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
@@ -15,6 +19,7 @@ export default function ShopFloor() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [clockOutModal, setClockOutModal] = useState(false);
   const [clockOutData, setClockOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
 
@@ -64,6 +69,15 @@ export default function ShopFloor() {
     } catch (err) {
       console.error('Failed to load queue:', err);
     }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await Promise.all([
+      checkActiveJob(),
+      selectedWorkCenter ? loadQueue(selectedWorkCenter) : Promise.resolve()
+    ]);
+    setRefreshing(false);
   };
 
   const handleClockIn = async (item: QueueItem) => {
@@ -122,45 +136,79 @@ export default function ShopFloor() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <div className="spinner h-12 w-12 mx-auto mb-4"></div>
+          <p className="text-surface-500">Loading shop floor...</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-gray-900">Shop Floor</h1>
+      {/* Page Header */}
+      <div className="page-header">
+        <div>
+          <h1 className="page-title flex items-center gap-3">
+            <WrenchScrewdriverIcon className="h-8 w-8 text-werco-600" />
+            Shop Floor
+          </h1>
+          <p className="page-subtitle">Clock in/out and manage work center queues</p>
+        </div>
+        <div className="page-actions">
+          <button 
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="btn-secondary"
+          >
+            <ArrowPathIcon className={`h-5 w-5 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
+      </div>
 
       {/* Active Job Banner */}
       {activeJob && (
-        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <div className="animate-pulse mr-3">
-                <div className="h-4 w-4 rounded-full bg-green-500"></div>
+        <div className="relative overflow-hidden bg-gradient-to-r from-emerald-500 to-emerald-600 rounded-2xl p-6 text-white shadow-lg">
+          {/* Animated background pattern */}
+          <div className="absolute inset-0 opacity-10">
+            <div className="absolute inset-0" style={{
+              backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,0.1) 10px, rgba(255,255,255,0.1) 20px)'
+            }} />
+          </div>
+          
+          <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+            <div className="flex items-start gap-4">
+              <div className="p-3 bg-white/20 rounded-xl">
+                <div className="h-4 w-4 rounded-full bg-white animate-pulse"></div>
               </div>
               <div>
-                <p className="font-medium text-green-800">Currently Working On</p>
-                <p className="text-lg font-bold text-green-900">
-                  {activeJob.work_order_number} - {activeJob.operation_name}
+                <p className="text-emerald-100 text-sm font-medium uppercase tracking-wide mb-1">
+                  Currently Working On
                 </p>
-                <p className="text-sm text-green-700">
-                  {activeJob.part_number} - {activeJob.part_name}
+                <h2 className="text-2xl font-bold mb-1">
+                  {activeJob.work_order_number} — {activeJob.operation_name}
+                </h2>
+                <p className="text-emerald-100">
+                  {activeJob.part_number} • {activeJob.part_name}
                 </p>
               </div>
             </div>
-            <div className="text-right">
-              <div className="text-sm text-green-600 mb-1">
-                Started at {formatClockInTime(activeJob.clock_in)}
-              </div>
-              <div className="flex items-center text-green-700 mb-2">
-                <ClockIcon className="h-5 w-5 mr-1" />
-                <span className="font-mono text-lg">{getElapsedTime(activeJob.clock_in)}</span>
+            
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+              <div className="text-center sm:text-right">
+                <p className="text-emerald-100 text-sm mb-1">
+                  Started at {formatClockInTime(activeJob.clock_in)}
+                </p>
+                <div className="flex items-center gap-2 text-3xl font-bold font-mono">
+                  <ClockIcon className="h-7 w-7" />
+                  {getElapsedTime(activeJob.clock_in)}
+                </div>
               </div>
               <button
                 onClick={() => setClockOutModal(true)}
-                className="btn-danger flex items-center"
+                className="btn bg-white text-emerald-700 hover:bg-emerald-50 shadow-lg"
               >
                 <StopIcon className="h-5 w-5 mr-2" />
                 Clock Out
@@ -176,11 +224,13 @@ export default function ShopFloor() {
           <button
             key={wc.id}
             onClick={() => setSelectedWorkCenter(wc.id)}
-            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-              selectedWorkCenter === wc.id
-                ? 'bg-werco-primary text-white'
-                : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
-            }`}
+            className={`
+              px-5 py-3 rounded-xl font-semibold transition-all duration-200 
+              ${selectedWorkCenter === wc.id
+                ? 'bg-werco-600 text-white shadow-md shadow-werco-600/30'
+                : 'bg-white text-surface-700 border border-surface-200 hover:border-werco-300 hover:bg-werco-50'
+              }
+            `}
           >
             {wc.name}
           </button>
@@ -188,90 +238,137 @@ export default function ShopFloor() {
       </div>
 
       {/* Job Queue */}
-      <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">
-          Job Queue - {workCenters.find(wc => wc.id === selectedWorkCenter)?.name}
-        </h2>
+      <div className="card card-flush">
+        <div className="px-6 py-4 border-b border-surface-200 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-surface-900">
+              Job Queue
+            </h2>
+            <p className="text-sm text-surface-500">
+              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} • {queue.length} job{queue.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+        </div>
         
         {queue.length === 0 ? (
-          <p className="text-gray-500 text-center py-8">No jobs in queue</p>
+          <div className="text-center py-16">
+            <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
+              <QueueListIcon className="h-8 w-8 text-surface-400" />
+            </div>
+            <p className="text-surface-600 font-medium">No jobs in queue</p>
+            <p className="text-sm text-surface-500 mt-1">Select a different work center or check back later</p>
+          </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="table">
+              <thead>
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Priority</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Work Order</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Due Date</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                  <th>Priority</th>
+                  <th>Work Order</th>
+                  <th>Part</th>
+                  <th>Operation</th>
+                  <th>Progress</th>
+                  <th>Due Date</th>
+                  <th>Status</th>
+                  <th className="w-32">Action</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {queue.map((item) => (
-                  <tr key={item.operation_id} className="hover:bg-gray-50">
-                    <td className="px-4 py-4">
-                      <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-sm font-bold ${
-                        item.priority <= 2 ? 'bg-red-100 text-red-800' :
-                        item.priority <= 5 ? 'bg-yellow-100 text-yellow-800' :
-                        'bg-gray-100 text-gray-800'
-                      }`}>
-                        {item.priority}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className="font-medium text-werco-primary">{item.work_order_number}</span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div>
-                        <div className="font-medium">{item.part_number}</div>
-                        <div className="text-sm text-gray-500">{item.part_name}</div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div>
-                        <div className="font-medium">{item.operation_number}</div>
-                        <div className="text-sm text-gray-500">{item.operation_name}</div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className="font-medium">{item.quantity_complete}</span>
-                      <span className="text-gray-500">/{item.quantity_ordered}</span>
-                    </td>
-                    <td className="px-4 py-4 text-sm">
-                      {item.due_date ? format(new Date(item.due_date), 'MMM d, yyyy') : '-'}
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${
-                        item.status === 'in_progress' ? 'bg-green-100 text-green-800' :
-                        item.status === 'ready' ? 'bg-blue-100 text-blue-800' :
-                        'bg-gray-100 text-gray-800'
-                      }`}>
-                        {item.status.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4">
-                      {item.status === 'in_progress' ? (
-                        <span className="text-green-600 flex items-center">
-                          <CheckCircleIcon className="h-5 w-5 mr-1" />
-                          In Progress
+              <tbody>
+                {queue.map((item) => {
+                  const progress = (item.quantity_complete / item.quantity_ordered) * 100;
+                  const isOverdue = item.due_date && new Date(item.due_date) < new Date();
+                  
+                  return (
+                    <tr key={item.operation_id} className={isOverdue ? 'bg-red-50/50' : ''}>
+                      <td>
+                        <span className={`
+                          inline-flex items-center justify-center w-10 h-10 rounded-xl text-sm font-bold
+                          ${item.priority <= 2 
+                            ? 'bg-red-100 text-red-700' 
+                            : item.priority <= 5 
+                            ? 'bg-amber-100 text-amber-700' 
+                            : 'bg-surface-100 text-surface-600'
+                          }
+                        `}>
+                          P{item.priority}
                         </span>
-                      ) : (
-                        <button
-                          onClick={() => handleClockIn(item)}
-                          disabled={!!activeJob}
-                          className="btn-success flex items-center disabled:opacity-50"
-                        >
-                          <PlayIcon className="h-4 w-4 mr-1" />
-                          Start
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td>
+                        <span className="font-semibold text-werco-600">{item.work_order_number}</span>
+                      </td>
+                      <td>
+                        <div>
+                          <p className="font-medium text-surface-900">{item.part_number}</p>
+                          <p className="text-sm text-surface-500 line-clamp-1">{item.part_name}</p>
+                        </div>
+                      </td>
+                      <td>
+                        <div>
+                          <p className="font-medium text-surface-900">Op {item.operation_number}</p>
+                          <p className="text-sm text-surface-500">{item.operation_name}</p>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="w-32">
+                          <div className="flex items-center justify-between text-sm mb-1">
+                            <span className="font-medium text-surface-700 tabular-nums">
+                              {item.quantity_complete}/{item.quantity_ordered}
+                            </span>
+                            <span className="text-surface-500">{Math.round(progress)}%</span>
+                          </div>
+                          <div className="h-2 bg-surface-200 rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-werco-500 rounded-full transition-all"
+                              style={{ width: `${Math.min(100, progress)}%` }}
+                            />
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <span className={`text-sm font-medium ${isOverdue ? 'text-red-600' : 'text-surface-700'}`}>
+                          {item.due_date ? format(new Date(item.due_date), 'MMM d') : '—'}
+                        </span>
+                        {isOverdue && (
+                          <span className="block text-xs text-red-500 font-medium">OVERDUE</span>
+                        )}
+                      </td>
+                      <td>
+                        <span className={`
+                          inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold
+                          ${item.status === 'in_progress' 
+                            ? 'bg-emerald-100 text-emerald-700' 
+                            : item.status === 'ready' 
+                            ? 'bg-blue-100 text-blue-700' 
+                            : 'bg-surface-100 text-surface-600'
+                          }
+                        `}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${
+                            item.status === 'in_progress' ? 'bg-emerald-500' : 
+                            item.status === 'ready' ? 'bg-blue-500' : 'bg-surface-400'
+                          }`}></span>
+                          {item.status.replace('_', ' ')}
+                        </span>
+                      </td>
+                      <td>
+                        {item.status === 'in_progress' ? (
+                          <span className="inline-flex items-center gap-1.5 text-emerald-600 font-medium">
+                            <CheckCircleIcon className="h-5 w-5" />
+                            Active
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleClockIn(item)}
+                            disabled={!!activeJob}
+                            className="btn-success btn-sm w-full disabled:opacity-50"
+                          >
+                            <PlayIcon className="h-4 w-4 mr-1.5" />
+                            Start
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -280,45 +377,63 @@ export default function ShopFloor() {
 
       {/* Clock Out Modal */}
       {clockOutModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Clock Out</h3>
+        <div className="modal-overlay" onClick={() => setClockOutModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="text-lg font-semibold text-surface-900">Clock Out</h3>
+              <button 
+                onClick={() => setClockOutModal(false)}
+                className="p-2 rounded-lg text-surface-400 hover:text-surface-600 hover:bg-surface-100"
+              >
+                <XMarkIcon className="h-5 w-5" />
+              </button>
+            </div>
             
-            <div className="space-y-4">
-              <div>
-                <label className="label">Quantity Produced</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={clockOutData.quantity_produced}
-                  onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
-                  className="input"
-                />
+            <div className="modal-body space-y-4">
+              <div className="bg-surface-50 rounded-xl p-4 mb-4">
+                <p className="text-sm text-surface-500 mb-1">Completing work on</p>
+                <p className="font-semibold text-surface-900">
+                  {activeJob?.work_order_number} — {activeJob?.operation_name}
+                </p>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Quantity Produced</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={clockOutData.quantity_produced}
+                    onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
+                    className="input text-center text-lg font-semibold"
+                  />
+                </div>
+                
+                <div>
+                  <label className="label">Quantity Scrapped</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={clockOutData.quantity_scrapped}
+                    onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
+                    className="input text-center text-lg font-semibold"
+                  />
+                </div>
               </div>
               
               <div>
-                <label className="label">Quantity Scrapped</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={clockOutData.quantity_scrapped}
-                  onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
-                  className="input"
-                />
-              </div>
-              
-              <div>
-                <label className="label">Notes</label>
+                <label className="label">Notes (optional)</label>
                 <textarea
                   value={clockOutData.notes}
                   onChange={(e) => setClockOutData({ ...clockOutData, notes: e.target.value })}
                   className="input"
                   rows={3}
+                  placeholder="Any issues, observations, or notes..."
                 />
               </div>
             </div>
             
-            <div className="flex justify-end gap-3 mt-6">
+            <div className="modal-footer">
               <button
                 onClick={() => setClockOutModal(false)}
                 className="btn-secondary"
@@ -329,6 +444,7 @@ export default function ShopFloor() {
                 onClick={handleClockOut}
                 className="btn-primary"
               >
+                <CheckCircleIcon className="h-5 w-5 mr-2" />
                 Complete Clock Out
               </button>
             </div>

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { format } from 'date-fns';
 import {
@@ -6,7 +7,7 @@ import {
   ExclamationTriangleIcon,
   ClipboardDocumentCheckIcon,
   DocumentMagnifyingGlassIcon,
-  XMarkIcon
+  XMarkIcon,
 } from '@heroicons/react/24/outline';
 
 type TabType = 'ncr' | 'car' | 'fai';
@@ -88,6 +89,7 @@ const dispositionColors: Record<string, string> = {
 };
 
 export default function QualityPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('ncr');
   const [ncrs, setNcrs] = useState<NCR[]>([]);
   const [cars, setCars] = useState<CAR[]>([]);
@@ -95,6 +97,10 @@ export default function QualityPage() {
   const [summary, setSummary] = useState<QualitySummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [parts, setParts] = useState<any[]>([]);
+  const [ncrStatusFilter, setNcrStatusFilter] = useState<string>(() => {
+    const filter = searchParams.get('filter');
+    return filter === 'open' ? 'open' : '';
+  });
   
   const [showNCRModal, setShowNCRModal] = useState(false);
   const [showCARModal, setShowCARModal] = useState(false);
@@ -248,7 +254,39 @@ export default function QualityPage() {
         {activeTab === 'ncr' && (
           <>
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-semibold">Non-Conformance Reports</h2>
+              <div className="flex items-center gap-4">
+                <h2 className="text-lg font-semibold">Non-Conformance Reports</h2>
+                <select
+                  value={ncrStatusFilter}
+                  onChange={(e) => {
+                    setNcrStatusFilter(e.target.value);
+                    if (e.target.value) {
+                      setSearchParams({ filter: e.target.value });
+                    } else {
+                      setSearchParams({});
+                    }
+                  }}
+                  className="input w-40"
+                >
+                  <option value="">All Status</option>
+                  <option value="open">Open</option>
+                  <option value="under_review">Under Review</option>
+                  <option value="pending_disposition">Pending Disposition</option>
+                  <option value="closed">Closed</option>
+                </select>
+                {ncrStatusFilter && (
+                  <button
+                    onClick={() => {
+                      setNcrStatusFilter('');
+                      setSearchParams({});
+                    }}
+                    className="flex items-center gap-1 px-3 py-1.5 text-sm bg-werco-100 text-werco-700 rounded-full hover:bg-werco-200"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                    Clear
+                  </button>
+                )}
+              </div>
               <button onClick={() => setShowNCRModal(true)} className="btn-primary flex items-center">
                 <PlusIcon className="h-5 w-5 mr-1" /> New NCR
               </button>
@@ -267,7 +305,7 @@ export default function QualityPage() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {ncrs.map((ncr) => (
+                  {(ncrStatusFilter ? ncrs.filter(ncr => ncr.status === ncrStatusFilter) : ncrs).map((ncr) => (
                     <tr key={ncr.id} className="hover:bg-gray-50 cursor-pointer">
                       <td className="px-4 py-3 font-medium">{ncr.ncr_number}</td>
                       <td className="px-4 py-3">{ncr.part?.part_number || '-'}</td>
