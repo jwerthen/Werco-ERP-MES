@@ -263,11 +263,18 @@ def create_po_from_upload(
     from app.models.part import PartType
     part_id_map = {}  # Maps part_number to part_id for new parts
     for part_data in data.create_parts:
+        # Determine part type - default to PURCHASED, but allow RAW_MATERIAL
+        part_type_str = part_data.get("part_type", "purchased").lower()
+        if part_type_str == "raw_material":
+            part_type = PartType.RAW_MATERIAL
+        else:
+            part_type = PartType.PURCHASED
+        
         new_part = Part(
             part_number=part_data.get("part_number"),
             name=part_data.get("description", part_data.get("part_number")),
             description=part_data.get("description"),
-            part_type=PartType.PURCHASED,  # Parts from PO are purchased
+            part_type=part_type,
             is_active=True,
             status="active"
         )

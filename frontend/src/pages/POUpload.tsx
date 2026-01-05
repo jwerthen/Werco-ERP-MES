@@ -43,6 +43,7 @@ interface LineItem {
   // Form state
   selected_part_id: number | null;
   create_new_part: boolean;
+  new_part_type: 'purchased' | 'raw_material';
 }
 
 interface ExtractionResult {
@@ -184,6 +185,7 @@ export default function POUpload() {
         ...item,
         selected_part_id: item.matched_part_id,
         create_new_part: false,
+        new_part_type: 'purchased' as const,
       })));
       
       setStep('review');
@@ -239,7 +241,15 @@ export default function POUpload() {
   const toggleCreatePart = (lineIndex: number) => {
     setLineItems(prev => prev.map((item, idx) => 
       idx === lineIndex 
-        ? { ...item, create_new_part: !item.create_new_part, selected_part_id: null }
+        ? { ...item, create_new_part: !item.create_new_part, selected_part_id: null, new_part_type: 'purchased' }
+        : item
+    ));
+  };
+
+  const setPartType = (lineIndex: number, partType: 'purchased' | 'raw_material') => {
+    setLineItems(prev => prev.map((item, idx) => 
+      idx === lineIndex 
+        ? { ...item, new_part_type: partType }
         : item
     ));
   };
@@ -270,7 +280,8 @@ export default function POUpload() {
         .filter(item => item.create_new_part)
         .map(item => ({
           part_number: item.part_number,
-          description: item.description
+          description: item.description,
+          part_type: item.new_part_type
         }));
       
       const result = await api.createPOFromUpload({
@@ -786,16 +797,41 @@ export default function POUpload() {
                         </button>
                       </div>
                     ) : item.create_new_part ? (
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm text-blue-600">
-                          Will create new part: {item.part_number}
-                        </span>
-                        <button
-                          onClick={() => toggleCreatePart(idx)}
-                          className="text-xs text-gray-500 hover:underline"
-                        >
-                          Cancel
-                        </button>
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-blue-600">
+                            Will create new part: {item.part_number}
+                          </span>
+                          <button
+                            onClick={() => toggleCreatePart(idx)}
+                            className="text-xs text-gray-500 hover:underline"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <span className="text-xs text-gray-500">Part Type:</span>
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`part-type-${idx}`}
+                              checked={item.new_part_type === 'purchased'}
+                              onChange={() => setPartType(idx, 'purchased')}
+                              className="text-rose-600"
+                            />
+                            <span className="text-sm">Purchased Part</span>
+                          </label>
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`part-type-${idx}`}
+                              checked={item.new_part_type === 'raw_material'}
+                              onChange={() => setPartType(idx, 'raw_material')}
+                              className="text-rose-600"
+                            />
+                            <span className="text-sm">Raw Material</span>
+                          </label>
+                        </div>
                       </div>
                     ) : (
                       <div className="space-y-2">

@@ -93,7 +93,7 @@ class POCreateFromUpload(BaseModel):
     
     line_items: List[LineItemConfirm]
     
-    # Parts to create
+    # Parts to create - each dict should have: part_number, description, part_type (optional: 'purchased' or 'raw_material')
     create_parts: List[Dict[str, Any]] = []
     
     # PDF reference
