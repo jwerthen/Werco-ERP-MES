@@ -1192,6 +1192,72 @@ class ApiService {
   getPOPdfUrl(path: string) {
     return `${this.api.defaults.baseURL}/po-upload/pdf/${path}`;
   }
+
+  // Analytics & BI
+  async getKPIDashboard(params?: { period?: string; start_date?: string; end_date?: string; work_center_id?: number }) {
+    const response = await this.api.get('/analytics/kpis', { params });
+    return response.data;
+  }
+
+  async getOEEDetails(params?: { period?: string; start_date?: string; end_date?: string; work_center_id?: number; granularity?: string }) {
+    const response = await this.api.get('/analytics/oee', { params });
+    return response.data;
+  }
+
+  async getProductionTrends(params?: { period?: string; start_date?: string; end_date?: string; group_by?: string; granularity?: string }) {
+    const response = await this.api.get('/analytics/production-trends', { params });
+    return response.data;
+  }
+
+  async getCostAnalysis(params?: { period?: string; start_date?: string; end_date?: string; work_order_id?: number }) {
+    const response = await this.api.get('/analytics/cost-analysis', { params });
+    return response.data;
+  }
+
+  async getQualityMetrics(params?: { period?: string; start_date?: string; end_date?: string; metric_type?: string }) {
+    const response = await this.api.get('/analytics/quality-metrics', { params });
+    return response.data;
+  }
+
+  async getInventoryTurnover(params?: { period?: string; start_date?: string; end_date?: string; category?: string }) {
+    const response = await this.api.get('/analytics/inventory-turnover', { params });
+    return response.data;
+  }
+
+  async predictDelivery(workOrderId: number) {
+    const response = await this.api.get(`/analytics/predict/delivery/${workOrderId}`);
+    return response.data;
+  }
+
+  async getCapacityForecast(weeksAhead = 4) {
+    const response = await this.api.get('/analytics/predict/capacity', { params: { weeks_ahead: weeksAhead } });
+    return response.data;
+  }
+
+  async getInventoryDemandPrediction() {
+    const response = await this.api.get('/analytics/predict/inventory-demand');
+    return response.data;
+  }
+
+  async getReportTemplates() {
+    const response = await this.api.get('/analytics/custom-report/templates');
+    return response.data;
+  }
+
+  async createReportTemplate(template: any) {
+    const response = await this.api.post('/analytics/custom-report/templates', template);
+    return response.data;
+  }
+
+  async runCustomReport(request: any) {
+    const response = await this.api.post('/analytics/custom-report', request);
+    return response.data;
+  }
+
+  async getDataSources() {
+    const response = await this.api.get('/analytics/data-sources');
+    return response.data;
+  }
 }
 
 export const api = new ApiService();

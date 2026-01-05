@@ -35,6 +35,7 @@ import QuoteCalculator from './pages/QuoteCalculator';
 import AdminSettings from './pages/AdminSettings';
 import Receiving from './pages/Receiving';
 import POUpload from './pages/POUpload';
+import Analytics from './pages/Analytics';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -295,6 +296,13 @@ function AppRoutes() {
             <AdminSettings />
           </Layout>
         </AdminRoute>
+      } />
+      <Route path="/analytics" element={
+        <PrivateRoute>
+          <Layout>
+            <Analytics />
+          </Layout>
+        </PrivateRoute>
       } />
     </Routes>
   );

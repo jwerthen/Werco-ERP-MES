@@ -18,6 +18,7 @@ from .customer import Customer
 from .calibration import Equipment, CalibrationRecord, CalibrationStatus
 from .supplier_part import SupplierPartMapping
 from .quote_config import QuoteMaterial, QuoteMachine, QuoteFinish, QuoteSettings, MaterialCategory, MachineType
+from .analytics import ReportTemplate, KPITarget
 
 __all__ = [
     "User", "UserRole",

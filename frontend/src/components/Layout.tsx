@@ -92,7 +92,8 @@ const navigation: NavItem[] = [
     ]
   },
   { name: 'Documents', href: '/documents', icon: DocumentTextIcon },
-  { name: 'Reports', href: '/reports', icon: ChartBarIcon },
+  { name: 'Analytics', href: '/analytics', icon: ChartBarIcon },
+  { name: 'Reports', href: '/reports', icon: DocumentTextIcon },
   { 
     name: 'Administration', 
     icon: Cog6ToothIcon,
