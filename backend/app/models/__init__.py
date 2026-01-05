@@ -18,6 +18,9 @@ from .customer import Customer
 from .calibration import Equipment, CalibrationRecord, CalibrationStatus
 from .supplier_part import SupplierPartMapping
 from .quote_config import QuoteMaterial, QuoteMachine, QuoteFinish, QuoteSettings, MaterialCategory, MachineType
+from .job import Job, JobStatus, JobPriority
+from .notification import NotificationPreference, NotificationLog, DigestQueue
+from .webhook import Webhook, WebhookDelivery
 
 __all__ = [
     "User", "UserRole",
@@ -32,4 +35,7 @@ __all__ = [
     "Document", "DocumentType",
     "MRPRun", "MRPRequirement", "MRPAction", "MRPRunStatus", "PlanningAction",
     "CustomFieldDefinition", "CustomFieldValue", "FieldType", "EntityType",
+    "Job", "JobStatus", "JobPriority",
+    "NotificationPreference", "NotificationLog", "DigestQueue",
+    "Webhook", "WebhookDelivery",
 ]

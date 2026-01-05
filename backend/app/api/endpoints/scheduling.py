@@ -8,6 +8,14 @@ from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
 from app.models.part import Part
+from app.services.scheduling_service import SchedulingService
+from app.schemas.scheduling import (
+    SchedulingRunRequest,
+    SchedulingConflict,
+    LoadChartRequest,
+    LoadChartDataPoint
+)
+from app.core.queue import enqueue_job
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -148,36 +156,102 @@ def auto_schedule_operations(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
 ):
-    """Auto-schedule unscheduled operations by priority and due date"""
-    query = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order)
-    ).join(WorkOrder).filter(
-        WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
-        WorkOrderOperation.status.in_([OperationStatus.PENDING, OperationStatus.READY]),
-        WorkOrderOperation.scheduled_start == None
+    """DEPRECATED: Use /run endpoint instead"""
+    # Legacy endpoint - redirect to new constraint-based scheduling
+    work_center_ids = [work_center_id] if work_center_id else None
+
+    scheduling_service = SchedulingService(db)
+    results = scheduling_service.run_scheduling(
+        work_center_ids=work_center_ids,
+        horizon_days=90,
+        optimize_setup=False
     )
-    
-    if work_center_id:
-        query = query.filter(WorkOrderOperation.work_center_id == work_center_id)
-    
-    operations = query.order_by(
-        WorkOrder.priority,
-        WorkOrder.due_date,
-        WorkOrderOperation.sequence
-    ).all()
-    
-    # Simple scheduling: assign dates starting today
-    current_date = date.today()
-    scheduled_count = 0
-    
-    for op in operations:
-        op.scheduled_start = current_date
-        # Estimate end date based on hours (8 hours/day)
-        total_hours = (op.setup_time_hours or 0) + (op.run_time_hours or 0)
-        days_needed = max(1, int(total_hours / 8) + (1 if total_hours % 8 > 0 else 0))
-        op.scheduled_end = current_date
-        scheduled_count += 1
-    
-    db.commit()
-    
-    return {"message": f"Scheduled {scheduled_count} operations"}
+
+    return {
+        "message": f"Scheduled {results['scheduled_count']} operations",
+        "scheduled_count": results['scheduled_count'],
+        "conflicts": results['conflict_count']
+    }
+
+
+@router.post("/run")
+def run_scheduling(
+    request: SchedulingRunRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+):
+    """Run constraint-based scheduling algorithm"""
+
+    scheduling_service = SchedulingService(db)
+    results = scheduling_service.run_scheduling(
+        work_center_ids=request.work_center_ids,
+        horizon_days=request.horizon_days,
+        optimize_setup=request.optimize_setup
+    )
+
+    return results
+
+
+@router.get("/conflicts", response_model=List[SchedulingConflict])
+def get_scheduling_conflicts(
+    work_center_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get current scheduling conflicts (over-capacity situations)"""
+
+    scheduling_service = SchedulingService(db)
+
+    # Initialize capacity for all work centers
+    from app.models.work_center import WorkCenter
+    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+    scheduling_service._initialize_capacity(work_centers, 90)
+
+    conflicts = scheduling_service.detect_conflicts(work_center_id)
+
+    return conflicts
+
+
+@router.post("/load-chart", response_model=List[LoadChartDataPoint])
+def get_load_chart(
+    request: LoadChartRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get work center load chart data"""
+
+    scheduling_service = SchedulingService(db)
+
+    # Initialize capacity
+    from app.models.work_center import WorkCenter
+    wc = db.query(WorkCenter).filter(WorkCenter.id == request.work_center_id).first()
+    if not wc:
+        raise HTTPException(status_code=404, detail="Work center not found")
+
+    days = (request.end_date - request.start_date).days
+    scheduling_service._initialize_capacity([wc], max(days, 90))
+
+    load_data = scheduling_service.get_load_chart(
+        request.work_center_id,
+        request.start_date,
+        request.end_date
+    )
+
+    return load_data
+
+
+@router.post("/run-background")
+async def run_scheduling_background(
+    request: SchedulingRunRequest,
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+):
+    """Queue scheduling run as background job"""
+
+    await enqueue_job(
+        "run_scheduling_job",
+        work_center_ids=request.work_center_ids,
+        horizon_days=request.horizon_days,
+        optimize_setup=request.optimize_setup
+    )
+
+    return {"message": "Scheduling job queued"}

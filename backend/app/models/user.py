@@ -41,7 +41,8 @@ class User(Base):
     
     # Relationships
     time_entries = relationship("TimeEntry", back_populates="user")
-    
+    notification_preference = relationship("NotificationPreference", back_populates="user", uselist=False)
+
     @property
     def full_name(self) -> str:
         return f"{self.first_name} {self.last_name}"
