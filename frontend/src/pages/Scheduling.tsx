@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
-import { format, addDays, startOfWeek, differenceInDays, parseISO, isWithinInterval } from 'date-fns';
+import { format, addDays, startOfWeek, differenceInDays, parseISO, isBefore, isAfter, isSameDay } from 'date-fns';
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -32,6 +32,11 @@ interface ScheduledJob {
   run_hours: number;
 }
 
+interface DragState {
+  job: ScheduledJob | null;
+  isDragging: boolean;
+}
+
 const statusColors: Record<string, string> = {
   pending: 'bg-gray-400',
   ready: 'bg-blue-500',
@@ -54,12 +59,18 @@ export default function Scheduling() {
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date(), { weekStartsOn: 1 }));
-  const [daysToShow] = useState(14);
+  const [daysToShow] = useState(7);
   const [selectedJob, setSelectedJob] = useState<ScheduledJob | null>(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
-  const [scheduleForm, setScheduleForm] = useState({ scheduled_start: '', scheduled_end: '' });
+  const [scheduleForm, setScheduleForm] = useState({ scheduled_start: '', scheduled_end: '', work_center_id: 0 });
+  
+  // Drag and drop state
+  const [dragState, setDragState] = useState<DragState>({ job: null, isDragging: false });
+  const [dropTargetWc, setDropTargetWc] = useState<number | null>(null);
 
-  const days = Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i));
+  // Generate days for display: Monday-Saturday only (skip Sundays)
+  const days = Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i))
+    .filter(day => day.getDay() !== 0); // 0 = Sunday
 
   useEffect(() => {
     loadData();
@@ -83,7 +94,8 @@ export default function Scheduling() {
     }
   };
 
-  const getJobsForWorkCenterAndDay = (wcId: number, day: Date) => {
+  // Get jobs that START on a specific day OR are continuing from a previous week
+  const getJobsStartingOnDay = (wcId: number, day: Date, dayIdx: number): ScheduledJob[] => {
     return jobs.filter(job => {
       if (job.work_center_id !== wcId) return false;
       if (!job.scheduled_start) return false;
@@ -91,9 +103,58 @@ export default function Scheduling() {
       const jobStart = parseISO(job.scheduled_start);
       const jobEnd = job.scheduled_end ? parseISO(job.scheduled_end) : jobStart;
       
-      return isWithinInterval(day, { start: jobStart, end: jobEnd }) ||
-             format(jobStart, 'yyyy-MM-dd') === format(day, 'yyyy-MM-dd');
+      // Job starts on this exact day
+      if (isSameDay(jobStart, day)) return true;
+      
+      // Job started before this week but continues into it - show on first visible day
+      if (dayIdx === 0 && isBefore(jobStart, day) && (isAfter(jobEnd, day) || isSameDay(jobEnd, day))) {
+        return true;
+      }
+      
+      return false;
     });
+  };
+
+  // Calculate span of a job in days within the visible range (counting only visible days)
+  const getJobSpan = (job: ScheduledJob, day: Date, dayIdx: number): number => {
+    if (!job.scheduled_start) return 1;
+    
+    const jobStart = parseISO(job.scheduled_start);
+    const jobEnd = job.scheduled_end ? parseISO(job.scheduled_end) : jobStart;
+    
+    // If job started before current view, calculate from current day
+    const effectiveStart = isBefore(jobStart, day) ? day : jobStart;
+    
+    // Count how many visible days this job spans
+    let spanCount = 0;
+    for (let i = dayIdx; i < days.length; i++) {
+      const checkDay = days[i];
+      if (isBefore(checkDay, effectiveStart)) continue;
+      if (isAfter(checkDay, jobEnd)) break;
+      spanCount++;
+    }
+    
+    return Math.max(1, spanCount);
+  };
+
+  // Check if a job spans through a specific day (but doesn't start on it and isn't continuing from prev week)
+  const isJobSpanningDay = (wcId: number, day: Date, dayIdx: number): ScheduledJob | null => {
+    for (const job of jobs) {
+      if (job.work_center_id !== wcId) continue;
+      if (!job.scheduled_start || !job.scheduled_end) continue;
+      
+      const jobStart = parseISO(job.scheduled_start);
+      const jobEnd = parseISO(job.scheduled_end);
+      
+      // Skip if this is the first day (those are handled by getJobsStartingOnDay)
+      if (dayIdx === 0) continue;
+      
+      // Check if day is between start and end (exclusive of start day)
+      if (isAfter(day, jobStart) && (isBefore(day, jobEnd) || isSameDay(day, jobEnd))) {
+        return job;
+      }
+    }
+    return null;
   };
 
   const getUnscheduledJobs = (wcId: number) => {
@@ -104,9 +165,57 @@ export default function Scheduling() {
     setSelectedJob(job);
     setScheduleForm({
       scheduled_start: job.scheduled_start ? job.scheduled_start.split('T')[0] : format(new Date(), 'yyyy-MM-dd'),
-      scheduled_end: job.scheduled_end ? job.scheduled_end.split('T')[0] : ''
+      scheduled_end: job.scheduled_end ? job.scheduled_end.split('T')[0] : '',
+      work_center_id: job.work_center_id
     });
     setShowScheduleModal(true);
+  };
+
+  // Drag and drop handlers
+  const handleDragStart = (e: React.DragEvent, job: ScheduledJob) => {
+    setDragState({ job, isDragging: true });
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', job.operation_id.toString());
+  };
+
+  const handleDragEnd = () => {
+    setDragState({ job: null, isDragging: false });
+    setDropTargetWc(null);
+  };
+
+  const handleDragOver = (e: React.DragEvent, wcId: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dropTargetWc !== wcId) {
+      setDropTargetWc(wcId);
+    }
+  };
+
+  const handleDragLeave = () => {
+    setDropTargetWc(null);
+  };
+
+  const handleDrop = async (e: React.DragEvent, targetWcId: number) => {
+    e.preventDefault();
+    setDropTargetWc(null);
+    
+    const job = dragState.job;
+    if (!job || job.work_center_id === targetWcId) {
+      setDragState({ job: null, isDragging: false });
+      return;
+    }
+    
+    try {
+      // Update work center assignment
+      await api.updateOperationWorkCenter(job.operation_id, targetWcId);
+      
+      // Reload data to reflect changes
+      loadData();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to move operation');
+    }
+    
+    setDragState({ job: null, isDragging: false });
   };
 
   const handleSchedule = async (e: React.FormEvent) => {
@@ -162,10 +271,10 @@ export default function Scheduling() {
         </div>
       </div>
 
-      {/* Gantt Chart */}
+      {/* Gantt Chart with Continuous Bars and Drag-Drop */}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full border-collapse">
+          <table className="min-w-full border-collapse" style={{ tableLayout: 'fixed' }}>
             <thead>
               <tr className="bg-gray-50">
                 <th className="sticky left-0 bg-gray-50 z-10 px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-48 border-r">
@@ -174,10 +283,10 @@ export default function Scheduling() {
                 {days.map((day, idx) => (
                   <th
                     key={idx}
-                    className={`px-2 py-2 text-center text-xs font-medium min-w-24 border-r ${
+                    className={`px-2 py-2 text-center text-xs font-medium w-24 border-r ${
                       format(day, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd')
                         ? 'bg-blue-50 text-blue-700'
-                        : [0, 6].includes(day.getDay())
+                        : day.getDay() === 6
                         ? 'bg-gray-100 text-gray-500'
                         : 'text-gray-500'
                     }`}
@@ -191,9 +300,19 @@ export default function Scheduling() {
             <tbody>
               {workCenters.map((wc) => {
                 const unscheduled = getUnscheduledJobs(wc.id);
+                const isDropTarget = dropTargetWc === wc.id;
+                
                 return (
-                  <tr key={wc.id} className="border-b hover:bg-gray-50">
-                    <td className="sticky left-0 bg-white z-10 px-4 py-3 border-r">
+                  <tr 
+                    key={wc.id} 
+                    className={`border-b transition-colors ${
+                      isDropTarget ? 'bg-blue-100' : 'hover:bg-gray-50'
+                    }`}
+                    onDragOver={(e) => handleDragOver(e, wc.id)}
+                    onDragLeave={handleDragLeave}
+                    onDrop={(e) => handleDrop(e, wc.id)}
+                  >
+                    <td className={`sticky left-0 z-10 px-4 py-3 border-r ${isDropTarget ? 'bg-blue-100' : 'bg-white'}`}>
                       <div className="font-medium text-sm">{wc.code}</div>
                       <div className="text-xs text-gray-500">{wc.name}</div>
                       {unscheduled.length > 0 && (
@@ -201,33 +320,68 @@ export default function Scheduling() {
                           {unscheduled.length} unscheduled
                         </div>
                       )}
+                      {isDropTarget && dragState.job && (
+                        <div className="mt-1 text-xs text-blue-600 font-medium">
+                          Drop to move here
+                        </div>
+                      )}
                     </td>
                     {days.map((day, dayIdx) => {
-                      const dayJobs = getJobsForWorkCenterAndDay(wc.id, day);
-                      const isWeekend = [0, 6].includes(day.getDay());
+                      const jobsStartingToday = getJobsStartingOnDay(wc.id, day, dayIdx);
+                      const spanningJob = isJobSpanningDay(wc.id, day, dayIdx);
+                      const isWeekend = day.getDay() === 6; // Saturday only
                       const isToday = format(day, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
+                      
+                      // If a job is spanning through this day (but didn't start here), render empty cell
+                      // The bar from the start day will cover this cell via colspan
+                      if (spanningJob && jobsStartingToday.length === 0) {
+                        return null; // Cell is covered by colspan from previous day
+                      }
                       
                       return (
                         <td
                           key={dayIdx}
-                          className={`px-1 py-1 border-r align-top min-h-16 ${
+                          colSpan={jobsStartingToday.length > 0 ? 1 : 1}
+                          className={`px-1 py-1 border-r align-top h-16 relative ${
                             isToday ? 'bg-blue-50' : isWeekend ? 'bg-gray-50' : ''
-                          }`}
+                          } ${isDropTarget ? 'bg-blue-100' : ''}`}
                         >
                           <div className="space-y-1">
-                            {dayJobs.map((job) => (
-                              <div
-                                key={job.operation_id}
-                                onClick={() => openScheduleModal(job)}
-                                className={`text-xs p-1 rounded cursor-pointer hover:opacity-80 border-l-4 ${
-                                  priorityColors[job.priority] || 'border-l-gray-400'
-                                } ${statusColors[job.status]} text-white`}
-                                title={`${job.work_order_number} - ${job.operation_name}\n${job.part_number}`}
-                              >
-                                <div className="font-medium truncate">{job.work_order_number}</div>
-                                <div className="truncate opacity-90">{job.operation_name}</div>
-                              </div>
-                            ))}
+                            {jobsStartingToday.map((job) => {
+                              const span = getJobSpan(job, day, dayIdx);
+                              // Calculate width: span * cell width (96px) - padding
+                              const widthPx = span * 96 - 8;
+                              
+                              return (
+                                <div
+                                  key={job.operation_id}
+                                  draggable
+                                  onDragStart={(e) => handleDragStart(e, job)}
+                                  onDragEnd={handleDragEnd}
+                                  onClick={() => openScheduleModal(job)}
+                                  className={`text-xs p-1.5 rounded cursor-move hover:opacity-90 border-l-4 shadow-sm ${
+                                    priorityColors[job.priority] || 'border-l-gray-400'
+                                  } ${statusColors[job.status]} text-white ${
+                                    dragState.job?.operation_id === job.operation_id ? 'opacity-50' : ''
+                                  }`}
+                                  style={{
+                                    width: span > 1 ? `${widthPx}px` : 'auto',
+                                    position: span > 1 ? 'absolute' : 'relative',
+                                    zIndex: span > 1 ? 5 : 1,
+                                    minWidth: '88px'
+                                  }}
+                                  title={`${job.work_order_number} - ${job.operation_name}\n${job.part_number}\n${span > 1 ? `${span} days` : '1 day'}\nDrag to move to another work center`}
+                                >
+                                  <div className="font-medium truncate">{job.work_order_number}</div>
+                                  <div className="truncate opacity-90">{job.operation_name}</div>
+                                  {span > 1 && (
+                                    <div className="text-[10px] opacity-75 mt-0.5">
+                                      {span} days
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
                         </td>
                       );
@@ -239,6 +393,13 @@ export default function Scheduling() {
           </table>
         </div>
       </div>
+      
+      {/* Drag hint */}
+      {dragState.isDragging && (
+        <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg text-sm z-50">
+          Dragging: {dragState.job?.work_order_number} - Drop on a work center row to move
+        </div>
+      )}
 
       {/* Unscheduled Jobs Queue */}
       <div className="card">

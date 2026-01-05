@@ -36,6 +36,7 @@ import AdminSettings from './pages/AdminSettings';
 import Receiving from './pages/Receiving';
 import POUpload from './pages/POUpload';
 import Analytics from './pages/Analytics';
+import ShopFloorSimple from './pages/ShopFloorSimple';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -109,6 +110,13 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <ShopFloor />
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/shop-floor/operations" element={
+        <PrivateRoute>
+          <Layout>
+            <ShopFloorSimple />
           </Layout>
         </PrivateRoute>
       } />

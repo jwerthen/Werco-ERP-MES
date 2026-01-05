@@ -692,6 +692,11 @@ class ApiService {
     return response.data;
   }
 
+  async updateOperationWorkCenter(operationId: number, workCenterId: number) {
+    const response = await this.api.put(`/scheduling/operations/${operationId}/work-center`, { work_center_id: workCenterId });
+    return response.data;
+  }
+
   async getCapacitySummary(startDate: string, endDate: string) {
     const response = await this.api.get('/scheduling/capacity', { params: { start_date: startDate, end_date: endDate } });
     return response.data;

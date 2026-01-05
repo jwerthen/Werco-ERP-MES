@@ -18,6 +18,10 @@ class ScheduleUpdate(BaseModel):
     scheduled_end: Optional[date] = None
 
 
+class WorkCenterUpdate(BaseModel):
+    work_center_id: int
+
+
 @router.get("/jobs")
 def get_scheduled_jobs(
     start_date: Optional[str] = None,
@@ -92,6 +96,42 @@ def schedule_operation(
     db.commit()
     
     return {"message": "Operation scheduled", "operation_id": operation_id}
+
+
+@router.put("/operations/{operation_id}/work-center")
+def update_operation_work_center(
+    operation_id: int,
+    update: WorkCenterUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+):
+    """Move an operation to a different work center"""
+    from app.models.work_center import WorkCenter
+    
+    operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    
+    # Verify target work center exists and is active
+    work_center = db.query(WorkCenter).filter(
+        WorkCenter.id == update.work_center_id,
+        WorkCenter.is_active == True
+    ).first()
+    if not work_center:
+        raise HTTPException(status_code=404, detail="Work center not found or inactive")
+    
+    old_wc_id = operation.work_center_id
+    operation.work_center_id = update.work_center_id
+    
+    db.commit()
+    
+    return {
+        "message": "Operation moved to new work center",
+        "operation_id": operation_id,
+        "old_work_center_id": old_wc_id,
+        "new_work_center_id": update.work_center_id,
+        "new_work_center_code": work_center.code
+    }
 
 
 @router.get("/capacity")

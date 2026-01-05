@@ -83,7 +83,7 @@ export default function WorkOrderDetail() {
     const qtyScrapped = prompt('Enter quantity scrapped (if any):', '0');
     
     try {
-      await api.completeOperation(operationId, parseFloat(qtyComplete), parseFloat(qtyScrapped || '0'));
+      await api.completeWOOperation(operationId, parseFloat(qtyComplete), parseFloat(qtyScrapped || '0'));
       loadWorkOrder();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to complete operation');
