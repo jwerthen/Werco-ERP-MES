@@ -31,7 +31,7 @@ export interface WorkCenter {
   updated_at: string;
 }
 
-export type WorkCenterType = 'fabrication' | 'cnc_machining' | 'paint' | 'powder_coating' | 'assembly' | 'welding' | 'inspection' | 'shipping';
+export type WorkCenterType = 'fabrication' | 'cnc_machining' | 'laser' | 'press_brake' | 'paint' | 'powder_coating' | 'assembly' | 'welding' | 'inspection' | 'shipping';
 
 export interface Part {
   id: number;

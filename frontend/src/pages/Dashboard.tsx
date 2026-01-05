@@ -26,6 +26,8 @@ import {
 const workCenterTypeColors: Record<string, string> = {
   fabrication: 'bg-blue-500',
   cnc_machining: 'bg-purple-500',
+  laser: 'bg-cyan-500',
+  press_brake: 'bg-indigo-500',
   paint: 'bg-amber-500',
   powder_coating: 'bg-orange-500',
   assembly: 'bg-emerald-500',

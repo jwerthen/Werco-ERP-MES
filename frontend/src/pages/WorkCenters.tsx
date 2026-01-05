@@ -6,6 +6,8 @@ import { PlusIcon, PencilIcon } from '@heroicons/react/24/outline';
 const typeColors: Record<WorkCenterType, string> = {
   fabrication: 'bg-blue-100 text-blue-800',
   cnc_machining: 'bg-purple-100 text-purple-800',
+  laser: 'bg-cyan-100 text-cyan-800',
+  press_brake: 'bg-indigo-100 text-indigo-800',
   paint: 'bg-yellow-100 text-yellow-800',
   powder_coating: 'bg-orange-100 text-orange-800',
   assembly: 'bg-green-100 text-green-800',
@@ -221,6 +223,8 @@ export default function WorkCenters() {
                   >
                     <option value="fabrication">Fabrication</option>
                     <option value="cnc_machining">CNC Machining</option>
+                    <option value="laser">Laser</option>
+                    <option value="press_brake">Press Brake</option>
                     <option value="paint">Paint</option>
                     <option value="powder_coating">Powder Coating</option>
                     <option value="assembly">Assembly</option>

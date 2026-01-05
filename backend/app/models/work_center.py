@@ -8,6 +8,8 @@ from app.db.database import Base
 class WorkCenterType(str, enum.Enum):
     FABRICATION = "fabrication"
     CNC_MACHINING = "cnc_machining"
+    LASER = "laser"
+    PRESS_BRAKE = "press_brake"
     PAINT = "paint"
     POWDER_COATING = "powder_coating"
     ASSEMBLY = "assembly"
