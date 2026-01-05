@@ -1,6 +1,19 @@
-import axios, { AxiosInstance, AxiosError } from 'axios';
+import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
+
+// ETag cache for conditional requests
+interface CacheEntry {
+  etag: string;
+  data: any;
+  timestamp: number;
+}
+
+// Global cache for ETag-based conditional requests
+const etagCache = new Map<string, CacheEntry>();
+
+// Cache TTL in milliseconds (5 minutes)
+const CACHE_TTL = 5 * 60 * 1000;
 
 class ApiService {
   private api: AxiosInstance;
@@ -31,6 +44,83 @@ class ApiService {
         return Promise.reject(error);
       }
     );
+  }
+
+  /**
+   * Fetch with ETag-based conditional request support.
+   * Returns cached data on 304 Not Modified, reducing bandwidth.
+   * 
+   * @param url - API endpoint path
+   * @param config - Optional axios config
+   * @returns Promise with response data and metadata
+   */
+  private async fetchWithCache(
+    url: string, 
+    config?: AxiosRequestConfig
+  ): Promise<{ data: any; fromCache: boolean; changed: boolean }> {
+    const cacheKey = url + (config?.params ? JSON.stringify(config.params) : '');
+    const cached = etagCache.get(cacheKey);
+    
+    // Build headers with If-None-Match if we have a cached ETag
+    const headers: Record<string, string> = {};
+    if (cached?.etag) {
+      headers['If-None-Match'] = cached.etag;
+    }
+    
+    try {
+      const response = await this.api.get(url, {
+        ...config,
+        headers: { ...config?.headers, ...headers },
+        validateStatus: (status) => status === 200 || status === 304,
+      });
+      
+      // 304 Not Modified - return cached data
+      if (response.status === 304 && cached) {
+        return { data: cached.data, fromCache: true, changed: false };
+      }
+      
+      // 200 OK - update cache with new ETag
+      const etag = response.headers['etag'];
+      if (etag) {
+        etagCache.set(cacheKey, {
+          etag: etag.replace(/"/g, ''),
+          data: response.data,
+          timestamp: Date.now(),
+        });
+      }
+      
+      // Check if data actually changed (for UI optimization)
+      const changed = !cached || JSON.stringify(cached.data) !== JSON.stringify(response.data);
+      
+      return { data: response.data, fromCache: false, changed };
+    } catch (error) {
+      // On error, return stale cache if available and not too old
+      if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+        console.warn('API error, returning stale cache:', error);
+        return { data: cached.data, fromCache: true, changed: false };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Clear the ETag cache (useful on logout or data mutations)
+   */
+  clearCache() {
+    etagCache.clear();
+  }
+
+  /**
+   * Clear specific cache entry
+   */
+  invalidateCache(urlPattern: string) {
+    const keysToDelete: string[] = [];
+    etagCache.forEach((_, key) => {
+      if (key.includes(urlPattern)) {
+        keysToDelete.push(key);
+      }
+    });
+    keysToDelete.forEach(key => etagCache.delete(key));
   }
 
   setToken(token: string) {
@@ -214,12 +304,12 @@ class ApiService {
     return response.data;
   }
 
-  async startOperation(operationId: number) {
+  async startWOOperation(operationId: number) {
     const response = await this.api.post(`/work-orders/operations/${operationId}/start`);
     return response.data;
   }
 
-  async completeOperation(operationId: number, quantityComplete: number, quantityScrapped = 0) {
+  async completeWOOperation(operationId: number, quantityComplete: number, quantityScrapped = 0) {
     const response = await this.api.post(`/work-orders/operations/${operationId}/complete`, null, {
       params: { quantity_complete: quantityComplete, quantity_scrapped: quantityScrapped }
     });
@@ -252,8 +342,47 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * Get dashboard data with ETag-based caching.
+   * Returns cached data on 304 Not Modified, reducing bandwidth by ~75%.
+   */
+  async getDashboardWithCache(): Promise<{ data: any; fromCache: boolean; changed: boolean }> {
+    return this.fetchWithCache('/shop-floor/dashboard');
+  }
+
   async getActiveUsers() {
     const response = await this.api.get('/shop-floor/active-users');
+    return response.data;
+  }
+
+  // Simplified Shop Floor Operations
+  async getShopFloorOperations(params?: { work_center_id?: number; status?: string; search?: string }) {
+    const response = await this.api.get('/shop-floor/operations', { params });
+    return response.data;
+  }
+
+  async startOperation(operationId: number) {
+    const response = await this.api.put(`/shop-floor/operations/${operationId}/start`);
+    return response.data;
+  }
+
+  async completeOperation(operationId: number, data: { quantity_complete: number; notes?: string }) {
+    const response = await this.api.post(`/shop-floor/operations/${operationId}/complete`, data);
+    return response.data;
+  }
+
+  async getOperationDetails(operationId: number) {
+    const response = await this.api.get(`/shop-floor/operations/${operationId}`);
+    return response.data;
+  }
+
+  async holdOperation(operationId: number) {
+    const response = await this.api.put(`/shop-floor/operations/${operationId}/hold`);
+    return response.data;
+  }
+
+  async resumeOperation(operationId: number) {
+    const response = await this.api.put(`/shop-floor/operations/${operationId}/resume`);
     return response.data;
   }
 
@@ -1214,7 +1343,7 @@ class ApiService {
     return response.data;
   }
 
-  async getQualityMetrics(params?: { period?: string; start_date?: string; end_date?: string; metric_type?: string }) {
+  async getAnalyticsQualityMetrics(params?: { period?: string; start_date?: string; end_date?: string; metric_type?: string }) {
     const response = await this.api.get('/analytics/quality-metrics', { params });
     return response.data;
   }

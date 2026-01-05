@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { DashboardData, WorkCenterStatus } from '../types';
@@ -16,6 +16,7 @@ import {
   ClockIcon,
   QrCodeIcon,
   ChartBarIcon,
+  ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { 
   ExclamationTriangleIcon as ExclamationTriangleSolid,
@@ -55,28 +56,53 @@ export default function Dashboard() {
   const [openNCRs, setOpenNCRs] = useState(0);
   const [lowInventory, setLowInventory] = useState(0);
   const [equipmentDue, setEquipmentDue] = useState(0);
+  
+  // Conditional request state
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [dataChanged, setDataChanged] = useState(false);
+  const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Clear "data changed" indicator after 2 seconds
   useEffect(() => {
-    loadDashboard();
-    const interval = setInterval(loadDashboard, 30000);
-    return () => clearInterval(interval);
-  }, []);
+    if (dataChanged) {
+      const timeout = setTimeout(() => setDataChanged(false), 2000);
+      return () => clearTimeout(timeout);
+    }
+  }, [dataChanged]);
 
-  const loadDashboard = async () => {
+  const loadDashboard = useCallback(async (isInitial = false) => {
+    if (!isInitial) {
+      setIsRefreshing(true);
+    }
+    
     try {
-      const [dashboardData, qualitySummary, equipmentDueData, lowStockData] = await Promise.all([
-        api.getDashboard(),
+      // Use cached request for dashboard (supports ETag/304)
+      const [dashboardResult, qualitySummary, equipmentDueData, lowStockData] = await Promise.all([
+        api.getDashboardWithCache(),
         api.getQualitySummary().catch(() => ({ open_ncrs: 0 })),
         api.getEquipmentDueSoon(30).catch(() => []),
         api.getLowStockAlerts().catch(() => [])
       ]);
       
-      setData(dashboardData);
+      // Only update state if data actually changed (prevents unnecessary re-renders)
+      if (dashboardResult.changed || isInitial) {
+        setData(dashboardResult.data);
+        setDataChanged(!isInitial && dashboardResult.changed);
+      }
+      
       setOpenNCRs(qualitySummary.open_ncrs || 0);
       setEquipmentDue(equipmentDueData.length || 0);
       setLowInventory(lowStockData.length || 0);
       
+      // Update last refreshed timestamp
+      if (!dashboardResult.fromCache) {
+        setLastUpdated(new Date());
+      }
+      
       const newAlerts: Alert[] = [];
+      const dashboardData = dashboardResult.data;
+      
       if (dashboardData.summary.overdue > 0) {
         newAlerts.push({
           type: 'error',
@@ -121,6 +147,20 @@ export default function Dashboard() {
       setError('Failed to load dashboard data');
     } finally {
       setLoading(false);
+      setIsRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDashboard(true);
+    const interval = setInterval(() => loadDashboard(false), 30000);
+    return () => clearInterval(interval);
+  }, [loadDashboard]);
+
+  // Manual refresh handler
+  const handleManualRefresh = () => {
+    if (!isRefreshing) {
+      loadDashboard(false);
     }
   };
 
@@ -152,10 +192,38 @@ export default function Dashboard() {
       {/* Page header */}
       <div className="page-header">
         <div>
-          <h1 className="page-title">Dashboard</h1>
-          <p className="page-subtitle">Manufacturing operations overview</p>
+          <div className="flex items-center gap-3">
+            <h1 className="page-title">Dashboard</h1>
+            {/* Data changed indicator */}
+            {dataChanged && (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 animate-pulse">
+                Updated
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <p className="page-subtitle">Manufacturing operations overview</p>
+            {/* Refresh indicator */}
+            {isRefreshing && (
+              <ArrowPathIcon className="h-4 w-4 text-surface-400 animate-spin" />
+            )}
+            {lastUpdated && !isRefreshing && (
+              <span className="text-xs text-surface-400">
+                Updated {lastUpdated.toLocaleTimeString()}
+              </span>
+            )}
+          </div>
         </div>
         <div className="page-actions">
+          {/* Manual refresh button */}
+          <button
+            onClick={handleManualRefresh}
+            disabled={isRefreshing}
+            className="btn-ghost btn-sm"
+            title="Refresh dashboard"
+          >
+            <ArrowPathIcon className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
+          </button>
           <Link to="/scanner" className="btn-secondary">
             <QrCodeIcon className="h-5 w-5 mr-2" />
             Scanner
