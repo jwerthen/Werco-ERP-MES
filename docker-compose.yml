@@ -18,6 +18,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: werco-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
 
   # Backend API
   backend:
@@ -30,15 +47,23 @@ services:
       SECRET_KEY: ${SECRET_KEY:-change-this-in-production-use-strong-random-key}
       CORS_ORIGINS: http://localhost:3000,http://localhost:8000
       DEBUG: "false"
+      ENVIRONMENT: development
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      REDIS_URL: redis://redis:6379/0
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      LOG_LEVEL: INFO
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./backend:/app
+      - backend_logs:/app/logs
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
 
   # Frontend (React)
   frontend:
@@ -55,6 +80,16 @@ services:
       - /app/node_modules
     environment:
       REACT_APP_API_URL: http://localhost:8000/api/v1
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  backend_logs:
+    driver: local
+
+networks:
+  default:
+    name: werco-network

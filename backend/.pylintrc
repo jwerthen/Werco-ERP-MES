@@ -1,0 +1,75 @@
+[MASTER]
+# Use multiple processes to speed up Pylint.
+jobs=4
+
+# Pickle collected data for later comparisons.
+persistent=yes
+
+# Use a GUI for debugging Pylint errors.
+extension-pkg-whitelist=
+
+# Python code to execute, usually for sys.path manipulation.
+#init-hook='import sys; sys.path.append('.')'
+
+[MESSAGES CONTROL]
+# Disable certain pylint checks.
+disable=
+    C0111,  # missing-docstring
+    C0103,  # invalid-name
+    C0301,  # line-too-long
+    C0303,  # trailing-whitespace
+    C0330,  # wrong-hanging-indentation
+    W0212,  # protected-access (FastAPI uses _ in models)
+    R0903,  # too-few-public-methods
+    R0913,  # too-many-arguments (common in API endpoints)
+    C0114,  # missing-module-docstring
+    C0115,  # missing-class-docstring
+    C0116,  # missing-function-docstring
+
+[BASIC]
+# Good variable names.
+good-names=i,j,k,ex,Run,_
+
+[METRICS]
+# Maximum number of arguments for function / method
+max-args=10
+
+# Maximum number of locals for function / method body
+max-locals=20
+
+# Maximum number of return / yield for function / method body
+max-returns=6
+
+# Maximum number of branch for function / method body
+max-branches=15
+
+# Maximum number of statements in function / method body
+max-statements=60
+
+[DESIGN]
+# Maximum number of attributes for a class
+max-attributes=15
+
+[FORMAT]
+# Maximum number of characters on a single line.
+max-line-length=120
+
+# String used for indentation.
+indent-string='    '
+
+# Number of spaces of indent required.
+indent-after-paren=4
+
+[TYPECHECK]
+# List of decorators that produce context managers.
+contextmanager-decorators=contextlib.contextmanager
+
+[SIMILARITIES]
+# Minimum lines number of a similarity.
+min-similarity-lines=6
+
+# Ignore comments when computing similarities.
+ignore-comments=yes
+
+# Ignore docstrings when computing similarities.
+ignore-docstrings=yes
