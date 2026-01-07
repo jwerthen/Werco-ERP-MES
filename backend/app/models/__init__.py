@@ -33,4 +33,7 @@ __all__ = [
     "Document", "DocumentType",
     "MRPRun", "MRPRequirement", "MRPAction", "MRPRunStatus", "PlanningAction",
     "CustomFieldDefinition", "CustomFieldValue", "FieldType", "EntityType",
+    "Job", "JobStatus", "JobPriority",
+    "NotificationPreference", "NotificationLog", "DigestQueue",
+    "Webhook", "WebhookDelivery",
 ]

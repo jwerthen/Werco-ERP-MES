@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>{% if critical %}CRITICAL: {% endif %}Work Order Late</h2>
+
+<div class="alert {% if critical %}alert-danger{% else %}alert-warning{% endif %}">
+    <strong>Work Order {{ work_order.wo_number }}</strong> is {{ days_late }} days past due!
+</div>
+
+<table style="width: 100%; margin: 20px 0;">
+    <tr>
+        <td><strong>Part Number:</strong></td>
+        <td>{{ work_order.part.part_number }}</td>
+    </tr>
+    <tr>
+        <td><strong>Description:</strong></td>
+        <td>{{ work_order.part.description }}</td>
+    </tr>
+    <tr>
+        <td><strong>Quantity:</strong></td>
+        <td>{{ work_order.quantity }}</td>
+    </tr>
+    <tr>
+        <td><strong>Due Date:</strong></td>
+        <td style="color: #dc3545; font-weight: bold;">{{ work_order.due_date }}</td>
+    </tr>
+    <tr>
+        <td><strong>Days Late:</strong></td>
+        <td style="color: #dc3545; font-weight: bold;">{{ days_late }}</td>
+    </tr>
+    <tr>
+        <td><strong>Current Status:</strong></td>
+        <td>{{ work_order.status }}</td>
+    </tr>
+</table>
+
+<p><strong>Action Required:</strong> Please review this work order and take appropriate action to expedite completion.</p>
+
+<a href="{{ base_url }}/work-orders/{{ work_order.id }}" class="button">View Work Order</a>
+{% endblock %}

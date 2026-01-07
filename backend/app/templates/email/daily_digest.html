@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Daily Digest - {{ date }}</h2>
+
+<p>Hello {{ user.full_name }},</p>
+
+<p>Here's your daily summary of ERP system activity:</p>
+
+{% if events.WO_LATE %}
+<h3 style="color: #dc3545;">Late Work Orders ({{ events.WO_LATE|length }})</h3>
+<ul>
+    {% for event in events.WO_LATE %}
+    <li>WO {{ event.wo_number }} - {{ event.days_late }} days late</li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+{% if events.LOW_STOCK %}
+<h3 style="color: #ffc107;">Low Stock Items ({{ events.LOW_STOCK|length }})</h3>
+<ul>
+    {% for event in events.LOW_STOCK %}
+    <li>{{ event.part_number }} - {{ event.quantity_on_hand }} on hand (reorder at {{ event.reorder_point }})</li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+{% if events.WO_COMPLETED %}
+<h3 style="color: #28a745;">Completed Work Orders ({{ events.WO_COMPLETED|length }})</h3>
+<ul>
+    {% for event in events.WO_COMPLETED %}
+    <li>WO {{ event.wo_number }} - {{ event.part_number }}</li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+<a href="{{ base_url }}/dashboard" class="button">View Dashboard</a>
+
+<p style="margin-top: 30px; font-size: 12px; color: #6c757d;">
+    To change your notification preferences, visit your user settings.
+</p>
+{% endblock %}

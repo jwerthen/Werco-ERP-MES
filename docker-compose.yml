@@ -20,19 +20,19 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # Redis Cache
+  # Redis (for job queue and caching)
   redis:
     image: redis:7-alpine
     container_name: werco-redis
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    volumes:
-      - redis_data:/data
     command: redis-server --appendonly yes
     restart: unless-stopped
 
@@ -50,8 +50,18 @@ services:
       ENVIRONMENT: development
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       REDIS_URL: redis://redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
       SENTRY_DSN: ${SENTRY_DSN:-}
       LOG_LEVEL: INFO
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@werco.com}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Werco ERP System}
+      WEBHOOK_ENCRYPTION_KEY: ${WEBHOOK_ENCRYPTION_KEY:-}
     ports:
       - "8000:8000"
     depends_on:
@@ -81,6 +91,35 @@ services:
     environment:
       REACT_APP_API_URL: http://localhost:8000/api/v1
     restart: unless-stopped
+
+  # ARQ Worker (background jobs)
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: werco-worker
+    environment:
+      DATABASE_URL: postgresql://werco_user:${DB_PASSWORD:-werco_secure_password}@db:5432/werco_erp
+      SECRET_KEY: ${SECRET_KEY:-change-this-in-production-use-strong-random-key}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@werco.com}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Werco ERP System}
+      WEBHOOK_ENCRYPTION_KEY: ${WEBHOOK_ENCRYPTION_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: arq app.worker.WorkerSettings
 
 volumes:
   postgres_data:

@@ -111,11 +111,13 @@ class MRPAction(Base):
     reference_number = Column(String(100), nullable=True)
     
     # Status
-    is_processed = Column(Boolean, default=False)
+    processed = Column(Boolean, default=False)
     processed_at = Column(DateTime, nullable=True)
     processed_by = Column(Integer, nullable=True)
-    result_reference = Column(String(100), nullable=True)  # WO or PO number created
-    
+    result_wo_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    result_po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
+    error_message = Column(Text, nullable=True)
+
     # Notes
     notes = Column(Text)
     

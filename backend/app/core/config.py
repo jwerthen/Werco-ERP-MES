@@ -48,12 +48,26 @@ class Settings(BaseSettings):
     SENTRY_DSN: Optional[str] = None
     LOG_LEVEL: str = "INFO"
     
-    # Redis Cache
+    # Redis / Job Queue
     REDIS_URL: Optional[str] = None
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
     
     # LLM Integration
     ANTHROPIC_API_KEY: Optional[str] = None
-    
+
+    # Email Configuration
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "noreply@werco.com"
+    SMTP_FROM_NAME: str = "Werco ERP System"
+
+    # Webhook Configuration
+    WEBHOOK_ENCRYPTION_KEY: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = True

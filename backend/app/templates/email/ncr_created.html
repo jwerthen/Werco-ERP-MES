@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Non-Conformance Report Created</h2>
+
+<div class="alert alert-danger">
+    <strong>NCR {{ ncr.ncr_number }}</strong> has been created and requires attention.
+</div>
+
+<table style="width: 100%; margin: 20px 0;">
+    <tr>
+        <td><strong>Part Number:</strong></td>
+        <td>{{ ncr.part.part_number if ncr.part else 'N/A' }}</td>
+    </tr>
+    <tr>
+        <td><strong>Description:</strong></td>
+        <td>{{ ncr.description }}</td>
+    </tr>
+    <tr>
+        <td><strong>Severity:</strong></td>
+        <td>{{ ncr.severity }}</td>
+    </tr>
+    <tr>
+        <td><strong>Created By:</strong></td>
+        <td>{{ ncr.created_by }}</td>
+    </tr>
+    <tr>
+        <td><strong>Date:</strong></td>
+        <td>{{ ncr.created_at }}</td>
+    </tr>
+</table>
+
+<p><strong>Immediate Action Required:</strong> Review and disposition this NCR.</p>
+
+<a href="{{ base_url }}/quality/ncr/{{ ncr.id }}" class="button">View NCR</a>
+{% endblock %}
