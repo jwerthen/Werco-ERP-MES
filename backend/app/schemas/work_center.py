@@ -21,6 +21,7 @@ class WorkCenterCreate(WorkCenterBase):
 
 
 class WorkCenterUpdate(BaseModel):
+    version: int  # Required for optimistic locking
     name: Optional[str] = None
     description: Optional[str] = None
     hourly_rate: Optional[float] = None
@@ -34,6 +35,7 @@ class WorkCenterUpdate(BaseModel):
 
 class WorkCenterResponse(WorkCenterBase):
     id: int
+    version: int  # For optimistic locking
     is_active: bool
     current_status: str
     created_at: datetime

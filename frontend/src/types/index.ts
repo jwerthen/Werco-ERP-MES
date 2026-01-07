@@ -1,5 +1,6 @@
 export interface User {
   id: number;
+  version: number;  // For optimistic locking
   employee_id: string;
   email: string;
   first_name: string;
@@ -16,6 +17,7 @@ export type UserRole = 'admin' | 'manager' | 'supervisor' | 'operator' | 'qualit
 
 export interface WorkCenter {
   id: number;
+  version: number;  // For optimistic locking
   code: string;
   name: string;
   work_center_type: WorkCenterType;
@@ -35,6 +37,7 @@ export type WorkCenterType = 'fabrication' | 'cnc_machining' | 'laser' | 'press_
 
 export interface Part {
   id: number;
+  version: number;  // For optimistic locking
   part_number: string;
   revision: string;
   name: string;
@@ -57,6 +60,7 @@ export type PartType = 'manufactured' | 'purchased' | 'assembly' | 'raw_material
 
 export interface WorkOrder {
   id: number;
+  version: number;  // For optimistic locking
   work_order_number: string;
   part_id: number;
   quantity_ordered: number;
@@ -86,6 +90,7 @@ export type WorkOrderStatus = 'draft' | 'released' | 'in_progress' | 'on_hold' |
 
 export interface WorkOrderOperation {
   id: number;
+  version: number;  // For optimistic locking
   work_order_id: number;
   work_center_id: number;
   sequence: number;
