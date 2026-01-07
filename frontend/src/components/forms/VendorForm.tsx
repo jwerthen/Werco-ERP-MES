@@ -1,7 +1,7 @@
 import React from 'react';
-import { FormField } from './ui/FormField';
-import { FormWithValidation } from './ui/FormWithValidation';
-import { VendorFormData, vendorSchema } from '../validation/schemas';
+import { FormField } from '../ui/FormField';
+import { FormWithValidation } from '../ui/FormWithValidation';
+import { VendorFormData, vendorSchema } from '../../validation/schemas';
 
 interface VendorFormProps {
   initialData?: Partial<VendorFormData>;
@@ -43,7 +43,7 @@ export function VendorForm({
         return (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <FormField label="Vendor Code" name="code" error={errors.code?.message} required>
+              <FormField label="Vendor Code" name="code" error={errors.code} required>
                 <input
                   {...register('code')}
                   className={`input ${errors.code ? 'input-error' : ''}`}
@@ -53,7 +53,7 @@ export function VendorForm({
                 <p className="text-xs text-gray-500 mt-1">2-20 characters, uppercase</p>
               </FormField>
 
-              <FormField label="Vendor Name" name="name" error={errors.name?.message} required>
+              <FormField label="Vendor Name" name="name" error={errors.name} required>
                 <input
                   {...register('name')}
                   className={`input ${errors.name ? 'input-error' : ''}`}

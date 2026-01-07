@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { axios } from 'axios';
+import { useState, useCallback } from 'react';
+import axios from 'axios';
 
 // ============================================================================
 // API VALIDATION ERROR TYPES
@@ -36,15 +36,16 @@ export function isApiValidationError(error: unknown): error is ApiValidationErro
 // HOOK TO MAP API ERRORS TO FORM FIELDS
 // ============================================================================
 
-interface UseFormErrorMappingProps<T extends Record<string, any>> {
-  setError: (name: keyof T, error: { type?: string; message?: string }) => void;
+interface UseFormErrorMappingProps {
+  // Use any for setError to allow compatibility with react-hook-form's UseFormSetError
+  setError: (name: string, error: { type?: string; message?: string }) => void;
   setFormError?: (message: string) => void;
 }
 
-export function useFormErrorMapping<T extends Record<string, any>>({
+export function useFormErrorMapping<T extends Record<string, unknown> = Record<string, unknown>>({
   setError,
   setFormError,
-}: UseFormErrorMappingProps<T>) {
+}: UseFormErrorMappingProps) {
   const mapApiErrorToForm = useCallback(
     (error: unknown) => {
       console.error('API Error:', error);
@@ -56,7 +57,7 @@ export function useFormErrorMapping<T extends Record<string, any>>({
           // Map validation errors to form fields
           data.details.forEach((detail) => {
             // Handle nested fields (e.g., "lines.0.qty" -> "lines.0.qty")
-            setError(detail.field as keyof T, {
+            setError(detail.field, {
               type: 'server',
               message: detail.message,
             });

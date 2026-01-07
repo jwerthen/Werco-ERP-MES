@@ -1,7 +1,7 @@
 import React from 'react';
-import { FormField } from './ui/FormField';
-import { FormWithValidation } from './ui/FormWithValidation';
-import { UserLoginFormData, userLoginSchema } from '../validation/schemas';
+import { FormField } from '../ui/FormField';
+import { FormWithValidation } from '../ui/FormWithValidation';
+import { UserLoginFormData, userLoginSchema } from '../../validation/schemas';
 
 interface UserLoginFormProps {
   onSubmit: (data: UserLoginFormData) => Promise<void>;
@@ -36,7 +36,7 @@ export function UserLoginForm({
 
         return (
           <>
-            <FormField label="Email" name="email" error={errors.email?.message} required>
+            <FormField label="Email" name="email" error={errors.email} required>
               <input
                 {...register('email')}
                 type="email"
@@ -47,7 +47,7 @@ export function UserLoginForm({
               />
             </FormField>
 
-            <FormField label="Password" name="password" error={errors.password?.message} required>
+            <FormField label="Password" name="password" error={errors.password} required>
               <input
                 {...register('password')}
                 type="password"

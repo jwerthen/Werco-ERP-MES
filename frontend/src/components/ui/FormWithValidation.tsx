@@ -1,11 +1,11 @@
 import React from 'react';
-import { useForm, UseFormReturn, SubmitHandler } from 'react-hook-form';
+import { useForm, UseFormReturn, SubmitHandler, FieldValues } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { FormField } from './ui/FormField';
-import { useFormErrorMapping } from '../hooks/useFormErrorHandling';
+import { FormField } from './FormField';
+import { useFormErrorMapping } from '../../hooks/useFormErrorHandling';
 
-interface FormWithValidationProps<TData, TSchema extends z.ZodSchema> {
+interface FormWithValidationProps<TData extends FieldValues, TSchema extends z.ZodSchema> {
   schema: TSchema;
   initialValues: Partial<TData>;
   onSubmit: (data: TData) => Promise<void>;
@@ -37,7 +37,7 @@ interface FormWithValidationProps<TData, TSchema extends z.ZodSchema> {
  *   )}
  * </FormWithValidation>
  */
-export function FormWithValidation<TData extends z.infer<TSchema>, TSchema extends z.ZodSchema>({
+export function FormWithValidation<TData extends FieldValues & z.infer<TSchema>, TSchema extends z.ZodSchema>({
   schema,
   initialValues,
   onSubmit,
@@ -55,12 +55,12 @@ export function FormWithValidation<TData extends z.infer<TSchema>, TSchema exten
   });
 
   const { errors, dirtyFields, isValid } = form.formState;
-  const { mapApiErrorToForm } = useFormErrorMapping<TData>({
-    setError: form.setError,
+  const { mapApiErrorToForm } = useFormErrorMapping({
+    setError: form.setError as (name: string, error: { type?: string; message?: string }) => void,
     setFormError: setFormError,
   });
 
-  const handleSubmit: SubmitHandler<TData> = async (data) => {
+  const handleSubmit: SubmitHandler<TData> = async (data: TData) => {
     setFormError(null);
     try {
       await onSubmit(data);

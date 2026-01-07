@@ -26,7 +26,7 @@ export interface OptimisticFormActions<T> {
 
 export type OptimisticFormReturn<T> = OptimisticFormState<T> & OptimisticFormActions<T>;
 
-interface VersionedData {
+interface VersionedData extends Record<string, unknown> {
   version: number;
 }
 

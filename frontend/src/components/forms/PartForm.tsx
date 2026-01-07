@@ -2,10 +2,10 @@ import React, { useState } from 'react';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { FormField } from './ui/FormField';
-import { FormWithValidation } from './ui/FormWithValidation';
-import { PartFormData, partSchema, PartType, UnitOfMeasure } from '../validation/schemas';
-import { useFormErrorMapping, useAsyncValidation } from '../hooks/useFormErrorHandling';
+import { FormField } from '../ui/FormField';
+import { FormWithValidation } from '../ui/FormWithValidation';
+import { PartFormData, partSchema, PartType, UnitOfMeasure } from '../../validation/schemas';
+import { useFormErrorMapping, useAsyncValidation } from '../../hooks/useFormErrorHandling';
 
 interface PartFormProps {
   initialData?: Partial<PartFormData>;

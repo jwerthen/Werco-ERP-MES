@@ -1,7 +1,7 @@
 import React from 'react';
-import { FormField } from './ui/FormField';
-import { FormWithValidation } from './ui/FormWithValidation';
-import { UserFormData, userSchema, userLoginSchema, UserRole } from '../validation/schemas';
+import { FormField } from '../ui/FormField';
+import { FormWithValidation } from '../ui/FormWithValidation';
+import { UserFormData, userSchema, UserRole } from '../../validation/schemas';
 
 interface UserFormProps {
   initialData?: Partial<UserFormData>;
@@ -39,7 +39,7 @@ export function UserForm({
         return (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <FormField label="Employee ID" name="employee_id" error={errors.employee_id?.message} required>
+              <FormField label="Employee ID" name="employee_id" error={errors.employee_id} required>
                 <input
                   {...register('employee_id')}
                   className={`input ${errors.employee_id ? 'input-error' : ''}`}
@@ -48,7 +48,7 @@ export function UserForm({
                 />
               </FormField>
 
-              <FormField label="Email" name="email" error={errors.email?.message} required>
+              <FormField label="Email" name="email" error={errors.email} required>
                 <input
                   {...register('email')}
                   type="email"
@@ -60,7 +60,7 @@ export function UserForm({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <FormField label="First Name" name="first_name" error={errors.first_name?.message} required>
+              <FormField label="First Name" name="first_name" error={errors.first_name} required>
                 <input
                   {...register('first_name')}
                   className={`input ${errors.first_name ? 'input-error' : ''}`}
@@ -69,7 +69,7 @@ export function UserForm({
                 />
               </FormField>
 
-              <FormField label="Last Name" name="last_name" error={errors.last_name?.message} required>
+              <FormField label="Last Name" name="last_name" error={errors.last_name} required>
                 <input
                   {...register('last_name')}
                   className={`input ${errors.last_name ? 'input-error' : ''}`}
@@ -88,7 +88,7 @@ export function UserForm({
               />
             </FormField>
 
-            <FormField label="Role" name="role" error={errors.role?.message} required>
+            <FormField label="Role" name="role" error={errors.role} required>
               <select {...register('role')} className="select">
                 <option value={UserRole.ADMIN}>Administrator</option>
                 <option value={UserRole.MANAGER}>Manager</option>
@@ -100,7 +100,7 @@ export function UserForm({
               </select>
             </FormField>
 
-            <FormField label="Password" name="password" error={errors.password?.message} required>
+            <FormField label="Password" name="password" error={errors.password} required>
               <input
                 {...register('password')}
                 type="password"

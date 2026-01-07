@@ -60,7 +60,7 @@ const partNumberSchema = z
   .min(3, 'Part number must be at least 3 characters')
   .max(50, 'Part number must be at most 50 characters')
   .regex(/^[A-Z0-9\-]+$/, 'Only letters, numbers, and dashes allowed')
-  .transform(v => v.toUpperCase().trim());
+  .transform((v: string) => v.toUpperCase().trim());
 
 const revisionSchema = z
   .string({
@@ -70,7 +70,7 @@ const revisionSchema = z
   .min(1, 'Revision required (at least 1 character)')
   .max(20, 'Revision must be at most 20 characters')
   .regex(/^[A-Z0-9]+$/, 'Letters and numbers only')
-  .transform(v => v.toUpperCase().trim());
+  .transform((v: string) => v.toUpperCase().trim());
 
 const nameSchema = z
   .string({
@@ -160,7 +160,7 @@ export const partSchema = z.object({
   overhead_cost: moneySchema.optional().default(0),
 
   // Lead time
-  lead_time_days: nonNegativeIntegerSchema.default(0).max(365, 'Lead time must be 0-365 days'),
+  lead_time_days: nonNegativeIntegerSchema.max(365, 'Lead time must be 0-365 days').default(0),
 
   // Inventory
   safety_stock: moneySmallSchema.optional().default(0),
@@ -176,7 +176,8 @@ export const partSchema = z.object({
   customer_part_number: z.string().max(100, 'Must be at most 100 characters').optional(),
   drawing_number: z.string().max(100, 'Must be at most 100 characters').optional(),
 }).refine(
-  (data) => !(data.reorder_point > 0 && data.reorder_quantity === 0),
+  (data: { reorder_point?: number; reorder_quantity?: number }) => 
+    !((data.reorder_point ?? 0) > 0 && data.reorder_quantity === 0),
   {
     message: 'Reorder quantity must be greater than 0 when reorder point is set',
     path: ['reorder_quantity']
@@ -279,20 +280,19 @@ export const workOrderUpdateSchema = z.object({
 // USER SCHEMA
 // ============================================================================
 
-const uppercaseNamesSchema = (field: string) =>
-  z.string()
-    .transform(v => v.trim())
-    .transform(v => v.charAt(0).toUpperCase() + v.slice(1));
-
-const firstNameSchema = uppercaseNamesSchema('first_name')
+const firstNameSchema = z.string()
   .min(1, 'First name required')
   .max(50, 'Must be at most 50 characters')
-  .regex(/^[a-zA-Z\s\-']+$/, 'Letters only (spaces, hyphens, apostrophes allowed)');
+  .regex(/^[a-zA-Z\s\-']+$/, 'Letters only (spaces, hyphens, apostrophes allowed)')
+  .transform((v: string) => v.trim())
+  .transform((v: string) => v.charAt(0).toUpperCase() + v.slice(1));
 
-const lastNameSchema = uppercaseNamesSchema('last_name')
+const lastNameSchema = z.string()
   .min(1, 'Last name required')
   .max(50, 'Must be at most 50 characters')
-  .regex(/^[a-zA-Z\s\-']+$/, 'Letters only (spaces, hyphens, apostrophes allowed)');
+  .regex(/^[a-zA-Z\s\-']+$/, 'Letters only (spaces, hyphens, apostrophes allowed)')
+  .transform((v: string) => v.trim())
+  .transform((v: string) => v.charAt(0).toUpperCase() + v.slice(1));
 
 const passwordStrengthSchema = z
   .string()
@@ -353,7 +353,7 @@ export const vendorSchema = z.object({
     .min(2, 'Code must be at least 2 characters')
     .max(20, 'Code must be at most 20 characters')
     .regex(/^[A-Z0-9\-]+$/, 'Letters, numbers, and dashes only')
-    .transform(v => v.toUpperCase().trim()),
+    .transform((v: string) => v.toUpperCase().trim()),
   name: nameSchema,
   contact_name: z.string().max(100).optional(),
   email: z.string().max(255).optional(),
@@ -363,7 +363,7 @@ export const vendorSchema = z.object({
   city: z.string().max(100).optional(),
   state: z.string().length(2, 'State must be 2 letters').regex(/^[A-Z]{2}$/).optional(),
   postal_code: z.string().max(20).optional(),
-  country: z.string().length(2).default('USA').regex(/^[A-Z]{2}$/).optional(),
+  country: z.string().length(2).regex(/^[A-Z]{2}$/).default('US').optional(),
   payment_terms: z.string().max(100).optional(),
   lead_time_days: z.number().int().min(0).max(365).default(14),
   is_approved: z.boolean().default(false),
@@ -410,7 +410,7 @@ export const poSchema = z.object({
   notes: z.string().max(2000).optional(),
   lines: z.array(poLineSchema).default([]),
 }).refine(
-  (data) => {
+  (data: { required_date?: string; expected_date?: string }) => {
     if (data.required_date && data.expected_date) {
       const required = new Date(data.required_date);
       const expected = new Date(data.expected_date);
@@ -462,6 +462,7 @@ export type WorkOrderUpdateFormData = z.infer<typeof workOrderUpdateSchema>;
 export type WorkOrderOperationFormData = z.infer<typeof workOrderOperationSchema>;
 export type UserFormData = z.infer<typeof userSchema>;
 export type UserUpdateFormData = z.infer<typeof userUpdateSchema>;
+export type UserLoginFormData = z.infer<typeof userLoginSchema>;
 export type VendorFormData = z.infer<typeof vendorSchema>;
 export type VendorUpdateFormData = z.infer<typeof vendorUpdateSchema>;
 export type POFormData = z.infer<typeof poSchema>;

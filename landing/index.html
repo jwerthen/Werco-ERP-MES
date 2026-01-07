@@ -1,0 +1,1435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Your ERP - Manufacturing Intelligence Made Simple</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: {
+              50: '#eef4ff',
+              100: '#d9e6ff',
+              200: '#bcd3ff',
+              300: '#8eb8ff',
+              400: '#5990ff',
+              500: '#3366ff',
+              600: '#1B4D9C',
+              700: '#1a3f7a',
+              800: '#1b3664',
+              900: '#1c3154',
+            },
+            accent: {
+              500: '#C8352B',
+              600: '#b91c1c',
+            },
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.6s ease-out',
+            'slide-up': 'slideUp 0.6s ease-out',
+          },
+          keyframes: {
+            fadeIn: {
+              '0%': { opacity: '0' },
+              '100%': { opacity: '1' },
+            },
+            slideUp: {
+              '0%': { transform: 'translateY(20px)', opacity: '0' },
+              '100%': { transform: 'translateY(0)', opacity: '1' },
+            },
+          },
+        },
+      },
+    }
+  </script>
+</head>
+<body class="bg-white min-h-screen">
+
+  <!-- Trusted By Logo Section -->
+  <div class="bg-white py-8 border-b border-neutral-100">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <p class="text-center text-sm text-neutral-500 mb-6 font-medium">Trusted by forward-thinking manufacturers</p>
+      <div class="flex flex-wrap items-center justify-center gap-8 md:gap-12 opacity-60">
+        <!-- Logo placeholders - these will be replaced with real logos -->
+        <div class="flex items-center justify-center w-24 h-12 bg-neutral-200 rounded hover:opacity-100 transition-opacity cursor-pointer">
+          <span class="text-xs font-bold text-neutral-500">AEROSPACE</span>
+        </div>
+        <div class="flex items-center justify-center w-24 h-12 bg-neutral-200 rounded hover:opacity-100 transition-opacity cursor-pointer">
+          <span class="text-xs font-bold text-neutral-500">TECHFAB</span>
+        </div>
+        <div class="flex items-center justify-center w-24 h-12 bg-neutral-200 rounded hover:opacity-100 transition-opacity cursor-pointer">
+          <span class="text-xs font-bold text-neutral-500">DEFENSE</span>
+        </div>
+        <div class="flex items-center justify-center w-24 h-12 bg-neutral-200 rounded hover:opacity-100 transition-opacity cursor-pointer">
+          <span class="text-xs font-bold text-neutral-500">PRECISION</span>
+        </div>
+        <div class="flex items-center justify-center w-24 h-12 bg-neutral-200 rounded hover:opacity-100 transition-opacity cursor-pointer">
+          <span class="text-xs font-bold text-neutral-500">MEDICAL</span>
+        </div>
+        <div class="flex items-center justify-center w-24 h-12 bg-neutral-200 rounded hover:opacity-100 transition-opacity cursor-pointer hidden md:flex">
+          <span class="text-xs font-bold text-neutral-500">METAL</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <header id="header" class="fixed top-0 left-0 right-0 z-50 transition-all duration-300">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <nav class="flex items-center justify-between h-16 md:h-20">
+        <div class="flex items-center space-x-2">
+          <div class="w-10 h-10 bg-primary-600 rounded-lg flex items-center justify-center">
+            <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+            </svg>
+          </div>
+          <span class="font-bold text-xl" id="logo-text">Your ERP</span>
+        </div>
+        <div class="hidden md:flex items-center space-x-8">
+          <a href="#features" class="header-link font-medium text-white/90 hover:text-white">Features</a>
+          <a href="#screenshots" class="header-link font-medium text-white/90 hover:text-white">Screenshots</a>
+          <a href="#compliance" class="header-link font-medium text-white/90 hover:text-white">Compliance</a>
+          <a href="#industries" class="header-link font-medium text-white/90 hover:text-white">Industries</a>
+          <a href="#pricing" class="header-link font-medium text-white/90 hover:text-white">Pricing</a>
+          <button class="header-cta bg-accent-500 text-white px-6 py-3 rounded-lg font-semibold hover:bg-accent-600 transition-colors">Request Demo</button>
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="relative bg-gradient-to-br from-neutral-900 via-primary-900 to-neutral-900 text-white overflow-hidden min-h-screen">
+    <div class="absolute inset-0 bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]"></div>
+    <div class="absolute top-0 left-1/4 w-96 h-96 bg-primary-500/20 rounded-full blur-3xl"></div>
+    <div class="absolute bottom-0 right-1/4 w-96 h-96 bg-accent-500/10 rounded-full blur-3xl"></div>
+
+    <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-32 pb-20">
+      <div class="text-center max-w-5xl mx-auto">
+        <div class="inline-flex items-center space-x-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-2 mb-8 border border-white/20">
+          <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+          <span class="text-sm font-medium">AS9100D • ISO 9001 • CMMC Level 2 Ready</span>
+        </div>
+
+        <h1 class="text-4xl md:text-5xl lg:text-6xl font-bold mb-6 animate-fade-in">
+          Manufacturing Intelligence<br>
+          <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-accent-400">Powered for Your Success</span>
+        </h1>
+
+        <p class="text-xl md:text-2xl text-neutral-300 mb-8 max-w-3xl mx-auto">
+          A complete ERP & MES system that adapts to your manufacturing needs.
+          Personalize it with your branding, customize workflows, and go live fast.
+        </p>
+
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
+          <button class="bg-accent-500 hover:bg-accent-600 text-white text-lg px-8 py-4 rounded-lg font-semibold min-w-[200px] transition-colors">Start 14-Day Trial</button>
+          <button class="bg-white text-primary-600 px-6 py-3 rounded-lg font-semibold border-2 border-white hover:bg-white/10 transition-colors">Schedule Demo</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-white to-transparent"></div>
+  </section>
+
+  <!-- Success Metrics Bar -->
+  <section class="bg-primary-600 py-8 -mt-16 relative z-10">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-6 text-center text-white">
+        <div>
+          <div class="text-4xl md:text-5xl font-bold mb-1">500+</div>
+          <div class="text-sm text-primary-200">Happy Users</div>
+        </div>
+        <div>
+          <div class="text-4xl md:text-5xl font-bold mb-1">50K+</div>
+          <div class="text-sm text-primary-200">Work Orders Tracked</div>
+        </div>
+        <div>
+          <div class="text-4xl md:text-5xl font-bold mb-1">120</div>
+          <div class="text-sm text-primary-200">Manufacturers</div>
+        </div>
+        <div>
+          <div class="text-4xl md:text-5xl font-bold mb-1">98%</div>
+          <div class="text-sm text-primary-200">Satisfaction Rate</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Video Demo Section -->
+  <section class="bg-white py-20 border-t border-neutral-200">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-12">
+        <h2 class="text-4xl md:text-5xl font-bold text-neutral-900 mb-4">
+          See How It Works<br>
+          <span class="text-primary-600">In 2 Minutes</span>
+        </h2>
+        <p class="text-lg text-neutral-600 max-w-2xl mx-auto">
+          Watch our quick demo to see the key features in action. No video? 
+          Scroll down to explore interactive features.
+        </p>
+      </div>
+
+      <div class="relative max-w-4xl mx-auto">
+        <!-- Video Placeholder Card -->
+        <div class="aspect-video bg-neutral-900 rounded-2xl overflow-hidden shadow-2xl relative group cursor-pointer">
+          <!-- Placeholder Background -->
+          <div class="absolute inset-0 bg-gradient-to-br from-primary-900 to-neutral-900">
+            <!-- Mock Interface -->
+            <div class="p-4">
+              <div class="flex justify-between items-center mb-4">
+                <div class="flex space-x-2">
+                  <div class="w-3 h-3 rounded-full bg-red-500"></div>
+                  <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
+                  <div class="w-3 h-3 rounded-full bg-green-500"></div>
+                </div>
+                <span class="text-neutral-400 text-xs">app.your-erp.com</span>
+              </div>
+              <div class="bg-white rounded-lg p-4">
+                <div class="grid grid-cols-3 gap-3 mb-3">
+                  <div class="h-16 bg-blue-100 rounded"></div>
+                  <div class="h-16 bg-green-100 rounded"></div>
+                  <div class="h-16 bg-amber-100 rounded"></div>
+                </div>
+                <div class="space-y-2">
+                  <div class="h-10 bg-neutral-200 rounded"></div>
+                  <div class="h-10 bg-neutral-200 rounded"></div>
+                  <div class="h-10 bg-neutral-200 rounded"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Play Button Overlay -->
+          <div class="absolute inset-0 flex items-center justify-center bg-black/50 group-hover:bg-black/40 transition-colors">
+            <div class="relative">
+              <!-- Play Button -->
+              <div class="w-20 h-20 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
+                <svg class="w-12 h-12 text-white ml-1" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M8 5v14l11-7z"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+
+          <!-- Duration Badge -->
+          <div class="absolute bottom-4 right-4 bg-black/70 text-white px-3 py-1 rounded-full text-sm">
+            2:30
+          </div>
+        </div>
+
+        <!-- Video Description Below -->
+        <div class="mt-8 grid md:grid-cols-3 gap-6 text-center">
+          <div>
+            <div class="w-12 h-12 bg-primary-100 rounded-full flex items-center justify-center mx-auto mb-3">
+              <svg class="w-6 h-6 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+              </svg>
+            </div>
+            <h3 class="font-semibold text-neutral-900 mb-1">Quick Setup</h3>
+            <p class="text-sm text-neutral-600">Get started in minutes, not months</p>
+          </div>
+          <div>
+            <div class="w-12 h-12 bg-primary-100 rounded-full flex items-center justify-center mx-auto mb-3">
+              <svg class="w-6 h-6 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+            </div>
+            <h3 class="font-semibold text-neutral-900 mb-1">Compliance Built-In</h3>
+            <p class="text-sm text-neutral-600">AS9100D & ISO 9001 ready out of the box</p>
+          </div>
+          <div>
+            <div class="w-12 h-12 bg-primary-100 rounded-full flex items-center justify-center mx-auto mb-3">
+              <svg class="w-6 h-6 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+            </div>
+            <h3 class="font-semibold text-neutral-900 mb-1">Affordable Pricing</h3>
+            <p class="text-sm text-neutral-600">Start at $299/month, scale as you grow</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Section -->
+  <section id="features" class="bg-neutral-50 py-20">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16">
+        <h2 class="text-4xl md:text-5xl font-bold text-neutral-900 mb-4">
+          Everything You Need<br>
+          <span class="text-primary-600">to Run Your Shop Floor</span>
+        </h2>
+        <p class="text-lg text-neutral-600 max-w-2xl mx-auto">
+          A complete ERP & MES platform designed for manufacturing excellence.
+          From work order creation to shipping, everything in one place.
+        </p>
+      </div>
+
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div class="bg-white rounded-xl shadow-card p-6 hover:shadow-card-hover transition-shadow border border-neutral-200">
+          <div class="w-12 h-12 bg-blue-500 rounded-lg flex items-center justify-center text-white mb-4">
+            <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+            </svg>
+          </div>
+          <h3 class="text-2xl font-bold mb-2 text-neutral-900">Shop Floor Control</h3>
+          <p class="text-neutral-600">Real-time work center management, time tracking, and job queue visibility.</p>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-card p-6 hover:shadow-card-hover transition-shadow border border-neutral-200">
+          <div class="w-12 h-12 bg-green-500 rounded-lg flex items-center justify-center text-white mb-4">
+            <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+            </svg>
+          </div>
+          <h3 class="text-2xl font-bold mb-2 text-neutral-900">Work Order Management</h3>
+          <p class="text-neutral-600">Complete work order lifecycle with routing, scheduling, and Gantt visualization.</p>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-card p-6 hover:shadow-card-hover transition-shadow border border-neutral-200">
+          <div class="w-12 h-12 bg-purple-500 rounded-lg flex items-center justify-center text-white mb-4">
+            <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+            </svg>
+          </div>
+          <h3 class="text-2xl font-bold mb-2 text-neutral-900">Parts & BOM</h3>
+          <p class="text-neutral-600">Multi-level BOMs, make vs. buy classification, and revision control.</p>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-card p-6 hover:shadow-card-hover transition-shadow border border-neutral-200">
+          <div class="w-12 h-12 bg-amber-500 rounded-lg flex items-center justify-center text-white mb-4">
+            <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+          </div>
+          <h3 class="text-2xl font-bold mb-2 text-neutral-900">Quality Management</h3>
+          <p class="text-neutral-600">NCR/CAR tracking, First Article Inspection, and comprehensive lot traceability.</p>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-card p-6 hover:shadow-card-hover transition-shadow border border-neutral-200">
+          <div class="w-12 h-12 bg-orange-500 rounded-lg flex items-center justify-center text-white mb-4">
+            <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
+            </svg>
+          </div>
+          <h3 class="text-2xl font-bold mb-2 text-neutral-900">Purchasing & Inventory</h3>
+          <p class="text-neutral-600">PO management, receiving, stock levels, and MRP planning.</p>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-card p-6 hover:shadow-card-hover transition-shadow border border-neutral-200">
+          <div class="w-12 h-12 bg-cyan-500 rounded-lg flex items-center justify-center text-white mb-4">
+            <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+          </div>
+          <h3 class="text-2xl font-bold mb-2 text-neutral-900">Analytics & Reporting</h3>
+          <p class="text-neutral-600">Real-time dashboards, production analytics, and comprehensive reporting.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interactive Demo -->
+  <section class="bg-white py-20 border-t border-b border-neutral-200">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-12">
+        <h2 class="text-4xl md:text-5xl font-bold text-neutral-900 mb-4">See It In Action</h2>
+        <p class="text-lg text-neutral-600 max-w-2xl mx-auto">
+          An intuitive interface designed for shop floor efficiency.
+          Operators love it, managers trust it.
+        </p>
+      </div>
+
+      <div class="bg-neutral-900 rounded-2xl overflow-hidden shadow-2xl max-w-4xl mx-auto">
+        <div class="bg-neutral-800 px-4 py-3 flex items-center justify-between">
+          <div class="flex space-x-2">
+            <div class="w-3 h-3 rounded-full bg-red-500"></div>
+            <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
+            <div class="w-3 h-3 rounded-full bg-green-500"></div>
+          </div>
+          <div class="text-neutral-400 text-sm">app.your-erp.com</div>
+        </div>
+
+        <div class="bg-white min-h-[400px] p-6">
+          <div class="grid grid-cols-3 gap-4 mb-6">
+            <div class="bg-blue-50 rounded-xl p-4 border border-blue-200">
+              <div class="text-3xl font-bold text-blue-700">12</div>
+              <div class="text-sm text-blue-600">Active WOs</div>
+            </div>
+            <div class="bg-green-50 rounded-xl p-4 border border-green-200">
+              <div class="text-3xl font-bold text-green-700">8</div>
+              <div class="text-sm text-green-600">On Schedule</div>
+            </div>
+            <div class="bg-amber-50 rounded-xl p-4 border border-amber-200">
+              <div class="text-3xl font-bold text-amber-700">2</div>
+              <div class="text-sm text-amber-600">Need Attention</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div class="bg-neutral-50 rounded-lg p-3 border border-neutral-200">
+              <div class="text-sm font-medium text-neutral-900">CNC-01</div>
+              <div class="text-xs text-neutral-600 mt-1">WO-1050 Running</div>
+              <div class="w-full h-2 bg-neutral-200 rounded mt-2 overflow-hidden">
+                <div class="h-full bg-primary-600 rounded" style="width: 65%"></div>
+              </div>
+            </div>
+            <div class="bg-neutral-50 rounded-lg p-3 border border-neutral-200">
+              <div class="text-sm font-medium text-neutral-900">Laser-01</div>
+              <div class="text-xs text-neutral-600 mt-1">WO-1045 Running</div>
+              <div class="w-full h-2 bg-neutral-200 rounded mt-2 overflow-hidden">
+                <div class="h-full bg-primary-600 rounded" style="width: 40%"></div>
+              </div>
+            </div>
+            <div class="bg-neutral-50 rounded-lg p-3 border border-neutral-200">
+              <div class="text-sm font-medium text-neutral-900">Assembly-01</div>
+              <div class="text-xs text-neutral-600 mt-1">WO-1048 Running</div>
+              <div class="w-full h-2 bg-neutral-200 rounded mt-2 overflow-hidden">
+                <div class="h-full bg-primary-600 rounded" style="width: 85%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Screenshots Showcase -->
+  <section id="screenshots" class="bg-neutral-50 py-20">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16">
+        <h2 class="text-4xl md:text-5xl font-bold text-neutral-900 mb-4">
+          Built by Manufacturers,<br>
+          <span class="text-primary-600">For Manufacturers</span>
+        </h2>
+        <p class="text-lg text-neutral-600 max-w-2xl mx-auto">
+          See the actual application in action. Every feature designed for real shop floor workflows.
+        </p>
+      </div>
+
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+        <!-- Dashboard Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden">
+              <div class="absolute inset-0 bg-gradient-to-br from-primary-50 to-neutral-100">
+                <div class="p-4 space-y-3">
+                  <div class="h-8 bg-neutral-200 rounded"></div>
+                  <div class="grid grid-cols-3 gap-2">
+                    <div class="h-16 bg-blue-100 rounded"></div>
+                    <div class="h-16 bg-green-100 rounded"></div>
+                    <div class="h-16 bg-amber-100 rounded"></div>
+                  </div>
+                  <div class="space-y-2">
+                    <div class="h-12 bg-neutral-200 rounded"></div>
+                    <div class="h-12 bg-neutral-200 rounded"></div>
+                  </div>
+                </div>
+              </div>
+              <img src="screenshots/dashboard.png" alt="Dashboard View" class="w-full h-full object-cover hidden" onerror="this.parentElement.querySelector('.placeholder').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Real-Time Dashboard</h3>
+              <p class="text-neutral-600 text-sm">See all work centers, active jobs, and production metrics at a glance.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Work Orders Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden">
+              <div class="absolute inset-0 bg-gradient-to-br from-green-50 to-neutral-100">
+                <div class="p-4 space-y-2">
+                  <div class="h-8 bg-neutral-200 rounded"></div>
+                  <div class="space-y-2">
+                    <div class="h-10 bg-white border border-neutral-200 rounded"></div>
+                    <div class="h-10 bg-white border border-neutral-200 rounded"></div>
+                    <div class="h-10 bg-white border border-neutral-200 rounded"></div>
+                  </div>
+                </div>
+              </div>
+              <img src="screenshots/work-orders.png" alt="Work Orders List" class="w-full h-full object-cover hidden" onerror="this.parentElement.querySelector('.placeholder').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Work Order Management</h3>
+              <p class="text-neutral-600 text-sm">Create, track, and manage work orders with complete routing information.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Shop Floor Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden">
+              <div class="absolute inset-0 bg-gradient-to-br from-blue-50 to-neutral-100">
+                <div class="p-4 space-y-3">
+                  <div class="h-12 bg-primary-100 rounded"></div>
+                  <div class="space-y-2">
+                    <div class="h-10 bg-white border border-primary-200 rounded"></div>
+                    <div class="h-10 bg-white border border-neutral-200 rounded"></div>
+                    <div class="h-10 bg-white border border-neutral-200 rounded"></div>
+                  </div>
+                </div>
+              </div>
+              <img src="screenshots/shop-floor.png" alt="Shop Floor View" class="w-full h-full object-cover hidden" onerror="this.parentElement.querySelector('.placeholder').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Shop Floor Control</h3>
+              <p class="text-neutral-600 text-sm">Operator-friendly interface for clocking in, reporting production, and viewing queues.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Scheduling Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden">
+              <div class="absolute inset-0 bg-gradient-to-br from-purple-50 to-neutral-100">
+                <div class="p-4">
+                  <div class="space-y-3">
+                    <div class="flex">
+                      <div class="h-10 bg-purple-200 rounded-l w-1/4"></div>
+                      <div class="h-10 bg-purple-100 flex-1"></div>
+                    </div>
+                    <div class="flex">
+                      <div class="h-10 bg-purple-200 rounded-l w-1/4"></div>
+                      <div class="h-10 bg-blue-100 flex-1"></div>
+                    </div>
+                    <div class="flex">
+                      <div class="h-10 bg-purple-200 rounded-l w-1/4"></div>
+                      <div class="h-10 bg-green-100 flex-1"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <img src="screenshots/scheduling.png" alt="Gantt Scheduling" class="w-full h-full object-cover hidden" onerror="this.parentElement.querySelector('.placeholder').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Gantt Scheduling</h3>
+              <p class="text-neutral-600 text-sm">Drag-and-drop scheduling with visual capacity planning and bottleneck identification.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Quality Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden">
+              <div class="absolute inset-0 bg-gradient-to-br from-red-50 to-neutral-100">
+                <div class="p-4 space-y-3">
+                  <div class="h-8 bg-red-200 rounded"></div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="h-16 bg-white border border-neutral-200 rounded"></div>
+                    <div class="h-16 bg-white border border-neutral-200 rounded"></div>
+                  </div>
+                  <div class="h-20 bg-white border border-neutral-200 rounded"></div>
+                </div>
+              </div>
+              <img src="screenshots/quality.png" alt="Quality Management" class="w-full h-full object-cover hidden" onerror="this.parentElement.querySelector('.placeholder').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Quality Management</h3>
+              <p class="text-neutral-600 text-sm">NCR/CAR tracking, First Article Inspection, and comprehensive lot traceability.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mobile Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden p-8">
+              <div class="w-32 h-64 bg-neutral-200 rounded-2xl border-4 border-neutral-80 shadow-lg relative">
+                <div class="absolute top-2 left-1/2 transform -translate-x-1/2 w-3 h-3 bg-neutral-80 rounded-full"></div>
+                <div class="p-2 space-y-2">
+                  <div class="h-4 bg-primary-200 rounded"></div>
+                  <div class="h-3 bg-neutral-300 rounded"></div>
+                  <div class="h-3 bg-neutral-300 rounded"></div>
+                  <div class="h-8 bg-green-200 rounded mt-2"></div>
+                  <div class="h-8 bg-blue-200 rounded"></div>
+                  <div class="h-8 bg-purple-200 rounded"></div>
+                </div>
+              </div>
+              <img src="screenshots/mobile.png" alt="Mobile View" class="w-full h-full object-cover hidden absolute inset-0" onerror="this.parentElement.querySelector('.mobile-mockup').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Mobile Ready</h3>
+              <p class="text-neutral-600 text-sm">Touch-optimized interface for shop floor kiosks and mobile devices.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Parts & BOM Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden">
+              <div class="absolute inset-0 bg-gradient-to-br from-cyan-50 to-neutral-100">
+                <div class="p-4 space-y-2">
+                  <div class="h-8 bg-neutral-200 rounded"></div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="h-20 bg-white border border-neutral-200 rounded"></div>
+                    <div class="space-y-2">
+                      <div class="h-8 bg-white border border-neutral-200 rounded"></div>
+                      <div class="h-8 bg-white border border-neutral-200 rounded"></div>
+                      <div class="h-8 bg-white border border-neutral-200 rounded"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <img src="screenshots/parts-bom.png" alt="Parts & BOM" class="w-full h-full object-cover hidden" onerror="this.parentElement.querySelector('.placeholder').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Parts & BOM</h3>
+              <p class="text-neutral-600 text-sm">Multi-level BOMs with revision control and make vs. buy classification.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Purchasing Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden">
+              <div class="absolute inset-0 bg-gradient-to-br from-orange-50 to-neutral-100">
+                <div class="p-4 space-y-2">
+                  <div class="h-8 bg-neutral-200 rounded"></div>
+                  <div class="space-y-2">
+                    <div class="h-12 bg-white border border-neutral-200 rounded"></div>
+                    <div class="h-12 bg-white border border-neutral-200 rounded"></div>
+                  </div>
+                </div>
+              </div>
+              <img src="screenshots/purchasing.png" alt="Purchasing" class="w-full h-full object-cover hidden" onerror="this.parentElement.querySelector('.placeholder').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Purchasing & Inventory</h3>
+              <p class="text-neutral-600 text-sm">PO management, receiving workflow, and Material Requirements Planning (MRP).</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reports Screenshot -->
+        <div class="group relative">
+          <div class="bg-white rounded-xl shadow-card overflow-hidden border border-neutral-200 hover:shadow-card-hover transition-all duration-300">
+            <div class="aspect-video bg-neutral-100 flex items-center justify-center relative overflow-hidden">
+              <div class="absolute inset-0 bg-gradient-to-br from-indigo-50 to-neutral-100">
+                <div class="p-4">
+                  <div class="grid grid-cols-2 gap-4">
+                    <div class="h-20 bg-indigo-100 rounded"></div>
+                    <div class="h-20 bg-green-100 rounded"></div>
+                    <div class="h-20 bg-amber-100 rounded"></div>
+                    <div class="h-20 bg-blue-100 rounded"></div>
+                  </div>
+                </div>
+              </div>
+              <img src="screenshots/reports.png" alt="Reports & Analytics" class="w-full h-full object-cover hidden" onerror="this.parentElement.querySelector('.placeholder').classList.remove('hidden');" />
+            </div>
+            <div class="p-6">
+              <h3 class="text-xl font-bold text-neutral-900 mb-2">Reports & Analytics</h3>
+              <p class="text-neutral-600 text-sm">Real-time dashboards, production metrics, and comprehensive reporting.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-12 text-center">
+        <button class="btn-secondary">View All Features</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Competitor Comparison Table -->
+  <section id="comparison" class="bg-neutral-50 py-20 border-t border-neutral-200">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-12">
+        <h2 class="text-4xl md:text-5xl font-bold text-neutral-900 mb-4">
+          Why Choose<br>
+          <span class="text-primary-600">Your ERP?</span>
+        </h2>
+        <p class="text-lg text-neutral-600 max-w-2xl mx-auto">
+ See how we stack up against manual spreadsheets and traditional solutions.
+        </p>
+      </div>
+
+      <div class="overflow-x-auto rounded-xl shadow-lg bg-white">
+        <table class="w-full">
+          <thead>
+            <tr class="bg-primary-600 text-white">
+              <th class="px-6 py-4 text-left font-semibold">Feature</th>
+              <th class="px-6 py-4 text-center font-semibold">Spreadsheets</th>
+              <th class="px-6 py-4 text-center font-semibold">Legacy ERP</th>
+              <th class="px-6 py-4 text-center font-semibold bg-primary-700">Your ERP</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-neutral-200">
+            <tr>
+              <td class="px-6 py-4 text-neutral-700 font-medium">Real-time Dashboard</td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-red-500 mx-auto" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-amber-500 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center bg-primary-50">
+                <svg class="w-6 h-6 text-green-500 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                </svg>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 text-neutral-700 font-medium">Mobile Access</td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-red-500 mx-auto" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-amber-500 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center bg-primary-50">
+                <svg class="w-6 h-6 text-green-500 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                </svg>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 text-neutral-700 font-medium">AS9100D/ISO 9001 Compliance</td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-red-500 mx-auto" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-amber-500 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center bg-primary-50">
+                <svg class="w-6 h-6 text-green-500 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                </svg>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 text-neutral-700 font-medium">Quality Management (NCR/CAR)</td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-red-500 mx-auto" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-red-500 mx-auto" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center bg-primary-50">
+                <svg class="w-6 h-6 text-green-500 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                </svg>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 text-neutral-700 font-medium">Gantt Scheduling</td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-red-500 mx-auto" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center">
+                <svg class="w-6 h-6 text-red-500 mx-auto" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                </svg>
+              </td>
+              <td class="px-6 py-4 text-center bg-primary-50">
+                <svg class="w-6 h-6 text-green-500 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                </svg>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 text-neutral-700 font-medium">Implementation Time</td>
+              <td class="px-6 py-4 text-center text-neutral-500">N/A</td>
+              <td class="px-6 py-4 text-center textneutral-500">6-12 months</td>
+              <td class="px-6 py-4 text-center bg-primary-50 text-primary-700 font-semibold">2-4 weeks</td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 text-neutral-700 font-medium">IT Infrastructure Required</td>
+              <td class="px-6 py-4 text-center text-neutral-500">Yes</td>
+              <td class="px-6 py-4 text-center text-neutral-500">Yes</td>
+              <td class="px-6 py-4 text-center bg-primary-50 text-green-600 font-semibold">No</td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 text-neutral-700 font-medium">Monthly Cost</td>
+              <td class="px-6 py-4 text-center text-neutral-500">$0</td>
+              <td class="px-6 py-4 text-center text-neutral-500">$5K-$50K+</td>
+              <td class="px-6 py-4 text-center bg-primary-50 text-primary-700 font-semibold">$299-$599</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="mt-8 grid md:grid-cols-3 gap-6">
+        <div class="bg-white rounded-lg p-6 shadow-md">
+          <div class="flex items-center space-x-3 mb-3">
+            <div class="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </div>
+            <h3 class="font-bold text-neutral-900">Spreadsheets</h3>
+          </div>
+          <p class="text-sm text-neutral-600">Manual entry, no real-time visibility, compliance risk, version control issues.</p>
+        </div>
+
+        <div class="bg-white rounded-lg p-6 shadow-md">
+          <div class="flex items-center space-x-3 mb-3">
+            <div class="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+            </div>
+            <h3 class="font-bold text-neutral-900">Legacy ERP</h3>
+          </div>
+          <p class="text-sm text-neutral-600">Expensive, slow implementation, complex, requires IT teams, rigid workflows.</p>
+        </div>
+
+        <div class="bg-primary-600 rounded-lg p-6 shadow-lg">
+          <div class="flex items-center space-x-3 mb-3">
+            <div class="w-10 h-10 bg-white rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+              </svg>
+            </div>
+            <h3 class="font-bold text-white">Your ERP</h3>
+          </div>
+          <p class="text-sm text-primary-100">Purpose-built for manufacturing, quick implementation, compliant, flexible, affordable.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ Section -->
+  <section id="faq" class="bg-white py-20 border-t border-neutral-200">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-12">
+        <h2 class="text-4xl md:text-5xl font-bold text-neutral-900 mb-4">
+          Frequently Asked<br>
+          <span class="text-primary-600">Questions</span>
+        </h2>
+        <p class="text-lg text-neutral-600 max-w-2xl mx-auto">
+          Everything you need to know about our ERP & MES solution.
+        </p>
+      </div>
+
+      <div class="space-y-4">
+        <!-- FAQ Item 1 -->
+        <div class="border border-neutral-200 rounded-lg overflow-hidden">
+          <button class="faq-toggle w-full px-6 py-4 text-left flex items-center justify-between bg-white hover:bg-neutral-50 transition-colors">
+            <span class="font-semibold text-neutral-900">How long does it take to implement?</span>
+            <svg class="faq-icon w-5 h-5 text-neutral-400 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <div class="faq-content hidden px-6 py-4 bg-neutral-50 border-t border-neutral-200">
+            <p class="text-neutral-700">Most implementations are completed in 2-4 weeks. Our team handles data migration from spreadsheets or existing systems, configures your workflows, and provides comprehensive training. You'll be running production in weeks, not months.</p>
+          </div>
+        </div>
+
+        <!-- FAQ Item 2 -->
+        <div class="border border-neutral-200 rounded-lg overflow-hidden">
+          <button class="faq-toggle w-full px-6 py-4 text-left flex items-center justify-between bg-white hover:bg-neutral-50 transition-colors">
+            <span class="font-semibold text-neutral-900">Is my data secure and private?</span>
+            <svg class="faq-icon w-5 h-5 text-neutral-400 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <div class="faq-content hidden px-6 py-4 bg-neutral-50 border-t border-neutral-200">
+            <p class="text-neutral-700">Absolutely. We use industry-standard encryption for data at rest and in transit. Our platform is SOC 2 Type II compliant and built for CMMC Level 2 requirements. You retain full ownership of your data at all times.</p>
+          </div>
+        </div>
+
+        <!-- FAQ Item 3 -->
+        <div class="border border-neutral-200 rounded-lg overflow-hidden">
+          <button class="faq-toggle w-full px-6 py-4 text-left flex items-center justify-between bg-white hover:bg-neutral-50 transition-colors">
+            <span class="font-semibold text-neutral-900">What happens during the free trial?</span>
+            <svg class="faq-icon w-5 h-5 text-neutral-400 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <div class="faq-content hidden px-6 py-4 bg-neutral-50 border-t border-neutral-200">
+            <p class="text-neutral-700">During your 14-day free trial, you'll have full access to all features. Our team will guide you through setup, help you import sample data, and answer any questions. No credit card required to start.</p>
+          </div>
+        </div>
+
+        <!-- FAQ Item 4 -->
+        <div class="border border-neutral-200 rounded-lg overflow-hidden">
+          <button class="faq-toggle w-full px-6 py-4 text-left flex items-center justify-between bg-white hover:bg-neutral-50 transition-colors">
+            <span class="font-semibold text-neutral-900">Can I customize the system to match my workflows?</span>
+            <svg class="faq-icon w-5 h-5 text-neutral-400 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <div class="faq-content hidden px-6 py-4 bg-neutral-50 border-t border-neutral-200">
+            <p class="text-neutral-700">Yes! Personalization is a core feature. Customize work center names, operation types, status labels, and routing rules. Add custom fields, create branded dashboards, and adapt the system to your unique processes.</p>
+          </div>
+        </div>
+
+        <!-- FAQ Item 5 -->
+        <div class="border border-neutral-200 rounded-lg overflow-hidden">
+          <button class="faq-toggle w-full px-6 py-4 text-left flex items-center justify-between bg-white hover:bg-neutral-50 transition-colors">
+            <span class="font-semibold text-neutral-900">What integrations are available?</span>
+            <svg class="faq-icon w-5 h-5 text-neutral-400 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <div class="faq-content hidden px-6 py-4 bg-neutral-50 border-t border-neutral-200">
+            <p class="text-neutral-700">We integrate with popular accounting systems (QuickBooks, NetSuite), CAD/CAM software, barcode scanners, and label printers. Our REST API also allows custom integrations with your existing tools.</p>
+          </div>
+        </div>
+
+        <!-- FAQ Item 6 -->
+        <div class="border border-neutral-200 rounded-lg overflow-hidden">
+          <button class="faq-toggle w-full px-6 py-4 text-left flex items-center justify-between bg-white hover:bg-neutral-50 transition-colors">
+            <span class="font-semibold text-neutral-900">Do you provide training and support?</span>
+            <svg class="faq-icon w-5 h-5 text-neutral-400 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <div class="faq-content hidden px-6 py-4 bg-neutral-50 border-t border-neutral-200">
+            <p class="text-neutral-700">Yes, we provide comprehensive onboarding for your entire team - operators, supervisors, and managers. This includes hands-on training, video tutorials, and ongoing priority support via email and chat.</p>
+          </div>
+        </div>
+
+        <!-- FAQ Item 7 -->
+        <div class="border border-neutral-200 rounded-lg overflow-hidden">
+          <button class="faq-toggle w-full px-6 py-4 text-left flex items-center justify-between bg-white hover:bg-neutral-50 transition-colors">
+            <span class="font-semibold text-neutral-900">Can I switch plans later?</span>
+            <svg class="faq-icon w-5 h-5 text-neutral-400 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <div class="faq-content hidden px-6 py-4 bg-neutral-50 border-t border-neutral-200">
+            <p class="text-neutral-700">Absolutely. You can upgrade or downgrade your plan at any time. Changes take effect at the next billing cycle. We'll help you choose the right plan as you grow.</p>
+          </div>
+        </div>
+
+        <!-- FAQ Item 8 -->
+        <div class="border border-neutral-200 rounded-lg overflow-hidden">
+          <button class="faq-toggle w-full px-6 py-4 text-left flex items-center justify-between bg-white hover:bg-neutral-50 transition-colors">
+            <span class="font-semibold text-neutral-900">What hardware do I need?</span>
+            <svg class="faq-icon w-5 h-5 text-neutral-400 transform transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          <div class="faq-content hidden px-6 py-4 bg-neutral-50 border-t border-neutral-200">
+            <p class="text-neutral-700">You only need a web browser and internet connection. The system runs in the cloud - no servers or IT infrastructure required. For shop floor, we recommend tablets or touch-screen kiosks that can be easily mounted.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pricing Section -->
+  <section id="pricing" class="bg-white py-20 border-t border-neutral-200">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-12">
+        <h2 class="text-4xl md:text-5xl font-bold text-neutral-900 mb-4">
+          Simple, Transparent<br>
+          <span class="text-primary-600">Pricing</span>
+        </h2>
+        <p class="text-lg text-neutral-600 max-w-2xl mx-auto">
+          No hidden fees. No long-term contracts. Cancel anytime.
+        </p>
+      </div>
+
+      <div class="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+        <div class="bg-white rounded-xl shadow-card p-6 border-2 border-neutral-200">
+          <h3 class="text-2xl font-bold text-neutral-900 mb-2">Starter</h3>
+          <p class="text-neutral-600 text-sm mb-6">For small job shops</p>
+          <div class="text-4xl font-bold text-neutral-900 mb-2">$299<span class="text-lg text-neutral-600">/month</span></div>
+          <ul class="space-y-3 mb-8">
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Up to 5 users</span>
+            </li>
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Work Order Management</span>
+            </li>
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Email Support</span>
+            </li>
+          </ul>
+          <button class="w-full bg-primary-600 text-white py-3 rounded-lg font-semibold hover:bg-primary-700 transition-colors">Start Free Trial</button>
+        </div>
+
+        <div class="bg-white rounded-xl ring-2 ring-primary-500 p-6 shadow-xl scale-105">
+          <div class="absolute top-0 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+            <span class="bg-primary-600 text-white text-sm font-semibold px-4 py-1 rounded-full">Most Popular</span>
+          </div>
+          <h3 class="text-2xl font-bold text-neutral-900 mb-2">Professional</h3>
+          <p class="text-neutral-600 text-sm mb-6">For growing manufacturers</p>
+          <div class="text-4xl font-bold text-neutral-900 mb-2">$599<span class="text-lg text-neutral-600">/month</span></div>
+          <ul class="space-y-3 mb-8">
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Up to 20 users</span>
+            </li>
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Quality Management (NCR/CAR/FAI)</span>
+            </li>
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Purchasing & Inventory</span>
+            </li>
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Priority Support</span>
+            </li>
+          </ul>
+          <button class="w-full bg-primary-600 text-white py-3 rounded-lg font-semibold hover:bg-primary-700 transition-colors">Start Free Trial</button>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-card p-6 border-2 border-neutral-200">
+          <h3 class="text-2xl font-bold text-neutral-900 mb-2">Enterprise</h3>
+          <p class="text-neutral-600 text-sm mb-6">For large organizations</p>
+          <div class="text-4xl font-bold text-neutral-900 mb-2">Custom</div>
+          <ul class="space-y-3 mb-8">
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Unlimited users</span>
+            </li>
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Multiple facilities</span>
+            </li>
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Custom Workflows</span>
+            </li>
+            <li class="flex items-center space-x-2 text-sm text-neutral-700">
+              <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/></svg>
+              <span>Dedicated Support</span>
+            </li>
+          </ul>
+          <button class="w-full bg-white border-2 border-primary-600 text-primary-600 py-3 rounded-lg font-semibold hover:bg-primary-50 transition-colors">Contact Sales</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Testimonials Section -->
+  <section class="bg-neutral-900 text-white py-20">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-12">
+        <h2 class="text-4xl md:text-5xl font-bold mb-4">
+          Trusted by<br>
+          <span class="text-primary-400">Manufacturing Leaders</span>
+        </h2>
+        <p class="text-lg text-neutral-400 max-w-2xl mx-auto">
+          See what our customers say about transforming their operations.
+        </p>
+      </div>
+
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8 mb-8">
+        <!-- Testimonial 1 -->
+        <div class="bg-white/10 backdrop-blur-sm rounded-2xl p-6 border border-white/20 hover:scale-105 transition-transform duration-300">
+          <div class="flex items-center space-x-4 mb-6">
+            <div class="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-white font-bold text-2xl">
+              SM
+            </div>
+            <div>
+              <div class="font-bold text-white text-lg">Sarah Martinez</div>
+              <div class="text-neutral-400 text-sm">Operations Manager, Precision Aerospace</div>
+            </div>
+          </div>
+          <div class="mb-4">
+            <svg class="w-8 h-8 text-primary-500/50" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/>
+            </svg>
+          </div>
+          <p class="text-neutral-300 leading-relaxed">
+            "We went from manual spreadsheets to full visibility in 3 weeks. Audits that used to take days now take hours. The team loves the shop floor interface."
+          </p>
+          <div class="mt-4 flex items-center space-x-1">
+            {[1, 2, 3, 4, 5].map((star) => (
+              <svg key={star} class="w-5 h-5 text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 01.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 01-1.175 0l-2.8 2.034c-.784.57-1.838.197-1.539-1.118l1.07-3.292a1 1 0 01.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/>
+              </svg>
+            ))}
+          </div>
+        </div>
+
+        <!-- Testimonial 2 -->
+        <div class="bg-white/10 backdrop-blur-sm rounded-2xl p-6 border border-white/20 hover:scale-105 transition-transform duration-300">
+          <div class="flex items-center space-x-4 mb-6">
+            <div class="w-16 h-16 bg-gradient-to-br from-green-500 to-teal-600 rounded-full flex items-center justify-center text-white font-bold text-2xl">
+              JC
+            </div>
+            <div>
+              <div class="font-bold text-white text-lg">James Chen</div>
+              <div class="text-neutral-400 text-sm">Production Manager, TechFab Solutions</div>
+            </div>
+          </div>
+          <div class="mb-4">
+            <svg class="w-8 h-8 text-primary-500/50" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/>
+            </svg>
+          </div>
+          <p class="text-neutral-300 leading-relaxed">
+            "The scheduling alone was worth the investment. We reduced bottlenecks by 40% and increased on-time deliveries significantly. Best decision we made."
+          </p>
+          <div class="mt-4 flex items-center space-x-1">
+            {[1, 2, 3, 4, 5].map((star) => (
+              <svg key={star} class="w-5 h-5 text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 01.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 01-1.175 0l-2.8 2.034c-.784.57-1.838.197-1.539-1.118l1.07-3.292a1 1 0 01.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/>
+              </svg>
+            ))}
+          </div>
+        </div>
+
+        <!-- Testimonial 3 -->
+        <div class="bg-white/10 backdrop-blur-sm rounded-2xl p-6 border border-white/20 hover:scale-105 transition-transform duration-300">
+          <div class="flex items-center space-x-4 mb-6">
+            <div class="w-16 h-16 bg-gradient-to-br from-amber-500 to-orange-600 rounded-full flex items-center justify-center text-white font-bold text-2xl">
+              MR
+            </div>
+            <div>
+              <div class="font-bold text-white text-lg">Michael Roberts</div>
+              <div class="text-neutral-400 text-sm">Quality Director, Defense Components Inc.</div>
+            </div>
+          </div>
+          <div class="mb-4">
+            <svg class="w-8 h-8 text-primary-500/50" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/>
+            </svg>
+          </div>
+          <p class="text-neutral-300 leading-relaxed">
+            "AS9100D compliance was a nightmare before. Now it's just built into our workflow. First Article Inspection, NCR tracking, traceability - all automated."
+          </p>
+          <div class="mt-4 flex items-center space-x-1">
+            {[1, 2, 3, 4, 5].map((star) => (
+              <svg key={star} class="w-5 h-5 text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 01.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 01-1.175 0l-2.8 2.034c-.784.57-1.838.197-1.539-1.118l1.07-3.292a1 1 0 01.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/>
+              </svg>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <!-- Case Study Summaries -->
+      <div class="grid md:grid-cols-3 gap-6">
+        <div class="bg-primary-900 rounded-xl p-6 border border-primary-700">
+          <div class="flex items-center justify-between mb-4">
+            <span class="text-primary-400 text-sm font-medium">Case Study</span>
+            <span class="bg-green-500/20 text-green-400 px-3 py-1 rounded-full text-xs">Aerospace</span>
+          </div>
+          <h3 class="font-bold text-white mb-2">Precision Aerospace</h3>
+          <p class="text-neutral-400 text-sm mb-4">
+            Reduced audit preparation time by 75% and eliminated compliance penalties.
+          </p>
+          <div class="space-y-2">
+            <div class="flex justify-between text-sm">
+              <span class="text-neutral-400">Rework Reduction</span>
+              <span class="text-green-400 font-semibold">-68%</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-neutral-400">On-Time Delivery</span>
+              <span class="text-green-400 font-semibold">+42%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-primary-900 rounded-xl p-6 border border-primary-700">
+          <div class="flex items-center justify-between mb-4">
+            <span class="text-primary-400 text-sm font-medium">Case Study</span>
+            <span class="bg-blue-500/20 text-blue-400 px-3 py-1 rounded-full text-xs">Defense</span>
+          </div>
+          <h3 class="font-bold text-white mb-2">Defense Components</h3>
+          <p class="text-neutral-400 text-sm mb-4">
+            Implemented full CMMC Level 2 compliance and improved lot traceability.
+          </p>
+          <div class="space-y-2">
+            <div class="flex justify-between text-sm">
+              <span class="text-neutral-400">Audit Score</span>
+              <span class="text-green-400 font-semibold">99.2%</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-neutral-400">Customer Satisfaction</span>
+              <span class="text-green-400 font-semibold">+35%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-primary-900 rounded-xl p-6 border border-primary-700">
+          <div class="flex items-center justify-between mb-4">
+            <span class="text-primary-400 text-sm font-medium">Case Study</span>
+            <span class="bg-purple-500/20 text-purple-400 px-3 py-1 rounded-full text-xs">Medical</span>
+          </div>
+          <h3 class="font-bold text-white mb-2">Med-Tech Manufacturing</h3>
+          <p class="text-neutral-400 text-sm mb-4">
+            Streamlined quality processes and improved production visibility.
+          </p>
+          <div class="space-y-2">
+            <div class="flex justify-between text-sm">
+              <span class="text-neutral-400">Quality Escapes</span>
+              <span class="text-green-400 font-semibold">-92%</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-neutral-400">Production Throughput</span>
+              <span class="text-green-400 font-semibold">+58%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-12 text-center">
+        <button class="btn-secondary bg-white/20 hover:bg-white/30 text-white hover:text-white border-white/30">
+          Read More Success Stories
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA Section -->
+  <section class="bg-gradient-to-br from-primary-600 to-primary-800 py-20">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center text-white">
+        <h2 class="text-4xl md:text-5xl font-bold mb-6">
+          Ready to Transform<br>
+          <span class="text-primary-200">Your Manufacturing Operations?</span>
+        </h2>
+        <p class="text-xl text-primary-100 mb-8 max-w-2xl mx-auto">
+          Start your free 14-day trial today. No credit card required.
+        </p>
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+          <button class="bg-white text-primary-600 px-8 py-4 rounded-lg font-semibold text-lg min-w-[200px] hover:bg-neutral-50 transition-colors">
+            Start Free Trial
+          </button>
+          <button class="bg-white/20 text-white px-8 py-4 rounded-lg font-semibold text-lg min-w-[200px] hover:bg-white/30 transition-colors">
+            Schedule Demo
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="bg-neutral-900 text-white py-12">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="grid md:grid-cols-4 gap-8 mb-8">
+        <div class="md:col-span-2">
+          <div class="flex items-center space-x-2 mb-4">
+            <div class="w-10 h-10 bg-primary-600 rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+              </svg>
+            </div>
+            <span class="font-bold text-xl">Your ERP</span>
+          </div>
+          <p class="text-neutral-400">
+            Manufacturing intelligence designed for your business. Personalizable, compliant, and built for scale.
+          </p>
+        </div>
+        <div>
+          <h4 class="font-semibold mb-4">Product</h4>
+          <ul class="space-y-2 text-neutral-400">
+            <li><a href="#features" class="hover:text-white">Features</a></li>
+            <li><a href="#pricing" class="hover:text-white">Pricing</a></li>
+            <li><a href="#" class="hover:text-white">Case Studies</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 class="font-semibold mb-4">Company</h4>
+          <ul class="space-y-2 text-neutral-400">
+            <li><a href="#" class="hover:text-white">About</a></li>
+            <li><a href="#" class="hover:text-white">Contact</a></li>
+            <li><a href="#" class="hover:text-white">Partners</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Security & Trust Badges -->
+      <div class="border-t border-neutral-800 pt-8 mb-8">
+        <h4 class="text-center text-sm text-neutral-500 mb-6">Security & Compliance</h4>
+        <div class="flex flex-wrap items-center justify-center gap-6 md:gap-8">
+          <!-- SOC 2 Badge -->
+          <div class="flex items-center space-x-2 bg-neutral-800 rounded-lg px-4 py-2 hover:bg-neutral-700 transition-colors cursor-pointer">
+            <svg class="w-6 h-6 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+            </svg>
+            <span class="text-xs text-neutral-300">SOC 2 Type II</span>
+          </div>
+
+          <!-- ISO 9001 Badge -->
+          <div class="flex items-center space-x-2 bg-neutral-800 rounded-lg px-4 py-2 hover:bg-neutral-700 transition-colors cursor-pointer">
+            <svg class="w-6 h-6 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span class="text-xs text-neutral-300">ISO 9001 Certified</span>
+          </div>
+
+          <!-- GDPR Badge -->
+          <div class="flex items-center space-x-2 bg-neutral-800 rounded-lg px-4 py-2 hover:bg-neutral-700 transition-colors cursor-pointer">
+            <svg class="w-6 h-6 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+            </svg>
+            <span class="text-xs text-neutral-300">GDPR Compliant</span>
+          </div>
+
+          <!-- SSL Badge -->
+          <div class="flex items-center space-x-2 bg-neutral-800 rounded-lg px-4 py-2 hover:bg-neutral-700 transition-colors cursor-pointer">
+            <svg class="w-6 h-6 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+            </svg>
+            <span class="text-xs text-neutral-300">256-bit SSL</span>
+          </div>
+
+          <!-- CMMC Badge -->
+          <div class="flex items-center space-x-2 bg-neutral-800 rounded-lg px-4 py-2 hover:bg-neutral-700 transition-colors cursor-pointer">
+            <svg class="w-6 h-6 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/>
+            </svg>
+            <span class="text-xs text-neutral-300">CMMC Ready</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="border-t border-neutral-800 pt-8 flex flex-col md:flex-row justify-between items-center">
+        <p class="text-neutral-400 text-sm">© 2026 Your ERP. All rights reserved.</p>
+        <div class="flex space-x-6 mt-4 md:mt-0 text-sm text-neutral-400">
+          <a href="#" class="hover:text-white">Privacy Policy</a>
+          <a href="#" class="hover:text-white">Terms of Service</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Header scroll effect
+    const header = document.getElementById('header');
+    const logoText = document.getElementById('logo-text');
+    const headerLinks = document.querySelectorAll('.header-link');
+    const headerCta = document.querySelector('.header-cta');
+
+    window.addEventListener('scroll', () => {
+      if (window.scrollY > 50) {
+        header.classList.add('bg-white/95', 'backdrop-blur-sm', 'shadow-lg');
+        logoText.classList.remove('text-white');
+        logoText.classList.add('text-primary-900');
+        headerLinks.forEach(link => {
+          link.classList.remove('text-white/90');
+          link.classList.add('text-neutral-700');
+        });
+        headerCta.classList.remove('bg-accent-500');
+        headerCta.classList.add('bg-primary-600');
+      } else {
+        header.classList.remove('bg-white/95', 'backdrop-blur-sm', 'shadow-lg');
+        logoText.classList.add('text-white');
+        logoText.classList.remove('text-primary-900');
+        headerLinks.forEach(link => {
+          link.classList.add('text-white/90');
+          link.classList.remove('text-neutral-700');
+        });
+        headerCta.classList.add('bg-accent-500');
+        headerCta.classList.remove('bg-primary-600');
+      }
+    });
+
+    // FAQ Accordion functionality
+    document.querySelectorAll('.faq-toggle').forEach(toggle => {
+      toggle.addEventListener('click', () => {
+        const content = toggle.nextElementSibling;
+        const icon = toggle.querySelector('.faq-icon');
+
+        content.classList.toggle('hidden');
+        icon.classList.toggle('rotate-180');
+
+        // Optional: Close other items when one is opened
+        document.querySelectorAll('.faq-toggle').forEach(otherToggle => {
+          if (otherToggle !== toggle) {
+            const otherContent = otherToggle.nextElementSibling;
+            const otherIcon = otherToggle.querySelector('.faq-icon');
+            otherContent.classList.add('hidden');
+            otherIcon.classList.remove('rotate-180');
+          }
+        });
+      });
+    });
+
+    // Sticky CTA Button
+    let stickyCTA = null;
+
+    const createStickyCTA = () => {
+      if (stickyCTA) return;
+
+      stickyCTA = document.createElement('div');
+      stickyCTA.class = 'fixed bottom-6 right-6 z-40 animate-slide-up';
+      stickyCTA.innerHTML = `
+        <a href="#pricing" class="inline-flex items-center space-x-2 bg-primary-600 hover:bg-primary-700 text-white px-6 py-3 rounded-full shadow-lg hover:shadow-xl transition-all transform hover:scale-105">
+          <span class="font-semibold">Start Free Trial</span>
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+          </svg>
+        </a>
+      `;
+
+      // Mobile version - positioned at bottom
+      if (window.innerWidth < 768) {
+        stickyCTA.classList.remove('bottom-6', 'right-6');
+        stickyCTA.classList.add('left-4', 'right-4', 'bottom-20');
+        stickyCTA.querySelector('a').classList.add('w-full', 'justify-center');
+      }
+
+      document.body.appendChild(stickyCTA);
+    };
+
+    const removeStickyCTA = () => {
+      if (stickyCTA) {
+        stickyCTA.remove();
+        stickyCTA = null;
+      }
+    };
+
+    // Show sticky CTA after scrolling past 500px
+    window.addEventListener('scroll', () => {
+      if (window.scrollY > 500) {
+        createStickyCTA();
+      } else {
+        removeStickyCTA();
+      }
+    });
+
+    // Smooth scrolling for anchor links
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+      anchor.addEventListener('click', function(e) {
+        e.preventDefault();
+        const target = document.querySelector(this.getAttribute('href'));
+        if (target) {
+          target.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start'
+          });
+        }
+      });
+    });
+  </script>
+
+</body>
+</html>
+

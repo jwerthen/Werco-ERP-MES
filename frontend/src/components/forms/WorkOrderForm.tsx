@@ -1,13 +1,13 @@
 import React from 'react';
-import { FormField } from './ui/FormField';
-import { FormWithValidation } from './ui/FormWithValidation';
+import { FormField } from '../ui/FormField';
+import { FormWithValidation } from '../ui/FormWithValidation';
 import {
   WorkOrderFormData,
   workOrderSchema,
   WorkOrderStatus,
   WorkOrderOperationFormData,
   workOrderOperationSchema,
-} from '../validation/schemas';
+} from '../../validation/schemas';
 
 interface WorkOrderFormProps {
   initialData?: Partial<WorkOrderFormData>;
