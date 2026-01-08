@@ -544,10 +544,10 @@ export default function RoutingPage() {
                   <div className="flex gap-2">
                     <input
                       type="number"
-                      value={timeUnits.setup === 'min' ? newOperation.setup_hours * 60 : newOperation.setup_hours}
+                      value={timeUnits.setup === 'min' ? Math.round(newOperation.setup_hours * 60 * 100) / 100 : newOperation.setup_hours}
                       onChange={(e) => {
                         const val = parseFloat(e.target.value) || 0;
-                        setNewOperation({ ...newOperation, setup_hours: timeUnits.setup === 'min' ? val / 60 : val });
+                        setNewOperation({ ...newOperation, setup_hours: timeUnits.setup === 'min' ? Math.round(val / 60 * 10000) / 10000 : val });
                       }}
                       className="input flex-1"
                       step={timeUnits.setup === 'min' ? 1 : 0.01}
@@ -568,10 +568,10 @@ export default function RoutingPage() {
                   <div className="flex gap-2">
                     <input
                       type="number"
-                      value={timeUnits.run === 'min' ? newOperation.run_hours_per_unit * 60 : newOperation.run_hours_per_unit}
+                      value={timeUnits.run === 'min' ? Math.round(newOperation.run_hours_per_unit * 60 * 100) / 100 : newOperation.run_hours_per_unit}
                       onChange={(e) => {
                         const val = parseFloat(e.target.value) || 0;
-                        setNewOperation({ ...newOperation, run_hours_per_unit: timeUnits.run === 'min' ? val / 60 : val });
+                        setNewOperation({ ...newOperation, run_hours_per_unit: timeUnits.run === 'min' ? Math.round(val / 60 * 10000) / 10000 : val });
                       }}
                       className="input flex-1"
                       step={timeUnits.run === 'min' ? 0.1 : 0.001}
@@ -594,10 +594,10 @@ export default function RoutingPage() {
                   <div className="flex gap-2">
                     <input
                       type="number"
-                      value={timeUnits.move === 'min' ? newOperation.move_hours * 60 : newOperation.move_hours}
+                      value={timeUnits.move === 'min' ? Math.round(newOperation.move_hours * 60 * 100) / 100 : newOperation.move_hours}
                       onChange={(e) => {
                         const val = parseFloat(e.target.value) || 0;
-                        setNewOperation({ ...newOperation, move_hours: timeUnits.move === 'min' ? val / 60 : val });
+                        setNewOperation({ ...newOperation, move_hours: timeUnits.move === 'min' ? Math.round(val / 60 * 10000) / 10000 : val });
                       }}
                       className="input flex-1"
                       step={timeUnits.move === 'min' ? 1 : 0.01}
@@ -618,10 +618,10 @@ export default function RoutingPage() {
                   <div className="flex gap-2">
                     <input
                       type="number"
-                      value={timeUnits.queue === 'min' ? newOperation.queue_hours * 60 : newOperation.queue_hours}
+                      value={timeUnits.queue === 'min' ? Math.round(newOperation.queue_hours * 60 * 100) / 100 : newOperation.queue_hours}
                       onChange={(e) => {
                         const val = parseFloat(e.target.value) || 0;
-                        setNewOperation({ ...newOperation, queue_hours: timeUnits.queue === 'min' ? val / 60 : val });
+                        setNewOperation({ ...newOperation, queue_hours: timeUnits.queue === 'min' ? Math.round(val / 60 * 10000) / 10000 : val });
                       }}
                       className="input flex-1"
                       step={timeUnits.queue === 'min' ? 1 : 0.01}
