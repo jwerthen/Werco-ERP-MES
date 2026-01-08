@@ -687,6 +687,16 @@ class ApiService {
     return response.data;
   }
 
+  async getSchedulableWorkOrders(params?: { start_date?: string; end_date?: string; work_center_id?: number }) {
+    const response = await this.api.get('/scheduling/work-orders', { params });
+    return response.data;
+  }
+
+  async scheduleWorkOrder(workOrderId: number, data: { scheduled_start: string; work_center_id?: number }) {
+    const response = await this.api.put(`/scheduling/work-orders/${workOrderId}/schedule`, data);
+    return response.data;
+  }
+
   async scheduleOperation(operationId: number, data: { scheduled_start: string; scheduled_end?: string | null }) {
     const response = await this.api.put(`/scheduling/operations/${operationId}/schedule`, data);
     return response.data;

@@ -17,17 +17,24 @@ interface ScheduledJob {
   id: number;
   work_order_id: number;
   work_order_number: string;
-  operation_id: number;
-  operation_name: string;
+  current_operation_id: number;
+  current_operation_name: string;
+  current_operation_number?: string;
+  current_operation_sequence: number;
   part_number: string;
   part_name: string;
   work_center_id: number;
   status: string;
+  operation_status: string;
   scheduled_start?: string;
   scheduled_end?: string;
   due_date?: string;
   quantity: number;
+  quantity_complete: number;
   priority: number;
+  total_operations: number;
+  operations_complete: number;
+  remaining_hours: number;
   setup_hours: number;
   run_hours: number;
 }
@@ -76,7 +83,7 @@ export default function Scheduling() {
     try {
       const [wcRes, jobsRes] = await Promise.all([
         api.getWorkCenters(),
-        api.getScheduledJobs({
+        api.getSchedulableWorkOrders({
           start_date: format(weekStart, 'yyyy-MM-dd'),
           end_date: format(addDays(weekStart, daysToShow), 'yyyy-MM-dd')
         })
@@ -175,7 +182,7 @@ export default function Scheduling() {
   const handleDragStart = (e: React.DragEvent, job: ScheduledJob) => {
     setDragState({ job, isDragging: true });
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', job.operation_id.toString());
+    e.dataTransfer.setData('text/plain', job.work_order_id.toString());
   };
 
   const handleDragEnd = () => {
@@ -206,13 +213,13 @@ export default function Scheduling() {
     }
     
     try {
-      // Update work center assignment
-      await api.updateOperationWorkCenter(job.operation_id, targetWcId);
+      // Update work center for the current operation
+      await api.updateOperationWorkCenter(job.current_operation_id, targetWcId);
       
       // Reload data to reflect changes
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to move operation');
+      alert(err.response?.data?.detail || 'Failed to move work order');
     }
     
     setDragState({ job: null, isDragging: false });
@@ -223,9 +230,10 @@ export default function Scheduling() {
     if (!selectedJob) return;
     
     try {
-      await api.scheduleOperation(selectedJob.operation_id, {
+      // Schedule the entire work order (first op gets scheduled, rest follow automatically)
+      await api.scheduleWorkOrder(selectedJob.work_order_id, {
         scheduled_start: scheduleForm.scheduled_start,
-        scheduled_end: scheduleForm.scheduled_end || null
+        work_center_id: selectedJob.work_center_id
       });
       setShowScheduleModal(false);
       loadData();
@@ -354,15 +362,15 @@ export default function Scheduling() {
                               
                               return (
                                 <div
-                                  key={job.operation_id}
+                                  key={job.work_order_id}
                                   draggable
                                   onDragStart={(e) => handleDragStart(e, job)}
                                   onDragEnd={handleDragEnd}
                                   onClick={() => openScheduleModal(job)}
                                   className={`text-xs p-1.5 rounded cursor-move hover:opacity-90 border-l-4 shadow-sm ${
                                     priorityColors[job.priority] || 'border-l-gray-400'
-                                  } ${statusColors[job.status]} text-white ${
-                                    dragState.job?.operation_id === job.operation_id ? 'opacity-50' : ''
+                                  } ${statusColors[job.operation_status] || statusColors[job.status]} text-white ${
+                                    dragState.job?.work_order_id === job.work_order_id ? 'opacity-50' : ''
                                   }`}
                                   style={{
                                     width: span > 1 ? `${widthPx}px` : 'auto',
@@ -370,10 +378,10 @@ export default function Scheduling() {
                                     zIndex: span > 1 ? 5 : 1,
                                     minWidth: '88px'
                                   }}
-                                  title={`${job.work_order_number} - ${job.operation_name}\n${job.part_number}\n${span > 1 ? `${span} days` : '1 day'}\nDrag to move to another work center`}
+                                  title={`${job.work_order_number} - ${job.part_number}\nOp ${job.operations_complete + 1}/${job.total_operations}: ${job.current_operation_name}\n${span > 1 ? `${span} days` : '1 day'}\nDrag to move to another work center`}
                                 >
                                   <div className="font-medium truncate">{job.work_order_number}</div>
-                                  <div className="truncate opacity-90">{job.operation_name}</div>
+                                  <div className="truncate opacity-90">Op {job.operations_complete + 1}/{job.total_operations}</div>
                                   {span > 1 && (
                                     <div className="text-[10px] opacity-75 mt-0.5">
                                       {span} days
@@ -401,18 +409,19 @@ export default function Scheduling() {
         </div>
       )}
 
-      {/* Unscheduled Jobs Queue */}
+      {/* Unscheduled Work Orders Queue */}
       <div className="card">
-        <h2 className="text-lg font-semibold mb-4">Unscheduled Operations</h2>
+        <h2 className="text-lg font-semibold mb-4">Unscheduled Work Orders</h2>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">WO #</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Current Op</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
-                <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Hours</th>
+                <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Hours Left</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Due</th>
                 <th className="px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase">Priority</th>
                 <th className="px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
@@ -420,9 +429,12 @@ export default function Scheduling() {
             </thead>
             <tbody className="divide-y divide-gray-200">
               {jobs.filter(j => !j.scheduled_start && j.status !== 'complete').map((job) => (
-                <tr key={job.operation_id} className="hover:bg-gray-50">
+                <tr key={job.work_order_id} className="hover:bg-gray-50">
                   <td className="px-4 py-2 font-medium text-werco-primary">{job.work_order_number}</td>
-                  <td className="px-4 py-2">{job.operation_name}</td>
+                  <td className="px-4 py-2 text-sm">{job.current_operation_name}</td>
+                  <td className="px-4 py-2">
+                    <span className="text-sm font-medium">Op {job.operations_complete + 1}/{job.total_operations}</span>
+                  </td>
                   <td className="px-4 py-2">
                     <div className="text-sm">{job.part_number}</div>
                     <div className="text-xs text-gray-500">{job.part_name}</div>
@@ -431,7 +443,7 @@ export default function Scheduling() {
                     {workCenters.find(wc => wc.id === job.work_center_id)?.code}
                   </td>
                   <td className="px-4 py-2 text-right text-sm">
-                    {(job.setup_hours + job.run_hours).toFixed(1)}
+                    {job.remaining_hours.toFixed(1)}h
                   </td>
                   <td className="px-4 py-2 text-sm">
                     {job.due_date ? format(parseISO(job.due_date), 'MMM d') : '-'}
@@ -458,7 +470,7 @@ export default function Scheduling() {
             </tbody>
           </table>
           {jobs.filter(j => !j.scheduled_start && j.status !== 'complete').length === 0 && (
-            <p className="text-center text-gray-500 py-4">All operations are scheduled</p>
+            <p className="text-center text-gray-500 py-4">All work orders are scheduled</p>
           )}
         </div>
       </div>
@@ -495,42 +507,38 @@ export default function Scheduling() {
       {showScheduleModal && selectedJob && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Schedule Operation</h3>
+            <h3 className="text-lg font-semibold mb-4">Schedule Work Order</h3>
             <div className="bg-gray-50 rounded p-3 mb-4">
-              <p className="font-medium">{selectedJob.work_order_number} - {selectedJob.operation_name}</p>
+              <p className="font-medium">{selectedJob.work_order_number}</p>
               <p className="text-sm text-gray-600">{selectedJob.part_number} - {selectedJob.part_name}</p>
               <p className="text-sm text-gray-500 mt-1">
-                Est. Hours: {(selectedJob.setup_hours + selectedJob.run_hours).toFixed(1)} |
+                Progress: Op {selectedJob.operations_complete + 1}/{selectedJob.total_operations} |
+                Remaining: {selectedJob.remaining_hours.toFixed(1)}h |
                 Qty: {selectedJob.quantity}
+              </p>
+              <p className="text-sm text-werco-primary mt-1">
+                Next Op: {selectedJob.current_operation_name}
               </p>
             </div>
             <form onSubmit={handleSchedule} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Start Date *</label>
-                  <input
-                    type="date"
-                    value={scheduleForm.scheduled_start}
-                    onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_start: e.target.value })}
-                    className="input"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">End Date</label>
-                  <input
-                    type="date"
-                    value={scheduleForm.scheduled_end}
-                    onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_end: e.target.value })}
-                    className="input"
-                  />
-                </div>
+              <div>
+                <label className="label">Start Date *</label>
+                <input
+                  type="date"
+                  value={scheduleForm.scheduled_start}
+                  onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_start: e.target.value })}
+                  className="input"
+                  required
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Scheduling this work order will start the first operation. Subsequent operations will auto-advance when each is completed.
+                </p>
               </div>
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <button type="button" onClick={() => setShowScheduleModal(false)} className="btn-secondary">
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary">Schedule</button>
+                <button type="submit" className="btn-primary">Schedule Work Order</button>
               </div>
             </form>
           </div>

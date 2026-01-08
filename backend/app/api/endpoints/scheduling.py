@@ -30,6 +30,89 @@ class WorkCenterUpdate(BaseModel):
     work_center_id: int
 
 
+@router.get("/work-orders")
+def get_schedulable_work_orders(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    work_center_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get work orders for scheduling view (shows WO with its current/first operation)"""
+    query = db.query(WorkOrder).options(
+        joinedload(WorkOrder.part),
+        joinedload(WorkOrder.operations)
+    ).filter(
+        WorkOrder.status.in_([
+            WorkOrderStatus.RELEASED,
+            WorkOrderStatus.IN_PROGRESS,
+            WorkOrderStatus.ON_HOLD
+        ])
+    )
+    
+    work_orders = query.order_by(
+        WorkOrder.priority,
+        WorkOrder.due_date
+    ).all()
+    
+    result = []
+    for wo in work_orders:
+        if not wo.operations:
+            continue
+            
+        # Get operations sorted by sequence
+        operations = sorted(wo.operations, key=lambda op: op.sequence)
+        
+        # Find current operation (first non-complete operation)
+        current_op = None
+        for op in operations:
+            if op.status != OperationStatus.COMPLETE:
+                current_op = op
+                break
+        
+        # If all complete, skip this work order
+        if not current_op:
+            continue
+        
+        # Filter by work center if specified
+        if work_center_id and current_op.work_center_id != work_center_id:
+            continue
+        
+        # Calculate total remaining hours
+        remaining_hours = sum(
+            float(op.setup_time_hours or 0) + float(op.run_time_hours or 0)
+            for op in operations if op.status != OperationStatus.COMPLETE
+        )
+        
+        result.append({
+            "id": wo.id,
+            "work_order_id": wo.id,
+            "work_order_number": wo.work_order_number,
+            "part_number": wo.part.part_number if wo.part else "",
+            "part_name": wo.part.name if wo.part else "",
+            "current_operation_id": current_op.id,
+            "current_operation_name": current_op.name,
+            "current_operation_number": current_op.operation_number,
+            "current_operation_sequence": current_op.sequence,
+            "work_center_id": current_op.work_center_id,
+            "status": wo.status.value if hasattr(wo.status, 'value') else wo.status,
+            "operation_status": current_op.status.value if hasattr(current_op.status, 'value') else current_op.status,
+            "scheduled_start": current_op.scheduled_start.isoformat() if current_op.scheduled_start else None,
+            "scheduled_end": current_op.scheduled_end.isoformat() if current_op.scheduled_end else None,
+            "due_date": wo.due_date.isoformat() if wo.due_date else None,
+            "quantity": float(wo.quantity_ordered),
+            "quantity_complete": float(wo.quantity_complete or 0),
+            "priority": wo.priority,
+            "total_operations": len(operations),
+            "operations_complete": sum(1 for op in operations if op.status == OperationStatus.COMPLETE),
+            "remaining_hours": remaining_hours,
+            "setup_hours": float(current_op.setup_time_hours or 0),
+            "run_hours": float(current_op.run_time_hours or 0)
+        })
+    
+    return result
+
+
 @router.get("/jobs")
 def get_scheduled_jobs(
     start_date: Optional[str] = None,
@@ -38,7 +121,7 @@ def get_scheduled_jobs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get all operations for scheduling view"""
+    """Get all operations for scheduling view (legacy endpoint)"""
     query = db.query(WorkOrderOperation).options(
         joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
     ).join(WorkOrder).filter(
@@ -86,6 +169,80 @@ def get_scheduled_jobs(
     return result
 
 
+class WorkOrderScheduleUpdate(BaseModel):
+    scheduled_start: date
+    work_center_id: Optional[int] = None  # Override first operation's work center
+
+
+@router.put("/work-orders/{work_order_id}/schedule")
+def schedule_work_order(
+    work_order_id: int,
+    schedule: WorkOrderScheduleUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+):
+    """
+    Schedule an entire work order by scheduling its first operation.
+    The work order will automatically flow through subsequent operations as each completes.
+    """
+    from datetime import timedelta
+    
+    work_order = db.query(WorkOrder).options(
+        joinedload(WorkOrder.operations)
+    ).filter(WorkOrder.id == work_order_id).first()
+    
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    
+    if not work_order.operations:
+        raise HTTPException(status_code=400, detail="Work order has no operations")
+    
+    # Get operations sorted by sequence
+    operations = sorted(work_order.operations, key=lambda op: op.sequence)
+    first_op = operations[0]
+    
+    # Optionally override work center for first operation
+    if schedule.work_center_id:
+        from app.models.work_center import WorkCenter
+        work_center = db.query(WorkCenter).filter(
+            WorkCenter.id == schedule.work_center_id,
+            WorkCenter.is_active == True
+        ).first()
+        if not work_center:
+            raise HTTPException(status_code=404, detail="Work center not found or inactive")
+        first_op.work_center_id = schedule.work_center_id
+    
+    # Schedule first operation
+    first_op.scheduled_start = schedule.scheduled_start
+    
+    # Calculate estimated end based on setup + run time
+    total_hours = float(first_op.setup_time_hours or 0) + float(first_op.run_time_hours or 0)
+    days_needed = max(1, int(total_hours / 8) + (1 if total_hours % 8 > 0 else 0))
+    first_op.scheduled_end = schedule.scheduled_start + timedelta(days=days_needed - 1)
+    
+    # Mark first operation as ready if work order is released
+    if work_order.status in [WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]:
+        if first_op.status == OperationStatus.PENDING:
+            first_op.status = OperationStatus.READY
+    
+    # Clear scheduling for subsequent operations (they will be scheduled when previous completes)
+    for op in operations[1:]:
+        op.scheduled_start = None
+        op.scheduled_end = None
+    
+    db.commit()
+    
+    return {
+        "message": f"Work order {work_order.work_order_number} scheduled",
+        "work_order_id": work_order_id,
+        "first_operation_id": first_op.id,
+        "scheduled_start": schedule.scheduled_start.isoformat(),
+        "scheduled_end": first_op.scheduled_end.isoformat() if first_op.scheduled_end else None,
+        "work_center_id": first_op.work_center_id,
+        "total_operations": len(operations)
+    }
+
+
 @router.put("/operations/{operation_id}/schedule")
 def schedule_operation(
     operation_id: int,
@@ -93,7 +250,7 @@ def schedule_operation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
-    """Schedule or reschedule an operation"""
+    """Schedule or reschedule an individual operation"""
     operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
