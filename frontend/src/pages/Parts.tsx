@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import { Part, PartType } from '../types';
-import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 
 const typeColors: Record<PartType, string> = {
   manufactured: 'bg-blue-100 text-blue-800',
@@ -9,6 +9,14 @@ const typeColors: Record<PartType, string> = {
   assembly: 'bg-purple-100 text-purple-800',
   raw_material: 'bg-yellow-100 text-yellow-800',
 };
+
+interface BOMItem {
+  id: number;
+  component_part_id: number;
+  quantity: number;
+  item_number: number;
+  component_part?: Part;
+}
 
 export default function Parts() {
   const [parts, setParts] = useState<Part[]>([]);
@@ -33,6 +41,10 @@ export default function Parts() {
   });
   const [customerSearch, setCustomerSearch] = useState('');
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
+  const [expandedParts, setExpandedParts] = useState<Set<number>>(new Set());
+  const [bomData, setBomData] = useState<Record<number, BOMItem[]>>({});
+  const [loadingBom, setLoadingBom] = useState<number | null>(null);
+  const [showComponentsOnly, setShowComponentsOnly] = useState(false);
 
   // Get unique customers from existing parts
   const existingCustomers = useMemo(() => {
@@ -66,16 +78,66 @@ export default function Parts() {
     loadParts();
   }, [loadParts]);
 
-  const filteredParts = parts.filter(part => {
-    if (!search) return true;
-    const searchLower = search.toLowerCase();
-    return (
-      part.part_number.toLowerCase().includes(searchLower) ||
-      part.name.toLowerCase().includes(searchLower) ||
-      part.description?.toLowerCase().includes(searchLower) ||
-      part.customer_part_number?.toLowerCase().includes(searchLower)
-    );
-  });
+  // Get all component part IDs (parts that are used in BOMs)
+  const componentPartIds = useMemo(() => {
+    const ids = new Set<number>();
+    Object.values(bomData).forEach(items => {
+      items.forEach(item => ids.add(item.component_part_id));
+    });
+    return ids;
+  }, [bomData]);
+
+  // Filter parts - optionally hide components that are part of assemblies
+  const filteredParts = useMemo(() => {
+    let filtered = parts.filter(part => {
+      if (!search) return true;
+      const searchLower = search.toLowerCase();
+      return (
+        part.part_number.toLowerCase().includes(searchLower) ||
+        part.name.toLowerCase().includes(searchLower) ||
+        part.description?.toLowerCase().includes(searchLower) ||
+        part.customer_part_number?.toLowerCase().includes(searchLower)
+      );
+    });
+    
+    // Optionally hide parts that are components of loaded assemblies
+    if (!showComponentsOnly && componentPartIds.size > 0) {
+      filtered = filtered.filter(part => !componentPartIds.has(part.id));
+    }
+    
+    return filtered;
+  }, [parts, search, showComponentsOnly, componentPartIds]);
+
+  // Toggle assembly expansion
+  const toggleExpand = async (partId: number) => {
+    const newExpanded = new Set(expandedParts);
+    if (newExpanded.has(partId)) {
+      newExpanded.delete(partId);
+    } else {
+      newExpanded.add(partId);
+      // Load BOM data if not already loaded
+      if (!bomData[partId]) {
+        setLoadingBom(partId);
+        try {
+          const bom = await api.getBOMByPart(partId);
+          if (bom && bom.items) {
+            setBomData(prev => ({ ...prev, [partId]: bom.items }));
+          } else {
+            setBomData(prev => ({ ...prev, [partId]: [] }));
+          }
+        } catch (err) {
+          console.error('Failed to load BOM:', err);
+          setBomData(prev => ({ ...prev, [partId]: [] }));
+        } finally {
+          setLoadingBom(null);
+        }
+      }
+    }
+    setExpandedParts(newExpanded);
+  };
+
+  // Get part by ID for BOM display
+  const getPartById = (partId: number) => parts.find(p => p.id === partId);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -185,6 +247,7 @@ export default function Parts() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase w-8"></th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part #</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
@@ -198,51 +261,131 @@ export default function Parts() {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {filteredParts.map((part) => (
-                <tr key={part.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-4">
-                    <span className="font-medium text-werco-primary">{part.part_number}</span>
-                  </td>
-                  <td className="px-4 py-4">
-                    <div>
-                      <div className="font-medium">{part.name}</div>
-                      {part.customer_part_number && (
-                        <div className="text-sm text-gray-500">Cust P/N: {part.customer_part_number}</div>
+                <React.Fragment key={part.id}>
+                  {/* Main part row */}
+                  <tr className="hover:bg-gray-50">
+                    <td className="px-4 py-4">
+                      {part.part_type === 'assembly' && (
+                        <button
+                          onClick={() => toggleExpand(part.id)}
+                          className="text-gray-400 hover:text-gray-600"
+                          title={expandedParts.has(part.id) ? 'Collapse BOM' : 'Expand BOM'}
+                        >
+                          {loadingBom === part.id ? (
+                            <div className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-werco-primary"></div>
+                          ) : expandedParts.has(part.id) ? (
+                            <ChevronDownIcon className="h-5 w-5" />
+                          ) : (
+                            <ChevronRightIcon className="h-5 w-5" />
+                          )}
+                        </button>
                       )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-4 text-sm">{part.customer_name || '-'}</td>
-                  <td className="px-4 py-4">
-                    <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${typeColors[part.part_type]}`}>
-                      {part.part_type.replace('_', ' ')}
-                    </span>
-                  </td>
-                  <td className="px-4 py-4 font-medium">{part.revision}</td>
-                  <td className="px-4 py-4">${Number(part.standard_cost || 0).toFixed(2)}</td>
-                  <td className="px-4 py-4">
-                    {part.is_critical && (
-                      <span className="inline-flex px-2 py-1 rounded bg-red-100 text-red-800 text-xs font-medium">
-                        Critical
+                    </td>
+                    <td className="px-4 py-4">
+                      <span className="font-medium text-werco-primary">{part.part_number}</span>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div>
+                        <div className="font-medium">{part.name}</div>
+                        {part.customer_part_number && (
+                          <div className="text-sm text-gray-500">Cust P/N: {part.customer_part_number}</div>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-sm">{part.customer_name || '-'}</td>
+                    <td className="px-4 py-4">
+                      <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${typeColors[part.part_type]}`}>
+                        {part.part_type.replace('_', ' ')}
                       </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-4">
-                    <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
-                      part.status === 'active' ? 'bg-green-100 text-green-800' :
-                      part.status === 'obsolete' ? 'bg-gray-100 text-gray-800' :
-                      'bg-yellow-100 text-yellow-800'
-                    }`}>
-                      {part.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-4">
-                    <button
-                      onClick={() => handleEdit(part)}
-                      className="text-gray-400 hover:text-gray-600"
-                    >
-                      <PencilIcon className="h-5 w-5" />
-                    </button>
-                  </td>
-                </tr>
+                    </td>
+                    <td className="px-4 py-4 font-medium">{part.revision}</td>
+                    <td className="px-4 py-4">${Number(part.standard_cost || 0).toFixed(2)}</td>
+                    <td className="px-4 py-4">
+                      {part.is_critical && (
+                        <span className="inline-flex px-2 py-1 rounded bg-red-100 text-red-800 text-xs font-medium">
+                          Critical
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-4">
+                      <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
+                        part.status === 'active' ? 'bg-green-100 text-green-800' :
+                        part.status === 'obsolete' ? 'bg-gray-100 text-gray-800' :
+                        'bg-yellow-100 text-yellow-800'
+                      }`}>
+                        {part.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4">
+                      <button
+                        onClick={() => handleEdit(part)}
+                        className="text-gray-400 hover:text-gray-600"
+                      >
+                        <PencilIcon className="h-5 w-5" />
+                      </button>
+                    </td>
+                  </tr>
+                  
+                  {/* BOM items (expanded) */}
+                  {expandedParts.has(part.id) && bomData[part.id] && bomData[part.id].length > 0 && (
+                    bomData[part.id].map((item) => {
+                      const componentPart = item.component_part || getPartById(item.component_part_id);
+                      return (
+                        <tr key={`bom-${part.id}-${item.id}`} className="bg-gray-50 hover:bg-gray-100">
+                          <td className="px-4 py-2"></td>
+                          <td className="px-4 py-2 pl-8">
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-400">└</span>
+                              <span className="text-sm text-werco-primary">
+                                {componentPart?.part_number || `Part #${item.component_part_id}`}
+                              </span>
+                              <span className="text-xs bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded">
+                                x{item.quantity}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-2 text-sm text-gray-600">
+                            {componentPart?.name || '-'}
+                          </td>
+                          <td className="px-4 py-2 text-sm text-gray-500">-</td>
+                          <td className="px-4 py-2">
+                            {componentPart && (
+                              <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${typeColors[componentPart.part_type]}`}>
+                                {componentPart.part_type.replace('_', ' ')}
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-sm text-gray-600">{componentPart?.revision || '-'}</td>
+                          <td className="px-4 py-2 text-sm text-gray-600">
+                            ${Number(componentPart?.standard_cost || 0).toFixed(2)}
+                          </td>
+                          <td className="px-4 py-2"></td>
+                          <td className="px-4 py-2"></td>
+                          <td className="px-4 py-2">
+                            {componentPart && (
+                              <button
+                                onClick={() => handleEdit(componentPart)}
+                                className="text-gray-400 hover:text-gray-600"
+                              >
+                                <PencilIcon className="h-4 w-4" />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                  
+                  {/* No BOM items message */}
+                  {expandedParts.has(part.id) && bomData[part.id] && bomData[part.id].length === 0 && (
+                    <tr className="bg-gray-50">
+                      <td className="px-4 py-2"></td>
+                      <td colSpan={9} className="px-4 py-2 pl-8 text-sm text-gray-500 italic">
+                        No BOM defined for this assembly
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
