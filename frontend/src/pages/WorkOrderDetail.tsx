@@ -260,57 +260,101 @@ export default function WorkOrderDetail() {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Seq</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Group</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Est. Hours</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actual Hours</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty Complete</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {workOrder.operations.map((op) => (
-                  <tr key={op.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-4 font-medium">{op.sequence}</td>
-                    <td className="px-4 py-4">
-                      <div>
-                        <div className="font-medium">{op.operation_number || `OP${op.sequence}`}</div>
-                        <div className="text-sm text-gray-500">{op.name}</div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4 text-sm">{op.work_center_id}</td>
-                    <td className="px-4 py-4 text-sm">
-                      {(Number(op.setup_time_hours || 0) + Number(op.run_time_hours || 0)).toFixed(2)}
-                    </td>
-                    <td className="px-4 py-4 text-sm">
-                      {(Number(op.actual_setup_hours || 0) + Number(op.actual_run_hours || 0)).toFixed(2)}
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className="font-medium">{op.quantity_complete}</span>
-                      <span className="text-gray-500">/{workOrder.quantity_ordered}</span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[op.status]}`}>
-                        {op.status.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4 text-center">
-                      {op.status !== 'complete' && workOrder.status !== 'draft' && (
-                        <button
-                          onClick={() => handleCompleteOperation(op.id, op.name)}
-                          className="text-green-600 hover:text-green-800 text-sm font-medium"
-                          title="Complete Operation"
-                        >
-                          <CheckCircleIcon className="h-5 w-5 inline" /> Complete
-                        </button>
-                      )}
-                      {op.status === 'complete' && (
-                        <span className="text-gray-400 text-sm">Done</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {(() => {
+                  let lastGroup = '';
+                  return workOrder.operations.map((op, index) => {
+                    const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
+                    if (op.operation_group) lastGroup = op.operation_group;
+                    
+                    const groupColors: Record<string, string> = {
+                      'LASER': 'bg-red-100 text-red-800',
+                      'MACHINE': 'bg-blue-100 text-blue-800',
+                      'BEND': 'bg-orange-100 text-orange-800',
+                      'WELD': 'bg-yellow-100 text-yellow-800',
+                      'FINISH': 'bg-purple-100 text-purple-800',
+                      'ASSEMBLY': 'bg-green-100 text-green-800',
+                      'INSPECT': 'bg-cyan-100 text-cyan-800',
+                    };
+                    
+                    return (
+                      <tr 
+                        key={op.id} 
+                        className={`hover:bg-gray-50 ${isNewGroup ? 'border-t-2 border-gray-300' : ''}`}
+                      >
+                        <td className="px-4 py-3 font-medium text-sm">{op.sequence}</td>
+                        <td className="px-4 py-3">
+                          {op.operation_group && (
+                            <span className={`inline-flex px-2 py-1 rounded text-xs font-bold ${groupColors[op.operation_group] || 'bg-gray-100 text-gray-800'}`}>
+                              {op.operation_group}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div>
+                            <div className="font-medium text-sm">{op.name}</div>
+                            {op.description && (
+                              <div className="text-xs text-gray-500 mt-0.5">{op.description}</div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          {op.component_part_number ? (
+                            <div>
+                              <div className="font-medium text-sm text-blue-600">{op.component_part_number}</div>
+                              {op.component_part_name && (
+                                <div className="text-xs text-gray-500">{op.component_part_name}</div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-gray-400 text-sm">-</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          {op.component_quantity ? (
+                            <span className="font-medium text-sm">{op.component_quantity}</span>
+                          ) : (
+                            <div>
+                              <span className="font-medium text-sm">{op.quantity_complete}</span>
+                              <span className="text-gray-500 text-sm">/{workOrder.quantity_ordered}</span>
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-sm">
+                          {(Number(op.setup_time_hours || 0) + Number(op.run_time_hours || 0)).toFixed(2)}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[op.status]}`}>
+                            {op.status.replace('_', ' ')}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {op.status !== 'complete' && workOrder.status !== 'draft' && (
+                            <button
+                              onClick={() => handleCompleteOperation(op.id, op.name)}
+                              className="text-green-600 hover:text-green-800 text-sm font-medium"
+                              title="Complete Operation"
+                            >
+                              <CheckCircleIcon className="h-5 w-5 inline" /> Complete
+                            </button>
+                          )}
+                          {op.status === 'complete' && (
+                            <span className="text-gray-400 text-sm">Done</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  });
+                })()}
               </tbody>
             </table>
           </div>

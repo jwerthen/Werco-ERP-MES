@@ -91,11 +91,18 @@ class WorkOrderOperation(Base):
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False)
     work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=False)
     
+    # Component tracking (for assembly WOs with BOM)
+    component_part_id = Column(Integer, ForeignKey("parts.id"), nullable=True)
+    component_quantity = Column(Float, default=0.0)  # Qty of this component needed
+    
     # Operation details
     sequence = Column(Integer, nullable=False)  # 10, 20, 30...
     operation_number = Column(String(20))  # OP10, OP20...
     name = Column(String(255), nullable=False)
     description = Column(Text)
+    
+    # Grouping for batch operations
+    operation_group = Column(String(50), nullable=True)  # e.g., "LASER", "BEND", "WELD"
     
     # Work instructions
     setup_instructions = Column(Text)
@@ -136,3 +143,4 @@ class WorkOrderOperation(Base):
     work_order = relationship("WorkOrder", back_populates="operations")
     work_center = relationship("WorkCenter", back_populates="operations")
     time_entries = relationship("TimeEntry", back_populates="operation")
+    component_part = relationship("Part", foreign_keys=[component_part_id])

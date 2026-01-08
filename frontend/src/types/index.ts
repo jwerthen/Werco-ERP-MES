@@ -115,6 +115,12 @@ export interface WorkOrderOperation {
   actual_end?: string;
   created_at: string;
   updated_at: string;
+  // Component tracking for assembly WOs
+  component_part_id?: number;
+  component_part_number?: string;
+  component_part_name?: string;
+  component_quantity?: number;
+  operation_group?: string;
 }
 
 export type OperationStatus = 'pending' | 'ready' | 'in_progress' | 'complete' | 'on_hold';

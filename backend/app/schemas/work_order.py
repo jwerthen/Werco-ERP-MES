@@ -65,6 +65,13 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     created_at: datetime
     updated_at: datetime
     
+    # Component tracking for assembly WOs
+    component_part_id: Optional[int] = None
+    component_part_number: Optional[str] = None
+    component_part_name: Optional[str] = None
+    component_quantity: Optional[float] = None
+    operation_group: Optional[str] = None
+    
     class Config:
         from_attributes = True
 
