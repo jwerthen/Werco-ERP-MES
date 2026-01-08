@@ -483,8 +483,8 @@ export default function RoutingPage() {
 
       {/* Add/Edit Operation Modal */}
       {showAddOperationModal && selectedRouting && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowAddOperationModal(false)}>
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-4">
               {editingOperation ? 'Edit Operation' : 'Add Operation'}
             </h3>
@@ -556,7 +556,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.setup}
                       onChange={(e) => setTimeUnits({ ...timeUnits, setup: e.target.value as 'hrs' | 'min' })}
-                      className="input w-20"
+                      className="border border-gray-300 rounded-lg px-3 py-2 w-20 bg-white cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -580,7 +580,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.run}
                       onChange={(e) => setTimeUnits({ ...timeUnits, run: e.target.value as 'hrs' | 'min' })}
-                      className="input w-20"
+                      className="border border-gray-300 rounded-lg px-3 py-2 w-20 bg-white cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -606,7 +606,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.move}
                       onChange={(e) => setTimeUnits({ ...timeUnits, move: e.target.value as 'hrs' | 'min' })}
-                      className="input w-20"
+                      className="border border-gray-300 rounded-lg px-3 py-2 w-20 bg-white cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -630,7 +630,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.queue}
                       onChange={(e) => setTimeUnits({ ...timeUnits, queue: e.target.value as 'hrs' | 'min' })}
-                      className="input w-20"
+                      className="border border-gray-300 rounded-lg px-3 py-2 w-20 bg-white cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
