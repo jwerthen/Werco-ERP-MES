@@ -61,12 +61,33 @@ export default function Parts() {
     return existingCustomers.filter(c => c.toLowerCase().includes(search));
   }, [existingCustomers, customerSearch]);
 
+  const [allComponentIds, setAllComponentIds] = useState<Set<number>>(new Set());
+
   const loadParts = useCallback(async () => {
     try {
       const params: any = {};
       if (typeFilter) params.part_type = typeFilter;
-      const response = await api.getParts(params);
-      setParts(response);
+      const [partsResponse, bomsResponse] = await Promise.all([
+        api.getParts(params),
+        api.getBOMs({ active_only: true })
+      ]);
+      setParts(partsResponse);
+      
+      // Build set of all component part IDs from all BOMs
+      const componentIds = new Set<number>();
+      const bomDataMap: Record<number, BOMItem[]> = {};
+      
+      for (const bom of bomsResponse) {
+        if (bom.items && bom.items.length > 0) {
+          bomDataMap[bom.part_id] = bom.items;
+          bom.items.forEach((item: BOMItem) => {
+            componentIds.add(item.component_part_id);
+          });
+        }
+      }
+      
+      setAllComponentIds(componentIds);
+      setBomData(bomDataMap);
     } catch (err) {
       console.error('Failed to load parts:', err);
     } finally {
@@ -78,16 +99,7 @@ export default function Parts() {
     loadParts();
   }, [loadParts]);
 
-  // Get all component part IDs (parts that are used in BOMs)
-  const componentPartIds = useMemo(() => {
-    const ids = new Set<number>();
-    Object.values(bomData).forEach(items => {
-      items.forEach(item => ids.add(item.component_part_id));
-    });
-    return ids;
-  }, [bomData]);
-
-  // Filter parts - optionally hide components that are part of assemblies
+  // Filter parts - hide components that are part of assemblies (unless searching)
   const filteredParts = useMemo(() => {
     let filtered = parts.filter(part => {
       if (!search) return true;
@@ -100,13 +112,13 @@ export default function Parts() {
       );
     });
     
-    // Optionally hide parts that are components of loaded assemblies
-    if (!showComponentsOnly && componentPartIds.size > 0) {
-      filtered = filtered.filter(part => !componentPartIds.has(part.id));
+    // Hide parts that are components of assemblies (unless searching or toggled)
+    if (!search && !showComponentsOnly && allComponentIds.size > 0) {
+      filtered = filtered.filter(part => !allComponentIds.has(part.id));
     }
     
     return filtered;
-  }, [parts, search, showComponentsOnly, componentPartIds]);
+  }, [parts, search, showComponentsOnly, allComponentIds]);
 
   // Toggle assembly expansion
   const toggleExpand = async (partId: number) => {
