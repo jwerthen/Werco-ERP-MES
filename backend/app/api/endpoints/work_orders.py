@@ -89,6 +89,81 @@ def list_work_orders(
     return result
 
 
+@router.get("/preview-operations/{part_id}")
+def preview_work_order_operations(
+    part_id: int,
+    quantity: float = 1,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Preview what operations would be generated for a part (for debugging)"""
+    part = db.query(Part).filter(Part.id == part_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+    
+    result = {
+        "part_id": part_id,
+        "part_number": part.part_number,
+        "part_type": part.part_type.value,
+        "is_assembly": part.part_type == PartType.ASSEMBLY,
+        "quantity": quantity,
+        "bom_found": False,
+        "bom_status": None,
+        "bom_items_count": 0,
+        "component_routings": [],
+        "operations_preview": []
+    }
+    
+    if part.part_type == PartType.ASSEMBLY:
+        # Check for BOM
+        bom = db.query(BOM).filter(
+            BOM.part_id == part_id,
+            BOM.is_active == True
+        ).first()
+        
+        if bom:
+            result["bom_found"] = True
+            result["bom_status"] = bom.status
+            
+            # Get BOM items
+            items = db.query(BOMItem).filter(BOMItem.bom_id == bom.id).all()
+            result["bom_items_count"] = len(items)
+            
+            for item in items:
+                component = db.query(Part).filter(Part.id == item.component_part_id).first()
+                if not component:
+                    continue
+                    
+                # Check for routing
+                routing = db.query(Routing).filter(
+                    Routing.part_id == component.id,
+                    Routing.is_active == True
+                ).first()
+                
+                comp_info = {
+                    "part_id": component.id,
+                    "part_number": component.part_number,
+                    "quantity_per": float(item.quantity),
+                    "total_qty": float(item.quantity) * quantity,
+                    "has_routing": routing is not None,
+                    "routing_status": routing.status if routing else None,
+                    "routing_operations": []
+                }
+                
+                if routing:
+                    for op in routing.operations:
+                        if op.is_active:
+                            comp_info["routing_operations"].append({
+                                "sequence": op.sequence,
+                                "name": op.name,
+                                "work_center_id": op.work_center_id
+                            })
+                
+                result["component_routings"].append(comp_info)
+    
+    return result
+
+
 def get_work_center_group(work_center: WorkCenter) -> str:
     """Get operation group name from work center type"""
     if not work_center:
@@ -150,10 +225,26 @@ def create_work_order(
         # Check for BOM (for assemblies)
         bom = None
         if is_assembly:
+            # Get BOM - prefer released, then draft
             bom = db.query(BOM).filter(
                 BOM.part_id == work_order_in.part_id,
-                BOM.is_active == True
+                BOM.is_active == True,
+                BOM.status == "released"
             ).first()
+            
+            if not bom:
+                bom = db.query(BOM).filter(
+                    BOM.part_id == work_order_in.part_id,
+                    BOM.is_active == True,
+                    BOM.status == "draft"
+                ).first()
+            
+            # Also try without status filter as fallback
+            if not bom:
+                bom = db.query(BOM).filter(
+                    BOM.part_id == work_order_in.part_id,
+                    BOM.is_active == True
+                ).first()
         
         if is_assembly and bom:
             # Assembly with BOM: collect all component operations and group by work center
