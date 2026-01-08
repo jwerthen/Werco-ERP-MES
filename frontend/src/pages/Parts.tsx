@@ -28,7 +28,8 @@ export default function Parts() {
     requires_inspection: true,
     customer_name: '',
     customer_part_number: '',
-    drawing_number: ''
+    drawing_number: '',
+    version: 0
   });
   const [customerSearch, setCustomerSearch] = useState('');
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
@@ -105,7 +106,8 @@ export default function Parts() {
       requires_inspection: part.requires_inspection,
       customer_name: part.customer_name || '',
       customer_part_number: part.customer_part_number || '',
-      drawing_number: part.drawing_number || ''
+      drawing_number: part.drawing_number || '',
+      version: part.version || 0
     });
     setCustomerSearch(part.customer_name || '');
     setShowModal(true);
@@ -124,7 +126,8 @@ export default function Parts() {
       requires_inspection: true,
       customer_name: '',
       customer_part_number: '',
-      drawing_number: ''
+      drawing_number: '',
+      version: 0
     });
     setCustomerSearch('');
     setShowCustomerDropdown(false);
