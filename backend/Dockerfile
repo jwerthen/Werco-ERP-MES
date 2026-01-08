@@ -22,5 +22,5 @@ COPY . .
 EXPOSE 8000
 
 # Start command - Railway provides PORT environment variable
-# Note: Migrations are run via Base.metadata.create_all in main.py for now
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Run Alembic migrations, then start the server
+CMD alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
