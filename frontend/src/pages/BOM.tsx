@@ -69,7 +69,9 @@ export default function BOMPage() {
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set());
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showAddItemModal, setShowAddItemModal] = useState(false);
+  const [showNewPartModal, setShowNewPartModal] = useState(false);
   const [viewMode, setViewMode] = useState<'single' | 'exploded'>('single');
+  const [partSearch, setPartSearch] = useState('');
 
   const [newBOM, setNewBOM] = useState({ part_id: 0, revision: 'A', description: '', bom_type: 'standard' });
   const [newItem, setNewItem] = useState({
@@ -81,6 +83,13 @@ export default function BOMPage() {
     scrap_factor: 0,
     is_optional: false,
     notes: ''
+  });
+  const [newPart, setNewPart] = useState({
+    part_number: '',
+    name: '',
+    part_type: 'manufactured' as 'manufactured' | 'purchased' | 'assembly' | 'raw_material',
+    revision: 'A',
+    description: ''
   });
 
   useEffect(() => {
@@ -141,6 +150,7 @@ export default function BOMPage() {
       setSelectedBOM(updated);
       setBoms(boms.map(b => b.id === updated.id ? updated : b));
       setShowAddItemModal(false);
+      setPartSearch('');
       setNewItem({
         component_part_id: 0,
         item_number: (selectedBOM.items.length + 1) * 10,
@@ -153,6 +163,26 @@ export default function BOMPage() {
       });
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to add item');
+    }
+  };
+
+  const handleCreateNewPart = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const createdPart = await api.createPart(newPart);
+      // Add to parts list and select it
+      setParts([...parts, createdPart]);
+      setNewItem({ ...newItem, component_part_id: createdPart.id });
+      setShowNewPartModal(false);
+      setNewPart({
+        part_number: '',
+        name: '',
+        part_type: 'manufactured',
+        revision: 'A',
+        description: ''
+      });
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to create part');
     }
   };
 
@@ -481,24 +511,58 @@ export default function BOMPage() {
       {/* Add Item Modal */}
       {showAddItemModal && selectedBOM && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Add BOM Item</h3>
             <form onSubmit={handleAddItem} className="space-y-4">
               <div>
                 <label className="label">Component Part</label>
-                <select
-                  value={newItem.component_part_id}
-                  onChange={(e) => setNewItem({ ...newItem, component_part_id: parseInt(e.target.value) })}
-                  className="input"
-                  required
-                >
-                  <option value={0}>Select a part...</option>
-                  {parts.filter(p => p.id !== selectedBOM.part_id).map(part => (
-                    <option key={part.id} value={part.id}>
-                      {part.part_number} - {part.name} ({part.part_type})
-                    </option>
-                  ))}
-                </select>
+                <div className="flex gap-2">
+                  <div className="flex-1 relative">
+                    <input
+                      type="text"
+                      placeholder="Search parts..."
+                      value={partSearch}
+                      onChange={(e) => setPartSearch(e.target.value)}
+                      className="input mb-1"
+                    />
+                    <select
+                      value={newItem.component_part_id}
+                      onChange={(e) => setNewItem({ ...newItem, component_part_id: parseInt(e.target.value) })}
+                      className="input"
+                      required
+                      size={5}
+                    >
+                      <option value={0}>-- Select a part --</option>
+                      {parts
+                        .filter(p => p.id !== selectedBOM.part_id)
+                        .filter(p => {
+                          if (!partSearch) return true;
+                          const search = partSearch.toLowerCase();
+                          return p.part_number.toLowerCase().includes(search) || 
+                                 p.name.toLowerCase().includes(search);
+                        })
+                        .map(part => (
+                          <option key={part.id} value={part.id}>
+                            {part.part_number} - {part.name} ({part.part_type})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPartModal(true)}
+                    className="btn-secondary h-fit whitespace-nowrap"
+                    title="Create a new part"
+                  >
+                    <PlusIcon className="h-4 w-4 mr-1 inline" />
+                    New Part
+                  </button>
+                </div>
+                {newItem.component_part_id > 0 && (
+                  <div className="mt-1 text-sm text-green-600">
+                    Selected: {parts.find(p => p.id === newItem.component_part_id)?.part_number}
+                  </div>
+                )}
               </div>
               <div className="grid grid-cols-3 gap-4">
                 <div>
@@ -573,10 +637,85 @@ export default function BOMPage() {
                 </label>
               </div>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowAddItemModal(false)} className="btn-secondary">
+                <button type="button" onClick={() => { setShowAddItemModal(false); setPartSearch(''); }} className="btn-secondary">
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary">Add Item</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* New Part Modal (nested inside Add Item flow) */}
+      {showNewPartModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-semibold mb-4">Create New Part</h3>
+            <form onSubmit={handleCreateNewPart} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Part Number *</label>
+                  <input
+                    type="text"
+                    value={newPart.part_number}
+                    onChange={(e) => setNewPart({ ...newPart, part_number: e.target.value.toUpperCase() })}
+                    className="input"
+                    required
+                    placeholder="e.g., PART-001"
+                  />
+                </div>
+                <div>
+                  <label className="label">Revision</label>
+                  <input
+                    type="text"
+                    value={newPart.revision}
+                    onChange={(e) => setNewPart({ ...newPart, revision: e.target.value.toUpperCase() })}
+                    className="input"
+                    placeholder="A"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="label">Name *</label>
+                <input
+                  type="text"
+                  value={newPart.name}
+                  onChange={(e) => setNewPart({ ...newPart, name: e.target.value })}
+                  className="input"
+                  required
+                  placeholder="Part name"
+                />
+              </div>
+              <div>
+                <label className="label">Type *</label>
+                <select
+                  value={newPart.part_type}
+                  onChange={(e) => setNewPart({ ...newPart, part_type: e.target.value as any })}
+                  className="input"
+                  required
+                >
+                  <option value="manufactured">Manufactured</option>
+                  <option value="purchased">Purchased</option>
+                  <option value="assembly">Assembly</option>
+                  <option value="raw_material">Raw Material</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">Description</label>
+                <textarea
+                  value={newPart.description}
+                  onChange={(e) => setNewPart({ ...newPart, description: e.target.value })}
+                  className="input"
+                  rows={2}
+                  placeholder="Optional description"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2 border-t">
+                <button type="button" onClick={() => setShowNewPartModal(false)} className="btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary">Create & Select</button>
               </div>
             </form>
           </div>
