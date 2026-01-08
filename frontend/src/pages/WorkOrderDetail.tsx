@@ -8,6 +8,7 @@ import {
   PlayIcon,
   CheckCircleIcon,
   PrinterIcon,
+  CubeIcon,
 } from '@heroicons/react/24/outline';
 
 const statusColors: Record<string, string> = {
@@ -22,17 +23,54 @@ const statusColors: Record<string, string> = {
   ready: 'bg-blue-100 text-blue-800',
 };
 
+interface MaterialRequirement {
+  bom_item_id: number;
+  item_number: number;
+  part_id: number;
+  part_number: string;
+  part_name: string;
+  part_type: string;
+  quantity_per_assembly: number;
+  quantity_required: number;
+  scrap_factor: number;
+  scrap_allowance: number;
+  total_required: number;
+  unit_of_measure: string;
+  item_type: string;
+  is_optional: boolean;
+  notes: string | null;
+}
+
+interface MaterialRequirementsResponse {
+  work_order_id: number;
+  work_order_number: string;
+  quantity_ordered: number;
+  has_bom: boolean;
+  bom_id?: number;
+  bom_revision?: string;
+  materials: MaterialRequirement[];
+}
+
 export default function WorkOrderDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
 
   const loadWorkOrder = useCallback(async () => {
     try {
       const response = await api.getWorkOrder(parseInt(id!));
       setWorkOrder(response);
+      
+      // Load material requirements
+      try {
+        const matReqs = await api.getMaterialRequirements(parseInt(id!));
+        setMaterialReqs(matReqs);
+      } catch (e) {
+        // Material requirements may not exist for all parts
+      }
     } catch (err) {
       setError('Failed to load work order');
     } finally {
@@ -278,6 +316,78 @@ export default function WorkOrderDetail() {
           </div>
         )}
       </div>
+
+      {/* Material Requirements */}
+      {materialReqs && materialReqs.has_bom && materialReqs.materials.length > 0 && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <CubeIcon className="h-5 w-5 text-gray-500" />
+              <h2 className="text-lg font-semibold text-gray-900">Material Requirements</h2>
+            </div>
+            <span className="text-sm text-gray-500">
+              BOM Rev {materialReqs.bom_revision} • Qty: {materialReqs.quantity_ordered}
+            </span>
+          </div>
+          
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part Number</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty/Asm</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty Required</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Scrap</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total Needed</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">UOM</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {materialReqs.materials.map((mat) => (
+                  <tr key={mat.bom_item_id} className={mat.is_optional ? 'bg-yellow-50' : 'hover:bg-gray-50'}>
+                    <td className="px-4 py-3 text-sm font-medium">{mat.item_number}</td>
+                    <td className="px-4 py-3 text-sm font-medium text-blue-600">{mat.part_number}</td>
+                    <td className="px-4 py-3 text-sm text-gray-700">{mat.part_name}</td>
+                    <td className="px-4 py-3">
+                      <span className={`text-xs px-2 py-1 rounded ${
+                        mat.part_type === 'purchased' ? 'bg-green-100 text-green-800' :
+                        mat.part_type === 'manufactured' ? 'bg-blue-100 text-blue-800' :
+                        mat.part_type === 'raw_material' ? 'bg-yellow-100 text-yellow-800' :
+                        'bg-gray-100 text-gray-800'
+                      }`}>
+                        {mat.part_type.replace('_', ' ')}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-right">{mat.quantity_per_assembly}</td>
+                    <td className="px-4 py-3 text-sm text-right font-medium">{mat.quantity_required}</td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-500">
+                      {mat.scrap_allowance > 0 ? `+${mat.scrap_allowance}` : '-'}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-right font-bold text-green-700">{mat.total_required}</td>
+                    <td className="px-4 py-3 text-sm text-gray-500">{mat.unit_of_measure}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          
+          <div className="mt-4 text-sm text-gray-500">
+            <span className="bg-yellow-50 px-2 py-1 rounded">Optional items</span> highlighted in yellow
+          </div>
+        </div>
+      )}
+      
+      {materialReqs && !materialReqs.has_bom && (
+        <div className="card">
+          <div className="flex items-center gap-2 text-gray-500">
+            <CubeIcon className="h-5 w-5" />
+            <span>No BOM defined for this part</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

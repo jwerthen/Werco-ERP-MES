@@ -285,6 +285,75 @@ def start_work_order(
     return {"message": "Work order started"}
 
 
+@router.get("/{work_order_id}/material-requirements")
+def get_material_requirements(
+    work_order_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get BOM material requirements for a work order with quantities calculated"""
+    from app.models.bom import BOM, BOMItem
+    
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    
+    # Get BOM for the part
+    bom = db.query(BOM).filter(
+        BOM.part_id == work_order.part_id,
+        BOM.is_active == True
+    ).first()
+    
+    if not bom:
+        return {
+            "work_order_id": work_order_id,
+            "work_order_number": work_order.work_order_number,
+            "quantity_ordered": float(work_order.quantity_ordered),
+            "has_bom": False,
+            "materials": []
+        }
+    
+    # Get BOM items with component parts
+    items = db.query(BOMItem).filter(BOMItem.bom_id == bom.id).all()
+    
+    materials = []
+    for item in items:
+        component = db.query(Part).filter(Part.id == item.component_part_id).first()
+        if component:
+            qty_per_assembly = float(item.quantity)
+            qty_required = qty_per_assembly * float(work_order.quantity_ordered)
+            scrap_allowance = qty_required * float(item.scrap_factor or 0)
+            total_required = qty_required + scrap_allowance
+            
+            materials.append({
+                "bom_item_id": item.id,
+                "item_number": item.item_number,
+                "part_id": component.id,
+                "part_number": component.part_number,
+                "part_name": component.name,
+                "part_type": component.part_type.value if hasattr(component.part_type, 'value') else component.part_type,
+                "quantity_per_assembly": qty_per_assembly,
+                "quantity_required": round(qty_required, 3),
+                "scrap_factor": float(item.scrap_factor or 0),
+                "scrap_allowance": round(scrap_allowance, 3),
+                "total_required": round(total_required, 3),
+                "unit_of_measure": item.unit_of_measure or component.unit_of_measure.value,
+                "item_type": item.item_type.value if hasattr(item.item_type, 'value') else item.item_type,
+                "is_optional": item.is_optional,
+                "notes": item.notes
+            })
+    
+    return {
+        "work_order_id": work_order_id,
+        "work_order_number": work_order.work_order_number,
+        "quantity_ordered": float(work_order.quantity_ordered),
+        "has_bom": True,
+        "bom_id": bom.id,
+        "bom_revision": bom.revision,
+        "materials": sorted(materials, key=lambda x: x["item_number"])
+    }
+
+
 @router.post("/{work_order_id}/complete")
 def complete_work_order(
     work_order_id: int,

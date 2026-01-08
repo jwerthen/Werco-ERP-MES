@@ -308,6 +308,11 @@ class ApiService {
     return response.data;
   }
 
+  async getMaterialRequirements(workOrderId: number) {
+    const response = await this.api.get(`/work-orders/${workOrderId}/material-requirements`);
+    return response.data;
+  }
+
   // Operations
   async addOperation(workOrderId: number, data: any) {
     const response = await this.api.post(`/work-orders/${workOrderId}/operations`, data);
