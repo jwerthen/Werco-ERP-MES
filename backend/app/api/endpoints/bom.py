@@ -293,6 +293,11 @@ def add_bom_item(
             detail="Adding this component would create a circular reference in the BOM structure"
         )
     
+    # Inherit customer_name from parent assembly if component doesn't have one
+    parent_part = db.query(Part).filter(Part.id == bom.part_id).first()
+    if parent_part and parent_part.customer_name and not component.customer_name:
+        component.customer_name = parent_part.customer_name
+    
     item = BOMItem(bom_id=bom_id, **item_in.model_dump())
     db.add(item)
     db.commit()
