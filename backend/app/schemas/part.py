@@ -42,6 +42,7 @@ class PartBase(BaseModel):
     inspection_requirements: Optional[str] = Field(None, max_length=2000)
     
     # Customer info
+    customer_name: Optional[str] = Field(None, max_length=255)
     customer_part_number: Optional[str] = Field(None, max_length=100)
     drawing_number: Optional[str] = Field(None, max_length=100)
 
@@ -88,6 +89,7 @@ class PartUpdate(BaseModel):
     is_critical: Optional[bool] = None
     requires_inspection: Optional[bool] = None
     inspection_requirements: Optional[str] = Field(None, max_length=2000)
+    customer_name: Optional[str] = Field(None, max_length=255)
     customer_part_number: Optional[str] = Field(None, max_length=100)
     drawing_number: Optional[str] = Field(None, max_length=100)
     is_active: Optional[bool] = None
