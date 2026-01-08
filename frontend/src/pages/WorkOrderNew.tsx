@@ -103,26 +103,61 @@ export default function WorkOrderNew() {
 
     if (!partId) return;
 
+    // Find the selected part to check if it's an assembly
+    const selectedPart = parts.find(p => p.id === partId);
+    const isAssembly = selectedPart?.part_type === 'assembly';
+
     setLoadingRouting(true);
     try {
-      const routingRes = await api.getRoutingByPart(partId);
-      if (routingRes && routingRes.operations?.length > 0) {
-        setRouting(routingRes);
-        const ops: OperationPreview[] = routingRes.operations
-          .filter((op: RoutingOperation) => op.work_center)
-          .map((op: RoutingOperation) => ({
-            sequence: op.sequence,
-            operation_number: op.operation_number || `Op ${op.sequence}`,
+      if (isAssembly) {
+        // For assemblies, use the preview endpoint to get combined operations from BOM components
+        const previewRes = await api.previewWorkOrderOperations(partId, form.quantity_ordered);
+        if (previewRes && previewRes.operations_preview?.length > 0) {
+          // Create a fake routing object to indicate we have operations
+          setRouting({ id: 0, part_id: partId, revision: 'BOM', status: 'released', operations: [] } as any);
+          const ops: OperationPreview[] = previewRes.operations_preview.map((op: any, index: number) => ({
+            sequence: (index + 1) * 10,
+            operation_number: `Op ${(index + 1) * 10}`,
             name: op.name,
             work_center_id: op.work_center_id,
-            work_center_name: op.work_center?.name || '',
-            setup_time_hours: op.setup_hours,
-            run_time_hours: op.run_hours_per_unit * form.quantity_ordered,
-            fromRouting: true
+            work_center_name: op.work_center_name || '',
+            setup_time_hours: op.setup_hours || 0,
+            run_time_hours: (op.run_hours_per_unit || 0) * (op.component_quantity || form.quantity_ordered),
+            fromRouting: true,
+            component_part_id: op.component_part_id,
+            component_quantity: op.component_quantity
           }));
-        setOperations(ops);
+          setOperations(ops);
+        } else if (previewRes?.bom_found === false) {
+          // Assembly has no BOM defined
+          console.log('Assembly has no BOM');
+          setShowManualEntry(true);
+        } else {
+          // Assembly has BOM but no component routings
+          console.log('Assembly BOM has no component routings');
+          setShowManualEntry(true);
+        }
       } else {
-        setShowManualEntry(true);
+        // For non-assemblies, use the standard routing lookup
+        const routingRes = await api.getRoutingByPart(partId);
+        if (routingRes && routingRes.operations?.length > 0) {
+          setRouting(routingRes);
+          const ops: OperationPreview[] = routingRes.operations
+            .filter((op: RoutingOperation) => op.work_center)
+            .map((op: RoutingOperation) => ({
+              sequence: op.sequence,
+              operation_number: op.operation_number || `Op ${op.sequence}`,
+              name: op.name,
+              work_center_id: op.work_center_id,
+              work_center_name: op.work_center?.name || '',
+              setup_time_hours: op.setup_hours,
+              run_time_hours: op.run_hours_per_unit * form.quantity_ordered,
+              fromRouting: true
+            }));
+          setOperations(ops);
+        } else {
+          setShowManualEntry(true);
+        }
       }
     } catch (err) {
       console.error('Failed to load routing:', err);
@@ -371,7 +406,10 @@ export default function WorkOrderNew() {
               <div className="flex items-center gap-2 mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-700">
                 <CheckCircleIcon className="h-5 w-5 flex-shrink-0" />
                 <span className="text-sm font-medium">
-                  Auto-populated from routing Rev {routing.revision} ({operations.length} operations)
+                  {routing.revision === 'BOM' 
+                    ? `Auto-populated from BOM component routings (${operations.length} operations)`
+                    : `Auto-populated from routing Rev ${routing.revision} (${operations.length} operations)`
+                  }
                 </span>
               </div>
               

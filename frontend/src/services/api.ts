@@ -498,6 +498,13 @@ class ApiService {
     return response.data;
   }
 
+  async previewWorkOrderOperations(partId: number, quantity: number = 1) {
+    const response = await this.api.get(`/work-orders/preview-operations/${partId}`, {
+      params: { quantity }
+    });
+    return response.data;
+  }
+
   async createRouting(data: { part_id: number; revision?: string; description?: string }) {
     const response = await this.api.post('/routing/', data);
     return response.data;

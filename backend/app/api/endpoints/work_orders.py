@@ -153,13 +153,34 @@ def preview_work_order_operations(
                 if routing:
                     for op in routing.operations:
                         if op.is_active:
+                            work_center = db.query(WorkCenter).filter(WorkCenter.id == op.work_center_id).first()
                             comp_info["routing_operations"].append({
                                 "sequence": op.sequence,
                                 "name": op.name,
                                 "work_center_id": op.work_center_id
                             })
+                            # Add to operations_preview with full details
+                            result["operations_preview"].append({
+                                "name": f"{component.part_number} - {op.name}",
+                                "work_center_id": op.work_center_id,
+                                "work_center_name": work_center.name if work_center else "Unknown",
+                                "setup_hours": op.setup_hours,
+                                "run_hours_per_unit": op.run_hours_per_unit,
+                                "component_part_id": component.id,
+                                "component_part_number": component.part_number,
+                                "component_quantity": float(item.quantity) * quantity,
+                                "operation_group": get_work_center_group(work_center)
+                            })
                 
                 result["component_routings"].append(comp_info)
+            
+            # Sort operations_preview by group order then work center
+            group_order = {'LASER': 1, 'MACHINE': 2, 'BEND': 3, 'WELD': 4, 'FINISH': 5, 'ASSEMBLY': 6, 'INSPECT': 7, 'OTHER': 8}
+            result["operations_preview"].sort(key=lambda x: (
+                group_order.get(x.get('operation_group', 'OTHER'), 99),
+                x.get('work_center_name', ''),
+                x.get('component_part_number', '')
+            ))
     
     return result
 
