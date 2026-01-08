@@ -161,7 +161,7 @@ def create_work_order(
                 db, work_order, bom, float(work_order_in.quantity_ordered)
             )
         else:
-            # Simple part: use standard routing
+            # Simple part: use standard routing (prefer released, fall back to draft)
             routing = db.query(Routing).options(
                 joinedload(Routing.operations)
             ).filter(
@@ -169,6 +169,16 @@ def create_work_order(
                 Routing.is_active == True,
                 Routing.status == "released"
             ).first()
+            
+            # Fall back to draft routing if no released routing exists
+            if not routing:
+                routing = db.query(Routing).options(
+                    joinedload(Routing.operations)
+                ).filter(
+                    Routing.part_id == work_order_in.part_id,
+                    Routing.is_active == True,
+                    Routing.status == "draft"
+                ).first()
             
             if routing:
                 for rop in sorted(routing.operations, key=lambda x: x.sequence):
@@ -229,7 +239,7 @@ def _create_grouped_assembly_operations(
         # Calculate quantity needed for this component
         component_qty = float(item.quantity) * wo_quantity
         
-        # Get routing for this component
+        # Get routing for this component (prefer released, fall back to draft)
         routing = db.query(Routing).options(
             joinedload(Routing.operations)
         ).filter(
@@ -237,6 +247,16 @@ def _create_grouped_assembly_operations(
             Routing.is_active == True,
             Routing.status == "released"
         ).first()
+        
+        # Fall back to draft routing if no released routing exists
+        if not routing:
+            routing = db.query(Routing).options(
+                joinedload(Routing.operations)
+            ).filter(
+                Routing.part_id == component.id,
+                Routing.is_active == True,
+                Routing.status == "draft"
+            ).first()
         
         if not routing:
             continue
@@ -324,6 +344,16 @@ def _create_grouped_assembly_operations(
         Routing.is_active == True,
         Routing.status == "released"
     ).first()
+    
+    # Fall back to draft routing
+    if not assembly_routing:
+        assembly_routing = db.query(Routing).options(
+            joinedload(Routing.operations)
+        ).filter(
+            Routing.part_id == work_order.part_id,
+            Routing.is_active == True,
+            Routing.status == "draft"
+        ).first()
     
     if assembly_routing:
         for rop in sorted(assembly_routing.operations, key=lambda x: x.sequence):
