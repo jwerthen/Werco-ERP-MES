@@ -264,6 +264,28 @@ def release_bom(
     return {"message": "BOM released", "bom_id": bom.id}
 
 
+@router.delete("/{bom_id}")
+def delete_bom(
+    bom_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+):
+    """Delete a BOM (only draft BOMs can be deleted)"""
+    bom = db.query(BOM).filter(BOM.id == bom_id).first()
+    if not bom:
+        raise HTTPException(status_code=404, detail="BOM not found")
+    
+    if bom.status != "draft":
+        raise HTTPException(status_code=400, detail="Only draft BOMs can be deleted")
+    
+    # Delete all items first
+    db.query(BOMItem).filter(BOMItem.bom_id == bom_id).delete()
+    
+    db.delete(bom)
+    db.commit()
+    return {"message": "BOM deleted"}
+
+
 # BOM Item operations
 @router.post("/{bom_id}/items", response_model=BOMItemResponse)
 def add_bom_item(

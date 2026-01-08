@@ -207,6 +207,32 @@ def update_work_order(
     return work_order
 
 
+@router.delete("/{work_order_id}")
+def delete_work_order(
+    work_order_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+):
+    """Delete a work order (only draft or cancelled WOs can be deleted)"""
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    
+    if work_order.status not in [WorkOrderStatus.DRAFT, WorkOrderStatus.CANCELLED]:
+        raise HTTPException(
+            status_code=400, 
+            detail="Only draft or cancelled work orders can be deleted. Cancel it first."
+        )
+    
+    # Delete operations first
+    for op in work_order.operations:
+        db.delete(op)
+    
+    db.delete(work_order)
+    db.commit()
+    return {"message": f"Work order {work_order.work_order_number} deleted"}
+
+
 @router.post("/{work_order_id}/release")
 def release_work_order(
     work_order_id: int,

@@ -11,6 +11,7 @@ import {
   ChevronRightIcon,
   ClockIcon,
   ExclamationTriangleIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
 
 const statusConfig: Record<WorkOrderStatus, { bg: string; text: string; dot: string }> = {
@@ -60,6 +61,21 @@ export default function WorkOrders() {
   useEffect(() => {
     loadWorkOrders();
   }, [loadWorkOrders]);
+
+  const handleDelete = async (wo: WorkOrderSummary) => {
+    const canDelete = wo.status === 'draft' || wo.status === 'cancelled';
+    if (!canDelete) {
+      alert('Only draft or cancelled work orders can be deleted.');
+      return;
+    }
+    if (!window.confirm(`Delete work order ${wo.work_order_number}?`)) return;
+    try {
+      await api.deleteWorkOrder(wo.id);
+      loadWorkOrders();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to delete work order');
+    }
+  };
 
   const customers = useMemo(() => {
     const unique = new Set(workOrders.map(wo => wo.customer_name).filter(Boolean));
@@ -281,6 +297,7 @@ export default function WorkOrders() {
               <WorkOrderTable 
                 workOrders={orders} 
                 hideColumn={groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined}
+                onDelete={handleDelete}
               />
             </div>
           ))}
@@ -288,7 +305,7 @@ export default function WorkOrders() {
       ) : (
         // Flat Table View
         <div className="card card-flush overflow-hidden">
-          <WorkOrderTable workOrders={filteredWorkOrders} />
+          <WorkOrderTable workOrders={filteredWorkOrders} onDelete={handleDelete} />
           
           {filteredWorkOrders.length === 0 && (
             <div className="text-center py-16">
@@ -309,9 +326,10 @@ export default function WorkOrders() {
 interface WorkOrderTableProps {
   workOrders: WorkOrderSummary[];
   hideColumn?: 'customer' | 'part';
+  onDelete?: (wo: WorkOrderSummary) => void;
 }
 
-function WorkOrderTable({ workOrders, hideColumn }: WorkOrderTableProps) {
+function WorkOrderTable({ workOrders, hideColumn, onDelete }: WorkOrderTableProps) {
   const isOverdue = (wo: WorkOrderSummary) => {
     return wo.due_date && new Date(wo.due_date) < new Date() && !['complete', 'closed', 'cancelled'].includes(wo.status);
   };
@@ -391,12 +409,23 @@ function WorkOrderTable({ workOrders, hideColumn }: WorkOrderTableProps) {
                   </span>
                 </td>
                 <td>
-                  <Link 
-                    to={`/work-orders/${wo.id}`}
-                    className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
-                  >
-                    <ChevronRightIcon className="h-5 w-5" />
-                  </Link>
+                  <div className="flex items-center gap-1">
+                    {onDelete && (wo.status === 'draft' || wo.status === 'cancelled') && (
+                      <button 
+                        onClick={() => onDelete(wo)}
+                        className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                        title="Delete"
+                      >
+                        <TrashIcon className="h-4 w-4" />
+                      </button>
+                    )}
+                    <Link 
+                      to={`/work-orders/${wo.id}`}
+                      className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
+                    >
+                      <ChevronRightIcon className="h-5 w-5" />
+                    </Link>
+                  </div>
                 </td>
               </tr>
             );

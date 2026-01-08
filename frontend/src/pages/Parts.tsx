@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import { Part, PartType } from '../types';
-import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, TrashIcon } from '@heroicons/react/24/outline';
 
 const typeColors: Record<PartType, string> = {
   manufactured: 'bg-blue-100 text-blue-800',
@@ -187,6 +187,16 @@ export default function Parts() {
     setShowModal(true);
   };
 
+  const handleDelete = async (part: Part) => {
+    if (!window.confirm(`Delete part ${part.part_number}? This will mark it as obsolete.`)) return;
+    try {
+      await api.deletePart(part.id);
+      loadParts();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to delete part');
+    }
+  };
+
   const resetForm = () => {
     setEditingPart(null);
     setFormData({
@@ -329,12 +339,22 @@ export default function Parts() {
                       </span>
                     </td>
                     <td className="px-4 py-4">
-                      <button
-                        onClick={() => handleEdit(part)}
-                        className="text-gray-400 hover:text-gray-600"
-                      >
-                        <PencilIcon className="h-5 w-5" />
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleEdit(part)}
+                          className="text-gray-400 hover:text-gray-600"
+                          title="Edit"
+                        >
+                          <PencilIcon className="h-5 w-5" />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(part)}
+                          className="text-gray-400 hover:text-red-600"
+                          title="Delete"
+                        >
+                          <TrashIcon className="h-5 w-5" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                   

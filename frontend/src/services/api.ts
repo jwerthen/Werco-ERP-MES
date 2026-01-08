@@ -194,6 +194,11 @@ class ApiService {
     return response.data;
   }
 
+  async deletePart(id: number) {
+    const response = await this.api.delete(`/parts/${id}`);
+    return response.data;
+  }
+
   // BOM (Bill of Materials)
   async getBOMs(params?: { status?: string; active_only?: boolean }) {
     const response = await this.api.get('/bom/', { params });
@@ -222,6 +227,11 @@ class ApiService {
 
   async releaseBOM(id: number) {
     const response = await this.api.post(`/bom/${id}/release`);
+    return response.data;
+  }
+
+  async deleteBOM(id: number) {
+    const response = await this.api.delete(`/bom/${id}`);
     return response.data;
   }
 
@@ -273,6 +283,11 @@ class ApiService {
 
   async updateWorkOrder(id: number, data: any) {
     const response = await this.api.put(`/work-orders/${id}`, data);
+    return response.data;
+  }
+
+  async deleteWorkOrder(id: number) {
+    const response = await this.api.delete(`/work-orders/${id}`);
     return response.data;
   }
 
