@@ -645,6 +645,59 @@ def seed_labor_rates(
     return {"status": "ok", "created": created}
 
 
+@router.post("/seed-database")
+async def seed_database(
+    db: Session = Depends(get_db),
+    secret: str = None
+):
+    """Seed database with initial data. Requires secret key for security."""
+    import os
+    expected_secret = os.getenv("SECRET_KEY", "")[:16]
+    if secret != expected_secret:
+        raise HTTPException(status_code=403, detail="Invalid secret")
+    
+    from app.core.security import get_password_hash
+    
+    # Check if already seeded
+    if db.query(User).first():
+        return {"status": "already_seeded", "message": "Database already has users"}
+    
+    # Create admin user
+    admin = User(
+        employee_id="EMP001",
+        email="admin@werco.com",
+        hashed_password=get_password_hash("admin123"),
+        first_name="System",
+        last_name="Administrator",
+        role=UserRole.ADMIN,
+        department="IT",
+        is_superuser=True
+    )
+    db.add(admin)
+    
+    # Create sample users
+    users_data = [
+        ("EMP002", "jsmith@werco.com", "John", "Smith", UserRole.MANAGER, "Production"),
+        ("EMP003", "mjohnson@werco.com", "Mary", "Johnson", UserRole.SUPERVISOR, "Fabrication"),
+        ("EMP004", "bwilliams@werco.com", "Bob", "Williams", UserRole.OPERATOR, "CNC"),
+        ("EMP005", "sjones@werco.com", "Sarah", "Jones", UserRole.QUALITY, "Quality"),
+    ]
+    
+    for emp_id, email, first, last, role, dept in users_data:
+        user = User(
+            employee_id=emp_id,
+            email=email,
+            hashed_password=get_password_hash("password123"),
+            first_name=first,
+            last_name=last,
+            role=role,
+            department=dept
+        )
+        db.add(user)
+    
+    db.commit()
+    return {"status": "success", "message": "Database seeded with admin and sample users"}
+
 @router.post("/seed-outside-services")
 def seed_outside_services(
     db: Session = Depends(get_db),

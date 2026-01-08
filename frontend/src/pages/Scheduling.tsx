@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
-import { format, addDays, startOfWeek, differenceInDays, parseISO, isBefore, isAfter, isSameDay } from 'date-fns';
+import { format, addDays, startOfWeek, parseISO, isBefore, isAfter, isSameDay } from 'date-fns';
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -72,11 +72,7 @@ export default function Scheduling() {
   const days = Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i))
     .filter(day => day.getDay() !== 0); // 0 = Sunday
 
-  useEffect(() => {
-    loadData();
-  }, [weekStart]);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [wcRes, jobsRes] = await Promise.all([
         api.getWorkCenters(),
@@ -92,7 +88,11 @@ export default function Scheduling() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [weekStart, daysToShow]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   // Get jobs that START on a specific day OR are continuing from a previous week
   const getJobsStartingOnDay = (wcId: number, day: Date, dayIdx: number): ScheduledJob[] => {

@@ -46,30 +46,23 @@ DescriptionLong = Annotated[str, Field(
 
 Money = Annotated[Decimal, Field(
     ge=0,
-    max_digits=8,
-    decimal_places=2,
-    description="Currency: 0-999999.99"
+    description="Currency: non-negative decimal"
 )]
 
 OptionalMoney = Annotated[Decimal, Field(
     ge=0,
-    max_digits=8,
-    decimal_places=2,
     default=None,
-    description="Optional currency: 0-999999.99"
+    description="Optional currency: non-negative decimal"
 )]
 
 MoneySmall = Annotated[Decimal, Field(
     ge=0,
-    max_digits=6,
-    decimal_places=4,
-    description="Small currency: 0-9999.9999"
+    description="Small currency: non-negative decimal"
 )]
 
 Percentage = Annotated[Decimal, Field(
     ge=0,
     le=100,
-    decimal_places=2,
     description="Percentage: 0-100"
 )]
 

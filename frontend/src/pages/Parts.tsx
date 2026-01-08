@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import { Part, PartType } from '../types';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
@@ -48,11 +48,7 @@ export default function Parts() {
     return existingCustomers.filter(c => c.toLowerCase().includes(search));
   }, [existingCustomers, customerSearch]);
 
-  useEffect(() => {
-    loadParts();
-  }, [typeFilter]);
-
-  const loadParts = async () => {
+  const loadParts = useCallback(async () => {
     try {
       const params: any = {};
       if (typeFilter) params.part_type = typeFilter;
@@ -63,7 +59,11 @@ export default function Parts() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [typeFilter]);
+
+  useEffect(() => {
+    loadParts();
+  }, [loadParts]);
 
   const filteredParts = parts.filter(part => {
     if (!search) return true;
@@ -214,7 +214,7 @@ export default function Parts() {
                     </span>
                   </td>
                   <td className="px-4 py-4 font-medium">{part.revision}</td>
-                  <td className="px-4 py-4">${part.standard_cost.toFixed(2)}</td>
+                  <td className="px-4 py-4">${Number(part.standard_cost || 0).toFixed(2)}</td>
                   <td className="px-4 py-4">
                     {part.is_critical && (
                       <span className="inline-flex px-2 py-1 rounded bg-red-100 text-red-800 text-xs font-medium">

@@ -20,9 +20,9 @@ class WorkOrderOperationBase(BaseModel):
     description: Optional[DescriptionLong] = None
     setup_instructions: Optional[str] = Field(None, max_length=5000)
     run_instructions: Optional[str] = Field(None, max_length=5000)
-    setup_time_hours: MoneySmall = Field(default=Decimal("0.0"), ge=Decimal("0"), max_digits=4, decimal_places=2)
-    run_time_hours: Money = Field(default=Decimal("0.0"), ge=Decimal("0"), max_digits=6, decimal_places=2)
-    run_time_per_piece: MoneySmall = Field(default=Decimal("0.0"), ge=Decimal("0"), max_digits=10, decimal_places=4)
+    setup_time_hours: MoneySmall = Field(default=Decimal("0.0"), ge=Decimal("0"))
+    run_time_hours: Money = Field(default=Decimal("0.0"), ge=Decimal("0"))
+    run_time_per_piece: MoneySmall = Field(default=Decimal("0.0"), ge=Decimal("0"))
     requires_inspection: bool = False
     inspection_type: Optional[str] = Field(None, max_length=100)
 
@@ -37,20 +37,21 @@ class WorkOrderOperationUpdate(BaseModel):
     description: Optional[DescriptionLong] = None
     setup_instructions: Optional[str] = Field(None, max_length=5000)
     run_instructions: Optional[str] = Field(None, max_length=5000)
-    setup_time_hours: Optional[Decimal] = Field(None, ge=Decimal("0"), max_digits=4, decimal_places=2)
-    run_time_hours: Optional[Decimal] = Field(None, ge=Decimal("0"), max_digits=6, decimal_places=2)
-    run_time_per_piece: Optional[Decimal] = Field(None, ge=Decimal("0"), max_digits=10, decimal_places=4)
+    setup_time_hours: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    run_time_hours: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    run_time_per_piece: Optional[Decimal] = Field(None, ge=Decimal("0"))
     status: Optional[OperationStatus] = None
-    quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"), max_digits=10, decimal_places=4)
-    quantity_scrapped: Optional[Decimal] = Field(None, ge=Decimal("0"), max_digits=10, decimal_places=4)
+    quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    quantity_scrapped: Optional[Decimal] = Field(None, ge=Decimal("0"))
     requires_inspection: Optional[bool] = None
     inspection_complete: Optional[bool] = None
 
 
 class WorkOrderOperationResponse(WorkOrderOperationBase):
     id: int
-    version: int
+    version: Optional[int] = 0
     work_order_id: int
+    description: Optional[str] = None  # Override to allow empty strings
     status: OperationStatus
     quantity_complete: MoneySmall
     quantity_scrapped: MoneySmall
@@ -70,7 +71,7 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
 
 class WorkOrderBase(BaseModel):
     part_id: int = Field(..., gt=0, description="Part ID")
-    quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), max_digits=10, decimal_places=4, description="Quantity ordered")
+    quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), description="Quantity ordered")
     priority: int = Field(default=5, ge=1, le=10, description="Priority (1=highest, 10=lowest)")
     due_date: Optional[date] = Field(None, description="Due date")
     must_ship_by: Optional[date] = Field(None, description="Must ship by date")
@@ -101,7 +102,7 @@ class WorkOrderCreate(WorkOrderBase):
 
 class WorkOrderUpdate(BaseModel):
     version: int = Field(..., ge=0, description="Version for optimistic locking")
-    quantity_ordered: Optional[Decimal] = Field(None, gt=Decimal("0"), max_digits=10, decimal_places=4)
+    quantity_ordered: Optional[Decimal] = Field(None, gt=Decimal("0"))
     priority: Optional[int] = Field(None, ge=1, le=10)
     status: Optional[WorkOrderStatus] = None
     due_date: Optional[date] = None
@@ -111,13 +112,13 @@ class WorkOrderUpdate(BaseModel):
     lot_number: Optional[str] = Field(None, max_length=50)
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
-    quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"), max_digits=10, decimal_places=4)
-    quantity_scrapped: Optional[Decimal] = Field(None, ge=Decimal("0"), max_digits=10, decimal_places=4)
+    quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    quantity_scrapped: Optional[Decimal] = Field(None, ge=Decimal("0"))
 
 
 class WorkOrderResponse(WorkOrderBase):
     id: int
-    version: int
+    version: Optional[int] = 0
     work_order_number: str
     status: WorkOrderStatus
     quantity_complete: MoneySmall

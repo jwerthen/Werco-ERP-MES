@@ -15,7 +15,6 @@ import {
   ArrowTrendingDownIcon,
   ClockIcon,
   QrCodeIcon,
-  ChartBarIcon,
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { 
@@ -63,7 +62,7 @@ export default function Dashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [dataChanged, setDataChanged] = useState(false);
-  const refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const _refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null); // eslint-disable-line @typescript-eslint/no-unused-vars
 
   // Clear "data changed" indicator after 2 seconds
   useEffect(() => {

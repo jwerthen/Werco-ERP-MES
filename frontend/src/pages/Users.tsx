@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { UserRole } from '../types';
 import { PlusIcon, PencilIcon, KeyIcon, UserMinusIcon, UserPlusIcon } from '@heroicons/react/24/outline';
@@ -59,11 +59,7 @@ export default function Users() {
 
   const [newPassword, setNewPassword] = useState('');
 
-  useEffect(() => {
-    loadUsers();
-  }, [showInactive]);
-
-  const loadUsers = async () => {
+  const loadUsers = useCallback(async () => {
     try {
       const response = await api.getUsers(showInactive);
       setUsers(response);
@@ -72,13 +68,18 @@ export default function Users() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [showInactive]);
+
+  useEffect(() => {
+    loadUsers();
+  }, [loadUsers]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       if (editingUser) {
-        const { password, employee_id, ...updateData } = formData;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { password: _password, employee_id: _employee_id, ...updateData } = formData;
         await api.updateUser(editingUser.id, updateData);
       } else {
         await api.createUser(formData);

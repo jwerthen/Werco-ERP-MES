@@ -28,7 +28,6 @@ import {
   WrenchScrewdriverIcon as WrenchIcon2,
   DocumentMagnifyingGlassIcon,
   ChevronDownIcon,
-  ChevronRightIcon,
   Cog6ToothIcon,
   MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline';

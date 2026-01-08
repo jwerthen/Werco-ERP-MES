@@ -7,8 +7,6 @@ import {
   CheckCircleIcon,
   ExclamationTriangleIcon,
   XMarkIcon,
-  MagnifyingGlassIcon,
-  PlusIcon,
   ArrowPathIcon,
   DocumentCheckIcon,
 } from '@heroicons/react/24/outline';
@@ -140,6 +138,7 @@ export default function POUpload() {
         setError('Only PDF and Word documents (.pdf, .doc, .docx) are supported');
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrder } from '../types';
@@ -29,11 +29,7 @@ export default function WorkOrderDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    loadWorkOrder();
-  }, [id]);
-
-  const loadWorkOrder = async () => {
+  const loadWorkOrder = useCallback(async () => {
     try {
       const response = await api.getWorkOrder(parseInt(id!));
       setWorkOrder(response);
@@ -42,7 +38,11 @@ export default function WorkOrderDetail() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [id]);
+
+  useEffect(() => {
+    loadWorkOrder();
+  }, [loadWorkOrder]);
 
   const handleRelease = async () => {
     try {
@@ -189,7 +189,7 @@ export default function WorkOrderDetail() {
             </div>
             <div>
               <dt className="text-sm text-gray-500">Actual Hours</dt>
-              <dd className="text-lg font-medium">{workOrder.actual_hours.toFixed(2)}</dd>
+              <dd className="text-lg font-medium">{Number(workOrder.actual_hours || 0).toFixed(2)}</dd>
             </div>
           </dl>
         </div>
@@ -243,10 +243,10 @@ export default function WorkOrderDetail() {
                     </td>
                     <td className="px-4 py-4 text-sm">{op.work_center_id}</td>
                     <td className="px-4 py-4 text-sm">
-                      {(op.setup_time_hours + op.run_time_hours).toFixed(2)}
+                      {(Number(op.setup_time_hours || 0) + Number(op.run_time_hours || 0)).toFixed(2)}
                     </td>
                     <td className="px-4 py-4 text-sm">
-                      {(op.actual_setup_hours + op.actual_run_hours).toFixed(2)}
+                      {(Number(op.actual_setup_hours || 0) + Number(op.actual_run_hours || 0)).toFixed(2)}
                     </td>
                     <td className="px-4 py-4">
                       <span className="font-medium">{op.quantity_complete}</span>

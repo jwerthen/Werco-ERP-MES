@@ -60,7 +60,7 @@ class UserUpdate(BaseModel):
 
 class UserResponse(UserBase):
     id: int
-    version: int  # For optimistic locking
+    version: Optional[int] = 0  # For optimistic locking (optional for backwards compatibility)
     is_active: bool
     is_superuser: bool
     created_at: datetime

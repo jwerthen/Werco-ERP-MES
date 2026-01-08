@@ -135,7 +135,7 @@ def create_work_order(
                     description=rop.description,
                     work_center_id=rop.work_center_id,
                     setup_time_hours=rop.setup_hours,
-                    run_time_hours=rop.run_hours_per_unit * work_order_in.quantity_ordered,
+                    run_time_hours=float(rop.run_hours_per_unit or 0) * float(work_order_in.quantity_ordered),
                     status=OperationStatus.PENDING
                 )
                 db.add(wo_op)

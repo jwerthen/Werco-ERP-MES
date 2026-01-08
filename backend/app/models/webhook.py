@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Text
 from sqlalchemy.sql import func
-from app.db.base_class import Base
+from app.db.database import Base
 
 
 class Webhook(Base):

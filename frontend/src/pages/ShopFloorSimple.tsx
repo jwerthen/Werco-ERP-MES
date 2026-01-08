@@ -123,11 +123,8 @@ export default function ShopFloorSimple() {
       setLoading(false);
     };
     init();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    loadOperations();
-  }, [loadOperations]);
 
   // Auto-refresh every 30 seconds
   useEffect(() => {

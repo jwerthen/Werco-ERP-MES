@@ -35,7 +35,7 @@ class WorkCenterUpdate(BaseModel):
 
 class WorkCenterResponse(WorkCenterBase):
     id: int
-    version: int  # For optimistic locking
+    version: Optional[int] = 0  # For optimistic locking
     is_active: bool
     current_status: str
     created_at: datetime

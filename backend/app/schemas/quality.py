@@ -12,7 +12,7 @@ class NCRCreate(BaseModel):
     work_order_id: Optional[int] = Field(None, gt=0)
     lot_number: Optional[str] = Field(None, max_length=50, description="Required for AS9100D traceability")
     serial_number: Optional[str] = Field(None, max_length=100)
-    quantity_affected: MoneySmall = Field(default=MoneySmall.__get__(Decimal('1.0')), gt=Decimal('0'), description="Quantity of affected parts")
+    quantity_affected: Decimal = Field(default=Decimal('1.0'), gt=Decimal('0'), description="Quantity of affected parts")
     source: NCRSource = Field(..., description="Source of defect")
     title: str = Field(..., min_length=5, max_length=200, description="NCR title")
     description: DescriptionLong = Field(..., description="Detailed defect description")
@@ -35,7 +35,7 @@ class NCRUpdate(BaseModel):
     version: int = Field(..., ge=0, description="Version for optimistic locking")
     status: Optional[NCRStatus] = None
     disposition: Optional[NCRDisposition] = None
-    quantity_rejected: Optional[Decimal] = Field(None, ge=Decimal('0'), max_digits=10, decimal_places=4)
+    quantity_rejected: Optional[Decimal] = Field(None, ge=Decimal('0'))
     root_cause: Optional[str] = Field(None, max_length=2000, description="Required for closure, 20-2000 chars")
     containment_action: Optional[str] = Field(None, max_length=2000)
     estimated_cost: Optional[Money] = None
@@ -66,7 +66,7 @@ class PartSummary(BaseModel):
 
 class NCRResponse(BaseModel):
     id: int
-    version: int
+    version: Optional[int] = 0
     ncr_number: str
     part_id: Optional[int]
     part: Optional[PartSummary] = None

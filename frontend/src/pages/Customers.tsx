@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline';
 
@@ -51,11 +51,7 @@ export default function Customers() {
     notes: ''
   });
 
-  useEffect(() => {
-    loadCustomers();
-  }, [showInactive]);
-
-  const loadCustomers = async () => {
+  const loadCustomers = useCallback(async () => {
     try {
       const response = await api.getCustomers(!showInactive);
       setCustomers(response);
@@ -64,7 +60,11 @@ export default function Customers() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [showInactive]);
+
+  useEffect(() => {
+    loadCustomers();
+  }, [loadCustomers]);
 
   const filteredCustomers = customers.filter(c => {
     if (!search) return true;

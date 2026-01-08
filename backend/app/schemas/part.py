@@ -77,14 +77,14 @@ class PartUpdate(BaseModel):
     revision: Optional[str] = Field(None, min_length=1, max_length=20, pattern=r'^[A-Z0-9]+$')
     description: Optional[str] = Field(None, max_length=2000)
     unit_of_measure: Optional[UnitOfMeasure] = None
-    standard_cost: Optional[Decimal] = Field(None, ge=0, max_digits=8, decimal_places=2)
-    material_cost: Optional[Decimal] = Field(None, ge=0, max_digits=8, decimal_places=2)
-    labor_cost: Optional[Decimal] = Field(None, ge=0, max_digits=8, decimal_places=2)
-    overhead_cost: Optional[Decimal] = Field(None, ge=0, max_digits=8, decimal_places=2)
+    standard_cost: Optional[Decimal] = Field(None, ge=0)
+    material_cost: Optional[Decimal] = Field(None, ge=0)
+    labor_cost: Optional[Decimal] = Field(None, ge=0)
+    overhead_cost: Optional[Decimal] = Field(None, ge=0)
     lead_time_days: Optional[int] = Field(None, ge=0, le=365)
-    safety_stock: Optional[Decimal] = Field(None, ge=0, max_digits=10, decimal_places=4)
-    reorder_point: Optional[Decimal] = Field(None, ge=0, max_digits=10, decimal_places=4)
-    reorder_quantity: Optional[Decimal] = Field(None, ge=0, max_digits=10, decimal_places=4)
+    safety_stock: Optional[Decimal] = Field(None, ge=0)
+    reorder_point: Optional[Decimal] = Field(None, ge=0)
+    reorder_quantity: Optional[Decimal] = Field(None, ge=0)
     is_critical: Optional[bool] = None
     requires_inspection: Optional[bool] = None
     inspection_requirements: Optional[str] = Field(None, max_length=2000)
@@ -102,7 +102,7 @@ class PartUpdate(BaseModel):
 
 class PartResponse(PartBase):
     id: int
-    version: int
+    version: Optional[int] = 0  # Optional for backwards compatibility
     is_active: bool
     status: str
     created_at: datetime

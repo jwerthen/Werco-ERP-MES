@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrder } from '../types';
@@ -9,11 +9,7 @@ export default function PrintTraveler() {
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    loadWorkOrder();
-  }, [id]);
-
-  const loadWorkOrder = async () => {
+  const loadWorkOrder = useCallback(async () => {
     try {
       const response = await api.getWorkOrder(parseInt(id!));
       setWorkOrder(response);
@@ -22,7 +18,11 @@ export default function PrintTraveler() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [id]);
+
+  useEffect(() => {
+    loadWorkOrder();
+  }, [loadWorkOrder]);
 
   useEffect(() => {
     if (workOrder && !loading) {

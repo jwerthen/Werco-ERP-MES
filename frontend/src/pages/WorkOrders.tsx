@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrderSummary, WorkOrderStatus } from '../types';
@@ -6,7 +6,6 @@ import { format } from 'date-fns';
 import { 
   PlusIcon, 
   MagnifyingGlassIcon, 
-  FunnelIcon, 
   Squares2X2Icon, 
   ListBulletIcon,
   ChevronRightIcon,
@@ -45,11 +44,7 @@ export default function WorkOrders() {
   const [hideCOTS, setHideCOTS] = useState(true);
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
 
-  useEffect(() => {
-    loadWorkOrders();
-  }, [statusFilter]);
-
-  const loadWorkOrders = async () => {
+  const loadWorkOrders = useCallback(async () => {
     try {
       const params: any = {};
       if (statusFilter) params.status = statusFilter;
@@ -60,7 +55,11 @@ export default function WorkOrders() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [statusFilter]);
+
+  useEffect(() => {
+    loadWorkOrders();
+  }, [loadWorkOrders]);
 
   const customers = useMemo(() => {
     const unique = new Set(workOrders.map(wo => wo.customer_name).filter(Boolean));

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import {
@@ -16,8 +16,8 @@ import {
   BeakerIcon,
 } from '@heroicons/react/24/outline';
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, 
-  Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend
+  LineChart, Line, XAxis, YAxis, CartesianGrid, 
+  Tooltip, ResponsiveContainer
 } from 'recharts';
 
 interface KPIValue {
@@ -71,8 +71,6 @@ const PERIODS = [
   { value: 'ytd', label: 'Year to Date' },
 ];
 
-const COLORS = ['#1B4D9C', '#C8352B', '#10B981', '#F59E0B', '#6366F1', '#EC4899'];
-
 export default function Analytics() {
   const navigate = useNavigate();
   const [period, setPeriod] = useState('30d');
@@ -82,11 +80,7 @@ export default function Analytics() {
   const [productionTrends, setProductionTrends] = useState<ProductionDataPoint[]>([]);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    loadData();
-  }, [period]);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
@@ -103,7 +97,11 @@ export default function Analytics() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [period]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const getTrendIcon = (trend: 'up' | 'down' | 'flat', isGoodUp: boolean = true) => {
     if (trend === 'up') {

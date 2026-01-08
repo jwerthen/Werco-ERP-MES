@@ -3,7 +3,6 @@ import api from '../services/api';
 import { format } from 'date-fns';
 import {
   TruckIcon,
-  PlusIcon,
   PaperAirplaneIcon,
   PrinterIcon,
 } from '@heroicons/react/24/outline';

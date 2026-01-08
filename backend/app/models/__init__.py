@@ -19,6 +19,9 @@ from .calibration import Equipment, CalibrationRecord, CalibrationStatus
 from .supplier_part import SupplierPartMapping
 from .quote_config import QuoteMaterial, QuoteMachine, QuoteFinish, QuoteSettings, MaterialCategory, MachineType
 from .analytics import ReportTemplate, KPITarget
+from .notification import NotificationPreference, NotificationLog, DigestQueue
+from .job import Job, JobStatus, JobPriority
+from .webhook import Webhook, WebhookDelivery
 
 __all__ = [
     "User", "UserRole",

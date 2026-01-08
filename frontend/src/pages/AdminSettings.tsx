@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { format } from 'date-fns';
 import {
@@ -56,11 +56,7 @@ export default function AdminSettings() {
   const [editModal, setEditModal] = useState<{ type: string; item: any } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: string; item: any } | null>(null);
 
-  useEffect(() => {
-    loadTabData(activeTab);
-  }, [activeTab, showInactive]);
-
-  const loadTabData = async (tab: TabKey) => {
+  const loadTabData = useCallback(async (tab: TabKey) => {
     setLoading(true);
     try {
       switch (tab) {
@@ -94,7 +90,11 @@ export default function AdminSettings() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [showInactive]);
+
+  useEffect(() => {
+    loadTabData(activeTab);
+  }, [activeTab, loadTabData]);
 
   const handleSave = async (type: string, data: any) => {
     try {

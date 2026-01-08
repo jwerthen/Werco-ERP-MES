@@ -1,8 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { format } from 'date-fns';
 import {
-  DocumentIcon,
   ArrowUpTrayIcon,
   ArrowDownTrayIcon,
   TrashIcon,
@@ -69,11 +68,7 @@ export default function Documents() {
     file: null as File | null
   });
 
-  useEffect(() => {
-    loadData();
-  }, [filterType]);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [docsRes, partsRes, typesRes] = await Promise.all([
         api.getDocuments({ document_type: filterType || undefined }),
@@ -88,7 +83,11 @@ export default function Documents() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [filterType]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();

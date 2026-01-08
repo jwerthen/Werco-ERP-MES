@@ -1,12 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import {
-  ChartBarIcon,
   ClockIcon,
   CurrencyDollarIcon,
   ExclamationTriangleIcon,
   CheckCircleIcon,
-  TruckIcon,
 } from '@heroicons/react/24/outline';
 
 interface ProductionSummary {
@@ -108,11 +106,7 @@ export default function Reports() {
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState(30);
 
-  useEffect(() => {
-    loadData();
-  }, [period]);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [prodRes, qualRes, invRes, vendRes, utilRes, dailyRes, costRes, timeRes] = await Promise.all([
         api.getProductionSummary(period),
@@ -137,7 +131,11 @@ export default function Reports() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [period]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   if (loading) {
     return (

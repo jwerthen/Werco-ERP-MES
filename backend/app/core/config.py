@@ -10,7 +10,10 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     API_V1_PREFIX: str = "/api/v1"
     
-    # Database - override via environment variable
+    # Railway provides PORT environment variable
+    PORT: int = 8000
+    
+    # Database - Railway provides DATABASE_URL automatically for PostgreSQL plugin
     DATABASE_URL: str = "postgresql://user:pass@localhost:5432/werco_erp"
     
     # Security - MUST be overridden in production
@@ -28,8 +31,8 @@ class Settings(BaseSettings):
     def rate_limit_exempt_paths_list(self) -> List[str]:
         return [path.strip() for path in self.RATE_LIMIT_EXEMPT_PATHS.split(",")]
     
-    # CORS
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000"
+    # CORS - Include localhost for dev, Railway URLs added via env var in production
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:8000"
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: str = "*"
     CORS_ALLOW_HEADERS: str = "*"

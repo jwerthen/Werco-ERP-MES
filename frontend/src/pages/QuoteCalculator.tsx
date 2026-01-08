@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import DXFViewer from '../components/DXFViewer';
@@ -144,11 +144,7 @@ export default function QuoteCalculator() {
     rush: false
   });
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [materialsRes, finishesRes] = await Promise.all([
         api.getQuoteMaterials(),
@@ -162,10 +158,16 @@ export default function QuoteCalculator() {
         setSheetForm(f => ({ ...f, material_id: materialsRes[0].id }));
       }
     } catch (err: any) {
-      if (err.response?.status === 404 || materials.length === 0) {
+      if (err.response?.status === 404) {
         try {
           await api.seedQuoteDefaults();
-          loadData();
+          // Reload after seeding
+          const [mats, fins] = await Promise.all([
+            api.getQuoteMaterials(),
+            api.getQuoteFinishes()
+          ]);
+          setMaterials(mats);
+          setFinishes(fins);
           return;
         } catch (e) {
           console.error('Failed to seed defaults:', e);
@@ -175,7 +177,11 @@ export default function QuoteCalculator() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const handleDxfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import {
   PlusIcon,
@@ -78,11 +78,7 @@ export default function CustomFieldsPage() {
     field_group: ''
   });
 
-  useEffect(() => {
-    loadFields();
-  }, [selectedEntityType]);
-
-  const loadFields = async () => {
+  const loadFields = useCallback(async () => {
     try {
       const data = await api.getCustomFieldDefinitions(selectedEntityType || undefined);
       setFields(data);
@@ -91,7 +87,11 @@ export default function CustomFieldsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedEntityType]);
+
+  useEffect(() => {
+    loadFields();
+  }, [loadFields]);
 
   const resetForm = () => {
     setFormData({

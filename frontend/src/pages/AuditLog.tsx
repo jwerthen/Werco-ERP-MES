@@ -4,9 +4,7 @@ import { format } from 'date-fns';
 import {
   MagnifyingGlassIcon,
   ShieldCheckIcon,
-  ExclamationTriangleIcon,
   UserIcon,
-  DocumentTextIcon,
 } from '@heroicons/react/24/outline';
 
 interface AuditEntry {

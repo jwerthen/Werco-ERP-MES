@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../services/api';
 import { format } from 'date-fns';
@@ -31,11 +31,7 @@ export default function PrintPackingSlip() {
   const [shipment, setShipment] = useState<ShipmentDetail | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    loadShipment();
-  }, [id]);
-
-  const loadShipment = async () => {
+  const loadShipment = useCallback(async () => {
     try {
       const response = await api.getShipment(parseInt(id!));
       setShipment(response);
@@ -44,7 +40,11 @@ export default function PrintPackingSlip() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [id]);
+
+  useEffect(() => {
+    loadShipment();
+  }, [loadShipment]);
 
   useEffect(() => {
     if (shipment && !loading) {

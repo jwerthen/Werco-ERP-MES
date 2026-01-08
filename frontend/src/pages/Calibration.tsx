@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
-import { format, differenceInDays } from 'date-fns';
+import { format } from 'date-fns';
 import {
   PlusIcon,
   WrenchIcon,
@@ -99,11 +99,7 @@ export default function Calibration() {
     notes: ''
   });
 
-  useEffect(() => {
-    loadEquipment();
-  }, [statusFilter]);
-
-  const loadEquipment = async () => {
+  const loadEquipment = useCallback(async () => {
     try {
       const response = await api.getEquipment(statusFilter || undefined);
       setEquipment(response);
@@ -112,7 +108,11 @@ export default function Calibration() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [statusFilter]);
+
+  useEffect(() => {
+    loadEquipment();
+  }, [loadEquipment]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -59,7 +59,7 @@ class VendorUpdate(BaseModel):
 
 class VendorResponse(VendorBase):
     id: int
-    version: int
+    version: Optional[int] = 0
     is_active: bool
     approval_date: Optional[date] = None
     quality_rating: Optional[float] = None
@@ -73,8 +73,8 @@ class VendorResponse(VendorBase):
 # PO Line schemas
 class POLineBase(BaseModel):
     part_id: int = Field(..., gt=0)
-    quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), max_digits=10, decimal_places=4, description="Quantity to order")
-    unit_price: Money = Field(..., ge=Decimal("0"), max_digits=8, decimal_places=2, description="Unit price")
+    quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), description="Quantity to order")
+    unit_price: Money = Field(..., ge=Decimal("0"), description="Unit price")
     required_date: Optional[date] = None
     notes: Optional[str] = Field(None, max_length=500)
 
@@ -150,7 +150,7 @@ class VendorSummary(BaseModel):
 
 class POResponse(POBase):
     id: int
-    version: int
+    version: Optional[int] = 0
     po_number: str
     status: str
     order_date: Optional[date] = None
@@ -189,7 +189,7 @@ class POListResponse(BaseModel):
 # Receipt schemas
 class ReceiptCreate(BaseModel):
     po_line_id: int = Field(..., gt=0)
-    quantity_received: MoneySmall = Field(..., gt=Decimal("0"), max_digits=10, decimal_places=4)
+    quantity_received: MoneySmall = Field(..., gt=Decimal("0"))
     lot_number: str = Field(..., min_length=1, max_length=50, description="Required for AS9100D traceability")
     serial_numbers: Optional[str] = Field(None, max_length=500)
     heat_number: Optional[str] = Field(None, max_length=50)

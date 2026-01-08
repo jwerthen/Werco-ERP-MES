@@ -58,7 +58,7 @@ export default function Quotes() {
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [selectedQuote, setSelectedQuote] = useState<Quote | null>(null);
+  const [_selectedQuote, _setSelectedQuote] = useState<Quote | null>(null); // eslint-disable-line @typescript-eslint/no-unused-vars
 
   const [newQuote, setNewQuote] = useState({
     customer_name: '',
