@@ -226,19 +226,27 @@ def release_routing(
 def delete_routing(
     routing_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
 ):
-    """Soft delete (deactivate) a routing"""
+    """Delete a routing - hard delete for draft, soft delete for released"""
     routing = db.query(Routing).filter(Routing.id == routing_id).first()
     if not routing:
         raise HTTPException(status_code=404, detail="Routing not found")
     
-    routing.is_active = False
-    routing.status = "obsolete"
-    routing.obsolete_date = datetime.utcnow()
-    db.commit()
-    
-    return {"message": "Routing deactivated"}
+    if routing.status == "draft":
+        # Hard delete draft routings
+        for op in routing.operations:
+            db.delete(op)
+        db.delete(routing)
+        db.commit()
+        return {"message": "Routing deleted"}
+    else:
+        # Soft delete released/obsolete routings
+        routing.is_active = False
+        routing.status = "obsolete"
+        routing.obsolete_date = datetime.utcnow()
+        db.commit()
+        return {"message": "Routing deactivated"}
 
 
 # Operation endpoints

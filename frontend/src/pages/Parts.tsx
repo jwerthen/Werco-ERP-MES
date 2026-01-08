@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import { Part, PartType } from '../types';
-import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { useNavigate } from 'react-router-dom';
+import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, TrashIcon, WrenchScrewdriverIcon } from '@heroicons/react/24/outline';
 
 const typeColors: Record<PartType, string> = {
   manufactured: 'bg-blue-100 text-blue-800',
@@ -19,6 +20,7 @@ interface BOMItem {
 }
 
 export default function Parts() {
+  const navigate = useNavigate();
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -197,6 +199,22 @@ export default function Parts() {
     }
   };
 
+  const handleCreateRouting = async (part: Part) => {
+    try {
+      // Check if routing already exists
+      const existingRoutings = await api.getRoutings({ part_id: part.id });
+      if (existingRoutings.length > 0) {
+        navigate('/routing');
+        return;
+      }
+      // Create new routing and navigate
+      await api.createRouting({ part_id: part.id, revision: 'A', description: `Routing for ${part.part_number}` });
+      navigate('/routing');
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to create routing');
+    }
+  };
+
   const resetForm = () => {
     setEditingPart(null);
     setFormData({
@@ -347,6 +365,15 @@ export default function Parts() {
                         >
                           <PencilIcon className="h-5 w-5" />
                         </button>
+                        {(part.part_type === 'manufactured' || part.part_type === 'assembly') && (
+                          <button
+                            onClick={() => handleCreateRouting(part)}
+                            className="text-gray-400 hover:text-blue-600"
+                            title="Add/View Routing"
+                          >
+                            <WrenchScrewdriverIcon className="h-5 w-5" />
+                          </button>
+                        )}
                         <button
                           onClick={() => handleDelete(part)}
                           className="text-gray-400 hover:text-red-600"
@@ -395,12 +422,24 @@ export default function Parts() {
                           <td className="px-4 py-2"></td>
                           <td className="px-4 py-2">
                             {componentPart && (
-                              <button
-                                onClick={() => handleEdit(componentPart)}
-                                className="text-gray-400 hover:text-gray-600"
-                              >
-                                <PencilIcon className="h-4 w-4" />
-                              </button>
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => handleEdit(componentPart)}
+                                  className="text-gray-400 hover:text-gray-600"
+                                  title="Edit Part"
+                                >
+                                  <PencilIcon className="h-4 w-4" />
+                                </button>
+                                {(componentPart.part_type === 'manufactured' || componentPart.part_type === 'assembly') && (
+                                  <button
+                                    onClick={() => handleCreateRouting(componentPart)}
+                                    className="text-gray-400 hover:text-blue-600"
+                                    title="Add/View Routing"
+                                  >
+                                    <WrenchScrewdriverIcon className="h-4 w-4" />
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </td>
                         </tr>

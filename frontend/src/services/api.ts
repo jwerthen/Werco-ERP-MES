@@ -513,6 +513,11 @@ class ApiService {
     return response.data;
   }
 
+  async deleteRouting(id: number) {
+    const response = await this.api.delete(`/routing/${id}`);
+    return response.data;
+  }
+
   async addRoutingOperation(routingId: number, data: any) {
     const response = await this.api.post(`/routing/${routingId}/operations`, data);
     return response.data;

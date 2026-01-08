@@ -176,6 +176,24 @@ export default function RoutingPage() {
     }
   };
 
+  const handleDeleteRouting = async (routing: Routing) => {
+    const message = routing.status === 'draft' 
+      ? `Delete routing for ${routing.part?.part_number}? This will permanently delete it.`
+      : `Deactivate routing for ${routing.part?.part_number}? It will be marked as obsolete.`;
+    
+    if (!window.confirm(message)) return;
+
+    try {
+      await api.deleteRouting(routing.id);
+      if (selectedRouting?.id === routing.id) {
+        setSelectedRouting(null);
+      }
+      loadData();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to delete routing');
+    }
+  };
+
   const openEditOperation = (op: RoutingOperation) => {
     setEditingOperation(op);
     setNewOperation({
@@ -258,17 +276,26 @@ export default function RoutingPage() {
                 }`}
               >
                 <div className="flex justify-between items-start">
-                  <div>
+                  <div className="flex-1">
                     <div className="font-medium">{routing.part?.part_number}</div>
                     <div className="text-sm text-gray-500">{routing.part?.name}</div>
                   </div>
-                  <span className={`text-xs px-2 py-1 rounded ${
-                    routing.status === 'released' ? 'bg-green-100 text-green-800' :
-                    routing.status === 'draft' ? 'bg-yellow-100 text-yellow-800' :
-                    'bg-gray-100 text-gray-800'
-                  }`}>
-                    {routing.status}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-xs px-2 py-1 rounded ${
+                      routing.status === 'released' ? 'bg-green-100 text-green-800' :
+                      routing.status === 'draft' ? 'bg-yellow-100 text-yellow-800' :
+                      'bg-gray-100 text-gray-800'
+                    }`}>
+                      {routing.status}
+                    </span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteRouting(routing); }}
+                      className="text-gray-400 hover:text-red-600 p-1"
+                      title={routing.status === 'draft' ? 'Delete' : 'Deactivate'}
+                    >
+                      <TrashIcon className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
                 <div className="text-xs text-gray-400 mt-1">
                   Rev {routing.revision} | {routing.operations?.length || 0} operations
