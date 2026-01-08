@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
-import { PlusIcon, PencilIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
 
 interface Customer {
   id: number;
@@ -20,6 +20,34 @@ interface Customer {
   created_at: string;
 }
 
+interface CustomerStats {
+  customer_id: number;
+  customer_name: string;
+  part_count: number;
+  work_order_counts: {
+    total: number;
+    by_status: Record<string, number>;
+  };
+  recent_work_orders: Array<{
+    id: number;
+    work_order_number: string;
+    status: string;
+    due_date?: string;
+    quantity_ordered: number;
+    created_at: string;
+  }>;
+}
+
+const statusColors: Record<string, string> = {
+  draft: 'bg-gray-100 text-gray-800',
+  released: 'bg-blue-100 text-blue-800',
+  in_progress: 'bg-yellow-100 text-yellow-800',
+  complete: 'bg-green-100 text-green-800',
+  on_hold: 'bg-orange-100 text-orange-800',
+  cancelled: 'bg-red-100 text-red-800',
+  closed: 'bg-purple-100 text-purple-800',
+};
+
 export default function Customers() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,6 +55,9 @@ export default function Customers() {
   const [showInactive, setShowInactive] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [customerStats, setCustomerStats] = useState<CustomerStats | null>(null);
+  const [loadingStats, setLoadingStats] = useState(false);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -76,6 +107,25 @@ export default function Customers() {
       c.city?.toLowerCase().includes(searchLower)
     );
   });
+
+  const viewCustomerDetails = async (customer: Customer) => {
+    setSelectedCustomer(customer);
+    setLoadingStats(true);
+    try {
+      const stats = await api.getCustomerStats(customer.id);
+      setCustomerStats(stats);
+    } catch (err) {
+      console.error('Failed to load customer stats:', err);
+      setCustomerStats(null);
+    } finally {
+      setLoadingStats(false);
+    }
+  };
+
+  const closeDetails = () => {
+    setSelectedCustomer(null);
+    setCustomerStats(null);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -208,9 +258,13 @@ export default function Customers() {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {filteredCustomers.map((customer) => (
-                <tr key={customer.id} className={`hover:bg-gray-50 ${!customer.is_active ? 'opacity-60' : ''}`}>
+                <tr 
+                  key={customer.id} 
+                  className={`hover:bg-gray-50 cursor-pointer ${!customer.is_active ? 'opacity-60' : ''}`}
+                  onClick={() => viewCustomerDetails(customer)}
+                >
                   <td className="px-4 py-4 font-mono text-sm">{customer.code}</td>
-                  <td className="px-4 py-4 font-medium">{customer.name}</td>
+                  <td className="px-4 py-4 font-medium text-werco-primary">{customer.name}</td>
                   <td className="px-4 py-4">
                     <div>
                       <div className="text-sm">{customer.contact_name || '-'}</div>
@@ -242,7 +296,7 @@ export default function Customers() {
                   </td>
                   <td className="px-4 py-4 text-center">
                     <button
-                      onClick={() => handleEdit(customer)}
+                      onClick={(e) => { e.stopPropagation(); handleEdit(customer); }}
                       className="text-gray-400 hover:text-gray-600"
                     >
                       <PencilIcon className="h-5 w-5" />
@@ -421,6 +475,153 @@ export default function Customers() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Customer Detail Modal */}
+      {selectedCustomer && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg max-w-3xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 border-b flex items-center justify-between bg-gray-50">
+              <div className="flex items-center gap-3">
+                <button onClick={closeDetails} className="text-gray-500 hover:text-gray-700">
+                  <ArrowLeftIcon className="h-5 w-5" />
+                </button>
+                <div>
+                  <h2 className="text-xl font-semibold">{selectedCustomer.name}</h2>
+                  <p className="text-sm text-gray-500">Code: {selectedCustomer.code}</p>
+                </div>
+              </div>
+              <button onClick={closeDetails} className="text-gray-400 hover:text-gray-600">
+                <XMarkIcon className="h-6 w-6" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6 overflow-y-auto flex-1">
+              {loadingStats ? (
+                <div className="flex items-center justify-center h-32">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-werco-primary"></div>
+                </div>
+              ) : customerStats ? (
+                <div className="space-y-6">
+                  {/* Stats Cards */}
+                  <div className="grid grid-cols-3 gap-4">
+                    <div className="bg-blue-50 rounded-lg p-4">
+                      <div className="text-3xl font-bold text-blue-600">{customerStats.part_count}</div>
+                      <div className="text-sm text-blue-800">Parts</div>
+                    </div>
+                    <div className="bg-green-50 rounded-lg p-4">
+                      <div className="text-3xl font-bold text-green-600">{customerStats.work_order_counts.total}</div>
+                      <div className="text-sm text-green-800">Total Work Orders</div>
+                    </div>
+                    <div className="bg-yellow-50 rounded-lg p-4">
+                      <div className="text-3xl font-bold text-yellow-600">
+                        {(customerStats.work_order_counts.by_status['in_progress'] || 0) + 
+                         (customerStats.work_order_counts.by_status['released'] || 0)}
+                      </div>
+                      <div className="text-sm text-yellow-800">Active WOs</div>
+                    </div>
+                  </div>
+
+                  {/* Work Order Status Breakdown */}
+                  {Object.keys(customerStats.work_order_counts.by_status).length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-medium text-gray-700 mb-2">Work Orders by Status</h3>
+                      <div className="flex flex-wrap gap-2">
+                        {Object.entries(customerStats.work_order_counts.by_status).map(([status, count]) => (
+                          <span 
+                            key={status} 
+                            className={`px-3 py-1 rounded-full text-sm font-medium ${statusColors[status] || 'bg-gray-100 text-gray-800'}`}
+                          >
+                            {status.replace('_', ' ')}: {count}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Contact Info */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <h3 className="text-sm font-medium text-gray-700 mb-2">Contact</h3>
+                      <div className="text-sm space-y-1">
+                        <p>{selectedCustomer.contact_name || '-'}</p>
+                        <p className="text-gray-500">{selectedCustomer.email || '-'}</p>
+                        <p className="text-gray-500">{selectedCustomer.phone || '-'}</p>
+                      </div>
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-medium text-gray-700 mb-2">Address</h3>
+                      <div className="text-sm text-gray-600">
+                        {selectedCustomer.address_line1 && <p>{selectedCustomer.address_line1}</p>}
+                        {selectedCustomer.city && selectedCustomer.state && (
+                          <p>{selectedCustomer.city}, {selectedCustomer.state} {selectedCustomer.zip_code}</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Recent Work Orders */}
+                  {customerStats.recent_work_orders.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-medium text-gray-700 mb-2">Recent Work Orders</h3>
+                      <div className="border rounded-lg overflow-hidden">
+                        <table className="min-w-full divide-y divide-gray-200">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">WO #</th>
+                              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Status</th>
+                              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Qty</th>
+                              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Due Date</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-200">
+                            {customerStats.recent_work_orders.map(wo => (
+                              <tr key={wo.id} className="hover:bg-gray-50">
+                                <td className="px-4 py-2 text-sm font-medium text-werco-primary">{wo.work_order_number}</td>
+                                <td className="px-4 py-2">
+                                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColors[wo.status] || 'bg-gray-100'}`}>
+                                    {wo.status.replace('_', ' ')}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-2 text-sm">{wo.quantity_ordered}</td>
+                                <td className="px-4 py-2 text-sm text-gray-500">
+                                  {wo.due_date ? new Date(wo.due_date).toLocaleDateString() : '-'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {customerStats.recent_work_orders.length === 0 && customerStats.work_order_counts.total === 0 && (
+                    <div className="text-center text-gray-500 py-8">
+                      No work orders found for this customer
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-center text-gray-500 py-8">
+                  Failed to load customer statistics
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t bg-gray-50 flex justify-end gap-3">
+              <button onClick={closeDetails} className="btn-secondary">Close</button>
+              <button 
+                onClick={() => { closeDetails(); handleEdit(selectedCustomer); }}
+                className="btn-primary"
+              >
+                Edit Customer
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -1,10 +1,13 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from app.db.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.customer import Customer
+from app.models.part import Part
+from app.models.work_order import WorkOrder, WorkOrderStatus
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
 
@@ -136,6 +139,61 @@ def get_customer(
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     return customer
+
+
+@router.get("/{customer_id}/stats")
+def get_customer_stats(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get customer statistics including work order counts"""
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Get parts for this customer
+    part_ids = db.query(Part.id).filter(Part.customer_name == customer.name).subquery()
+    
+    # Count work orders by status
+    wo_counts = db.query(
+        WorkOrder.status,
+        func.count(WorkOrder.id).label('count')
+    ).filter(
+        WorkOrder.part_id.in_(part_ids)
+    ).group_by(WorkOrder.status).all()
+    
+    status_counts = {status.value: count for status, count in wo_counts}
+    total_wos = sum(status_counts.values())
+    
+    # Get recent work orders
+    recent_wos = db.query(WorkOrder).filter(
+        WorkOrder.part_id.in_(part_ids)
+    ).order_by(WorkOrder.created_at.desc()).limit(10).all()
+    
+    # Count parts
+    part_count = db.query(func.count(Part.id)).filter(Part.customer_name == customer.name).scalar()
+    
+    return {
+        "customer_id": customer_id,
+        "customer_name": customer.name,
+        "part_count": part_count,
+        "work_order_counts": {
+            "total": total_wos,
+            "by_status": status_counts
+        },
+        "recent_work_orders": [
+            {
+                "id": wo.id,
+                "work_order_number": wo.work_order_number,
+                "status": wo.status.value if hasattr(wo.status, 'value') else wo.status,
+                "due_date": wo.due_date.isoformat() if wo.due_date else None,
+                "quantity_ordered": float(wo.quantity_ordered),
+                "created_at": wo.created_at.isoformat()
+            }
+            for wo in recent_wos
+        ]
+    }
 
 
 @router.post("/", response_model=CustomerResponse)

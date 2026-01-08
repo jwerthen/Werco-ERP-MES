@@ -882,6 +882,11 @@ class ApiService {
     return response.data;
   }
 
+  async getCustomerStats(customerId: number) {
+    const response = await this.api.get(`/customers/${customerId}/stats`);
+    return response.data;
+  }
+
   // Calibration
   async getEquipment(status?: string) {
     const response = await this.api.get('/calibration/equipment', { params: { status } });
