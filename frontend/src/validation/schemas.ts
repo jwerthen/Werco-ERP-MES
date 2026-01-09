@@ -294,14 +294,59 @@ const lastNameSchema = z.string()
   .transform((v: string) => v.trim())
   .transform((v: string) => v.charAt(0).toUpperCase() + v.slice(1));
 
+const commonPatterns = ['password', '123456', 'qwerty', 'admin', 'letmein', 'welcome'];
+
 const passwordStrengthSchema = z
   .string()
   .min(12, 'Password must be at least 12 characters')
   .max(128, 'Password must be at most 128 characters')
-  .regex(/[A-Z]/, 'Password must contain uppercase letter')
-  .regex(/[a-z]/, 'Password must contain lowercase letter')
-  .regex(/[0-9]/, 'Password must contain number')
-  .regex(/[^A-Za-z0-9]/, 'Password must contain special character');
+  .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
+  .regex(/[a-z]/, 'Password must contain at least one lowercase letter')
+  .regex(/[0-9]/, 'Password must contain at least one number')
+  .regex(/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/, 'Password must contain at least one special character')
+  .refine(
+    (val) => !commonPatterns.some(pattern => val.toLowerCase().includes(pattern)),
+    'Password contains a common pattern that is not allowed'
+  );
+
+// Password strength calculator for UI feedback
+export function calculatePasswordStrength(password: string): {
+  score: number;
+  label: string;
+  color: string;
+  requirements: { met: boolean; label: string }[];
+} {
+  const requirements = [
+    { met: password.length >= 12, label: 'At least 12 characters' },
+    { met: /[A-Z]/.test(password), label: 'Uppercase letter' },
+    { met: /[a-z]/.test(password), label: 'Lowercase letter' },
+    { met: /[0-9]/.test(password), label: 'Number' },
+    { met: /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password), label: 'Special character' },
+    { met: !commonPatterns.some(p => password.toLowerCase().includes(p)), label: 'No common patterns' },
+  ];
+
+  const metCount = requirements.filter(r => r.met).length;
+  const score = Math.round((metCount / requirements.length) * 100);
+
+  let label: string;
+  let color: string;
+
+  if (score < 40) {
+    label = 'Weak';
+    color = 'red';
+  } else if (score < 70) {
+    label = 'Fair';
+    color = 'yellow';
+  } else if (score < 100) {
+    label = 'Good';
+    color = 'blue';
+  } else {
+    label = 'Strong';
+    color = 'green';
+  }
+
+  return { score, label, color, requirements };
+}
 
 export const userSchema = z.object({
   email: emailSchema,

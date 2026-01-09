@@ -20,19 +20,24 @@ class UserCreate(UserBase):
     @field_validator('password')
     @classmethod
     def validate_password(cls, v: str) -> str:
-        """Validate password strength"""
-        if v != v:
-            errors = []
-            if not re.search(r'[A-Z]', v):
-                errors.append("Password must contain uppercase letter")
-            if not re.search(r'[a-z]', v):
-                errors.append("Password must contain lowercase letter")
-            if not re.search(r'[0-9]', v):
-                errors.append("Password must contain number")
-            if not re.search(r'[^A-Za-z0-9]', v):
-                errors.append("Password must contain special character")
-            if errors:
-                raise ValueError("; ".join(errors))
+        """Validate password strength - AS9100D compliant"""
+        errors = []
+        if len(v) < 12:
+            errors.append("Password must be at least 12 characters")
+        if not re.search(r'[A-Z]', v):
+            errors.append("Password must contain at least one uppercase letter")
+        if not re.search(r'[a-z]', v):
+            errors.append("Password must contain at least one lowercase letter")
+        if not re.search(r'[0-9]', v):
+            errors.append("Password must contain at least one number")
+        if not re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]', v):
+            errors.append("Password must contain at least one special character (!@#$%^&*()_+-=[]{};\':\"\\|,.<>/?)")
+        # Check for common patterns
+        common_patterns = ['password', '123456', 'qwerty', 'admin', 'letmein', 'welcome']
+        if any(pattern in v.lower() for pattern in common_patterns):
+            errors.append("Password contains a common pattern that is not allowed")
+        if errors:
+            raise ValueError("; ".join(errors))
         return v
 
     @field_validator('first_name', 'last_name', mode='before')

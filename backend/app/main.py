@@ -219,6 +219,32 @@ async def csrf_protection(request: Request, call_next):
     return await call_next(request)
 
 
+# Input sanitization middleware - sanitize all incoming JSON data
+@app.middleware("http")
+async def sanitize_input(request: Request, call_next):
+    # Only process JSON requests with body
+    if request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            from app.core.sanitization import sanitize_dict
+            
+            # Read and sanitize body
+            body = await request.body()
+            if body:
+                import json
+                try:
+                    data = json.loads(body)
+                    if isinstance(data, dict):
+                        sanitized_data = sanitize_dict(data)
+                        # Create new request with sanitized body
+                        request._body = json.dumps(sanitized_data).encode()
+                except json.JSONDecodeError:
+                    pass  # Let validation handle invalid JSON
+        except Exception as e:
+            logger.warning(f"Input sanitization warning: {e}")
+    
+    return await call_next(request)
+
+
 # Security headers middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):

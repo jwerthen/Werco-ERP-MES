@@ -1,7 +1,7 @@
 import React from 'react';
 import { FormField } from '../ui/FormField';
 import { FormWithValidation } from '../ui/FormWithValidation';
-import { UserFormData, userSchema, UserRole } from '../../validation/schemas';
+import { UserFormData, userSchema, UserRole, calculatePasswordStrength } from '../../validation/schemas';
 
 interface UserFormProps {
   initialData?: Partial<UserFormData>;
@@ -118,38 +118,59 @@ export function UserForm({
 }
 
 /**
- * Password requirements hint that updates as user types
+ * Password requirements hint with strength indicator
  */
 function PasswordRequirementsHint({ password }: { password: string }) {
-  const requirements = [
-    { test: /[A-Z]/.test(password), label: 'Uppercase letter' },
-    { test: /[a-z]/.test(password), label: 'Lowercase letter' },
-    { test: /[0-9]/.test(password), label: 'Number' },
-    { test: /[^A-Za-z0-9]/.test(password), label: 'Special character' },
-    { test: password.length >= 12, label: '12+ characters' },
-  ];
+  if (!password) return null;
 
-  const allMet = requirements.every((r) => r.test);
+  const strength = calculatePasswordStrength(password);
+
+  const colorClasses = {
+    red: 'bg-red-500',
+    yellow: 'bg-yellow-500',
+    blue: 'bg-blue-500',
+    green: 'bg-green-500',
+  };
+
+  const textColorClasses = {
+    red: 'text-red-600',
+    yellow: 'text-yellow-600',
+    blue: 'text-blue-600',
+    green: 'text-green-600',
+  };
 
   return (
-    <div className="mt-2">
-      <p className="text-xs text-gray-600 mb-1">Password must contain:</p>
-      <ul className="space-y-1 text-xs">
-        {requirements.map((req, idx) => (
-          <li key={idx} className={`flex items-center gap-1 ${req.test ? 'text-green-600' : 'text-gray-400'}`}>
-            {req.test ? (
-              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <div className="mt-2 space-y-2">
+      {/* Strength bar */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+          <div
+            className={`h-full transition-all duration-300 ${colorClasses[strength.color as keyof typeof colorClasses]}`}
+            style={{ width: `${strength.score}%` }}
+          />
+        </div>
+        <span className={`text-xs font-medium ${textColorClasses[strength.color as keyof typeof textColorClasses]}`}>
+          {strength.label}
+        </span>
+      </div>
+
+      {/* Requirements checklist */}
+      <div className="grid grid-cols-2 gap-1">
+        {strength.requirements.map((req, idx) => (
+          <div key={idx} className={`flex items-center gap-1 text-xs ${req.met ? 'text-green-600' : 'text-gray-400'}`}>
+            {req.met ? (
+              <svg className="h-3 w-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
             ) : (
-              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="h-3 w-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
             )}
             <span>{req.label}</span>
-          </li>
+          </div>
         ))}
-      </ul>
+      </div>
     </div>
   );
 }
