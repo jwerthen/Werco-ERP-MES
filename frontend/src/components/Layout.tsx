@@ -315,7 +315,7 @@ export default function Layout({ children }: LayoutProps) {
         <div className="relative flex-shrink-0 p-4 border-t border-white/10 bg-white/5">
           <div className="flex items-center gap-3">
             <div className="flex-shrink-0">
-              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-rose-500 to-red-600 flex items-center justify-center text-white font-semibold text-sm shadow-lg">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 flex items-center justify-center text-white font-semibold text-sm shadow-lg">
                 {user?.first_name?.[0]}{user?.last_name?.[0]}
               </div>
             </div>
@@ -323,7 +323,7 @@ export default function Layout({ children }: LayoutProps) {
               <p className="text-sm font-medium text-white truncate">
                 {user?.first_name} {user?.last_name}
               </p>
-              <p className="text-xs text-rose-400/80 truncate capitalize">
+              <p className="text-xs text-cyan-400/80 truncate capitalize">
                 {user?.role?.replace('_', ' ')}
               </p>
             </div>
@@ -378,7 +378,7 @@ export default function Layout({ children }: LayoutProps) {
 
               {/* User avatar (mobile) */}
               <div className="lg:hidden flex items-center">
-                <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-rose-500 to-red-600 flex items-center justify-center text-white font-medium text-sm shadow-md">
+                <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 flex items-center justify-center text-white font-medium text-sm shadow-md">
                   {user?.first_name?.[0]}{user?.last_name?.[0]}
                 </div>
               </div>

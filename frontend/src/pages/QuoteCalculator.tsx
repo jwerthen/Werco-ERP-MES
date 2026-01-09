@@ -278,7 +278,7 @@ export default function QuoteCalculator() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-gradient-to-br from-rose-500 to-red-600 text-white">
+            <div className="p-2 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 text-white">
               <CalculatorIcon className="h-6 w-6" />
             </div>
             Instant Quote Calculator
@@ -300,22 +300,22 @@ export default function QuoteCalculator() {
           onClick={() => { setCalcType('cnc'); setResult(null); }}
           className={`group relative p-6 rounded-2xl border-2 transition-all duration-300 overflow-hidden ${
             calcType === 'cnc'
-              ? 'border-rose-500 bg-gradient-to-br from-rose-50 to-red-50'
+              ? 'border-cyan-500 bg-gradient-to-br from-cyan-50 to-cyan-100'
               : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-lg'
           }`}
         >
           {calcType === 'cnc' && (
-            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-rose-500 to-red-600" />
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-cyan-500 to-cyan-600" />
           )}
           <div className={`w-14 h-14 mx-auto mb-3 rounded-2xl flex items-center justify-center transition-all duration-300 ${
             calcType === 'cnc' 
-              ? 'bg-gradient-to-br from-rose-500 to-red-600 text-white shadow-lg' 
+              ? 'bg-gradient-to-br from-cyan-500 to-cyan-600 text-white shadow-lg' 
               : 'bg-slate-100 text-slate-400 group-hover:bg-slate-200'
           }`}>
             <CubeIcon className="h-7 w-7" />
           </div>
           <h3 className={`text-lg font-semibold text-center transition-colors ${
-            calcType === 'cnc' ? 'text-rose-700' : 'text-slate-700'
+            calcType === 'cnc' ? 'text-cyan-700' : 'text-slate-700'
           }`}>
             CNC Machining
           </h3>
@@ -326,22 +326,22 @@ export default function QuoteCalculator() {
           onClick={() => { setCalcType('sheet_metal'); setResult(null); }}
           className={`group relative p-6 rounded-2xl border-2 transition-all duration-300 overflow-hidden ${
             calcType === 'sheet_metal'
-              ? 'border-rose-500 bg-gradient-to-br from-rose-50 to-red-50'
+              ? 'border-cyan-500 bg-gradient-to-br from-cyan-50 to-cyan-100'
               : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-lg'
           }`}
         >
           {calcType === 'sheet_metal' && (
-            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-rose-500 to-red-600" />
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-cyan-500 to-cyan-600" />
           )}
           <div className={`w-14 h-14 mx-auto mb-3 rounded-2xl flex items-center justify-center transition-all duration-300 ${
             calcType === 'sheet_metal' 
-              ? 'bg-gradient-to-br from-rose-500 to-red-600 text-white shadow-lg' 
+              ? 'bg-gradient-to-br from-cyan-500 to-cyan-600 text-white shadow-lg' 
               : 'bg-slate-100 text-slate-400 group-hover:bg-slate-200'
           }`}>
             <Square3Stack3DIcon className="h-7 w-7" />
           </div>
           <h3 className={`text-lg font-semibold text-center transition-colors ${
-            calcType === 'sheet_metal' ? 'text-rose-700' : 'text-slate-700'
+            calcType === 'sheet_metal' ? 'text-cyan-700' : 'text-slate-700'
           }`}>
             Sheet Metal
           </h3>
@@ -353,7 +353,7 @@ export default function QuoteCalculator() {
         {/* Input Form */}
         <div className="card">
           <h2 className="text-lg font-semibold mb-6 flex items-center text-slate-800">
-            <div className="p-1.5 rounded-lg bg-rose-100 text-rose-600 mr-2">
+            <div className="p-1.5 rounded-lg bg-cyan-100 text-cyan-600 mr-2">
               <CalculatorIcon className="h-5 w-5" />
             </div>
             {calcType === 'cnc' ? 'CNC Part Details' : 'Sheet Metal Details'}
@@ -537,7 +537,7 @@ export default function QuoteCalculator() {
                       onChange={(e) => setCncForm({ ...cncForm, rush: e.target.checked })}
                       className="sr-only peer"
                     />
-                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-rose-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-amber-500 peer-checked:to-orange-500"></div>
+                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-cyan-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-amber-500 peer-checked:to-orange-500"></div>
                     <span className="ml-3 text-sm font-medium text-slate-700 flex items-center gap-1.5">
                       <BoltIcon className="h-4 w-4 text-amber-500" />
                       Rush Order (1.5x)
@@ -551,7 +551,7 @@ export default function QuoteCalculator() {
             <div className="space-y-5">
               {/* DXF Upload */}
               <div className={`border-2 border-dashed rounded-2xl p-5 text-center transition-all duration-300 ${
-                dxfFile ? 'border-rose-300 bg-rose-50/50' : 'border-slate-300 hover:border-rose-400 hover:bg-rose-50/30'
+                dxfFile ? 'border-cyan-300 bg-cyan-50/50' : 'border-slate-300 hover:border-cyan-400 hover:bg-cyan-50/30'
               }`}>
                 {!dxfFile ? (
                   <label className="cursor-pointer block">
@@ -575,11 +575,11 @@ export default function QuoteCalculator() {
                 ) : dxfAnalysis ? (
                   <div className="text-left">
                     <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center text-rose-600">
+                      <div className="flex items-center text-cyan-600">
                         <CheckCircleIcon className="h-5 w-5 mr-2" />
                         <span className="font-medium">{dxfFile.name}</span>
                       </div>
-                      <button onClick={clearDxf} className="text-red-500 text-sm hover:underline font-medium">Clear</button>
+                      <button onClick={clearDxf} className="text-slate-500 text-sm hover:underline font-medium">Clear</button>
                     </div>
                     <div className="mb-3">
                       <DXFViewer 
@@ -594,12 +594,12 @@ export default function QuoteCalculator() {
                         }}
                       />
                     </div>
-                    <div className="bg-gradient-to-br from-rose-50 to-red-50 rounded-xl p-4 border border-rose-200">
-                      <p className="font-medium text-rose-800 mb-2 flex items-center gap-2">
+                    <div className="bg-gradient-to-br from-cyan-50 to-cyan-100 rounded-xl p-4 border border-cyan-200">
+                      <p className="font-medium text-cyan-800 mb-2 flex items-center gap-2">
                         <SparklesIcon className="h-4 w-4" />
                         Extracted from DXF
                       </p>
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm text-rose-700">
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm text-cyan-700">
                         <span>Flat Size: {dxfAnalysis.flat_length}" x {dxfAnalysis.flat_width}"</span>
                         <span>Cut Length: {dxfAnalysis.total_cut_length}"</span>
                         <span>Holes: {dxfAnalysis.num_holes}</span>
@@ -622,7 +622,7 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Flat Pattern Size (inches)
-                  {dxfAnalysis && <span className="text-xs text-rose-600 bg-rose-100 px-2 py-0.5 rounded-full">from DXF</span>}
+                  {dxfAnalysis && <span className="text-xs text-cyan-600 bg-cyan-100 px-2 py-0.5 rounded-full">from DXF</span>}
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -680,7 +680,7 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Cutting
-                  {dxfAnalysis && <span className="text-xs text-rose-600 bg-rose-100 px-2 py-0.5 rounded-full">from DXF</span>}
+                  {dxfAnalysis && <span className="text-xs text-cyan-600 bg-cyan-100 px-2 py-0.5 rounded-full">from DXF</span>}
                 </label>
                 <div className="grid grid-cols-3 gap-3">
                   <div>
@@ -720,7 +720,7 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Bending
-                  {dxfAnalysis && <span className="text-xs text-rose-600 bg-rose-100 px-2 py-0.5 rounded-full">from DXF</span>}
+                  {dxfAnalysis && <span className="text-xs text-cyan-600 bg-cyan-100 px-2 py-0.5 rounded-full">from DXF</span>}
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -793,7 +793,7 @@ export default function QuoteCalculator() {
                       onChange={(e) => setSheetForm({ ...sheetForm, rush: e.target.checked })}
                       className="sr-only peer"
                     />
-                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-rose-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-amber-500 peer-checked:to-orange-500"></div>
+                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-cyan-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-amber-500 peer-checked:to-orange-500"></div>
                     <span className="ml-3 text-sm font-medium text-slate-700 flex items-center gap-1.5">
                       <BoltIcon className="h-4 w-4 text-amber-500" />
                       Rush Order (1.5x)
@@ -817,7 +817,7 @@ export default function QuoteCalculator() {
                     onClick={() => toggleFinish(f.id)}
                     className={`px-4 py-2 rounded-xl text-sm font-medium border-2 transition-all duration-200 ${
                       isSelected
-                        ? 'border-rose-500 bg-gradient-to-r from-rose-500 to-red-600 text-white shadow-md'
+                        ? 'border-cyan-500 bg-gradient-to-r from-cyan-500 to-cyan-600 text-white shadow-md'
                         : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
                     }`}
                   >
@@ -858,7 +858,7 @@ export default function QuoteCalculator() {
         {/* Results */}
         <div className="card">
           <h2 className="text-lg font-semibold mb-6 flex items-center text-slate-800">
-            <div className="p-1.5 rounded-lg bg-rose-100 text-rose-600 mr-2">
+            <div className="p-1.5 rounded-lg bg-cyan-100 text-cyan-600 mr-2">
               <CurrencyDollarIcon className="h-5 w-5" />
             </div>
             Quote Result
@@ -881,30 +881,30 @@ export default function QuoteCalculator() {
                   <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
                     <defs>
                       <pattern id="price-pattern" width="40" height="40" patternUnits="userSpaceOnUse">
-                        <path d="M20 0L40 20L20 40L0 20Z" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-rose-400"/>
+                        <path d="M20 0L40 20L20 40L0 20Z" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-cyan-400"/>
                       </pattern>
                     </defs>
                     <rect width="100%" height="100%" fill="url(#price-pattern)" />
                   </svg>
                 </div>
                 <div className="relative z-10">
-                  <p className="text-rose-400 text-sm font-medium">Total Quote</p>
+                  <p className="text-cyan-400 text-sm font-medium">Total Quote</p>
                   <p className="text-5xl font-bold text-white mt-2">${result.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
                   <p className="text-slate-400 mt-3">
-                    <span className="text-rose-400 font-semibold">${result.unit_price.toFixed(2)}</span> per unit x {calcType === 'cnc' ? cncForm.quantity : sheetForm.quantity}
+                    <span className="text-cyan-400 font-semibold">${result.unit_price.toFixed(2)}</span> per unit x {calcType === 'cnc' ? cncForm.quantity : sheetForm.quantity}
                   </p>
                 </div>
               </div>
 
               {/* Lead Time */}
-              <div className="flex items-center justify-between p-4 bg-gradient-to-r from-slate-50 to-rose-50 rounded-xl border border-slate-200">
+              <div className="flex items-center justify-between p-4 bg-gradient-to-r from-slate-50 to-cyan-50 rounded-xl border border-slate-200">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-rose-100">
-                    <ClockIcon className="h-5 w-5 text-rose-600" />
+                  <div className="p-2 rounded-lg bg-cyan-100">
+                    <ClockIcon className="h-5 w-5 text-cyan-600" />
                   </div>
                   <span className="font-medium text-slate-700">Estimated Lead Time</span>
                 </div>
-                <span className="text-xl font-bold text-rose-600">{result.lead_time_days} days</span>
+                <span className="text-xl font-bold text-cyan-600">{result.lead_time_days} days</span>
               </div>
 
               {/* Cost Breakdown */}

@@ -16,7 +16,7 @@ interface DXFViewerProps {
 export default function DXFViewer({ file, analysis }: DXFViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [dxfContent, setDxfContent] = useState<string>('');
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
