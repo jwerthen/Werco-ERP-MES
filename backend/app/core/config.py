@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     # CORS - Include localhost for dev, Railway URLs added via env var in production
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:8000"
     CORS_ALLOW_CREDENTIALS: bool = True
-    CORS_ALLOW_METHODS: str = "*"
-    CORS_ALLOW_HEADERS: str = "*"
+    CORS_ALLOW_METHODS: str = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+    CORS_ALLOW_HEADERS: str = "Authorization,Content-Type,X-Requested-With,Accept,Origin,If-None-Match,If-Match"
     
     @property
     def cors_origins_list(self) -> List[str]:

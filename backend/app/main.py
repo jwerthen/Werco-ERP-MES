@@ -170,6 +170,54 @@ app.add_middleware(
     allow_headers=settings.CORS_ALLOW_HEADERS.split(","),
 )
 
+# CSRF Protection middleware
+# For JWT-based SPAs, CSRF is mitigated by using Authorization header (not cookies)
+# This adds defense-in-depth by validating Origin/Referer for state-changing requests
+@app.middleware("http")
+async def csrf_protection(request: Request, call_next):
+    # Only check state-changing methods
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        # Skip CSRF check for certain endpoints
+        exempt_paths = (
+            "/api/v1/auth/login",
+            "/health",
+            "/api/v1/errors/log",
+        )
+        if request.url.path in exempt_paths:
+            return await call_next(request)
+        
+        # Defense 1: Check for X-Requested-With header (cannot be set cross-origin without CORS)
+        x_requested_with = request.headers.get("x-requested-with")
+        if x_requested_with != "XMLHttpRequest":
+            # Allow if request has valid Authorization header (API clients)
+            auth_header = request.headers.get("authorization")
+            if not auth_header or not auth_header.startswith("Bearer "):
+                logger.warning(f"CSRF: Missing X-Requested-With header for {request.url.path}")
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Missing required security header"}
+                )
+        
+        # Defense 2: Validate Origin/Referer header
+        origin = request.headers.get("origin") or request.headers.get("referer")
+        
+        if origin:
+            # Parse origin to get host
+            from urllib.parse import urlparse
+            parsed = urlparse(origin)
+            origin_host = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else None
+            
+            # Check if origin is in allowed list
+            if origin_host and origin_host not in settings.cors_origins_list:
+                logger.warning(f"CSRF: Blocked request from untrusted origin: {origin_host}")
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Request origin not allowed"}
+                )
+    
+    return await call_next(request)
+
+
 # Security headers middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
@@ -179,6 +227,8 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # Content Security Policy - restrict resource loading
+    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
     # Add content type
     response.headers["Content-Type"] = response.headers.get("Content-Type", "application/json")
     return response

@@ -24,6 +24,8 @@ class ApiService {
       baseURL: API_BASE_URL,
       headers: {
         'Content-Type': 'application/json',
+        // CSRF defense: Custom header that cannot be set by cross-origin requests
+        'X-Requested-With': 'XMLHttpRequest',
       },
     });
 
