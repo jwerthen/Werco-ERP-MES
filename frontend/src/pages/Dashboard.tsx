@@ -31,7 +31,7 @@ const workCenterTypeColors: Record<string, string> = {
   powder_coating: 'bg-orange-500',
   assembly: 'bg-emerald-500',
   welding: 'bg-red-500',
-  inspection: 'bg-rose-500',
+  inspection: 'bg-cyan-500',
   shipping: 'bg-slate-500',
 };
 

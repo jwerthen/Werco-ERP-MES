@@ -11,7 +11,7 @@ const AnimatedParticles = () => {
       {[...Array(20)].map((_, i) => (
         <div
           key={i}
-          className="absolute rounded-full bg-rose-400/20"
+          className="absolute rounded-full bg-cyan-400/20"
           style={{
             width: Math.random() * 4 + 2 + 'px',
             height: Math.random() * 4 + 2 + 'px',
@@ -24,7 +24,7 @@ const AnimatedParticles = () => {
       ))}
       
       {/* Energy pulses */}
-      <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-rose-500/10 rounded-full blur-3xl animate-pulse" />
+      <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl animate-pulse" />
       <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '1s' }} />
       <div className="absolute top-1/2 left-1/2 w-72 h-72 bg-amber-500/5 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '2s' }} />
     </div>
@@ -37,17 +37,17 @@ const CircuitPattern = () => (
     <defs>
       <pattern id="circuit" x="0" y="0" width="100" height="100" patternUnits="userSpaceOnUse">
         <path d="M10 10h80M10 10v30M90 10v30M10 40h30M60 40h30M40 40v30M60 40v30M10 70h80M10 70v20M90 70v20" 
-              stroke="currentColor" strokeWidth="1" fill="none" className="text-rose-400"/>
-        <circle cx="10" cy="10" r="3" className="fill-rose-400"/>
-        <circle cx="90" cy="10" r="3" className="fill-rose-400"/>
-        <circle cx="10" cy="40" r="2" className="fill-rose-400"/>
-        <circle cx="40" cy="40" r="2" className="fill-rose-400"/>
-        <circle cx="60" cy="40" r="2" className="fill-rose-400"/>
-        <circle cx="90" cy="40" r="2" className="fill-rose-400"/>
-        <circle cx="40" cy="70" r="2" className="fill-rose-400"/>
-        <circle cx="60" cy="70" r="2" className="fill-rose-400"/>
-        <circle cx="10" cy="70" r="3" className="fill-rose-400"/>
-        <circle cx="90" cy="70" r="3" className="fill-rose-400"/>
+              stroke="currentColor" strokeWidth="1" fill="none" className="text-cyan-400"/>
+        <circle cx="10" cy="10" r="3" className="fill-cyan-400"/>
+        <circle cx="90" cy="10" r="3" className="fill-cyan-400"/>
+        <circle cx="10" cy="40" r="2" className="fill-cyan-400"/>
+        <circle cx="40" cy="40" r="2" className="fill-cyan-400"/>
+        <circle cx="60" cy="40" r="2" className="fill-cyan-400"/>
+        <circle cx="90" cy="40" r="2" className="fill-cyan-400"/>
+        <circle cx="40" cy="70" r="2" className="fill-cyan-400"/>
+        <circle cx="60" cy="70" r="2" className="fill-cyan-400"/>
+        <circle cx="10" cy="70" r="3" className="fill-cyan-400"/>
+        <circle cx="90" cy="70" r="3" className="fill-cyan-400"/>
       </pattern>
     </defs>
     <rect width="100%" height="100%" fill="url(#circuit)" />
@@ -59,8 +59,8 @@ const HexagonGrid = () => (
   <svg className="absolute inset-0 w-full h-full opacity-[0.04]" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <pattern id="hexagons" width="56" height="100" patternUnits="userSpaceOnUse" patternTransform="scale(2)">
-        <path d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-rose-300"/>
-        <path d="M28 0L28 34L0 50L0 84L28 100L56 84L56 50L28 34" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-rose-300"/>
+        <path d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-cyan-300"/>
+        <path d="M28 0L28 34L0 50L0 84L28 100L56 84L56 50L28 34" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-cyan-300"/>
       </pattern>
     </defs>
     <rect width="100%" height="100%" fill="url(#hexagons)" />
@@ -73,7 +73,7 @@ const PowerFlowLines = () => (
     {[...Array(5)].map((_, i) => (
       <div
         key={i}
-        className="absolute h-px bg-gradient-to-r from-transparent via-rose-400/40 to-transparent"
+        className="absolute h-px bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent"
         style={{
           width: '200%',
           top: `${20 + i * 15}%`,
@@ -185,7 +185,7 @@ export default function Login() {
               <h1 className="text-5xl font-bold leading-tight">
                 <span className="text-white">Manufacturing</span>
                 <br />
-                <span className="bg-gradient-to-r from-rose-400 via-red-400 to-pink-400 bg-clip-text text-transparent">
+                <span className="bg-gradient-to-r from-cyan-400 via-cyan-500 to-blue-400 bg-clip-text text-transparent">
                   Execution System
                 </span>
               </h1>
@@ -194,15 +194,15 @@ export default function Login() {
             {/* Tagline */}
             <p className="text-lg text-slate-300 max-w-md leading-relaxed">
               Precision fabrication management for{' '}
-              <span className="text-rose-400 font-medium">power generation</span>,{' '}
-              <span className="text-rose-400 font-medium">data center</span>, and{' '}
-              <span className="text-rose-400 font-medium">defense</span> sectors.
+              <span className="text-cyan-400 font-medium">power generation</span>,{' '}
+              <span className="text-cyan-400 font-medium">data center</span>, and{' '}
+              <span className="text-cyan-400 font-medium">defense</span> sectors.
             </p>
             
             {/* Certification badges */}
             <div className="flex flex-wrap items-center gap-4 pt-4">
               <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-sm">
-                <ShieldCheckIcon className="h-5 w-5 text-rose-400" />
+                <ShieldCheckIcon className="h-5 w-5 text-cyan-400" />
                 <span className="text-sm font-medium text-white">AS9100D Compliant</span>
               </div>
               <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-sm">
@@ -214,7 +214,7 @@ export default function Login() {
             {/* Decorative stats/metrics */}
             <div className="grid grid-cols-3 gap-6 pt-8 border-t border-white/10">
               <div>
-                <div className="text-3xl font-bold text-rose-400">99.9%</div>
+                <div className="text-3xl font-bold text-cyan-400">99.9%</div>
                 <div className="text-sm text-slate-400 mt-1">System Uptime</div>
               </div>
               <div>
@@ -262,15 +262,15 @@ export default function Login() {
           {/* Login card with glassmorphism */}
           <div className="glass-card rounded-3xl shadow-2xl p-10 relative overflow-hidden">
             {/* Subtle gradient accent at top */}
-            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-rose-500 via-red-500 to-pink-500" />
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-cyan-500 via-cyan-600 to-blue-500" />
             
             <div className="text-center mb-8">
               {/* Animated lock icon container */}
               <div className="relative w-16 h-16 mx-auto mb-5">
-                <div className="absolute inset-0 bg-gradient-to-br from-rose-500 to-red-600 rounded-2xl rotate-3 opacity-20" />
-                <div className="absolute inset-0 bg-gradient-to-br from-rose-500 to-red-600 rounded-2xl -rotate-3 opacity-20" />
+                <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl rotate-3 opacity-20" />
+                <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl -rotate-3 opacity-20" />
                 <div className="relative w-full h-full bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl flex items-center justify-center shadow-lg">
-                  <LockClosedIcon className="h-8 w-8 text-rose-400" />
+                  <LockClosedIcon className="h-8 w-8 text-cyan-400" />
                 </div>
               </div>
               <h2 className="text-2xl font-bold text-slate-800">Welcome back</h2>
@@ -295,7 +295,7 @@ export default function Login() {
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                     <EnvelopeIcon className={`h-5 w-5 transition-colors duration-200 ${
-                      focusedField === 'email' ? 'text-rose-500' : 'text-slate-400'
+                      focusedField === 'email' ? 'text-cyan-500' : 'text-slate-400'
                     }`} />
                   </div>
                   <input
@@ -306,7 +306,7 @@ export default function Login() {
                     onChange={(e) => setEmail(e.target.value)}
                     onFocus={() => setFocusedField('email')}
                     onBlur={() => setFocusedField(null)}
-                    className="input-glow w-full pl-12 pr-4 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-rose-500 focus:outline-none transition-all duration-200"
+                    className="input-glow w-full pl-12 pr-4 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200"
                     placeholder="you@werco.com"
                     autoComplete="email"
                   />
@@ -321,7 +321,7 @@ export default function Login() {
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                     <LockClosedIcon className={`h-5 w-5 transition-colors duration-200 ${
-                      focusedField === 'password' ? 'text-rose-500' : 'text-slate-400'
+                      focusedField === 'password' ? 'text-cyan-500' : 'text-slate-400'
                     }`} />
                   </div>
                   <input
@@ -332,7 +332,7 @@ export default function Login() {
                     onChange={(e) => setPassword(e.target.value)}
                     onFocus={() => setFocusedField('password')}
                     onBlur={() => setFocusedField(null)}
-                    className="input-glow w-full pl-12 pr-12 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-rose-500 focus:outline-none transition-all duration-200"
+                    className="input-glow w-full pl-12 pr-12 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200"
                     placeholder="Enter your password"
                     autoComplete="current-password"
                   />
@@ -354,7 +354,7 @@ export default function Login() {
               <div className="flex justify-end">
                 <button
                   type="button"
-                  className="text-sm text-rose-600 hover:text-rose-700 font-medium transition-colors"
+                  className="text-sm text-cyan-600 hover:text-cyan-700 font-medium transition-colors"
                 >
                   Forgot password?
                 </button>
@@ -399,11 +399,11 @@ export default function Login() {
           {/* Mobile compliance badges */}
           <div className="lg:hidden flex flex-wrap items-center justify-center gap-3 mt-8">
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
-              <ShieldCheckIcon className="h-4 w-4 text-rose-500" />
+              <ShieldCheckIcon className="h-4 w-4 text-cyan-500" />
               <span className="text-xs font-medium">AS9100D</span>
             </div>
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
-              <ShieldCheckIcon className="h-4 w-4 text-red-500" />
+              <ShieldCheckIcon className="h-4 w-4 text-cyan-500" />
               <span className="text-xs font-medium">ISO 9001</span>
             </div>
           </div>

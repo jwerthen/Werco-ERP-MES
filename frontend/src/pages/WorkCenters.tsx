@@ -12,7 +12,7 @@ const typeColors: Record<WorkCenterType, string> = {
   powder_coating: 'bg-orange-100 text-orange-800',
   assembly: 'bg-green-100 text-green-800',
   welding: 'bg-red-100 text-red-800',
-  inspection: 'bg-rose-100 text-rose-800',
+  inspection: 'bg-cyan-100 text-cyan-800',
   shipping: 'bg-gray-100 text-gray-800',
 };
 

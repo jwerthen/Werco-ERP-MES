@@ -225,7 +225,7 @@ const SidebarPattern = () => (
   <svg className="absolute inset-0 w-full h-full opacity-[0.03]" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <pattern id="sidebar-hex" width="56" height="100" patternUnits="userSpaceOnUse" patternTransform="scale(1.5)">
-        <path d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-rose-300"/>
+        <path d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-cyan-300"/>
       </pattern>
     </defs>
     <rect width="100%" height="100%" fill="url(#sidebar-hex)" />
@@ -278,7 +278,7 @@ export default function Layout({ children }: LayoutProps) {
       >
         {/* Animated background elements */}
         <SidebarPattern />
-        <div className="absolute top-1/4 -left-20 w-40 h-40 bg-rose-500/10 rounded-full blur-3xl" />
+        <div className="absolute top-1/4 -left-20 w-40 h-40 bg-cyan-500/10 rounded-full blur-3xl" />
         <div className="absolute bottom-1/4 -right-20 w-60 h-60 bg-blue-500/10 rounded-full blur-3xl" />
         
         {/* Logo header */}
@@ -399,7 +399,7 @@ export default function Layout({ children }: LayoutProps) {
             <div className="flex items-center gap-2">
               <span>Werco Manufacturing</span>
               <span className="text-slate-300">|</span>
-              <span className="text-rose-600 font-medium">MES</span>
+              <span className="text-cyan-600 font-medium">MES</span>
             </div>
             <span className="text-slate-400">v1.0.0</span>
           </div>
@@ -417,7 +417,7 @@ export default function Layout({ children }: LayoutProps) {
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center gap-3 p-4 border-b border-slate-100">
-              <MagnifyingGlassIcon className="h-5 w-5 text-rose-500" />
+              <MagnifyingGlassIcon className="h-5 w-5 text-cyan-500" />
               <input
                 type="text"
                 placeholder="Search parts, work orders, customers..."

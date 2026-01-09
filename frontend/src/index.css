@@ -57,7 +57,7 @@
 
   /* Better focus states for accessibility */
   *:focus-visible {
-    @apply outline-none ring-2 ring-rose-500 ring-offset-2;
+    @apply outline-none ring-2 ring-cyan-500 ring-offset-2;
   }
 
   /* Custom scrollbar - modernized */
@@ -80,7 +80,7 @@
 
   /* Selection color - rose accent */
   ::selection {
-    @apply bg-rose-500/20 text-rose-900;
+    @apply bg-cyan-500/20 text-cyan-900;
   }
 }
 
@@ -108,12 +108,12 @@
 
   .btn-primary {
     @apply btn text-white;
-    background: linear-gradient(135deg, #f43f5e 0%, #e11d48 50%, #be123c 100%);
-    box-shadow: 0 4px 15px rgba(244, 63, 94, 0.3);
+    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 50%, #0e7490 100%);
+    box-shadow: 0 4px 15px rgba(6, 182, 212, 0.3);
   }
   
   .btn-primary:hover {
-    box-shadow: 0 6px 25px rgba(244, 63, 94, 0.5);
+    box-shadow: 0 6px 25px rgba(6, 182, 212, 0.5);
     transform: translateY(-1px);
   }
   
@@ -156,10 +156,10 @@
 
   .btn-outline {
     @apply btn
-           bg-transparent text-rose-600 
-           border-2 border-rose-500
-           hover:bg-rose-50
-           focus-visible:ring-rose-500;
+           bg-transparent text-cyan-600 
+           border-2 border-cyan-500
+           hover:bg-cyan-50
+           focus-visible:ring-cyan-500;
   }
 
   /* Button sizes */
@@ -245,13 +245,13 @@
            text-slate-800 text-base
            placeholder:text-slate-400
            transition-all duration-200
-           focus:border-rose-500 focus:outline-none
+           focus:border-cyan-500 focus:outline-none
            disabled:bg-slate-100 disabled:cursor-not-allowed;
     min-height: 44px;
   }
   
   .input:focus {
-    box-shadow: 0 0 0 3px rgba(244, 63, 94, 0.15), 0 0 20px rgba(244, 63, 94, 0.1);
+    box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.15), 0 0 20px rgba(6, 182, 212, 0.1);
   }
 
   .input-error {
@@ -286,14 +286,14 @@
   }
 
   .checkbox {
-    @apply h-5 w-5 rounded-md border-slate-300 text-rose-600 
-           focus:ring-rose-500 focus:ring-offset-0
+    @apply h-5 w-5 rounded-md border-slate-300 text-cyan-600 
+           focus:ring-cyan-500 focus:ring-offset-0
            cursor-pointer transition-colors;
   }
 
   .radio {
-    @apply h-5 w-5 border-slate-300 text-rose-600 
-           focus:ring-rose-500 focus:ring-offset-0
+    @apply h-5 w-5 border-slate-300 text-cyan-600 
+           focus:ring-cyan-500 focus:ring-offset-0
            cursor-pointer transition-colors;
   }
 
@@ -327,7 +327,7 @@
   }
   
   .table tbody tr:hover {
-    @apply bg-rose-50/30;
+    @apply bg-cyan-50/30;
   }
 
   .table tbody tr:last-child td {
@@ -354,7 +354,7 @@
   }
 
   .badge-primary {
-    @apply badge bg-rose-100 text-rose-700;
+    @apply badge bg-cyan-100 text-cyan-700;
   }
 
   .badge-success {
@@ -398,8 +398,8 @@
   }
 
   .status-dot-info {
-    @apply status-dot bg-rose-500;
-    box-shadow: 0 0 8px rgba(244, 63, 94, 0.5);
+    @apply status-dot bg-cyan-500;
+    box-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
   }
 
   /* ------------------------------------
@@ -441,7 +441,7 @@
   }
 
   .alert-info {
-    @apply alert bg-rose-50 border-rose-200 text-rose-800;
+    @apply alert bg-cyan-50 border-cyan-200 text-cyan-800;
   }
 
   /* ------------------------------------
@@ -627,9 +627,9 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Gradient text - Rose accent */
+  /* Gradient text - Cyan accent */
   .text-gradient {
-    @apply bg-gradient-to-r from-rose-600 to-red-500 bg-clip-text text-transparent;
+    @apply bg-gradient-to-r from-cyan-600 to-cyan-500 bg-clip-text text-transparent;
   }
 
   /* Glass effect - Enhanced */
