@@ -286,7 +286,7 @@ export default function QuoteCalculator() {
           <p className="text-slate-500 mt-1">Generate accurate quotes in seconds with AI-powered pricing</p>
         </div>
         <button
-          onClick={() => navigate('/quote-config')}
+          onClick={() => navigate('/admin/settings')}
           className="btn-secondary"
         >
           <CogIcon className="h-5 w-5 mr-2" />
