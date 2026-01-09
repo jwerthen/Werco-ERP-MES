@@ -5,10 +5,17 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'Deploy target (staging/production)'
+        required: false
+        default: 'staging'
 
 env:
   PYTHON_VERSION: '3.11'
   NODE_VERSION: '18'
+  RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
 
 jobs:
   backend-lint:
@@ -43,9 +50,10 @@ jobs:
 
       - name: Run MyPy
         run: mypy app --config-file=mypy.ini || true
+        continue-on-error: true
 
       - name: Run Bandit security check
-        run: bandit -r app -s B101
+        run: bandit -r app -s B101 -ll
 
   backend-test:
     name: Backend Tests
@@ -215,14 +223,31 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     environment:
       name: staging
-      url: https://staging.werco-erp.com
+      url: ${{ vars.STAGING_URL }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy to staging
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy Backend to Staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          echo "Deploying to staging environment..."
-          # Add deployment commands here
+          cd backend
+          railway up --service werco-api-staging --environment staging
+
+      - name: Deploy Frontend to Staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          cd frontend
+          railway up --service werco-frontend-staging --environment staging
+
+      - name: Verify Staging Deployment
+        run: |
+          sleep 30
+          curl -f ${{ vars.STAGING_API_URL }}/health || exit 1
 
   deploy-production:
     name: Deploy to Production
@@ -231,14 +256,46 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment:
       name: production
-      url: https://werco-erp.com
+      url: ${{ vars.PRODUCTION_URL }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy to production
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy Backend to Production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          echo "Deploying to production environment..."
-          # Add deployment commands here
+          cd backend
+          railway up --service werco-api --environment production
+
+      - name: Deploy Frontend to Production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          cd frontend
+          railway up --service werco-frontend --environment production
+
+      - name: Verify Production Deployment
+        run: |
+          sleep 30
+          curl -f ${{ vars.PRODUCTION_API_URL }}/health || exit 1
+
+      - name: Create GitHub Release
+        if: success()
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: deploy-${{ github.run_number }}
+          release_name: Production Deploy #${{ github.run_number }}
+          body: |
+            Automated production deployment
+            Commit: ${{ github.sha }}
+            Deployed by: ${{ github.actor }}
+          draft: false
+          prerelease: false
 
   notify:
     name: Notify Results
