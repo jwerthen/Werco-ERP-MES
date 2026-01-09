@@ -19,7 +19,7 @@
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet("update-status", "set-blocked", "add-comment", "wait-for-comment", "move-to-done", "list-tasks", "get-task")]
+    [ValidateSet("update-status", "set-blocked", "add-comment", "wait-for-comment", "move-to-done", "list-tasks", "get-task", "create-task")]
     [string]$Command,
     
     [Parameter(Position=1)]
@@ -207,6 +207,25 @@ function Get-Tasks {
     }
 }
 
+function Create-Task {
+    param([string]$Title, [string]$Priority = "Medium", [string]$Status = "Done")
+    $body = @{
+        parent = @{ database_id = $TASKBOARD_DB_ID }
+        properties = @{
+            "Task" = @{ title = @(@{ text = @{ content = $Title } }) }
+            "Status" = @{ select = @{ name = $Status } }
+            "Priority" = @{ select = @{ name = $Priority } }
+            "Assignee" = @{ select = @{ name = "Droid" } }
+            "Current Status" = @{ rich_text = @(@{ text = @{ content = "Completed" } }) }
+        }
+    } | ConvertTo-Json -Depth 6
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+    $result = Invoke-RestMethod -Uri "https://api.notion.com/v1/pages" -Headers $headers -Method Post -Body $bodyBytes
+    Write-Host "Task created: $Title"
+    Write-Host "ID: $($result.id)"
+    return $result.id
+}
+
 function Get-Task {
     param([string]$TaskId)
     $id = Get-TaskIdFromUrl $TaskId
@@ -281,6 +300,15 @@ switch ($Command) {
             exit 1
         }
         Get-Task -TaskId $TaskId
+    }
+    "create-task" {
+        if (-not $TaskId) {
+            Write-Host "Usage: notion-cc create-task <title> [priority] [status]"
+            exit 1
+        }
+        $priority = if ($Value) { $Value } else { "Medium" }
+        $status = if ($Message) { $Message } else { "Done" }
+        Create-Task -Title $TaskId -Priority $priority -Status $status
     }
     default {
         Write-Host @"
