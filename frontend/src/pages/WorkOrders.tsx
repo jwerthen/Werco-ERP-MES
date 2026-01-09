@@ -163,7 +163,7 @@ export default function WorkOrders() {
           <h1 className="page-title">Work Orders</h1>
           <p className="page-subtitle">Manage and track manufacturing orders</p>
         </div>
-        <div className="page-actions">
+        <div className="page-actions" data-tour="wo-create">
           <Link to="/work-orders/new" className="btn-primary">
             <PlusIcon className="h-5 w-5 mr-2" />
             New Work Order
@@ -207,7 +207,7 @@ export default function WorkOrders() {
       </div>
 
       {/* Filters */}
-      <div className="card">
+      <div className="card" data-tour="wo-filters">
         <div className="flex flex-col lg:flex-row gap-4">
           {/* Search */}
           <div className="relative flex-1">
@@ -304,7 +304,7 @@ export default function WorkOrders() {
         </div>
       ) : (
         // Flat Table View
-        <div className="card card-flush overflow-hidden">
+        <div className="card card-flush overflow-hidden" data-tour="wo-list">
           <WorkOrderTable workOrders={filteredWorkOrders} onDelete={handleDelete} />
           
           {filteredWorkOrders.length === 0 && (

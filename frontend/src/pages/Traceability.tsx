@@ -126,7 +126,7 @@ export default function Traceability() {
       </div>
 
       {/* Search */}
-      <div className="card">
+      <div className="card" data-tour="qa-traceability">
         <h2 className="text-lg font-semibold mb-4">Search</h2>
         <div className="flex gap-4">
           <div className="relative flex-1">

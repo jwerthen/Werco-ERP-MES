@@ -295,7 +295,7 @@ export default function QuoteCalculator() {
       </div>
 
       {/* Calculator Type Selector */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-2 gap-4" data-tour="quote-type">
         <button
           onClick={() => { setCalcType('cnc'); setResult(null); }}
           className={`group relative p-6 rounded-2xl border-2 transition-all duration-300 overflow-hidden ${
@@ -351,7 +351,7 @@ export default function QuoteCalculator() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Input Form */}
-        <div className="card">
+        <div className="card" data-tour="quote-inputs">
           <h2 className="text-lg font-semibold mb-6 flex items-center text-slate-800">
             <div className="p-1.5 rounded-lg bg-cyan-100 text-cyan-600 mr-2">
               <CalculatorIcon className="h-5 w-5" />
@@ -856,7 +856,7 @@ export default function QuoteCalculator() {
         </div>
 
         {/* Results */}
-        <div className="card">
+        <div className="card" data-tour="quote-result">
           <h2 className="text-lg font-semibold mb-6 flex items-center text-slate-800">
             <div className="p-1.5 rounded-lg bg-cyan-100 text-cyan-600 mr-2">
               <CurrencyDollarIcon className="h-5 w-5" />

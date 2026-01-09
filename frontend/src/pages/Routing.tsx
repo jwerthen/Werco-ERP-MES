@@ -251,7 +251,7 @@ export default function RoutingPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-tour="eng-routing">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Operations Routing</h1>
         <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center">

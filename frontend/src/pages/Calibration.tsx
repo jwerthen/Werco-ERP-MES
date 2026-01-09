@@ -234,7 +234,7 @@ export default function Calibration() {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4" data-tour="qa-calibration">
         <div className="card flex items-center">
           <div className="p-3 rounded-full bg-red-100 mr-4">
             <ExclamationTriangleIcon className="h-6 w-6 text-red-600" />

@@ -285,7 +285,7 @@ export default function BOMPage() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6" data-tour="eng-bom">
         {/* BOM List */}
         <div className="card lg:col-span-1">
           <h2 className="text-lg font-semibold mb-4">BOMs</h2>

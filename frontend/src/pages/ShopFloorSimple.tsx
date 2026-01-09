@@ -287,7 +287,7 @@ export default function ShopFloorSimple() {
       </div>
 
       {/* Filters */}
-      <div className="card">
+      <div className="card" data-tour="sf-clock">
         <div className="flex flex-wrap gap-4 items-center">
           <div className="flex-1 min-w-[200px]">
             <div className="relative">
@@ -342,7 +342,7 @@ export default function ShopFloorSimple() {
           <p className="text-sm text-gray-500 mt-1">Try adjusting your filters</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
           {operations.map(op => {
             const colors = STATUS_COLORS[op.status] || STATUS_COLORS.pending;
             const progress = op.quantity_ordered > 0 
@@ -431,7 +431,7 @@ export default function ShopFloorSimple() {
                 </div>
                 
                 {/* Action Buttons */}
-                <div className="flex gap-2">
+                <div className="flex gap-2" data-tour="sf-complete">
                   {/* Start Button - visible when pending or ready */}
                   {(op.status === 'pending' || op.status === 'ready') && (
                     <button
