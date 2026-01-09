@@ -1,0 +1,52 @@
+# Production Dockerfile for Werco ERP Frontend
+# Multi-stage build for optimized production image
+
+# Build stage
+FROM node:18-alpine AS build
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies (production only for smaller build)
+RUN npm ci --legacy-peer-deps
+
+# Copy source code
+COPY . .
+
+# Build argument for API URL
+ARG REACT_APP_API_URL
+ENV REACT_APP_API_URL=$REACT_APP_API_URL
+
+# Build the production app
+RUN npm run build
+
+# Production stage - nginx serves static files
+FROM nginx:alpine
+
+# Copy custom nginx config
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy built files
+COPY --from=build /app/build /usr/share/nginx/html
+
+# Create non-root user
+RUN addgroup -g 1001 -S werco && \
+    adduser -u 1001 -S werco -G werco && \
+    chown -R werco:werco /usr/share/nginx/html && \
+    chown -R werco:werco /var/cache/nginx && \
+    chown -R werco:werco /var/log/nginx && \
+    touch /var/run/nginx.pid && \
+    chown -R werco:werco /var/run/nginx.pid
+
+# Security headers are configured in nginx.conf
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD wget --quiet --tries=1 --spider http://localhost:3000/ || exit 1
+
+USER werco
+
+CMD ["nginx", "-g", "daemon off;"]

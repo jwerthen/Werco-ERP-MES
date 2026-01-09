@@ -1,0 +1,70 @@
+# Production Dockerfile for Werco ERP Backend
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# Production stage
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    poppler-utils \
+    tesseract-ocr \
+    antiword \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create non-root user for security
+RUN groupadd -r werco && useradd -r -g werco werco
+
+# Copy Python packages from builder
+COPY --from=builder /root/.local /home/werco/.local
+
+# Copy application code
+COPY --chown=werco:werco . .
+
+# Create directories for logs and uploads
+RUN mkdir -p /app/logs /app/uploads && chown -R werco:werco /app
+
+# Set environment
+ENV PATH=/home/werco/.local/bin:$PATH
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Switch to non-root user
+USER werco
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/health/ready || exit 1
+
+# Start command - run migrations then start with gunicorn for production
+CMD alembic upgrade head && \
+    gunicorn app.main:app \
+    --bind 0.0.0.0:${PORT:-8000} \
+    --workers ${GUNICORN_WORKERS:-4} \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --timeout 120 \
+    --keep-alive 5 \
+    --max-requests 1000 \
+    --max-requests-jitter 50 \
+    --access-logfile - \
+    --error-logfile - \
+    --capture-output

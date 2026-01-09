@@ -1,6 +1,7 @@
 # Werco ERP - Backend Dependencies
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
+gunicorn==21.2.0  # Production WSGI server
 sqlalchemy==2.0.25
 alembic==1.13.1
 psycopg2-binary==2.9.9

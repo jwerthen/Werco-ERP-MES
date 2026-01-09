@@ -12,6 +12,7 @@ build/
 .env
 .env.local
 .env.*.local
+.env.prod
 *.env
 venv/
 .venv/
@@ -54,6 +55,7 @@ docker-compose.override.yml
 *.pem
 *.key
 secrets/
+nginx/certs/
 
 # Temporary files
 tmp/
