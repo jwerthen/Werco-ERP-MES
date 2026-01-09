@@ -38,6 +38,102 @@ if settings.SENTRY_DSN:
         logger.warning("Sentry DSN provided but sentry-sdk not installed")
 
 
+def seed_quote_config_if_needed():
+    """Seed quote configuration data if it doesn't exist"""
+    from app.db.database import SessionLocal
+    from app.models.quote_config import QuoteMaterial, QuoteMachine, QuoteFinish, QuoteSettings, MaterialCategory, MachineType
+    
+    db = SessionLocal()
+    try:
+        # Check if materials exist
+        if db.query(QuoteMaterial).count() == 0:
+            logger.info("Seeding quote materials...")
+            
+            def calc_sheet_pricing(price_per_lb, density):
+                thicknesses = {
+                    '24ga': 0.0239, '22ga': 0.0299, '20ga': 0.0359, '18ga': 0.0478,
+                    '16ga': 0.0598, '14ga': 0.0747, '12ga': 0.1046, '11ga': 0.1196,
+                    '10ga': 0.1345, '7ga': 0.1793,
+                    '0.125': 0.125, '0.1875': 0.1875, '0.250': 0.250, '0.375': 0.375,
+                    '0.500': 0.500, '0.625': 0.625, '0.750': 0.750, '1.000': 1.000,
+                }
+                pricing = {}
+                for gauge, thick in thicknesses.items():
+                    weight_per_sqft = thick * 144 * density
+                    price = weight_per_sqft * price_per_lb * 1.15
+                    pricing[gauge] = round(price, 2)
+                return pricing
+            
+            materials = [
+                {'name': 'Mild Steel A36', 'category': MaterialCategory.STEEL, 'stock_price_per_pound': 0.55, 'density_lb_per_cubic_inch': 0.284, 'machinability_factor': 0.6, 'sheet_pricing': calc_sheet_pricing(0.55, 0.284)},
+                {'name': 'Galvanized Steel G90', 'category': MaterialCategory.STEEL, 'stock_price_per_pound': 0.70, 'density_lb_per_cubic_inch': 0.284, 'machinability_factor': 0.55, 'sheet_pricing': calc_sheet_pricing(0.70, 0.284)},
+                {'name': 'Aluminum 5052-H32', 'category': MaterialCategory.ALUMINUM, 'stock_price_per_pound': 2.38, 'density_lb_per_cubic_inch': 0.097, 'machinability_factor': 1.0, 'sheet_pricing': calc_sheet_pricing(2.38, 0.097)},
+                {'name': 'Aluminum 6061-T6', 'category': MaterialCategory.ALUMINUM, 'stock_price_per_pound': 2.58, 'density_lb_per_cubic_inch': 0.098, 'machinability_factor': 1.0, 'sheet_pricing': calc_sheet_pricing(2.58, 0.098)},
+                {'name': 'Stainless Steel 304', 'category': MaterialCategory.STAINLESS, 'stock_price_per_pound': 2.13, 'density_lb_per_cubic_inch': 0.289, 'machinability_factor': 0.4, 'sheet_pricing': calc_sheet_pricing(2.13, 0.289)},
+                {'name': 'Stainless Steel 316', 'category': MaterialCategory.STAINLESS, 'stock_price_per_pound': 3.08, 'density_lb_per_cubic_inch': 0.290, 'machinability_factor': 0.35, 'sheet_pricing': calc_sheet_pricing(3.08, 0.290)},
+            ]
+            for m in materials:
+                db.add(QuoteMaterial(**m))
+            db.commit()
+            logger.info(f"Seeded {len(materials)} materials")
+        
+        # Check if machines exist
+        if db.query(QuoteMachine).count() == 0:
+            logger.info("Seeding quote machines...")
+            laser_speeds = {
+                "steel": {"24ga": 1200, "22ga": 1000, "20ga": 850, "18ga": 650, "16ga": 500, "14ga": 380, "12ga": 280, "10ga": 200, "7ga": 120, "0.250": 150, "0.375": 100, "0.500": 70, "0.750": 40, "1.000": 25},
+                "stainless": {"24ga": 900, "22ga": 750, "20ga": 600, "18ga": 450, "16ga": 350, "14ga": 260, "12ga": 180, "10ga": 130, "7ga": 80, "0.250": 100, "0.375": 65, "0.500": 45, "0.750": 25, "1.000": 15},
+                "aluminum": {"24ga": 1500, "22ga": 1300, "20ga": 1100, "18ga": 900, "16ga": 700, "14ga": 550, "12ga": 400, "10ga": 300, "7ga": 200, "0.250": 220, "0.375": 150, "0.500": 100, "0.750": 60, "1.000": 35}
+            }
+            machines = [
+                {'name': 'Fiber Laser 6kW', 'machine_type': MachineType.LASER_FIBER, 'rate_per_hour': 150.00, 'setup_rate_per_hour': 75.00, 'cutting_speeds': laser_speeds, 'typical_setup_hours': 0.25},
+                {'name': 'Press Brake 150T', 'machine_type': MachineType.PRESS_BRAKE, 'rate_per_hour': 85.00, 'setup_rate_per_hour': 65.00, 'bend_time_seconds': 12.0, 'setup_time_per_bend_type': 300.0, 'typical_setup_hours': 0.5},
+                {'name': 'CNC Mill 3-Axis', 'machine_type': MachineType.CNC_MILL_3AXIS, 'rate_per_hour': 125.00, 'setup_rate_per_hour': 85.00, 'typical_setup_hours': 1.0},
+                {'name': 'CNC Mill 4-Axis', 'machine_type': MachineType.CNC_MILL_4AXIS, 'rate_per_hour': 145.00, 'setup_rate_per_hour': 95.00, 'typical_setup_hours': 1.5},
+                {'name': 'CNC Lathe', 'machine_type': MachineType.CNC_LATHE, 'rate_per_hour': 110.00, 'setup_rate_per_hour': 75.00, 'typical_setup_hours': 0.75},
+            ]
+            for m in machines:
+                db.add(QuoteMachine(**m))
+            db.commit()
+            logger.info(f"Seeded {len(machines)} machines")
+        
+        # Check if finishes exist
+        if db.query(QuoteFinish).count() == 0:
+            logger.info("Seeding quote finishes...")
+            finishes = [
+                {'name': 'Powder Coat - Standard Colors', 'category': 'coating', 'price_per_sqft': 2.50, 'minimum_charge': 35.00, 'additional_days': 3},
+                {'name': 'Powder Coat - Custom Color', 'category': 'coating', 'price_per_sqft': 3.50, 'minimum_charge': 75.00, 'additional_days': 5},
+                {'name': 'Zinc Plating - Clear', 'category': 'plating', 'price_per_lb': 1.25, 'minimum_charge': 45.00, 'additional_days': 5},
+                {'name': 'Anodize Type II - Clear', 'category': 'plating', 'price_per_sqft': 4.00, 'minimum_charge': 50.00, 'additional_days': 5},
+                {'name': 'Passivation', 'category': 'treatment', 'price_per_part': 5.00, 'minimum_charge': 35.00, 'additional_days': 2},
+                {'name': 'Deburr - Hand', 'category': 'finishing', 'price_per_part': 2.50, 'minimum_charge': 0.00, 'additional_days': 0},
+            ]
+            for f in finishes:
+                db.add(QuoteFinish(**f))
+            db.commit()
+            logger.info(f"Seeded {len(finishes)} finishes")
+        
+        # Check if settings exist
+        if db.query(QuoteSettings).count() == 0:
+            logger.info("Seeding quote settings...")
+            settings_data = [
+                {'setting_key': 'default_markup_pct', 'setting_value': '35', 'setting_type': 'number'},
+                {'setting_key': 'minimum_order_charge', 'setting_value': '150', 'setting_type': 'number'},
+                {'setting_key': 'rush_multiplier', 'setting_value': '1.5', 'setting_type': 'number'},
+                {'setting_key': 'standard_lead_days', 'setting_value': '10', 'setting_type': 'number'},
+                {'setting_key': 'quantity_breaks', 'setting_value': '{"10": 0.95, "25": 0.90, "50": 0.85, "100": 0.80}', 'setting_type': 'json'},
+            ]
+            for s in settings_data:
+                db.add(QuoteSettings(**s))
+            db.commit()
+            logger.info(f"Seeded {len(settings_data)} settings")
+    except Exception as e:
+        logger.error(f"Error seeding quote config: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -45,6 +141,8 @@ async def lifespan(app: FastAPI):
     # Create tables (in production, use Alembic migrations)
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified")
+    # Seed quote configuration if needed
+    seed_quote_config_if_needed()
     yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
