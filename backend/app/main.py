@@ -4,6 +4,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
+from datetime import datetime
+from sqlalchemy import text
 import logging
 import sys
 
@@ -292,15 +294,142 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-# Enhanced health check
+# Health check endpoints
 @app.get("/health")
 async def health_check():
-    """Health check endpoint with system status."""
+    """Basic health check - used by load balancers and Railway."""
     return {
         "status": "healthy",
         "app": settings.APP_NAME,
         "environment": settings.ENVIRONMENT,
         "version": "1.0.0"
+    }
+
+
+@app.get("/health/live")
+async def liveness_check():
+    """Liveness probe - indicates if the application is running.
+    Used by Kubernetes/container orchestrators to determine if container should be restarted.
+    """
+    return {"status": "alive", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/health/ready")
+async def readiness_check():
+    """Readiness probe - indicates if the application is ready to accept traffic.
+    Checks database connectivity and critical dependencies.
+    """
+    from app.database import SessionLocal
+    import time
+    
+    checks = {
+        "database": {"status": "unknown", "latency_ms": None},
+        "app": {"status": "healthy"},
+    }
+    overall_status = "healthy"
+    
+    # Database connectivity check
+    db_start = time.time()
+    try:
+        db = SessionLocal()
+        try:
+            # Execute a simple query to verify connection
+            db.execute(text("SELECT 1"))
+            checks["database"]["status"] = "healthy"
+            checks["database"]["latency_ms"] = round((time.time() - db_start) * 1000, 2)
+        finally:
+            db.close()
+    except Exception as e:
+        checks["database"]["status"] = "unhealthy"
+        checks["database"]["error"] = str(e)[:100]  # Truncate error message
+        overall_status = "unhealthy"
+        logger.error(f"Health check - Database unhealthy: {e}")
+    
+    # Redis check (if configured)
+    if settings.REDIS_URL:
+        try:
+            import redis
+            redis_start = time.time()
+            r = redis.from_url(settings.REDIS_URL, socket_timeout=2)
+            r.ping()
+            checks["redis"] = {
+                "status": "healthy",
+                "latency_ms": round((time.time() - redis_start) * 1000, 2)
+            }
+        except Exception as e:
+            checks["redis"] = {"status": "unhealthy", "error": str(e)[:100]}
+            # Redis is optional, don't fail health check
+            logger.warning(f"Health check - Redis unhealthy: {e}")
+    
+    status_code = 200 if overall_status == "healthy" else 503
+    
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": overall_status,
+            "timestamp": datetime.utcnow().isoformat(),
+            "checks": checks
+        }
+    )
+
+
+@app.get("/health/detailed")
+async def detailed_health_check():
+    """Detailed health check with system metrics - for monitoring dashboards.
+    Note: This endpoint may expose sensitive info, consider auth in production.
+    """
+    import platform
+    import sys
+    from app.database import SessionLocal
+    import time
+    
+    checks = {}
+    
+    # Database check with connection pool info
+    db_start = time.time()
+    try:
+        db = SessionLocal()
+        try:
+            result = db.execute(text("SELECT version()")).fetchone()
+            db_version = result[0] if result else "unknown"
+            checks["database"] = {
+                "status": "healthy",
+                "latency_ms": round((time.time() - db_start) * 1000, 2),
+                "version": db_version[:50]  # Truncate version string
+            }
+        finally:
+            db.close()
+    except Exception as e:
+        checks["database"] = {"status": "unhealthy", "error": str(e)[:100]}
+    
+    # System info
+    checks["system"] = {
+        "python_version": sys.version.split()[0],
+        "platform": platform.system(),
+        "platform_release": platform.release(),
+    }
+    
+    # Application info
+    checks["application"] = {
+        "name": settings.APP_NAME,
+        "environment": settings.ENVIRONMENT,
+        "version": "1.0.0",
+        "debug": settings.DEBUG,
+    }
+    
+    # Feature flags
+    checks["features"] = {
+        "rate_limiting": settings.RATE_LIMIT_ENABLED,
+        "sentry": bool(settings.SENTRY_DSN),
+        "redis": bool(settings.REDIS_URL),
+    }
+    
+    overall_status = "healthy" if checks.get("database", {}).get("status") == "healthy" else "degraded"
+    
+    return {
+        "status": overall_status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": checks
     }
 
 
