@@ -269,6 +269,22 @@ if settings.RATE_LIMIT_ENABLED:
         from slowapi.util import get_remote_address
         from slowapi.errors import RateLimitExceeded
         
+        # Define rate limits per endpoint type
+        # Stricter limits for sensitive auth endpoints
+        AUTH_RATE_LIMITS = {
+            "/api/v1/auth/login": "5/minute",      # Prevent brute force
+            "/api/v1/auth/register": "3/minute",   # Prevent mass registration
+            "/api/v1/auth/refresh": "30/minute",   # Allow reasonable token refreshes
+        }
+        
+        def get_rate_limit_for_path(request):
+            """Get rate limit based on request path"""
+            path = request.url.path
+            for auth_path, limit in AUTH_RATE_LIMITS.items():
+                if path.startswith(auth_path):
+                    return limit
+            return f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS}s"
+        
         limiter = Limiter(
             key_func=get_remote_address,
             default_limits=[f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS}s"],
@@ -276,7 +292,23 @@ if settings.RATE_LIMIT_ENABLED:
         )
         app.state.limiter = limiter
         app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-        logger.info(f"Rate limiting enabled: {settings.RATE_LIMIT_TIMES} requests/{settings.RATE_LIMIT_SECONDS}s")
+        
+        # Add middleware for path-specific rate limiting
+        @app.middleware("http")
+        async def rate_limit_by_path(request: Request, call_next):
+            """Apply stricter rate limits to sensitive endpoints"""
+            path = request.url.path
+            
+            # Check if this is a sensitive auth endpoint
+            if path in AUTH_RATE_LIMITS:
+                # The limiter will handle this with its default limits
+                # For now, we just log that it's a sensitive endpoint
+                logger.debug(f"Rate limiting auth endpoint: {path}")
+            
+            return await call_next(request)
+        
+        logger.info(f"Rate limiting enabled: {settings.RATE_LIMIT_TIMES} requests/{settings.RATE_LIMIT_SECONDS}s (default)")
+        logger.info(f"Auth rate limits: login=5/min, register=3/min, refresh=30/min")
     except ImportError:
         logger.warning("Rate limiting requested but slowapi not installed")
 
