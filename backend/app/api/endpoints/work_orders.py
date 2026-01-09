@@ -1,11 +1,12 @@
 from typing import List, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_audit_service
 from app.models.user import User, UserRole
+from app.services.audit_service import AuditService
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
 from app.models.part import Part, PartType
 from app.models.routing import Routing, RoutingOperation
@@ -214,12 +215,16 @@ def get_work_center_group(work_center: WorkCenter) -> str:
 @router.post("/", response_model=WorkOrderResponse)
 def create_work_order(
     work_order_in: WorkOrderCreate,
+    request: Request,
     auto_routing: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
     """Create a new work order. If auto_routing=True, operations are auto-generated from part routing.
     For assembly parts with BOMs, component part routings are collected and grouped by work center type."""
+    
+    # Initialize audit service
+    audit = AuditService(db, current_user, request)
     
     # Verify part exists
     part = db.query(Part).filter(Part.id == work_order_in.part_id).first()
@@ -330,6 +335,21 @@ def create_work_order(
     
     db.commit()
     db.refresh(work_order)
+    
+    # Audit log for work order creation
+    audit.log_create(
+        resource_type="work_order",
+        resource_id=work_order.id,
+        resource_identifier=work_order.work_order_number,
+        new_values=work_order,
+        extra_data={
+            "part_number": part.part_number,
+            "quantity": float(work_order.quantity_ordered),
+            "auto_routing": auto_routing,
+            "operation_count": len(work_order.operations)
+        }
+    )
+    
     return work_order
 
 
@@ -555,6 +575,7 @@ def get_work_order_by_number(
 def update_work_order(
     work_order_id: int,
     work_order_in: WorkOrderUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
@@ -563,18 +584,33 @@ def update_work_order(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
+    # Capture old values for audit
+    audit = AuditService(db, current_user, request)
+    old_values = {c.key: getattr(work_order, c.key) for c in work_order.__table__.columns}
+    
     update_data = work_order_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(work_order, field, value)
     
     db.commit()
     db.refresh(work_order)
+    
+    # Audit log for update
+    audit.log_update(
+        resource_type="work_order",
+        resource_id=work_order.id,
+        resource_identifier=work_order.work_order_number,
+        old_values=old_values,
+        new_values=work_order
+    )
+    
     return work_order
 
 
 @router.delete("/{work_order_id}")
 def delete_work_order(
     work_order_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
 ):
@@ -589,18 +625,33 @@ def delete_work_order(
             detail="Only draft or cancelled work orders can be deleted. Cancel it first."
         )
     
+    # Capture info for audit before deletion
+    audit = AuditService(db, current_user, request)
+    wo_number = work_order.work_order_number
+    wo_id = work_order.id
+    
     # Delete operations first
     for op in work_order.operations:
         db.delete(op)
     
     db.delete(work_order)
     db.commit()
-    return {"message": f"Work order {work_order.work_order_number} deleted"}
+    
+    # Audit log for deletion
+    audit.log_delete(
+        resource_type="work_order",
+        resource_id=wo_id,
+        resource_identifier=wo_number,
+        old_values=work_order
+    )
+    
+    return {"message": f"Work order {wo_number} deleted"}
 
 
 @router.post("/{work_order_id}/release")
 def release_work_order(
     work_order_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
@@ -616,6 +667,7 @@ def release_work_order(
     if not work_order.operations:
         raise HTTPException(status_code=400, detail="Work order must have at least one operation")
     
+    old_status = work_order.status.value
     work_order.status = WorkOrderStatus.RELEASED
     work_order.released_by = current_user.id
     work_order.released_at = datetime.utcnow()
@@ -625,6 +677,17 @@ def release_work_order(
         work_order.operations[0].status = OperationStatus.READY
     
     db.commit()
+    
+    # Audit log for status change
+    audit = AuditService(db, current_user, request)
+    audit.log_status_change(
+        resource_type="work_order",
+        resource_id=work_order.id,
+        resource_identifier=work_order.work_order_number,
+        old_status=old_status,
+        new_status="released"
+    )
+    
     return {"message": "Work order released", "work_order_number": work_order.work_order_number}
 
 

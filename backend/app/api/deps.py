@@ -1,10 +1,11 @@
 from typing import Generator, Optional
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from app.db.database import SessionLocal, get_db
 from app.core.security import verify_token
 from app.models.user import User, UserRole
+from app.services.audit_service import AuditService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -65,3 +66,12 @@ def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
             detail="Admin access required"
         )
     return current_user
+
+
+def get_audit_service(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> AuditService:
+    """Dependency to get an AuditService instance with user and request context."""
+    return AuditService(db, current_user, request)

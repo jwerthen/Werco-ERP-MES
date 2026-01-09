@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from app.db.database import get_db
@@ -7,6 +7,7 @@ from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.part import Part, PartType
 from app.schemas.part import PartCreate, PartUpdate, PartResponse
+from app.services.audit_service import AuditService
 
 router = APIRouter()
 
@@ -47,6 +48,7 @@ def list_parts(
 @router.post("/", response_model=PartResponse)
 def create_part(
     part_in: PartCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
@@ -61,6 +63,11 @@ def create_part(
     db.add(part)
     db.commit()
     db.refresh(part)
+    
+    # Audit log
+    audit = AuditService(db, current_user, request)
+    audit.log_create("part", part.id, part.part_number, new_values=part)
+    
     return part
 
 
@@ -94,6 +101,7 @@ def get_part_by_number(
 def update_part(
     part_id: int,
     part_in: PartUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
@@ -102,12 +110,20 @@ def update_part(
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
+    # Capture old values for audit
+    audit = AuditService(db, current_user, request)
+    old_values = {c.key: getattr(part, c.key) for c in part.__table__.columns}
+    
     update_data = part_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(part, field, value)
     
     db.commit()
     db.refresh(part)
+    
+    # Audit log
+    audit.log_update("part", part.id, part.part_number, old_values=old_values, new_values=part)
+    
     return part
 
 
@@ -137,6 +153,7 @@ def create_new_revision(
 @router.delete("/{part_id}")
 def delete_part(
     part_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN]))
 ):
@@ -145,7 +162,15 @@ def delete_part(
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
+    # Capture for audit
+    audit = AuditService(db, current_user, request)
+    old_status = part.status
+    
     part.is_active = False
     part.status = "obsolete"
     db.commit()
+    
+    # Audit log (soft delete = status change)
+    audit.log_status_change("part", part.id, part.part_number, old_status or "active", "obsolete")
+    
     return {"message": "Part marked as obsolete"}
