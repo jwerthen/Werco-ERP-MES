@@ -4,9 +4,10 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.core.security import verify_password, get_password_hash, create_access_token
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.audit_log import AuditLog
 from app.schemas.user import UserCreate, UserResponse, UserLogin, Token
+from app.api.deps import get_current_user, require_role
 
 router = APIRouter()
 
@@ -101,9 +102,10 @@ def login(
 def register(
     request: Request,
     user_in: UserCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
 ):
-    """Register a new user (typically admin-only in production)"""
+    """Register a new user (admin or manager only)"""
     # Check if email already exists
     if db.query(User).filter(User.email == user_in.email).first():
         raise HTTPException(

@@ -648,13 +648,9 @@ def seed_labor_rates(
 @router.post("/seed-database")
 async def seed_database(
     db: Session = Depends(get_db),
-    secret: str = None
+    current_user: User = Depends(admin_only)
 ):
-    """Seed database with initial data. Requires secret key for security."""
-    import os
-    expected_secret = os.getenv("SECRET_KEY", "")[:16]
-    if secret != expected_secret:
-        raise HTTPException(status_code=403, detail="Invalid secret")
+    """Seed database with initial data. Requires admin authentication."""
     
     from app.core.security import get_password_hash
     
