@@ -18,6 +18,10 @@ const CACHE_TTL = 5 * 60 * 1000;
 class ApiService {
   private api: AxiosInstance;
   private token: string | null = null;
+  private refreshToken: string | null = null;
+  private isRefreshing = false;
+  private refreshSubscribers: ((token: string) => void)[] = [];
+  private tokenExpiresAt: number | null = null;
 
   constructor() {
     this.api = axios.create({
@@ -29,16 +33,74 @@ class ApiService {
       },
     });
 
-    // Load token from localStorage
+    // Load tokens from localStorage
     this.token = localStorage.getItem('token');
+    this.refreshToken = localStorage.getItem('refreshToken');
+    const expiresAt = localStorage.getItem('tokenExpiresAt');
+    this.tokenExpiresAt = expiresAt ? parseInt(expiresAt, 10) : null;
+    
     if (this.token) {
       this.api.defaults.headers.common['Authorization'] = `Bearer ${this.token}`;
     }
 
-    // Response interceptor for error handling
+    // Request interceptor - check token expiration before requests
+    this.api.interceptors.request.use(
+      async (config) => {
+        // Skip token refresh for auth endpoints
+        if (config.url?.includes('/auth/login') || config.url?.includes('/auth/refresh')) {
+          return config;
+        }
+        
+        // Check if token is about to expire (within 60 seconds)
+        if (this.tokenExpiresAt && Date.now() >= this.tokenExpiresAt - 60000) {
+          if (this.refreshToken) {
+            try {
+              await this.refreshAccessToken();
+              config.headers['Authorization'] = `Bearer ${this.token}`;
+            } catch (error) {
+              // Refresh failed, will get 401 and redirect to login
+            }
+          }
+        }
+        return config;
+      },
+      (error) => Promise.reject(error)
+    );
+
+    // Response interceptor for error handling and token refresh
     this.api.interceptors.response.use(
       (response) => response,
-      (error: AxiosError) => {
+      async (error: AxiosError) => {
+        const originalRequest = error.config as AxiosRequestConfig & { _retry?: boolean };
+        
+        // If 401 and we haven't already retried and have a refresh token
+        if (error.response?.status === 401 && !originalRequest._retry && this.refreshToken) {
+          if (this.isRefreshing) {
+            // Wait for the ongoing refresh to complete
+            return new Promise((resolve) => {
+              this.refreshSubscribers.push((token: string) => {
+                originalRequest.headers = originalRequest.headers || {};
+                originalRequest.headers['Authorization'] = `Bearer ${token}`;
+                resolve(this.api(originalRequest));
+              });
+            });
+          }
+
+          originalRequest._retry = true;
+          
+          try {
+            await this.refreshAccessToken();
+            originalRequest.headers = originalRequest.headers || {};
+            originalRequest.headers['Authorization'] = `Bearer ${this.token}`;
+            return this.api(originalRequest);
+          } catch (refreshError) {
+            // Refresh failed, logout and redirect
+            this.logout();
+            window.location.href = '/login';
+            return Promise.reject(refreshError);
+          }
+        }
+        
         if (error.response?.status === 401) {
           this.logout();
           window.location.href = '/login';
@@ -46,6 +108,35 @@ class ApiService {
         return Promise.reject(error);
       }
     );
+  }
+
+  private async refreshAccessToken(): Promise<void> {
+    if (!this.refreshToken) {
+      throw new Error('No refresh token available');
+    }
+
+    this.isRefreshing = true;
+    
+    try {
+      const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {
+        refresh_token: this.refreshToken
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        }
+      });
+      
+      const { access_token, refresh_token, expires_in } = response.data;
+      
+      this.setTokens(access_token, refresh_token, expires_in);
+      
+      // Notify all waiting requests
+      this.refreshSubscribers.forEach(callback => callback(access_token));
+      this.refreshSubscribers = [];
+    } finally {
+      this.isRefreshing = false;
+    }
   }
 
   /**
@@ -131,10 +222,29 @@ class ApiService {
     this.api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
   }
 
+  setTokens(accessToken: string, refreshToken: string, expiresIn: number) {
+    this.token = accessToken;
+    this.refreshToken = refreshToken;
+    this.tokenExpiresAt = Date.now() + (expiresIn * 1000);
+    
+    localStorage.setItem('token', accessToken);
+    localStorage.setItem('refreshToken', refreshToken);
+    localStorage.setItem('tokenExpiresAt', this.tokenExpiresAt.toString());
+    
+    this.api.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
+  }
+
   logout() {
     this.token = null;
+    this.refreshToken = null;
+    this.tokenExpiresAt = null;
+    
     localStorage.removeItem('token');
+    localStorage.removeItem('refreshToken');
+    localStorage.removeItem('tokenExpiresAt');
+    
     delete this.api.defaults.headers.common['Authorization'];
+    this.clearCache();
   }
 
   // Auth

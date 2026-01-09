@@ -3,10 +3,14 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from app.core.security import verify_password, get_password_hash, create_access_token
+from app.core.security import (
+    verify_password, get_password_hash, create_access_token, 
+    create_refresh_token, verify_refresh_token
+)
+from app.core.config import settings
 from app.models.user import User, UserRole
 from app.models.audit_log import AuditLog
-from app.schemas.user import UserCreate, UserResponse, UserLogin, Token
+from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest
 from app.api.deps import get_current_user, require_role
 
 router = APIRouter()
@@ -86,16 +90,99 @@ def login(
     user.locked_until = None
     db.commit()
     
-    # Create access token
+    # Create access token (short-lived)
     access_token = create_access_token(subject=user.id)
+    
+    # Create refresh token (longer-lived, with rotation)
+    refresh_token, session_id, _ = create_refresh_token(subject=user.id)
     
     log_auth_event(db, "LOGIN_SUCCESS", user=user, success=True, request=request)
     
     return Token(
         access_token=access_token,
+        refresh_token=refresh_token,
         token_type="bearer",
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=UserResponse.model_validate(user)
     )
+
+
+@router.post("/refresh", response_model=TokenRefresh)
+def refresh_token(
+    request: Request,
+    token_request: RefreshTokenRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Refresh an access token using a refresh token.
+    Implements token rotation: returns new refresh token each time.
+    """
+    # Verify the refresh token
+    payload = verify_refresh_token(token_request.refresh_token)
+    
+    if not payload:
+        log_auth_event(db, "TOKEN_REFRESH_FAILED", email="unknown", 
+                      success=False, request=request, error="Invalid or expired refresh token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token"
+        )
+    
+    # Get the user
+    user_id = payload.get("user_id")
+    session_id = payload.get("session_id")
+    
+    user = db.query(User).filter(User.id == int(user_id)).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+    
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is disabled"
+        )
+    
+    # Check if account got locked since last token
+    if user.locked_until and user.locked_until > datetime.utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is locked"
+        )
+    
+    # Create new access token
+    new_access_token = create_access_token(subject=user.id)
+    
+    # Token rotation: create NEW refresh token (invalidates the old one implicitly)
+    # Use same session_id to maintain session continuity
+    new_refresh_token, _, _ = create_refresh_token(subject=user.id, session_id=session_id)
+    
+    log_auth_event(db, "TOKEN_REFRESHED", user=user, success=True, request=request)
+    
+    return TokenRefresh(
+        access_token=new_access_token,
+        refresh_token=new_refresh_token,
+        token_type="bearer",
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    )
+
+
+@router.post("/logout")
+def logout(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Logout endpoint - logs the event.
+    Note: With JWTs, true server-side invalidation requires a token blacklist (Redis).
+    Client should discard tokens on logout.
+    """
+    log_auth_event(db, "LOGOUT", user=current_user, success=True, request=request)
+    return {"message": "Logged out successfully"}
 
 
 @router.post("/register", response_model=UserResponse)

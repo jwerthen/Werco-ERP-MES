@@ -18,8 +18,11 @@ class Settings(BaseSettings):
     
     # Security - MUST be overridden in production
     SECRET_KEY: str = "CHANGE-THIS-IN-PRODUCTION"
+    REFRESH_TOKEN_SECRET_KEY: str = "CHANGE-THIS-REFRESH-SECRET"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # Short-lived access tokens
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # Refresh tokens valid for 7 days
+    SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 24  # Force re-login after 24 hours regardless
     
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True

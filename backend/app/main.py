@@ -180,6 +180,7 @@ async def csrf_protection(request: Request, call_next):
         # Skip CSRF check for certain endpoints
         exempt_paths = (
             "/api/v1/auth/login",
+            "/api/v1/auth/refresh",
             "/health",
             "/api/v1/errors/log",
         )

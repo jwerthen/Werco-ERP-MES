@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { TourMenu } from './Tour';
+import SessionWarningModal from './SessionWarningModal';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
@@ -217,10 +218,12 @@ function NavGroup({ item, location, onNavigate, collapsed, isAdmin }: {
           })}
         </div>
       )}
+
+      {/* Session Warning Modal */}
+      <SessionWarningModal />
     </div>
   );
 }
-
 // Hexagon grid pattern for sidebar
 const SidebarPattern = () => (
   <svg className="absolute inset-0 w-full h-full opacity-[0.03]" xmlns="http://www.w3.org/2000/svg">

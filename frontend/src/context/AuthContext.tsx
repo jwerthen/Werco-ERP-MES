@@ -1,13 +1,20 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { User } from '../types';
 import api from '../services/api';
+
+// Idle timeout in milliseconds (15 minutes)
+const IDLE_TIMEOUT = 15 * 60 * 1000;
+// Warning before timeout (1 minute before)
+const IDLE_WARNING = 60 * 1000;
 
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  sessionWarning: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
+  extendSession: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -15,6 +22,78 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [sessionWarning, setSessionWarning] = useState(false);
+  
+  const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const warningTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const clearTimers = useCallback(() => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+    if (warningTimerRef.current) {
+      clearTimeout(warningTimerRef.current);
+      warningTimerRef.current = null;
+    }
+  }, []);
+
+  const handleLogoutDueToIdle = useCallback(() => {
+    clearTimers();
+    api.logout();
+    setUser(null);
+    setSessionWarning(false);
+    localStorage.removeItem('user');
+    window.location.href = '/login?reason=idle';
+  }, [clearTimers]);
+
+  const resetIdleTimer = useCallback(() => {
+    if (!user) return;
+    
+    clearTimers();
+    setSessionWarning(false);
+    
+    // Set warning timer (fires 1 minute before logout)
+    warningTimerRef.current = setTimeout(() => {
+      setSessionWarning(true);
+    }, IDLE_TIMEOUT - IDLE_WARNING);
+    
+    // Set logout timer
+    idleTimerRef.current = setTimeout(() => {
+      handleLogoutDueToIdle();
+    }, IDLE_TIMEOUT);
+  }, [user, clearTimers, handleLogoutDueToIdle]);
+
+  const extendSession = useCallback(() => {
+    resetIdleTimer();
+  }, [resetIdleTimer]);
+
+  // Track user activity
+  useEffect(() => {
+    if (!user) return;
+
+    const activityEvents = ['mousedown', 'keydown', 'scroll', 'touchstart'];
+    
+    const handleActivity = () => {
+      if (!sessionWarning) {
+        resetIdleTimer();
+      }
+    };
+
+    activityEvents.forEach(event => {
+      window.addEventListener(event, handleActivity);
+    });
+
+    // Start the idle timer
+    resetIdleTimer();
+
+    return () => {
+      activityEvents.forEach(event => {
+        window.removeEventListener(event, handleActivity);
+      });
+      clearTimers();
+    };
+  }, [user, sessionWarning, resetIdleTimer, clearTimers]);
 
   useEffect(() => {
     // Check for existing token on mount
@@ -34,7 +113,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string) => {
     const response = await api.login(email, password);
-    api.setToken(response.access_token);
+    // Use setTokens for new refresh token flow, fallback to setToken for backwards compatibility
+    if (response.refresh_token && response.expires_in) {
+      api.setTokens(response.access_token, response.refresh_token, response.expires_in);
+    } else {
+      api.setToken(response.access_token);
+    }
     setUser(response.user);
     localStorage.setItem('user', JSON.stringify(response.user));
   };
@@ -50,8 +134,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       isAuthenticated: !!user,
       isLoading,
+      sessionWarning,
       login,
-      logout
+      logout,
+      extendSession
     }}>
       {children}
     </AuthContext.Provider>
