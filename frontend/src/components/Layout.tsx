@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { TourMenu } from './Tour';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
@@ -299,7 +300,7 @@ export default function Layout({ children }: LayoutProps) {
         </div>
 
         {/* Navigation */}
-        <nav className="relative flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide">
+        <nav className="relative flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide" data-tour="sidebar">
           {navigation.map((item) => (
             <NavGroup 
               key={item.name} 
@@ -366,15 +367,21 @@ export default function Layout({ children }: LayoutProps) {
             </div>
 
             {/* Right side actions */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2" data-tour="user-menu">
               {/* Quick search button */}
               <button
                 onClick={() => setSearchOpen(true)}
                 className="p-2 rounded-xl text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-all duration-200"
                 title="Search (Ctrl+K)"
+                data-tour="search"
               >
                 <MagnifyingGlassIcon className="h-5 w-5" />
               </button>
+
+              {/* Help & Tours menu */}
+              <div className="hidden lg:block">
+                <TourMenu />
+              </div>
 
               {/* User avatar (mobile) */}
               <div className="lg:hidden flex items-center">

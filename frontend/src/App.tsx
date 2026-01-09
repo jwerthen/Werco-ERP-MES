@@ -1,6 +1,8 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { TourProvider } from './context/TourContext';
+import { TourHighlight } from './components/Tour';
 import Layout from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -319,9 +321,12 @@ function AppRoutes() {
 function App() {
   return (
     <AuthProvider>
-      <Router>
-        <AppRoutes />
-      </Router>
+      <TourProvider>
+        <Router>
+          <AppRoutes />
+          <TourHighlight />
+        </Router>
+      </TourProvider>
     </AuthProvider>
   );
 }
