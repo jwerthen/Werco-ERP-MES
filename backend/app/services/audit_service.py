@@ -10,10 +10,9 @@ from fastapi import Request
 
 from app.models.audit_log import AuditLog
 from app.models.user import User
-import logging
-import json
+from app.core.logging import get_logger, get_correlation_id
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class AuditService:
@@ -164,6 +163,9 @@ class AuditService:
     ) -> AuditLog:
         """Create an audit log entry."""
         try:
+            # Include correlation ID for request tracing
+            correlation_id = get_correlation_id()
+            
             log_entry = AuditLog(
                 user_id=self.user.id if self.user else None,
                 user_email=self.user.email if self.user else None,
@@ -177,6 +179,7 @@ class AuditService:
                 new_values=new_values,
                 ip_address=self._ip_address,
                 user_agent=self._user_agent,
+                session_id=correlation_id,  # Store correlation ID for request tracing
                 success="true" if success else "false",
                 error_message=error_message,
                 extra_data=extra_data

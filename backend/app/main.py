@@ -6,22 +6,16 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from datetime import datetime
 from sqlalchemy import text
-import logging
-import sys
 
 from app.core.config import settings
 from app.api.router import api_router
 from app.db.database import engine, Base
+from app.core.logging import configure_logging, get_logger
+from app.middleware.logging_middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 
-# Configure structured logging
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+# Configure structured logging with correlation IDs
+configure_logging()
+logger = get_logger(__name__)
 
 # Initialize Sentry if DSN is provided
 if settings.SENTRY_DSN:
@@ -159,6 +153,10 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json"
 )
+
+# Logging middleware with correlation IDs (added first, executed last)
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(CorrelationIdMiddleware)
 
 # GZip compression middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
