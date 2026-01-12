@@ -18,15 +18,18 @@ export default function TourMenu() {
 
   const handleStartTour = (tourId: string) => {
     const tour = getTour(tourId);
+    console.log('Starting tour:', tourId, 'startPath:', tour?.startPath);
     if (tour) {
       setIsOpen(false);
       
       // Always navigate to the tour's start path
       if (tour.startPath) {
+        console.log('Navigating to:', tour.startPath);
         // Navigate even if on the same page (to ensure page is fresh)
         navigate(tour.startPath);
         // Delay tour start to allow page to fully render
         setTimeout(() => {
+          console.log('Starting tour after navigation');
           startTour(tour);
         }, 600);
       } else {
