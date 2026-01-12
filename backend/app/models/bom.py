@@ -12,6 +12,14 @@ class BOMItemType(str, enum.Enum):
     PHANTOM = "phantom"  # Sub-assembly that explodes into its components
 
 
+class BOMLineType(str, enum.Enum):
+    """Line type for BOM items - determines how item is treated in production"""
+    COMPONENT = "component"  # Standard manufactured or purchased component
+    HARDWARE = "hardware"  # COTS hardware (bolts, nuts, washers, etc.)
+    CONSUMABLE = "consumable"  # Consumables (adhesives, lubricants, etc.)
+    REFERENCE = "reference"  # Reference only - not consumed (documentation, tooling)
+
+
 class BOM(Base, SoftDeleteMixin):
     """Bill of Materials - Top level BOM for a part/assembly"""
     __tablename__ = "boms"
@@ -56,9 +64,14 @@ class BOMItem(Base):
     item_number = Column(Integer, nullable=False)  # Line item number (10, 20, 30...)
     quantity = Column(Float, nullable=False, default=1.0)
     item_type = Column(SQLEnum(BOMItemType), nullable=False)
+    line_type = Column(SQLEnum(BOMLineType), nullable=False, default=BOMLineType.COMPONENT)
     
     # Unit of measure for this line (may differ from part UOM)
     unit_of_measure = Column(String(20), default="each")
+    
+    # Hardware-specific fields
+    torque_spec = Column(String(100), nullable=True)  # e.g., "25 ft-lbs"
+    installation_notes = Column(Text, nullable=True)  # Assembly instructions
     
     # Reference designator for assemblies (e.g., "R1, R2, R3" for resistors)
     reference_designator = Column(String(255))

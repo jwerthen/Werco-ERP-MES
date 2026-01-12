@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional, List, Any
 from datetime import datetime
-from app.models.bom import BOMItemType
+from app.models.bom import BOMItemType, BOMLineType
 
 
 class BOMItemBase(BaseModel):
@@ -9,10 +9,13 @@ class BOMItemBase(BaseModel):
     item_number: int
     quantity: float = 1.0
     item_type: BOMItemType
+    line_type: BOMLineType = BOMLineType.COMPONENT
     unit_of_measure: str = "each"
     reference_designator: Optional[str] = None
     find_number: Optional[str] = None
     notes: Optional[str] = None
+    torque_spec: Optional[str] = None
+    installation_notes: Optional[str] = None
     work_center_id: Optional[int] = None
     operation_sequence: int = 10
     scrap_factor: float = 0.0
@@ -29,10 +32,13 @@ class BOMItemCreate(BOMItemBase):
 class BOMItemUpdate(BaseModel):
     quantity: Optional[float] = None
     item_type: Optional[BOMItemType] = None
+    line_type: Optional[BOMLineType] = None
     unit_of_measure: Optional[str] = None
     reference_designator: Optional[str] = None
     find_number: Optional[str] = None
     notes: Optional[str] = None
+    torque_spec: Optional[str] = None
+    installation_notes: Optional[str] = None
     work_center_id: Optional[int] = None
     operation_sequence: Optional[int] = None
     scrap_factor: Optional[float] = None
@@ -145,6 +151,7 @@ class BOMFlatItem(BaseModel):
     part_name: str
     part_type: str
     item_type: BOMItemType
+    line_type: BOMLineType = BOMLineType.COMPONENT
     quantity_per: float
     extended_quantity: float
     unit_of_measure: str
@@ -153,6 +160,8 @@ class BOMFlatItem(BaseModel):
     is_optional: bool
     is_alternate: bool
     has_children: bool
+    torque_spec: Optional[str] = None
+    installation_notes: Optional[str] = None
 
 
 class BOMFlattened(BaseModel):

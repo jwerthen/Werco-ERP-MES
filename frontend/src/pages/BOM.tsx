@@ -9,6 +9,8 @@ import {
   TrashIcon
 } from '@heroicons/react/24/outline';
 
+type LineType = 'component' | 'hardware' | 'consumable' | 'reference';
+
 interface BOMItem {
   id: number;
   bom_id: number;
@@ -16,10 +18,13 @@ interface BOMItem {
   item_number: number;
   quantity: number;
   item_type: 'make' | 'buy' | 'phantom';
+  line_type: LineType;
   unit_of_measure: string;
   find_number?: string;
   reference_designator?: string;
   notes?: string;
+  torque_spec?: string;
+  installation_notes?: string;
   scrap_factor: number;
   is_optional: boolean;
   is_alternate: boolean;
@@ -60,6 +65,20 @@ const itemTypeColors: Record<string, string> = {
   phantom: 'bg-purple-100 text-purple-800',
 };
 
+const lineTypeColors: Record<string, string> = {
+  component: 'bg-cyan-100 text-cyan-800',
+  hardware: 'bg-amber-100 text-amber-800',
+  consumable: 'bg-orange-100 text-orange-800',
+  reference: 'bg-gray-100 text-gray-600',
+};
+
+const lineTypeLabels: Record<string, string> = {
+  component: 'Component',
+  hardware: 'Hardware',
+  consumable: 'Consumable',
+  reference: 'Reference',
+};
+
 export default function BOMPage() {
   const [boms, setBoms] = useState<BOM[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
@@ -79,10 +98,13 @@ export default function BOMPage() {
     item_number: 10,
     quantity: 1,
     item_type: 'make' as 'make' | 'buy' | 'phantom',
+    line_type: 'component' as LineType,
     find_number: '',
     scrap_factor: 0,
     is_optional: false,
-    notes: ''
+    notes: '',
+    torque_spec: '',
+    installation_notes: ''
   });
   const [newPart, setNewPart] = useState({
     part_number: '',
@@ -156,10 +178,13 @@ export default function BOMPage() {
         item_number: (selectedBOM.items.length + 1) * 10,
         quantity: 1,
         item_type: 'make',
+        line_type: 'component',
         find_number: '',
         scrap_factor: 0,
         is_optional: false,
-        notes: ''
+        notes: '',
+        torque_spec: '',
+        installation_notes: ''
       });
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to add item');
@@ -371,7 +396,7 @@ export default function BOMPage() {
                       {viewMode === 'exploded' && <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Level</th>}
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item #</th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
                       <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
                       {viewMode === 'exploded' && <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Ext Qty</th>}
                       <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">UOM</th>
@@ -383,13 +408,19 @@ export default function BOMPage() {
                   <tbody className="bg-white divide-y divide-gray-200">
                     {viewMode === 'single' ? (
                       selectedBOM.items.map(item => (
-                        <tr key={item.id} className="hover:bg-gray-50">
+                        <tr key={item.id} className={`hover:bg-gray-50 ${item.line_type === 'hardware' ? 'bg-amber-50/50' : ''}`}>
                           <td className="px-4 py-3 font-medium">{item.find_number || item.item_number}</td>
                           <td className="px-4 py-3">
                             <div className="flex items-center">
                               <div>
                                 <div className="font-medium text-werco-primary">{item.component_part?.part_number}</div>
                                 <div className="text-sm text-gray-500">{item.component_part?.name}</div>
+                                {item.torque_spec && (
+                                  <div className="text-xs text-amber-600">Torque: {item.torque_spec}</div>
+                                )}
+                                {item.installation_notes && (
+                                  <div className="text-xs text-gray-400 italic">{item.installation_notes}</div>
+                                )}
                               </div>
                               {item.component_part?.has_bom && (
                                 <DocumentDuplicateIcon className="h-4 w-4 ml-2 text-blue-500" title="Has BOM" />
@@ -397,9 +428,14 @@ export default function BOMPage() {
                             </div>
                           </td>
                           <td className="px-4 py-3">
-                            <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${itemTypeColors[item.item_type]}`}>
-                              {item.item_type}
-                            </span>
+                            <div className="flex flex-col gap-1">
+                              <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${lineTypeColors[item.line_type || 'component']}`}>
+                                {lineTypeLabels[item.line_type || 'component']}
+                              </span>
+                              <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${itemTypeColors[item.item_type]}`}>
+                                {item.item_type}
+                              </span>
+                            </div>
                           </td>
                           <td className="px-4 py-3 text-right">{item.quantity}</td>
                           <td className="px-4 py-3 text-center">{item.unit_of_measure}</td>
@@ -564,6 +600,33 @@ export default function BOMPage() {
                   </div>
                 )}
               </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Line Type</label>
+                  <select
+                    value={newItem.line_type}
+                    onChange={(e) => setNewItem({ ...newItem, line_type: e.target.value as LineType })}
+                    className="input"
+                  >
+                    <option value="component">Component (Made Part)</option>
+                    <option value="hardware">Hardware (Bolts, Nuts, etc.)</option>
+                    <option value="consumable">Consumable (Adhesive, etc.)</option>
+                    <option value="reference">Reference Only</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label">Make/Buy</label>
+                  <select
+                    value={newItem.item_type}
+                    onChange={(e) => setNewItem({ ...newItem, item_type: e.target.value as any })}
+                    className="input"
+                  >
+                    <option value="make">Make</option>
+                    <option value="buy">Buy</option>
+                    <option value="phantom">Phantom</option>
+                  </select>
+                </div>
+              </div>
               <div className="grid grid-cols-3 gap-4">
                 <div>
                   <label className="label">Item #</label>
@@ -588,20 +651,6 @@ export default function BOMPage() {
                   />
                 </div>
                 <div>
-                  <label className="label">Type</label>
-                  <select
-                    value={newItem.item_type}
-                    onChange={(e) => setNewItem({ ...newItem, item_type: e.target.value as any })}
-                    className="input"
-                  >
-                    <option value="make">Make</option>
-                    <option value="buy">Buy</option>
-                    <option value="phantom">Phantom</option>
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
                   <label className="label">Find Number</label>
                   <input
                     type="text"
@@ -611,6 +660,51 @@ export default function BOMPage() {
                     placeholder="e.g., 1, 2, 3"
                   />
                 </div>
+              </div>
+              
+              {/* Hardware-specific fields */}
+              {(newItem.line_type === 'hardware') && (
+                <div className="p-3 bg-amber-50 rounded-lg space-y-3">
+                  <div className="text-sm font-medium text-amber-800">Hardware Details</div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="label">Torque Spec</label>
+                      <input
+                        type="text"
+                        value={newItem.torque_spec}
+                        onChange={(e) => setNewItem({ ...newItem, torque_spec: e.target.value })}
+                        className="input"
+                        placeholder="e.g., 25 ft-lbs"
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Scrap %</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={newItem.scrap_factor}
+                        onChange={(e) => setNewItem({ ...newItem, scrap_factor: parseFloat(e.target.value) })}
+                        className="input"
+                        placeholder="0.05 = 5%"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label">Installation Notes</label>
+                    <textarea
+                      value={newItem.installation_notes}
+                      onChange={(e) => setNewItem({ ...newItem, installation_notes: e.target.value })}
+                      className="input"
+                      rows={2}
+                      placeholder="Assembly instructions, loctite requirements, etc."
+                    />
+                  </div>
+                </div>
+              )}
+              
+              {newItem.line_type !== 'hardware' && (
                 <div>
                   <label className="label">Scrap %</label>
                   <input
@@ -624,7 +718,8 @@ export default function BOMPage() {
                     placeholder="0.05 = 5%"
                   />
                 </div>
-              </div>
+              )}
+              
               <div>
                 <label className="flex items-center">
                   <input
