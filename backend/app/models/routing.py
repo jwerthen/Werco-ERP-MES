@@ -2,9 +2,10 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, 
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.database import Base
+from app.db.mixins import SoftDeleteMixin
 
 
-class Routing(Base):
+class Routing(Base, SoftDeleteMixin):
     """Master routing for a part - defines standard manufacturing process"""
     __tablename__ = "routings"
     

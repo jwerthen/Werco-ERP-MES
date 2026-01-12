@@ -44,11 +44,16 @@ def list_work_orders(
     limit: int = 100,
     status: Optional[WorkOrderStatus] = None,
     search: Optional[str] = None,
+    include_deleted: bool = Query(False, description="Include soft-deleted work orders (admin only)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """List work orders with summary info"""
     query = db.query(WorkOrder).options(joinedload(WorkOrder.part))
+    
+    # Filter out soft-deleted unless explicitly requested by admin
+    if not include_deleted or current_user.role != UserRole.ADMIN:
+        query = query.filter(WorkOrder.is_deleted == False)
     
     if status:
         query = query.filter(WorkOrder.status == status)
@@ -611,41 +616,78 @@ def update_work_order(
 def delete_work_order(
     work_order_id: int,
     request: Request,
+    hard_delete: bool = Query(False, description="Permanently delete (only for draft/cancelled WOs)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
 ):
-    """Delete a work order (only draft or cancelled WOs can be deleted)"""
+    """
+    Soft delete or permanently delete a work order.
+    
+    **Soft delete (default)**: Marks the work order as deleted but preserves data.
+    
+    **Hard delete**: Only allowed for draft or cancelled work orders.
+    Permanently removes the record and associated operations.
+    """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
-    if work_order.status not in [WorkOrderStatus.DRAFT, WorkOrderStatus.CANCELLED]:
-        raise HTTPException(
-            status_code=400, 
-            detail="Only draft or cancelled work orders can be deleted. Cancel it first."
-        )
-    
-    # Capture info for audit before deletion
     audit = AuditService(db, current_user, request)
     wo_number = work_order.work_order_number
     wo_id = work_order.id
     
-    # Delete operations first
-    for op in work_order.operations:
-        db.delete(op)
+    if hard_delete:
+        # Only draft or cancelled can be hard deleted
+        if work_order.status not in [WorkOrderStatus.DRAFT, WorkOrderStatus.CANCELLED]:
+            raise HTTPException(
+                status_code=400, 
+                detail="Only draft or cancelled work orders can be hard deleted. Use soft delete instead."
+            )
+        
+        # Delete operations first
+        for op in work_order.operations:
+            db.delete(op)
+        
+        db.delete(work_order)
+        db.commit()
+        
+        audit.log_delete("work_order", wo_id, wo_number)
+        return {"message": f"Work order {wo_number} permanently deleted"}
     
-    db.delete(work_order)
+    # Soft delete - allowed for any status
+    work_order.soft_delete(current_user.id)
     db.commit()
     
-    # Audit log for deletion
-    audit.log_delete(
-        resource_type="work_order",
-        resource_id=wo_id,
-        resource_identifier=wo_number,
-        old_values=work_order
-    )
+    audit.log_delete("work_order", wo_id, wo_number, soft_delete=True)
+    return {"message": f"Work order {wo_number} marked as deleted (soft delete)", "can_restore": True}
+
+
+@router.post("/{work_order_id}/restore", summary="Restore a soft-deleted work order")
+def restore_work_order(
+    work_order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+):
+    """Restore a soft-deleted work order."""
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
     
-    return {"message": f"Work order {wo_number} deleted"}
+    if not work_order.is_deleted:
+        raise HTTPException(status_code=400, detail="Work order is not deleted")
+    
+    audit = AuditService(db, current_user, request)
+    
+    work_order.restore()
+    db.commit()
+    
+    audit.log_update("work_order", work_order.id, work_order.work_order_number,
+                    old_values={"is_deleted": True},
+                    new_values={"is_deleted": False},
+                    action="restore")
+    
+    return {"message": f"Work order {work_order.work_order_number} restored"}
 
 
 @router.post("/{work_order_id}/release")

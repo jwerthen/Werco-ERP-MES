@@ -1,9 +1,51 @@
 """
 Database mixins for common functionality.
 """
-from sqlalchemy import Column, Integer, DateTime, event
+from sqlalchemy import Column, Integer, DateTime, Boolean, String, event
 from sqlalchemy.orm import declared_attr
 from datetime import datetime
+
+
+class SoftDeleteMixin:
+    """
+    Mixin that adds soft delete support.
+    
+    Usage:
+        class MyModel(Base, SoftDeleteMixin):
+            __tablename__ = "my_table"
+            ...
+    
+    Records are not physically deleted, but marked with:
+    - is_deleted: Boolean flag
+    - deleted_at: Timestamp when deleted
+    - deleted_by: User ID who deleted (optional)
+    
+    Use filter(Model.is_deleted == False) in queries to exclude deleted records.
+    """
+    
+    @declared_attr
+    def is_deleted(cls):
+        return Column(Boolean, nullable=False, default=False, server_default='false', index=True)
+    
+    @declared_attr
+    def deleted_at(cls):
+        return Column(DateTime(timezone=True), nullable=True)
+    
+    @declared_attr
+    def deleted_by(cls):
+        return Column(Integer, nullable=True)
+    
+    def soft_delete(self, user_id: int = None):
+        """Mark record as deleted."""
+        self.is_deleted = True
+        self.deleted_at = datetime.utcnow()
+        self.deleted_by = user_id
+    
+    def restore(self):
+        """Restore a soft-deleted record."""
+        self.is_deleted = False
+        self.deleted_at = None
+        self.deleted_by = None
 
 
 class OptimisticLockMixin:

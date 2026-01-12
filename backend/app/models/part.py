@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import SoftDeleteMixin
 
 
 class PartType(str, enum.Enum):
@@ -23,7 +24,7 @@ class UnitOfMeasure(str, enum.Enum):
     LITERS = "liters"
 
 
-class Part(Base):
+class Part(Base, SoftDeleteMixin):
     __tablename__ = "parts"
     
     id = Column(Integer, primary_key=True, index=True)

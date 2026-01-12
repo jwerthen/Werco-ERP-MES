@@ -1,11 +1,12 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user
-from app.models.user import User
+from app.api.deps import get_current_user, require_role
+from app.models.user import User, UserRole
 from app.models.customer import Customer
+from app.services.audit_service import AuditService
 from app.models.part import Part
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from pydantic import BaseModel, EmailStr
@@ -99,11 +100,16 @@ def generate_customer_code(db: Session, name: str) -> str:
 def list_customers(
     active_only: bool = True,
     search: Optional[str] = None,
+    include_deleted: bool = Query(False, description="Include soft-deleted customers (admin only)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """List all customers"""
     query = db.query(Customer)
+    
+    # Filter out soft-deleted unless explicitly requested by admin
+    if not include_deleted or current_user.role != UserRole.ADMIN:
+        query = query.filter(Customer.is_deleted == False)
     
     if active_only:
         query = query.filter(Customer.is_active == True)
@@ -247,17 +253,67 @@ def update_customer(
 
 
 @router.delete("/{customer_id}")
-def deactivate_customer(
+def delete_customer(
     customer_id: int,
+    request: Request,
+    hard_delete: bool = Query(False, description="Permanently delete (use with caution)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
 ):
-    """Deactivate a customer"""
+    """Soft delete or permanently delete a customer."""
     customer = db.query(Customer).filter(Customer.id == customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     
+    audit = AuditService(db, current_user, request)
+    
+    if hard_delete:
+        # Check for dependencies
+        part_count = db.query(Part).filter(Part.customer_name == customer.name).count()
+        if part_count > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot hard delete: Customer has {part_count} associated parts"
+            )
+        
+        audit.log_delete("customer", customer.id, customer.name)
+        db.delete(customer)
+        db.commit()
+        return {"message": "Customer permanently deleted"}
+    
+    # Soft delete
+    customer.soft_delete(current_user.id)
     customer.is_active = False
     db.commit()
     
-    return {"message": "Customer deactivated"}
+    audit.log_delete("customer", customer.id, customer.name, soft_delete=True)
+    return {"message": "Customer marked as deleted (soft delete)", "can_restore": True}
+
+
+@router.post("/{customer_id}/restore", summary="Restore a soft-deleted customer")
+def restore_customer(
+    customer_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+):
+    """Restore a soft-deleted customer."""
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    if not customer.is_deleted:
+        raise HTTPException(status_code=400, detail="Customer is not deleted")
+    
+    audit = AuditService(db, current_user, request)
+    
+    customer.restore()
+    customer.is_active = True
+    db.commit()
+    
+    audit.log_update("customer", customer.id, customer.name,
+                    old_values={"is_deleted": True},
+                    new_values={"is_deleted": False},
+                    action="restore")
+    
+    return {"message": f"Customer {customer.name} restored"}

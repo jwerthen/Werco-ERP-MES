@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime, date
 import enum
 from app.db.database import Base
+from app.db.mixins import SoftDeleteMixin
 
 
 class WorkOrderStatus(str, enum.Enum):
@@ -23,7 +24,7 @@ class OperationStatus(str, enum.Enum):
     ON_HOLD = "on_hold"
 
 
-class WorkOrder(Base):
+class WorkOrder(Base, SoftDeleteMixin):
     """Manufacturing Work Order / Job"""
     __tablename__ = "work_orders"
     

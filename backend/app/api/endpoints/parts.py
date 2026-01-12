@@ -19,6 +19,7 @@ def list_parts(
     search: Optional[str] = Query(None, description="Search in part number, name, description, or customer part number"),
     part_type: Optional[PartType] = Query(None, description="Filter by part type (manufactured, purchased, assembly, raw_material)"),
     active_only: bool = Query(True, description="Only return active parts"),
+    include_deleted: bool = Query(False, description="Include soft-deleted parts (admin only)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -30,10 +31,15 @@ def list_parts(
     - **search**: Text search across part number, name, description, and customer part number
     - **part_type**: Filter by type (manufactured, purchased, assembly, raw_material)
     - **active_only**: When true, only returns active parts (default: true)
+    - **include_deleted**: Include soft-deleted parts (admin only, default: false)
     
     Returns parts ordered by part number.
     """
     query = db.query(Part)
+    
+    # Filter out soft-deleted unless explicitly requested by admin
+    if not include_deleted or current_user.role != UserRole.ADMIN:
+        query = query.filter(Part.is_deleted == False)
     
     if active_only:
         query = query.filter(Part.is_active == True)
@@ -175,23 +181,88 @@ def create_new_revision(
 def delete_part(
     part_id: int,
     request: Request,
+    hard_delete: bool = Query(False, description="Permanently delete the record (admin only, use with caution)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN]))
 ):
-    """Soft delete a part (mark as inactive/obsolete)"""
+    """
+    Soft delete a part (default) or permanently delete (hard_delete=true).
+    
+    **Soft delete**: Marks the part as deleted but preserves data for recovery and audit trail.
+    The part will be excluded from normal queries but can be restored.
+    
+    **Hard delete**: Permanently removes the record. Use with extreme caution.
+    Only available if no dependencies exist (work orders, BOMs, etc.).
+    """
     part = db.query(Part).filter(Part.id == part_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
-    # Capture for audit
     audit = AuditService(db, current_user, request)
-    old_status = part.status
     
+    if hard_delete:
+        # Check for dependencies before hard delete
+        from app.models.work_order import WorkOrder
+        from app.models.bom import BOM, BOMItem
+        
+        wo_count = db.query(WorkOrder).filter(WorkOrder.part_id == part_id).count()
+        bom_count = db.query(BOM).filter(BOM.part_id == part_id).count()
+        bom_item_count = db.query(BOMItem).filter(BOMItem.component_part_id == part_id).count()
+        
+        if wo_count > 0 or bom_count > 0 or bom_item_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot hard delete: Part has {wo_count} work orders, {bom_count} BOMs, {bom_item_count} BOM references"
+            )
+        
+        audit.log_delete("part", part.id, part.part_number)
+        db.delete(part)
+        db.commit()
+        return {"message": "Part permanently deleted"}
+    
+    # Soft delete
+    old_values = {"is_deleted": part.is_deleted, "status": part.status}
+    part.soft_delete(current_user.id)
     part.is_active = False
     part.status = "obsolete"
     db.commit()
     
-    # Audit log (soft delete = status change)
-    audit.log_status_change("part", part.id, part.part_number, old_status or "active", "obsolete")
+    audit.log_delete("part", part.id, part.part_number, soft_delete=True)
     
-    return {"message": "Part marked as obsolete"}
+    return {"message": "Part marked as deleted (soft delete)", "can_restore": True}
+
+
+@router.post("/{part_id}/restore", summary="Restore a soft-deleted part")
+def restore_part(
+    part_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+):
+    """
+    Restore a soft-deleted part.
+    
+    **Required roles**: Admin or Manager
+    
+    Returns the part to active status and clears deletion metadata.
+    """
+    part = db.query(Part).filter(Part.id == part_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+    
+    if not part.is_deleted:
+        raise HTTPException(status_code=400, detail="Part is not deleted")
+    
+    audit = AuditService(db, current_user, request)
+    
+    part.restore()
+    part.is_active = True
+    part.status = "active"
+    db.commit()
+    
+    audit.log_update("part", part.id, part.part_number, 
+                    old_values={"is_deleted": True, "status": "obsolete"},
+                    new_values={"is_deleted": False, "status": "active"},
+                    action="restore")
+    
+    return {"message": "Part restored successfully", "part_id": part.id}

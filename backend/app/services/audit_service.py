@@ -31,6 +31,7 @@ class AuditService:
         "CREATE": "CREATE",
         "UPDATE": "UPDATE",
         "DELETE": "DELETE",
+        "RESTORE": "RESTORE",
         "VIEW": "VIEW",
         "EXPORT": "EXPORT",
         "IMPORT": "IMPORT",
@@ -223,7 +224,8 @@ class AuditService:
         old_values: Any = None,
         new_values: Any = None,
         description: Optional[str] = None,
-        extra_data: Optional[Dict] = None
+        extra_data: Optional[Dict] = None,
+        action: str = None
     ) -> AuditLog:
         """Log an UPDATE action with change tracking."""
         old_dict = self._model_to_dict(old_values) if old_values else {}
@@ -232,14 +234,16 @@ class AuditService:
         # Calculate changes
         changes = self._get_changes(old_dict, new_dict)
         
-        if not changes:
-            # No actual changes - skip logging
+        if not changes and action != "restore":
+            # No actual changes - skip logging (unless it's a restore)
             return None
         
-        desc = description or f"Updated {resource_type}: {resource_identifier}"
+        # Use custom action verb if provided
+        action_verb = action.title() if action else "Updated"
+        desc = description or f"{action_verb} {resource_type}: {resource_identifier}"
         
         return self.log(
-            action=self.ACTIONS["UPDATE"],
+            action=action.upper() if action else self.ACTIONS["UPDATE"],
             resource_type=resource_type,
             resource_id=resource_id,
             resource_identifier=resource_identifier,
@@ -256,11 +260,13 @@ class AuditService:
         resource_identifier: str,
         old_values: Any = None,
         description: Optional[str] = None,
-        extra_data: Optional[Dict] = None
+        extra_data: Optional[Dict] = None,
+        soft_delete: bool = False
     ) -> AuditLog:
-        """Log a DELETE action."""
+        """Log a DELETE action (soft or hard delete)."""
         old_dict = self._model_to_dict(old_values) if old_values else None
-        desc = description or f"Deleted {resource_type}: {resource_identifier}"
+        delete_type = "soft deleted" if soft_delete else "deleted"
+        desc = description or f"{delete_type.title()} {resource_type}: {resource_identifier}"
         
         return self.log(
             action=self.ACTIONS["DELETE"],
@@ -269,7 +275,7 @@ class AuditService:
             resource_identifier=resource_identifier,
             description=desc,
             old_values=old_dict,
-            extra_data=extra_data
+            extra_data={"soft_delete": soft_delete, **(extra_data or {})}
         )
     
     def log_status_change(

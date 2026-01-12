@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text
 from datetime import datetime
 from app.db.database import Base
+from app.db.mixins import SoftDeleteMixin
 
 
-class Customer(Base):
+class Customer(Base, SoftDeleteMixin):
     """Customer master record"""
     __tablename__ = "customers"
     

@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import SoftDeleteMixin
 
 
 class BOMItemType(str, enum.Enum):
@@ -11,7 +12,7 @@ class BOMItemType(str, enum.Enum):
     PHANTOM = "phantom"  # Sub-assembly that explodes into its components
 
 
-class BOM(Base):
+class BOM(Base, SoftDeleteMixin):
     """Bill of Materials - Top level BOM for a part/assembly"""
     __tablename__ = "boms"
     
