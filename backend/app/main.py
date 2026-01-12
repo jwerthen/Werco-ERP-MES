@@ -356,7 +356,7 @@ async def readiness_check():
     """Readiness probe - indicates if the application is ready to accept traffic.
     Checks database connectivity and critical dependencies.
     """
-    from app.database import SessionLocal
+    from app.db.database import SessionLocal
     import time
     
     checks = {
@@ -417,7 +417,7 @@ async def detailed_health_check():
     """
     import platform
     import sys
-    from app.database import SessionLocal
+    from app.db.database import SessionLocal
     import time
     
     checks = {}
