@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useTour, TourStep } from '../../context/TourContext';
 import { XMarkIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 
@@ -20,17 +20,21 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
   const { nextStep, prevStep, endTour } = useTour();
   const [position, setPosition] = useState({ top: 0, left: 0 });
   const [placement, setPlacement] = useState<'top' | 'bottom' | 'left' | 'right'>('bottom');
+  const tooltipRef = useRef<HTMLDivElement>(null);
 
   const tooltipWidth = 340;
-  const tooltipHeight = 200; // Approximate
   const gap = 16;
+  const padding = 20; // Padding from viewport edges
 
   useEffect(() => {
+    // Get actual tooltip height after render
+    const tooltipHeight = tooltipRef.current?.offsetHeight || 250;
+    
     if (!targetRect) {
       // Center in viewport when no target
       setPosition({
-        top: window.innerHeight / 2 - tooltipHeight / 2,
-        left: window.innerWidth / 2 - tooltipWidth / 2,
+        top: Math.max(padding, (window.innerHeight - tooltipHeight) / 2),
+        left: Math.max(padding, (window.innerWidth - tooltipWidth) / 2),
       });
       return;
     }
@@ -49,16 +53,18 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
       const spaceLeft = targetRect.left;
       const spaceRight = viewport.width - (targetRect.left + targetRect.width);
 
-      if (spaceBottom >= tooltipHeight + gap) {
+      // Prefer top if bottom would overflow
+      if (spaceBottom >= tooltipHeight + gap + padding) {
         bestPlacement = 'bottom';
-      } else if (spaceTop >= tooltipHeight + gap) {
+      } else if (spaceTop >= tooltipHeight + gap + padding) {
         bestPlacement = 'top';
-      } else if (spaceRight >= tooltipWidth + gap) {
+      } else if (spaceRight >= tooltipWidth + gap + padding) {
         bestPlacement = 'right';
-      } else if (spaceLeft >= tooltipWidth + gap) {
+      } else if (spaceLeft >= tooltipWidth + gap + padding) {
         bestPlacement = 'left';
       } else {
-        bestPlacement = 'bottom';
+        // Default to top if nothing fits well (prevents bottom overflow)
+        bestPlacement = spaceTop > spaceBottom ? 'top' : 'bottom';
       }
     }
 
@@ -67,41 +73,43 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
 
     switch (bestPlacement) {
       case 'top':
-        newTop = targetRect.top - tooltipHeight - gap - 8;
+        newTop = targetRect.top - tooltipHeight - gap;
         newLeft = targetRect.left + targetRect.width / 2 - tooltipWidth / 2;
         break;
       case 'bottom':
-        newTop = targetRect.top + targetRect.height + gap + 8;
+        newTop = targetRect.top + targetRect.height + gap;
         newLeft = targetRect.left + targetRect.width / 2 - tooltipWidth / 2;
         break;
       case 'left':
         newTop = targetRect.top + targetRect.height / 2 - tooltipHeight / 2;
-        newLeft = targetRect.left - tooltipWidth - gap - 8;
+        newLeft = targetRect.left - tooltipWidth - gap;
         break;
       case 'right':
         newTop = targetRect.top + targetRect.height / 2 - tooltipHeight / 2;
-        newLeft = targetRect.left + targetRect.width + gap + 8;
+        newLeft = targetRect.left + targetRect.width + gap;
         break;
     }
 
-    // Keep tooltip within viewport bounds
-    newLeft = Math.max(16, Math.min(newLeft, viewport.width - tooltipWidth - 16));
-    newTop = Math.max(16, Math.min(newTop, viewport.height - tooltipHeight - 16));
+    // Keep tooltip within viewport bounds with padding
+    newLeft = Math.max(padding, Math.min(newLeft, viewport.width - tooltipWidth - padding));
+    newTop = Math.max(padding, Math.min(newTop, viewport.height - tooltipHeight - padding));
 
     setPosition({ top: newTop, left: newLeft });
     setPlacement(bestPlacement as 'top' | 'bottom' | 'left' | 'right');
-  }, [targetRect, step.position]);
+  }, [targetRect, step.position, stepIndex]); // Added stepIndex to recalculate on step change
 
   const isFirstStep = stepIndex === 0;
   const isLastStep = stepIndex === totalSteps - 1;
 
   return (
     <div
-      className="absolute pointer-events-auto bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-fade-in"
+      ref={tooltipRef}
+      className="fixed pointer-events-auto bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-fade-in"
       style={{
         top: position.top,
         left: position.left,
         width: tooltipWidth,
+        maxHeight: 'calc(100vh - 40px)',
         zIndex: 10000,
       }}
     >
