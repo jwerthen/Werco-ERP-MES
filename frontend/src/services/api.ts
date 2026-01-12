@@ -1551,6 +1551,23 @@ class ApiService {
     const response = await this.api.get('/analytics/data-sources');
     return response.data;
   }
+
+  // Search
+  async search(query: string, type?: string) {
+    const response = await this.api.get('/search', { params: { q: query, type } });
+    return response.data;
+  }
+
+  async getRecentItems() {
+    const response = await this.api.get('/search/recent');
+    return response.data;
+  }
+
+  // Generic get method for flexibility
+  async get<T = any>(url: string, config?: { params?: Record<string, any> }): Promise<{ data: T }> {
+    const response = await this.api.get<T>(url, config);
+    return { data: response.data };
+  }
 }
 
 export const api = new ApiService();
