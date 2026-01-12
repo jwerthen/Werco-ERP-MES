@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { TourMenu } from './Tour';
 import SessionWarningModal from './SessionWarningModal';
 import GlobalSearch, { useGlobalSearch } from './GlobalSearch';
+import BottomNav from './ui/BottomNav';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
@@ -401,15 +402,15 @@ export default function Layout({ children }: LayoutProps) {
           </div>
         </header>
 
-        {/* Main content */}
-        <main className="flex-1 p-4 sm:p-6 lg:p-8">
+        {/* Main content - extra bottom padding for mobile nav */}
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 pb-20 lg:pb-8">
           <div className="max-w-7xl mx-auto animate-fade-in">
             {children}
           </div>
         </main>
 
-        {/* Footer - Subtle glassmorphism */}
-        <footer className="flex-shrink-0 py-4 px-6 border-t border-white/50 bg-white/60 backdrop-blur-sm">
+        {/* Footer - Hidden on mobile, visible on desktop */}
+        <footer className="hidden lg:block flex-shrink-0 py-4 px-6 border-t border-white/50 bg-white/60 backdrop-blur-sm">
           <div className="max-w-7xl mx-auto flex items-center justify-between text-sm text-slate-500">
             <div className="flex items-center gap-2">
               <span>Werco Manufacturing</span>
@@ -420,6 +421,9 @@ export default function Layout({ children }: LayoutProps) {
           </div>
         </footer>
       </div>
+
+      {/* Bottom Navigation - Mobile only */}
+      <BottomNav onMenuClick={() => setSidebarOpen(true)} />
 
       {/* Global Search Modal */}
       <GlobalSearch isOpen={globalSearch.isOpen} onClose={globalSearch.close} />

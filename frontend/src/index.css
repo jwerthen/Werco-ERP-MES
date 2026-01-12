@@ -47,17 +47,50 @@
 @layer base {
   html {
     @apply scroll-smooth;
+    /* Prevent horizontal scroll on mobile */
+    overflow-x: hidden;
   }
   
   body {
     @apply bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50 text-slate-900 font-sans antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     min-height: 100vh;
+    min-height: 100dvh; /* Dynamic viewport height for mobile browsers */
+    overflow-x: hidden;
   }
 
   /* Better focus states for accessibility */
   *:focus-visible {
     @apply outline-none ring-2 ring-cyan-500 ring-offset-2;
+  }
+
+  /* Safe area insets for notched devices */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  
+  .pt-safe {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  
+  .pl-safe {
+    padding-left: env(safe-area-inset-left, 0px);
+  }
+  
+  .pr-safe {
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+
+  /* Prevent text selection on interactive elements (mobile) */
+  button, a, [role="button"] {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Improve touch scrolling */
+  .scroll-touch {
+    -webkit-overflow-scrolling: touch;
   }
 
   /* Custom scrollbar - modernized */
@@ -609,6 +642,130 @@
 
   .progress-danger .progress-bar {
     background: linear-gradient(90deg, #ef4444 0%, #dc2626 100%);
+  }
+
+  /* ------------------------------------
+     MOBILE-SPECIFIC COMPONENTS
+     ------------------------------------ */
+
+  /* Mobile data card */
+  .mobile-card {
+    @apply bg-white rounded-xl border border-slate-200 overflow-hidden;
+  }
+
+  .mobile-card-header {
+    @apply px-4 py-3 border-b border-slate-100 flex items-start justify-between gap-3;
+  }
+
+  .mobile-card-body {
+    @apply px-4 py-3;
+  }
+
+  .mobile-card-footer {
+    @apply px-4 py-3 bg-slate-50 border-t border-slate-100;
+  }
+
+  /* Mobile list item */
+  .mobile-list-item {
+    @apply flex items-center gap-4 px-4 py-4 bg-white border-b border-slate-100
+           active:bg-slate-50 transition-colors;
+    min-height: 72px;
+  }
+
+  .mobile-list-item:last-child {
+    @apply border-b-0;
+  }
+
+  /* Bottom navigation */
+  .bottom-nav {
+    @apply fixed bottom-0 left-0 right-0 z-40 
+           bg-white border-t border-slate-200
+           pb-safe;
+  }
+
+  .bottom-nav-item {
+    @apply flex flex-col items-center justify-center flex-1 h-16
+           text-slate-500 transition-colors;
+  }
+
+  .bottom-nav-item-active {
+    @apply bottom-nav-item text-cyan-600;
+  }
+
+  /* Swipe actions container */
+  .swipe-container {
+    @apply relative overflow-hidden;
+  }
+
+  .swipe-actions {
+    @apply absolute top-0 bottom-0 right-0 flex items-stretch;
+  }
+
+  .swipe-action {
+    @apply flex items-center justify-center w-20 text-white font-medium;
+  }
+
+  /* Pull to refresh indicator */
+  .pull-indicator {
+    @apply flex items-center justify-center py-4 text-slate-500;
+  }
+
+  /* Floating action button */
+  .fab {
+    @apply fixed z-40 flex items-center justify-center
+           w-14 h-14 rounded-full shadow-lg
+           text-white transition-all duration-200
+           active:scale-95;
+    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+    bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+    right: 1rem;
+  }
+
+  @media (min-width: 1024px) {
+    .fab {
+      bottom: 1.5rem;
+      right: 1.5rem;
+    }
+  }
+
+  /* Mobile-optimized table */
+  .table-mobile {
+    @apply w-full;
+  }
+
+  .table-mobile thead {
+    @apply hidden;
+  }
+
+  .table-mobile tbody tr {
+    @apply block mb-4 bg-white rounded-xl border border-slate-200 overflow-hidden;
+  }
+
+  .table-mobile tbody td {
+    @apply block px-4 py-2 border-b border-slate-100 last:border-b-0;
+  }
+
+  .table-mobile tbody td::before {
+    content: attr(data-label);
+    @apply block text-xs text-slate-500 uppercase tracking-wide mb-1;
+  }
+
+  @media (min-width: 768px) {
+    .table-mobile thead {
+      @apply table-header-group;
+    }
+
+    .table-mobile tbody tr {
+      @apply table-row mb-0 rounded-none border-0;
+    }
+
+    .table-mobile tbody td {
+      @apply table-cell border-b;
+    }
+
+    .table-mobile tbody td::before {
+      @apply hidden;
+    }
   }
 }
 
