@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     # Database - Railway provides DATABASE_URL automatically for PostgreSQL plugin
     DATABASE_URL: str = "postgresql://user:pass@localhost:5432/werco_erp"
     
+    # Database Connection Pool Settings
+    DB_POOL_SIZE: int = 5  # Number of connections to keep open
+    DB_MAX_OVERFLOW: int = 10  # Max additional connections when pool is exhausted
+    DB_POOL_TIMEOUT: int = 30  # Seconds to wait for connection from pool
+    DB_POOL_RECYCLE: int = 1800  # Recycle connections after 30 minutes
+    DB_POOL_PRE_PING: bool = True  # Test connections before use (handles stale connections)
+    
     # Security - MUST be overridden in production
     SECRET_KEY: str = "CHANGE-THIS-IN-PRODUCTION"
     REFRESH_TOKEN_SECRET_KEY: str = "CHANGE-THIS-REFRESH-SECRET"

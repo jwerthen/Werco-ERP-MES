@@ -500,16 +500,19 @@ async def detailed_health_check():
     checks = {}
     
     # Database check with connection pool info
+    from app.db.database import get_pool_status
     db_start = time.time()
     try:
         db = SessionLocal()
         try:
             result = db.execute(text("SELECT version()")).fetchone()
             db_version = result[0] if result else "unknown"
+            pool_status = get_pool_status()
             checks["database"] = {
                 "status": "healthy",
                 "latency_ms": round((time.time() - db_start) * 1000, 2),
-                "version": db_version[:50]  # Truncate version string
+                "version": db_version[:50],  # Truncate version string
+                "pool": pool_status
             }
         finally:
             db.close()

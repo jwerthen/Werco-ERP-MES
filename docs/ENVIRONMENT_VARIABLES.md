@@ -17,6 +17,23 @@ This document describes all environment variables used by Werco ERP. Use this as
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | Yes* | - | PostgreSQL connection string. Format: `postgresql://user:password@host:port/database` |
 
+### Connection Pool
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DB_POOL_SIZE` | No | `5` | Number of persistent connections to maintain |
+| `DB_MAX_OVERFLOW` | No | `10` | Max additional connections when pool is exhausted |
+| `DB_POOL_TIMEOUT` | No | `30` | Seconds to wait for connection from pool |
+| `DB_POOL_RECYCLE` | No | `1800` | Recycle connections after N seconds (default 30 min) |
+| `DB_POOL_PRE_PING` | No | `true` | Test connections before use (handles stale connections) |
+
+**Pool Sizing Guide:**
+- **Development**: `pool_size=5, max_overflow=5` (10 max connections)
+- **Production (small)**: `pool_size=10, max_overflow=10` (20 max connections)
+- **Production (large)**: `pool_size=20, max_overflow=20` (40 max connections)
+
+**Note:** Total max connections = `pool_size + max_overflow`. Ensure your PostgreSQL `max_connections` setting can accommodate this plus any other applications.
+
 **Examples:**
 ```bash
 # Local development
