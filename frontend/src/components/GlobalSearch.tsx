@@ -111,8 +111,8 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
 
   const fetchRecentItems = async () => {
     try {
-      const response = await api.get('/search/recent');
-      setRecentItems(response.data);
+      const data = await api.getRecentItems();
+      setRecentItems(data);
     } catch (error) {
       console.error('Failed to fetch recent items:', error);
     }
@@ -127,10 +127,8 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
 
     setIsLoading(true);
     try {
-      const response = await api.get<SearchResponse>('/search', {
-        params: { q: searchQuery, limit: 20 }
-      });
-      setResults(response.data.results);
+      const data = await api.search(searchQuery);
+      setResults(data.results || []);
       setSelectedIndex(0);
     } catch (error) {
       console.error('Search failed:', error);
