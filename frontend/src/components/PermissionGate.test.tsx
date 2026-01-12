@@ -14,6 +14,23 @@ jest.mock('../context/AuthContext', () => ({
 
 const mockUseAuth = useAuth as jest.MockedFunction<typeof useAuth>;
 
+// Helper to create mock user with all required fields
+const createMockUser = (overrides: {
+  id: number;
+  email: string;
+  first_name: string;
+  last_name: string;
+  role: 'admin' | 'manager' | 'supervisor' | 'operator' | 'quality' | 'shipping' | 'viewer';
+  is_superuser: boolean;
+}) => ({
+  ...overrides,
+  version: 1,
+  employee_id: `EMP${overrides.id.toString().padStart(3, '0')}`,
+  is_active: true,
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
+});
+
 describe('PermissionGate', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -22,15 +39,14 @@ describe('PermissionGate', () => {
   describe('with admin user', () => {
     beforeEach(() => {
       mockUseAuth.mockReturnValue({
-        user: {
+        user: createMockUser({
           id: 1,
           email: 'admin@werco.com',
           first_name: 'Admin',
           last_name: 'User',
           role: 'admin',
-          is_active: true,
           is_superuser: true,
-        },
+        }),
         isAuthenticated: true,
         isLoading: false,
         login: jest.fn(),
@@ -61,15 +77,14 @@ describe('PermissionGate', () => {
   describe('with operator user', () => {
     beforeEach(() => {
       mockUseAuth.mockReturnValue({
-        user: {
+        user: createMockUser({
           id: 2,
           email: 'operator@werco.com',
           first_name: 'Operator',
           last_name: 'User',
           role: 'operator',
-          is_active: true,
           is_superuser: false,
-        },
+        }),
         isAuthenticated: true,
         isLoading: false,
         login: jest.fn(),
@@ -147,15 +162,14 @@ describe('PermissionGate', () => {
   describe('anyOf and allOf props', () => {
     beforeEach(() => {
       mockUseAuth.mockReturnValue({
-        user: {
+        user: createMockUser({
           id: 3,
           email: 'manager@werco.com',
           first_name: 'Manager',
           last_name: 'User',
           role: 'manager',
-          is_active: true,
           is_superuser: false,
-        },
+        }),
         isAuthenticated: true,
         isLoading: false,
         login: jest.fn(),
@@ -191,15 +205,14 @@ describe('AdminOnly', () => {
 
   it('renders children for admin user', () => {
     mockUseAuth.mockReturnValue({
-      user: {
+      user: createMockUser({
         id: 1,
         email: 'admin@werco.com',
         first_name: 'Admin',
         last_name: 'User',
         role: 'admin',
-        is_active: true,
         is_superuser: true,
-      },
+      }),
       isAuthenticated: true,
       isLoading: false,
       login: jest.fn(),
@@ -217,15 +230,14 @@ describe('AdminOnly', () => {
 
   it('does not render for non-admin user', () => {
     mockUseAuth.mockReturnValue({
-      user: {
+      user: createMockUser({
         id: 2,
         email: 'user@werco.com',
         first_name: 'Regular',
         last_name: 'User',
         role: 'operator',
-        is_active: true,
         is_superuser: false,
-      },
+      }),
       isAuthenticated: true,
       isLoading: false,
       login: jest.fn(),
@@ -245,15 +257,14 @@ describe('AdminOnly', () => {
 describe('CanCreate', () => {
   it('renders children when user can create resource', () => {
     mockUseAuth.mockReturnValue({
-      user: {
+      user: createMockUser({
         id: 1,
         email: 'manager@werco.com',
         first_name: 'Manager',
         last_name: 'User',
         role: 'manager',
-        is_active: true,
         is_superuser: false,
-      },
+      }),
       isAuthenticated: true,
       isLoading: false,
       login: jest.fn(),
@@ -273,15 +284,14 @@ describe('CanCreate', () => {
 describe('CanEdit', () => {
   it('renders children when user can edit resource', () => {
     mockUseAuth.mockReturnValue({
-      user: {
+      user: createMockUser({
         id: 1,
         email: 'manager@werco.com',
         first_name: 'Manager',
         last_name: 'User',
         role: 'manager',
-        is_active: true,
         is_superuser: false,
-      },
+      }),
       isAuthenticated: true,
       isLoading: false,
       login: jest.fn(),
@@ -301,15 +311,14 @@ describe('CanEdit', () => {
 describe('CanDelete', () => {
   it('renders children when user can delete resource', () => {
     mockUseAuth.mockReturnValue({
-      user: {
+      user: createMockUser({
         id: 1,
         email: 'admin@werco.com',
         first_name: 'Admin',
         last_name: 'User',
         role: 'admin',
-        is_active: true,
         is_superuser: true,
-      },
+      }),
       isAuthenticated: true,
       isLoading: false,
       login: jest.fn(),
@@ -327,15 +336,14 @@ describe('CanDelete', () => {
 
   it('does not render for operator (no delete permission)', () => {
     mockUseAuth.mockReturnValue({
-      user: {
+      user: createMockUser({
         id: 2,
         email: 'operator@werco.com',
         first_name: 'Operator',
         last_name: 'User',
         role: 'operator',
-        is_active: true,
         is_superuser: false,
-      },
+      }),
       isAuthenticated: true,
       isLoading: false,
       login: jest.fn(),

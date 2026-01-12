@@ -13,6 +13,23 @@ jest.mock('../context/AuthContext', () => ({
 
 const mockUseAuth = useAuth as jest.MockedFunction<typeof useAuth>;
 
+// Helper to create mock user with all required fields
+const createMockUser = (overrides: {
+  id: number;
+  email: string;
+  first_name: string;
+  last_name: string;
+  role: 'admin' | 'manager' | 'supervisor' | 'operator' | 'quality' | 'shipping' | 'viewer';
+  is_superuser: boolean;
+}) => ({
+  ...overrides,
+  version: 1,
+  employee_id: `EMP${overrides.id.toString().padStart(3, '0')}`,
+  is_active: true,
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
+});
+
 describe('usePermissions', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -21,15 +38,14 @@ describe('usePermissions', () => {
   describe('with admin user', () => {
     beforeEach(() => {
       mockUseAuth.mockReturnValue({
-        user: {
+        user: createMockUser({
           id: 1,
           email: 'admin@werco.com',
           first_name: 'Admin',
           last_name: 'User',
           role: 'admin',
-          is_active: true,
           is_superuser: true,
-        },
+        }),
         isAuthenticated: true,
         isLoading: false,
         login: jest.fn(),
@@ -74,15 +90,14 @@ describe('usePermissions', () => {
   describe('with operator user', () => {
     beforeEach(() => {
       mockUseAuth.mockReturnValue({
-        user: {
+        user: createMockUser({
           id: 2,
           email: 'operator@werco.com',
           first_name: 'Operator',
           last_name: 'User',
           role: 'operator',
-          is_active: true,
           is_superuser: false,
-        },
+        }),
         isAuthenticated: true,
         isLoading: false,
         login: jest.fn(),
@@ -137,15 +152,14 @@ describe('usePermissions', () => {
   describe('with manager user', () => {
     beforeEach(() => {
       mockUseAuth.mockReturnValue({
-        user: {
+        user: createMockUser({
           id: 3,
           email: 'manager@werco.com',
           first_name: 'Manager',
           last_name: 'User',
           role: 'manager',
-          is_active: true,
           is_superuser: false,
-        },
+        }),
         isAuthenticated: true,
         isLoading: false,
         login: jest.fn(),
@@ -214,15 +228,14 @@ describe('usePermissions', () => {
   describe('with quality user', () => {
     beforeEach(() => {
       mockUseAuth.mockReturnValue({
-        user: {
+        user: createMockUser({
           id: 4,
           email: 'quality@werco.com',
           first_name: 'Quality',
           last_name: 'User',
           role: 'quality',
-          is_active: true,
           is_superuser: false,
-        },
+        }),
         isAuthenticated: true,
         isLoading: false,
         login: jest.fn(),
@@ -248,15 +261,14 @@ describe('usePermissions', () => {
   describe('with viewer user', () => {
     beforeEach(() => {
       mockUseAuth.mockReturnValue({
-        user: {
+        user: createMockUser({
           id: 5,
           email: 'viewer@werco.com',
           first_name: 'Viewer',
           last_name: 'User',
           role: 'viewer',
-          is_active: true,
           is_superuser: false,
-        },
+        }),
         isAuthenticated: true,
         isLoading: false,
         login: jest.fn(),

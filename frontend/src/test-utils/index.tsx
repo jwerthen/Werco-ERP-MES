@@ -13,12 +13,16 @@ import { TourProvider } from '../context/TourContext';
 // Mock user for authenticated tests
 export const mockUser = {
   id: 1,
+  version: 1,
+  employee_id: 'EMP001',
   email: 'test@werco.com',
   first_name: 'Test',
   last_name: 'User',
   role: 'admin' as const,
   is_active: true,
   is_superuser: true,
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
 };
 
 // Mock auth context value
