@@ -8,6 +8,7 @@ import {
   ExclamationTriangleIcon,
   WrenchScrewdriverIcon,
   CubeIcon,
+  PlusIcon,
 } from '@heroicons/react/24/outline';
 
 interface InventoryItem {
@@ -51,6 +52,7 @@ export default function MaterialsInventoryPage() {
   
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
 
   const [receiveForm, setReceiveForm] = useState({
@@ -59,6 +61,16 @@ export default function MaterialsInventoryPage() {
   });
   const [transferForm, setTransferForm] = useState({
     inventory_item_id: 0, quantity: 0, to_location_code: '', notes: ''
+  });
+  const [createForm, setCreateForm] = useState({
+    part_number: '',
+    name: '',
+    description: '',
+    part_type: 'raw_material' as 'raw_material' | 'purchased',
+    unit_of_measure: 'EA',
+    standard_cost: 0,
+    reorder_point: 0,
+    reorder_quantity: 0,
   });
 
   // Filter for raw materials and purchased parts only
@@ -121,6 +133,31 @@ export default function MaterialsInventoryPage() {
     }
   };
 
+  const handleCreateMaterial = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createPart({
+        ...createForm,
+        revision: 'A',
+        is_active: true,
+      });
+      setShowCreateModal(false);
+      setCreateForm({
+        part_number: '',
+        name: '',
+        description: '',
+        part_type: 'raw_material',
+        unit_of_measure: 'EA',
+        standard_cost: 0,
+        reorder_point: 0,
+        reorder_quantity: 0,
+      });
+      loadData();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to create material');
+    }
+  };
+
   const openTransfer = (item: InventoryItem) => {
     setSelectedItem(item);
     setTransferForm({ ...transferForm, inventory_item_id: item.id, quantity: item.quantity_available });
@@ -158,9 +195,14 @@ export default function MaterialsInventoryPage() {
           <h1 className="text-2xl font-bold text-gray-900">Materials & Hardware Inventory</h1>
           <p className="text-sm text-gray-500 mt-1">Raw materials, hardware, and purchased items</p>
         </div>
-        <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
-          <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Materials
-        </button>
+        <div className="flex gap-3">
+          <button onClick={() => setShowCreateModal(true)} className="btn-secondary flex items-center">
+            <PlusIcon className="h-5 w-5 mr-2" /> New Material
+          </button>
+          <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
+            <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Materials
+          </button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -431,6 +473,121 @@ export default function MaterialsInventoryPage() {
               <div className="flex justify-end gap-3">
                 <button type="button" onClick={() => setShowTransferModal(false)} className="btn-secondary">Cancel</button>
                 <button type="submit" className="btn-primary">Transfer</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Create Material Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold">Create New Material</h3>
+              <button onClick={() => setShowCreateModal(false)}><XMarkIcon className="h-6 w-6" /></button>
+            </div>
+            <form onSubmit={handleCreateMaterial} className="space-y-4">
+              <div>
+                <label className="label">Material Type *</label>
+                <select 
+                  value={createForm.part_type} 
+                  onChange={(e) => setCreateForm({...createForm, part_type: e.target.value as 'raw_material' | 'purchased'})} 
+                  className="input" 
+                  required
+                >
+                  <option value="raw_material">Raw Material (steel, aluminum, etc.)</option>
+                  <option value="purchased">Hardware/Purchased (bolts, screws, etc.)</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Part Number *</label>
+                  <input 
+                    type="text" 
+                    value={createForm.part_number} 
+                    onChange={(e) => setCreateForm({...createForm, part_number: e.target.value.toUpperCase()})} 
+                    className="input" 
+                    placeholder="e.g., STEEL-1018-0.5"
+                    required 
+                  />
+                </div>
+                <div>
+                  <label className="label">Unit of Measure *</label>
+                  <select 
+                    value={createForm.unit_of_measure} 
+                    onChange={(e) => setCreateForm({...createForm, unit_of_measure: e.target.value})} 
+                    className="input" 
+                    required
+                  >
+                    <option value="EA">EA (Each)</option>
+                    <option value="FT">FT (Feet)</option>
+                    <option value="IN">IN (Inches)</option>
+                    <option value="LB">LB (Pounds)</option>
+                    <option value="KG">KG (Kilograms)</option>
+                    <option value="SHT">SHT (Sheet)</option>
+                    <option value="BOX">BOX (Box)</option>
+                    <option value="PK">PK (Pack)</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="label">Name *</label>
+                <input 
+                  type="text" 
+                  value={createForm.name} 
+                  onChange={(e) => setCreateForm({...createForm, name: e.target.value})} 
+                  className="input" 
+                  placeholder="e.g., 1018 Cold Rolled Steel 0.5in"
+                  required 
+                />
+              </div>
+              <div>
+                <label className="label">Description</label>
+                <textarea 
+                  value={createForm.description} 
+                  onChange={(e) => setCreateForm({...createForm, description: e.target.value})} 
+                  className="input" 
+                  rows={2}
+                  placeholder="Optional detailed description"
+                />
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="label">Standard Cost</label>
+                  <input 
+                    type="number" 
+                    value={createForm.standard_cost} 
+                    onChange={(e) => setCreateForm({...createForm, standard_cost: parseFloat(e.target.value) || 0})} 
+                    className="input" 
+                    min={0} 
+                    step={0.01} 
+                  />
+                </div>
+                <div>
+                  <label className="label">Reorder Point</label>
+                  <input 
+                    type="number" 
+                    value={createForm.reorder_point} 
+                    onChange={(e) => setCreateForm({...createForm, reorder_point: parseFloat(e.target.value) || 0})} 
+                    className="input" 
+                    min={0} 
+                  />
+                </div>
+                <div>
+                  <label className="label">Reorder Qty</label>
+                  <input 
+                    type="number" 
+                    value={createForm.reorder_quantity} 
+                    onChange={(e) => setCreateForm({...createForm, reorder_quantity: parseFloat(e.target.value) || 0})} 
+                    className="input" 
+                    min={0} 
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end gap-3 pt-4 border-t">
+                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">Cancel</button>
+                <button type="submit" className="btn-primary">Create Material</button>
               </div>
             </form>
           </div>
