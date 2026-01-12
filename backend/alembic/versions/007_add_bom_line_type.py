@@ -63,17 +63,6 @@ def upgrade():
     if not column_exists(conn, 'bom_items', 'installation_notes'):
         op.add_column('bom_items', 
             sa.Column('installation_notes', sa.Text(), nullable=True))
-    
-    # Auto-set line_type based on part_type for existing items
-    # Hardware/consumables from purchased/raw_material parts get appropriate line_type
-    op.execute("""
-        UPDATE bom_items bi
-        SET line_type = 'hardware'
-        FROM parts p
-        WHERE bi.component_part_id = p.id
-        AND p.part_type = 'purchased'
-        AND bi.line_type = 'component'
-    """)
 
 
 def downgrade():
