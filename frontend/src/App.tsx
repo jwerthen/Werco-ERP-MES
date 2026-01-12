@@ -1,55 +1,63 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TourProvider } from './context/TourContext';
 import { TourHighlight } from './components/Tour';
 import Layout from './components/Layout';
+import { SkeletonDashboard, LoadingOverlay } from './components/ui/Skeleton';
+
+// Eagerly loaded - critical path
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Unauthorized from './pages/Unauthorized';
-import WorkOrders from './pages/WorkOrders';
-import WorkOrderNew from './pages/WorkOrderNew';
-import WorkOrderDetail from './pages/WorkOrderDetail';
-import ShopFloor from './pages/ShopFloor';
-import WorkCenters from './pages/WorkCenters';
-import Parts from './pages/Parts';
-import BOM from './pages/BOM';
-import Routing from './pages/Routing';
-import Inventory from './pages/Inventory';
-import MRP from './pages/MRP';
-import Quality from './pages/Quality';
-import CustomFields from './pages/CustomFields';
-import Purchasing from './pages/Purchasing';
-import Scheduling from './pages/Scheduling';
-import Documents from './pages/Documents';
-import Reports from './pages/Reports';
-import Shipping from './pages/Shipping';
-import Quotes from './pages/Quotes';
-import Users from './pages/Users';
-import Customers from './pages/Customers';
-import Scanner from './pages/Scanner';
-import Calibration from './pages/Calibration';
-import PrintTraveler from './pages/PrintTraveler';
-import ScannerMappings from './pages/ScannerMappings';
-import Traceability from './pages/Traceability';
-import PrintPackingSlip from './pages/PrintPackingSlip';
-import AuditLog from './pages/AuditLog';
-import QuoteCalculator from './pages/QuoteCalculator';
-import AdminSettings from './pages/AdminSettings';
-import Receiving from './pages/Receiving';
-import POUpload from './pages/POUpload';
-import Analytics from './pages/Analytics';
-import ShopFloorSimple from './pages/ShopFloorSimple';
+
+// Lazy loaded pages - code splitting for better performance
+const WorkOrders = lazy(() => import('./pages/WorkOrders'));
+const WorkOrderNew = lazy(() => import('./pages/WorkOrderNew'));
+const WorkOrderDetail = lazy(() => import('./pages/WorkOrderDetail'));
+const ShopFloor = lazy(() => import('./pages/ShopFloor'));
+const ShopFloorSimple = lazy(() => import('./pages/ShopFloorSimple'));
+const WorkCenters = lazy(() => import('./pages/WorkCenters'));
+const Parts = lazy(() => import('./pages/Parts'));
+const BOM = lazy(() => import('./pages/BOM'));
+const Routing = lazy(() => import('./pages/Routing'));
+const Inventory = lazy(() => import('./pages/Inventory'));
+const MRP = lazy(() => import('./pages/MRP'));
+const Quality = lazy(() => import('./pages/Quality'));
+const CustomFields = lazy(() => import('./pages/CustomFields'));
+const Purchasing = lazy(() => import('./pages/Purchasing'));
+const Scheduling = lazy(() => import('./pages/Scheduling'));
+const Documents = lazy(() => import('./pages/Documents'));
+const Reports = lazy(() => import('./pages/Reports'));
+const Shipping = lazy(() => import('./pages/Shipping'));
+const Quotes = lazy(() => import('./pages/Quotes'));
+const Users = lazy(() => import('./pages/Users'));
+const Customers = lazy(() => import('./pages/Customers'));
+const Scanner = lazy(() => import('./pages/Scanner'));
+const ScannerMappings = lazy(() => import('./pages/ScannerMappings'));
+const Calibration = lazy(() => import('./pages/Calibration'));
+const PrintTraveler = lazy(() => import('./pages/PrintTraveler'));
+const Traceability = lazy(() => import('./pages/Traceability'));
+const PrintPackingSlip = lazy(() => import('./pages/PrintPackingSlip'));
+const AuditLog = lazy(() => import('./pages/AuditLog'));
+const QuoteCalculator = lazy(() => import('./pages/QuoteCalculator'));
+const AdminSettings = lazy(() => import('./pages/AdminSettings'));
+const Receiving = lazy(() => import('./pages/Receiving'));
+const POUpload = lazy(() => import('./pages/POUpload'));
+const Analytics = lazy(() => import('./pages/Analytics'));
+
+// Loading fallback for lazy-loaded pages
+const PageLoader = () => (
+  <div className="p-6">
+    <SkeletonDashboard />
+  </div>
+);
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
   
   if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
+    return <LoadingOverlay message="Authenticating..." />;
   }
   
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" />;
@@ -59,18 +67,13 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   const { user, isAuthenticated, isLoading } = useAuth();
   
   if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
+    return <LoadingOverlay message="Authenticating..." />;
   }
   
   if (!isAuthenticated) {
     return <Navigate to="/login" />;
   }
   
-  // Allow admin role or superuser
   if (user?.role !== 'admin' && !user?.is_superuser) {
     return <Navigate to="/unauthorized" />;
   }
@@ -78,11 +81,22 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// Wrapper for lazy-loaded routes with Suspense
+function LazyRoute({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense fallback={<PageLoader />}>
+      {children}
+    </Suspense>
+  );
+}
+
 function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/unauthorized" element={<Unauthorized />} />
+      
+      {/* Dashboard - eagerly loaded */}
       <Route path="/" element={
         <PrivateRoute>
           <Layout>
@@ -90,230 +104,270 @@ function AppRoutes() {
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Work Orders */}
       <Route path="/work-orders" element={
         <PrivateRoute>
           <Layout>
-            <WorkOrders />
+            <LazyRoute><WorkOrders /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/work-orders/new" element={
         <PrivateRoute>
           <Layout>
-            <WorkOrderNew />
+            <LazyRoute><WorkOrderNew /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/work-orders/:id" element={
         <PrivateRoute>
           <Layout>
-            <WorkOrderDetail />
+            <LazyRoute><WorkOrderDetail /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Shop Floor */}
       <Route path="/shop-floor" element={
         <PrivateRoute>
           <Layout>
-            <ShopFloor />
+            <LazyRoute><ShopFloor /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/shop-floor/operations" element={
         <PrivateRoute>
           <Layout>
-            <ShopFloorSimple />
+            <LazyRoute><ShopFloorSimple /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Work Centers */}
       <Route path="/work-centers" element={
         <PrivateRoute>
           <Layout>
-            <WorkCenters />
+            <LazyRoute><WorkCenters /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Parts & BOM */}
       <Route path="/parts" element={
         <PrivateRoute>
           <Layout>
-            <Parts />
+            <LazyRoute><Parts /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/bom" element={
         <PrivateRoute>
           <Layout>
-            <BOM />
+            <LazyRoute><BOM /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/routing" element={
         <PrivateRoute>
           <Layout>
-            <Routing />
+            <LazyRoute><Routing /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Inventory & MRP */}
       <Route path="/inventory" element={
         <PrivateRoute>
           <Layout>
-            <Inventory />
+            <LazyRoute><Inventory /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/mrp" element={
         <PrivateRoute>
           <Layout>
-            <MRP />
+            <LazyRoute><MRP /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Quality */}
       <Route path="/quality" element={
         <PrivateRoute>
           <Layout>
-            <Quality />
+            <LazyRoute><Quality /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Custom Fields */}
       <Route path="/custom-fields" element={
         <PrivateRoute>
           <Layout>
-            <CustomFields />
+            <LazyRoute><CustomFields /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Purchasing & Receiving */}
       <Route path="/purchasing" element={
         <PrivateRoute>
           <Layout>
-            <Purchasing />
+            <LazyRoute><Purchasing /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/receiving" element={
         <PrivateRoute>
           <Layout>
-            <Receiving />
+            <LazyRoute><Receiving /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/po-upload" element={
         <PrivateRoute>
           <Layout>
-            <POUpload />
+            <LazyRoute><POUpload /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Scheduling */}
       <Route path="/scheduling" element={
         <PrivateRoute>
           <Layout>
-            <Scheduling />
+            <LazyRoute><Scheduling /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Documents & Reports */}
       <Route path="/documents" element={
         <PrivateRoute>
           <Layout>
-            <Documents />
+            <LazyRoute><Documents /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/reports" element={
         <PrivateRoute>
           <Layout>
-            <Reports />
+            <LazyRoute><Reports /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Shipping */}
       <Route path="/shipping" element={
         <PrivateRoute>
           <Layout>
-            <Shipping />
+            <LazyRoute><Shipping /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Quotes */}
       <Route path="/quotes" element={
         <PrivateRoute>
           <Layout>
-            <Quotes />
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/users" element={
-        <PrivateRoute>
-          <Layout>
-            <Users />
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/customers" element={
-        <PrivateRoute>
-          <Layout>
-            <Customers />
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/scanner" element={
-        <PrivateRoute>
-          <Layout>
-            <Scanner />
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/scanner/mappings" element={
-        <PrivateRoute>
-          <Layout>
-            <ScannerMappings />
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/calibration" element={
-        <PrivateRoute>
-          <Layout>
-            <Calibration />
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/print/traveler/:id" element={
-        <PrivateRoute>
-          <PrintTraveler />
-        </PrivateRoute>
-      } />
-      <Route path="/traceability" element={
-        <PrivateRoute>
-          <Layout>
-            <Traceability />
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/print/packing-slip/:id" element={
-        <PrivateRoute>
-          <PrintPackingSlip />
-        </PrivateRoute>
-      } />
-      <Route path="/audit-log" element={
-        <PrivateRoute>
-          <Layout>
-            <AuditLog />
+            <LazyRoute><Quotes /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
       <Route path="/quote-calculator" element={
         <PrivateRoute>
           <Layout>
-            <QuoteCalculator />
+            <LazyRoute><QuoteCalculator /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
+      
+      {/* Users & Customers */}
+      <Route path="/users" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Users /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/customers" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Customers /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      
+      {/* Scanner */}
+      <Route path="/scanner" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Scanner /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/scanner/mappings" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><ScannerMappings /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      
+      {/* Calibration */}
+      <Route path="/calibration" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Calibration /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      
+      {/* Print Pages (no Layout) */}
+      <Route path="/print/traveler/:id" element={
+        <PrivateRoute>
+          <LazyRoute><PrintTraveler /></LazyRoute>
+        </PrivateRoute>
+      } />
+      <Route path="/print/packing-slip/:id" element={
+        <PrivateRoute>
+          <LazyRoute><PrintPackingSlip /></LazyRoute>
+        </PrivateRoute>
+      } />
+      
+      {/* Traceability */}
+      <Route path="/traceability" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Traceability /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      
+      {/* Audit Log */}
+      <Route path="/audit-log" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><AuditLog /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      
+      {/* Admin Settings */}
       <Route path="/admin/settings" element={
         <AdminRoute>
           <Layout>
-            <AdminSettings />
+            <LazyRoute><AdminSettings /></LazyRoute>
           </Layout>
         </AdminRoute>
       } />
+      
+      {/* Analytics */}
       <Route path="/analytics" element={
         <PrivateRoute>
           <Layout>
-            <Analytics />
+            <LazyRoute><Analytics /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
