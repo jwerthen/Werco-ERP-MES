@@ -286,8 +286,8 @@ class ApiService {
   }
 
   // Parts
-  async getParts(params?: { search?: string; part_type?: string; active_only?: boolean }) {
-    const response = await this.api.get('/parts/', { params });
+  async getParts(params?: { search?: string; part_type?: string; active_only?: boolean; limit?: number }) {
+    const response = await this.api.get('/parts/', { params: { limit: 500, ...params } });
     return response.data;
   }
 
