@@ -19,7 +19,7 @@ from sqlalchemy.engine.reflection import Inspector
 
 # revision identifiers, used by Alembic.
 revision = '006'
-down_revision = '005'
+down_revision = '005_add_component_tracking'
 branch_labels = None
 depends_on = None
 
