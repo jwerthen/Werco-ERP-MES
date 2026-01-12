@@ -3,6 +3,7 @@ import api from '../services/api';
 import { Part, PartType } from '../types';
 import { useNavigate } from 'react-router-dom';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, TrashIcon, WrenchScrewdriverIcon } from '@heroicons/react/24/outline';
+import { SkeletonTable } from '../components/ui/Skeleton';
 
 const typeColors: Record<PartType, string> = {
   manufactured: 'bg-blue-100 text-blue-800',
@@ -283,6 +284,9 @@ export default function Parts() {
 
       {/* Parts Table */}
       <div className="card overflow-hidden">
+        {loading ? (
+          <SkeletonTable rows={8} columns={10} />
+        ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
@@ -461,8 +465,9 @@ export default function Parts() {
             </tbody>
           </table>
         </div>
+        )}
         
-        {filteredParts.length === 0 && (
+        {!loading && filteredParts.length === 0 && (
           <div className="text-center py-8 text-gray-500">
             No parts found
           </div>

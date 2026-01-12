@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
+import { SkeletonTable } from '../components/ui/Skeleton';
 
 interface Customer {
   id: number;
@@ -198,8 +199,14 @@ export default function Customers() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <div className="h-8 w-32 bg-gray-200 rounded animate-pulse" />
+          <div className="h-10 w-36 bg-gray-200 rounded animate-pulse" />
+        </div>
+        <div className="card overflow-hidden">
+          <SkeletonTable rows={8} columns={6} />
+        </div>
       </div>
     );
   }

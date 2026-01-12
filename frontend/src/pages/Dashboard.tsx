@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
+import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { DashboardData, WorkCenterStatus } from '../types';
 import {
   ClipboardDocumentListIcon,
@@ -166,14 +167,7 @@ export default function Dashboard() {
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center">
-          <div className="spinner h-12 w-12 mx-auto mb-4"></div>
-          <p className="text-surface-500">Loading dashboard...</p>
-        </div>
-      </div>
-    );
+    return <SkeletonDashboard />;
   }
 
   if (error) {

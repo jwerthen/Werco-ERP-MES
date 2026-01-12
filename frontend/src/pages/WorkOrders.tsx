@@ -13,6 +13,7 @@ import {
   ExclamationTriangleIcon,
   TrashIcon,
 } from '@heroicons/react/24/outline';
+import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 
 const statusConfig: Record<WorkOrderStatus, { bg: string; text: string; dot: string }> = {
   draft: { bg: 'bg-surface-100', text: 'text-surface-700', dot: 'bg-surface-400' },
@@ -146,10 +147,26 @@ export default function WorkOrders() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center">
-          <div className="spinner h-12 w-12 mx-auto mb-4"></div>
-          <p className="text-surface-500">Loading work orders...</p>
+      <div className="space-y-6">
+        {/* Header skeleton */}
+        <div className="flex items-center justify-between">
+          <div className="space-y-2">
+            <div className="h-8 w-48 bg-gray-200 rounded animate-pulse" />
+            <div className="h-4 w-72 bg-gray-200 rounded animate-pulse" />
+          </div>
+          <div className="h-10 w-40 bg-gray-200 rounded animate-pulse" />
+        </div>
+        
+        {/* Stats skeleton */}
+        <div className="grid grid-cols-3 gap-4">
+          {[1, 2, 3].map((i) => (
+            <SkeletonCard key={i} className="h-24" />
+          ))}
+        </div>
+        
+        {/* Table skeleton */}
+        <div className="card overflow-hidden">
+          <SkeletonTable rows={8} columns={8} />
         </div>
       </div>
     );
