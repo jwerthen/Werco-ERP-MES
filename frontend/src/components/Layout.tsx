@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { TourMenu } from './Tour';
 import SessionWarningModal from './SessionWarningModal';
+import GlobalSearch, { useGlobalSearch } from './GlobalSearch';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
@@ -240,7 +241,7 @@ export default function Layout({ children }: LayoutProps) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
+  const globalSearch = useGlobalSearch();
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
@@ -373,12 +374,16 @@ export default function Layout({ children }: LayoutProps) {
             <div className="flex items-center gap-2" data-tour="user-menu">
               {/* Quick search button */}
               <button
-                onClick={() => setSearchOpen(true)}
-                className="p-2 rounded-xl text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-all duration-200"
+                onClick={globalSearch.open}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-all duration-200 border border-slate-200"
                 title="Search (Ctrl+K)"
                 data-tour="search"
               >
-                <MagnifyingGlassIcon className="h-5 w-5" />
+                <MagnifyingGlassIcon className="h-4 w-4" />
+                <span className="hidden md:inline text-sm">Search...</span>
+                <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 text-xs font-medium text-slate-400 bg-slate-100 rounded">
+                  ⌘K
+                </kbd>
               </button>
 
               {/* Help & Tours menu */}
@@ -416,37 +421,8 @@ export default function Layout({ children }: LayoutProps) {
         </footer>
       </div>
 
-      {/* Search modal - Modern glassmorphism style */}
-      {searchOpen && (
-        <div 
-          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-start justify-center pt-20 px-4"
-          onClick={() => setSearchOpen(false)}
-        >
-          <div 
-            className="bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden animate-slide-down border border-white/50"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3 p-4 border-b border-slate-100">
-              <MagnifyingGlassIcon className="h-5 w-5 text-cyan-500" />
-              <input
-                type="text"
-                placeholder="Search parts, work orders, customers..."
-                className="flex-1 text-base outline-none placeholder:text-slate-400 bg-transparent"
-                autoFocus
-              />
-              <kbd className="hidden sm:inline-flex items-center px-2 py-1 text-xs font-medium text-slate-500 bg-slate-100 rounded-lg">
-                ESC
-              </kbd>
-            </div>
-            <div className="p-6 text-sm text-slate-500 text-center">
-              <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center">
-                <MagnifyingGlassIcon className="h-6 w-6 text-slate-400" />
-              </div>
-              Start typing to search...
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Global Search Modal */}
+      <GlobalSearch isOpen={globalSearch.isOpen} onClose={globalSearch.close} />
     </div>
   );
 }
