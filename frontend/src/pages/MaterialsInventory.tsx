@@ -53,6 +53,7 @@ export default function MaterialsInventoryPage() {
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showLocationModal, setShowLocationModal] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
 
   const [receiveForm, setReceiveForm] = useState({
@@ -69,6 +70,15 @@ export default function MaterialsInventoryPage() {
     part_type: 'raw_material' as 'raw_material' | 'purchased',
     unit_of_measure: 'each',
     standard_cost: 0,
+  });
+  const [locationForm, setLocationForm] = useState({
+    code: '',
+    name: '',
+    warehouse: 'MAIN',
+    zone: '',
+    aisle: '',
+    rack: '',
+    shelf: '',
   });
 
   // Filter for raw materials and purchased parts only
@@ -159,6 +169,40 @@ export default function MaterialsInventoryPage() {
         alert(errorMsg.map((e: any) => e.msg || e).join('\n'));
       } else {
         alert(errorMsg || 'Failed to create material');
+      }
+    }
+  };
+
+  const handleCreateLocation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.createInventoryLocation({
+        code: locationForm.code,
+        name: locationForm.name || locationForm.code,
+        warehouse: locationForm.warehouse,
+        zone: locationForm.zone || undefined,
+        aisle: locationForm.aisle || undefined,
+        rack: locationForm.rack || undefined,
+        shelf: locationForm.shelf || undefined,
+        is_active: true,
+      });
+      setShowLocationModal(false);
+      setLocationForm({
+        code: '',
+        name: '',
+        warehouse: 'MAIN',
+        zone: '',
+        aisle: '',
+        rack: '',
+        shelf: '',
+      });
+      loadData();
+    } catch (err: any) {
+      const errorMsg = err.response?.data?.detail;
+      if (Array.isArray(errorMsg)) {
+        alert(errorMsg.map((e: any) => e.msg || e).join('\n'));
+      } else {
+        alert(errorMsg || 'Failed to create location');
       }
     }
   };
@@ -482,6 +526,13 @@ export default function MaterialsInventoryPage() {
                     <option value="">Select location...</option>
                     {locations.map(l => <option key={l.id} value={l.code}>{l.code} - {l.name || l.warehouse}</option>)}
                   </select>
+                  <button
+                    type="button"
+                    onClick={() => { setShowReceiveModal(false); setShowLocationModal(true); }}
+                    className="mt-1 text-sm text-cyan-600 hover:text-cyan-700"
+                  >
+                    + Create new location
+                  </button>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
@@ -637,6 +688,102 @@ export default function MaterialsInventoryPage() {
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">Cancel</button>
                 <button type="submit" className="btn-primary">Create Material</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Create Location Modal */}
+      {showLocationModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold">Create New Location</h3>
+              <button onClick={() => setShowLocationModal(false)}><XMarkIcon className="h-6 w-6" /></button>
+            </div>
+            <form onSubmit={handleCreateLocation} className="space-y-4">
+              <div>
+                <label className="label">Location Code *</label>
+                <input 
+                  type="text" 
+                  value={locationForm.code} 
+                  onChange={(e) => setLocationForm({...locationForm, code: e.target.value.toUpperCase()})} 
+                  className="input" 
+                  placeholder="e.g., A-01-01 or RAW-STEEL"
+                  required 
+                />
+              </div>
+              <div>
+                <label className="label">Location Name</label>
+                <input 
+                  type="text" 
+                  value={locationForm.name} 
+                  onChange={(e) => setLocationForm({...locationForm, name: e.target.value})} 
+                  className="input" 
+                  placeholder="e.g., Raw Material Rack 1"
+                />
+              </div>
+              <div>
+                <label className="label">Warehouse</label>
+                <select 
+                  value={locationForm.warehouse} 
+                  onChange={(e) => setLocationForm({...locationForm, warehouse: e.target.value})} 
+                  className="input"
+                >
+                  <option value="MAIN">Main Warehouse</option>
+                  <option value="RAW">Raw Materials</option>
+                  <option value="FG">Finished Goods</option>
+                  <option value="WIP">Work In Progress</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Zone</label>
+                  <input 
+                    type="text" 
+                    value={locationForm.zone} 
+                    onChange={(e) => setLocationForm({...locationForm, zone: e.target.value})} 
+                    className="input" 
+                    placeholder="A, B, C..."
+                  />
+                </div>
+                <div>
+                  <label className="label">Aisle</label>
+                  <input 
+                    type="text" 
+                    value={locationForm.aisle} 
+                    onChange={(e) => setLocationForm({...locationForm, aisle: e.target.value})} 
+                    className="input" 
+                    placeholder="01, 02..."
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Rack</label>
+                  <input 
+                    type="text" 
+                    value={locationForm.rack} 
+                    onChange={(e) => setLocationForm({...locationForm, rack: e.target.value})} 
+                    className="input" 
+                    placeholder="R1, R2..."
+                  />
+                </div>
+                <div>
+                  <label className="label">Shelf</label>
+                  <input 
+                    type="text" 
+                    value={locationForm.shelf} 
+                    onChange={(e) => setLocationForm({...locationForm, shelf: e.target.value})} 
+                    className="input" 
+                    placeholder="1, 2, 3..."
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end gap-3 pt-4 border-t">
+                <button type="button" onClick={() => setShowLocationModal(false)} className="btn-secondary">Cancel</button>
+                <button type="submit" className="btn-primary">Create Location</button>
               </div>
             </form>
           </div>
