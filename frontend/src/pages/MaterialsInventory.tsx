@@ -511,9 +511,13 @@ export default function MaterialsInventoryPage() {
                   <input 
                     type="text" 
                     value={createForm.part_number} 
-                    onChange={(e) => setCreateForm({...createForm, part_number: e.target.value.toUpperCase()})} 
+                    onChange={(e) => {
+                      // Only allow uppercase letters, numbers, and hyphens
+                      const cleaned = e.target.value.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
+                      setCreateForm({...createForm, part_number: cleaned});
+                    }} 
                     className="input" 
-                    placeholder="e.g., STEEL-1018-0.5"
+                    placeholder="e.g., STEEL-1018-05"
                     required 
                   />
                 </div>
