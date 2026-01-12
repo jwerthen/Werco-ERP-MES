@@ -35,13 +35,33 @@ def log_auth_event(db: Session, action: str, user: User = None, email: str = Non
     db.commit()
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=Token, summary="User login")
 def login(
     request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
-    """Authenticate user and return JWT token"""
+    """
+    Authenticate a user and receive JWT access and refresh tokens.
+    
+    **Rate limited**: 5 attempts per minute
+    
+    **Account lockout**: After 5 failed attempts, account is locked for 30 minutes (CMMC compliance).
+    
+    **Request body** (form data):
+    - username: User's email address
+    - password: User's password
+    
+    **Returns**:
+    - access_token: JWT token for API authorization (valid for 30 minutes)
+    - refresh_token: Token to obtain new access tokens (valid for 7 days)
+    - token_type: Always "bearer"
+    - expires_in: Token expiration time in seconds
+    
+    **Raises**:
+    - 401: Invalid credentials
+    - 403: Account locked or inactive
+    """
     user = db.query(User).filter(User.email == form_data.username).first()
     
     if not user:

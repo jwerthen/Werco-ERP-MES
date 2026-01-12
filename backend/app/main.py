@@ -152,14 +152,90 @@ async def lifespan(app: FastAPI):
     logger.info(f"Shutting down {settings.APP_NAME}...")
 
 
+# OpenAPI Tags metadata for documentation grouping
+tags_metadata = [
+    {"name": "Authentication", "description": "User authentication, login, logout, and token management"},
+    {"name": "Users", "description": "User management and profile operations"},
+    {"name": "Parts", "description": "Part master data management - components, assemblies, and raw materials"},
+    {"name": "Bill of Materials", "description": "BOM structure and component relationships"},
+    {"name": "Routing", "description": "Manufacturing routing and operation sequences"},
+    {"name": "Work Orders", "description": "Production work order management and tracking"},
+    {"name": "Work Centers", "description": "Work center configuration and capacity management"},
+    {"name": "Shop Floor", "description": "Real-time shop floor control and operation tracking"},
+    {"name": "Inventory", "description": "Inventory management, stock levels, and transactions"},
+    {"name": "Material Requirements Planning", "description": "MRP calculations and material planning"},
+    {"name": "Quality Management", "description": "Quality control, inspections, and NCRs"},
+    {"name": "Purchasing", "description": "Purchase orders and vendor management"},
+    {"name": "Receiving & Inspection", "description": "Material receiving and incoming inspection"},
+    {"name": "Shipping", "description": "Shipping and delivery management"},
+    {"name": "Scheduling", "description": "Production scheduling and capacity planning"},
+    {"name": "Quotes", "description": "Customer quote management"},
+    {"name": "Quote Calculator", "description": "Quote cost estimation and calculation"},
+    {"name": "Customers", "description": "Customer master data management"},
+    {"name": "Calibration", "description": "Equipment calibration tracking and management"},
+    {"name": "Documents", "description": "Document management and attachments"},
+    {"name": "Reports", "description": "Report generation and export"},
+    {"name": "Analytics & BI", "description": "Business intelligence and analytics dashboards"},
+    {"name": "Traceability", "description": "Lot and serial number traceability"},
+    {"name": "Audit", "description": "Audit trail and change history"},
+    {"name": "Scanner", "description": "Barcode and QR code scanning operations"},
+    {"name": "Global Search", "description": "Cross-entity search functionality"},
+    {"name": "Custom Fields", "description": "User-defined custom field management"},
+    {"name": "Admin Settings", "description": "System administration and configuration"},
+    {"name": "DXF Parser", "description": "DXF file parsing for part dimensions"},
+    {"name": "PO Upload", "description": "Purchase order file upload and parsing"},
+    {"name": "Error Logging", "description": "Client-side error logging"},
+]
+
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Werco Manufacturing ERP & MES System - AS9100D & ISO9001 Compliant",
+    description="""
+## Werco Manufacturing ERP & MES System
+
+A comprehensive manufacturing execution system designed for **AS9100D** and **ISO9001** compliance.
+
+### Key Features
+
+* **Work Order Management** - Create, track, and manage production work orders
+* **Shop Floor Control** - Real-time operation tracking with barcode scanning
+* **Quality Management** - Inspection tracking, NCRs, and quality metrics
+* **Inventory Control** - Stock management with lot/serial traceability
+* **Material Requirements Planning** - MRP calculations and scheduling
+* **Document Management** - Attach and manage production documents
+* **Audit Trail** - Complete change history for compliance
+
+### Authentication
+
+All API endpoints (except `/health` and `/auth/login`) require JWT authentication.
+Include the token in the `Authorization` header:
+
+```
+Authorization: Bearer <your_token>
+```
+
+### Rate Limiting
+
+- Default: 100 requests per 60 seconds
+- Auth endpoints: 5 login attempts per minute
+- Register: 3 attempts per minute
+
+### Support
+
+For API support, contact the system administrator.
+    """,
     version="1.0.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json"
+    openapi_url="/api/openapi.json",
+    openapi_tags=tags_metadata,
+    contact={
+        "name": "Werco ERP Support",
+        "email": "support@werco.com",
+    },
+    license_info={
+        "name": "Proprietary",
+    },
 )
 
 # Logging middleware with correlation IDs (added first, executed last)

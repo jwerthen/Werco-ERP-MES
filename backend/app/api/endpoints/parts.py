@@ -12,17 +12,27 @@ from app.services.audit_service import AuditService
 router = APIRouter()
 
 
-@router.get("/", response_model=List[PartResponse])
+@router.get("/", response_model=List[PartResponse], summary="List all parts")
 def list_parts(
-    skip: int = 0,
-    limit: int = 100,
-    search: Optional[str] = None,
-    part_type: Optional[PartType] = None,
-    active_only: bool = True,
+    skip: int = Query(0, ge=0, description="Number of records to skip for pagination"),
+    limit: int = Query(100, ge=1, le=500, description="Maximum number of records to return"),
+    search: Optional[str] = Query(None, description="Search in part number, name, description, or customer part number"),
+    part_type: Optional[PartType] = Query(None, description="Filter by part type (manufactured, purchased, assembly, raw_material)"),
+    active_only: bool = Query(True, description="Only return active parts"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List parts with optional filtering"""
+    """
+    Retrieve a list of parts with optional filtering and pagination.
+    
+    - **skip**: Number of records to skip (for pagination)
+    - **limit**: Maximum number of records to return (max 500)
+    - **search**: Text search across part number, name, description, and customer part number
+    - **part_type**: Filter by type (manufactured, purchased, assembly, raw_material)
+    - **active_only**: When true, only returns active parts (default: true)
+    
+    Returns parts ordered by part number.
+    """
     query = db.query(Part)
     
     if active_only:
@@ -45,14 +55,25 @@ def list_parts(
     return query.order_by(Part.part_number).offset(skip).limit(limit).all()
 
 
-@router.post("/", response_model=PartResponse)
+@router.post("/", response_model=PartResponse, status_code=status.HTTP_201_CREATED, summary="Create a new part")
 def create_part(
     part_in: PartCreate,
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
-    """Create a new part"""
+    """
+    Create a new part in the system.
+    
+    **Required roles**: Admin, Manager, or Supervisor
+    
+    The part number must be unique and will be automatically converted to uppercase.
+    
+    **Returns**: The created part with system-generated ID and timestamps.
+    
+    **Raises**:
+    - 400: Part number already exists
+    """
     if db.query(Part).filter(Part.part_number == part_in.part_number).first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
