@@ -75,7 +75,8 @@ const navigation: NavItem[] = [
     name: 'Inventory & Purchasing', 
     icon: ArchiveBoxIcon,
     children: [
-      { name: 'Inventory', href: '/inventory', icon: ArchiveBoxIcon },
+      { name: 'Parts Inventory', href: '/inventory/parts', icon: CubeIcon },
+      { name: 'Materials & Hardware', href: '/inventory/materials', icon: ArchiveBoxIcon },
       { name: 'Purchasing', href: '/purchasing', icon: TruckIcon },
       { name: 'Upload PO', href: '/po-upload', icon: DocumentDuplicateIcon },
       { name: 'Receiving', href: '/receiving', icon: TruckIcon },
