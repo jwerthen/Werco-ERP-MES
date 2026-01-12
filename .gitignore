@@ -43,6 +43,10 @@ playwright-report/
 test-results/
 blob-report/
 
+# Load testing results
+load-tests/results/
+*.json.gz
+
 # Build outputs
 *.js.map
 build/
