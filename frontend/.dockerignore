@@ -3,3 +3,14 @@ build
 .git
 .gitignore
 npm-debug.log
+
+# Test files - exclude from production build
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+src/test-utils
+src/setupTests.ts
+jest.config.js
+coverage
+e2e
