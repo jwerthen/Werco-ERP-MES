@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useTour } from '../../context/TourContext';
 import { getAllTours, getTour } from '../../data/tours';
 import { 
@@ -12,13 +13,25 @@ import {
 export default function TourMenu() {
   const [isOpen, setIsOpen] = useState(false);
   const { startTour, isTourComplete, resetAllTours, isActive } = useTour();
+  const navigate = useNavigate();
+  const location = useLocation();
   const tours = getAllTours();
 
   const handleStartTour = (tourId: string) => {
     const tour = getTour(tourId);
     if (tour) {
-      startTour(tour);
       setIsOpen(false);
+      
+      // Navigate to the tour's start path if different from current location
+      if (tour.startPath && location.pathname !== tour.startPath) {
+        navigate(tour.startPath);
+        // Delay tour start to allow page to render
+        setTimeout(() => {
+          startTour(tour);
+        }, 500);
+      } else {
+        startTour(tour);
+      }
     }
   };
 

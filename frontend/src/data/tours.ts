@@ -5,6 +5,7 @@ export const tours: Record<string, Tour> = {
     id: 'getting-started',
     name: 'Getting Started',
     description: 'Learn the basics of navigating the Werco MES system',
+    startPath: '/',  // Dashboard
     steps: [
       {
         target: '[data-tour="sidebar"]',
@@ -36,6 +37,7 @@ export const tours: Record<string, Tour> = {
     id: 'work-orders',
     name: 'Work Orders',
     description: 'Learn how to create and manage work orders',
+    startPath: '/work-orders',
     steps: [
       {
         target: '[data-tour="wo-list"]',
@@ -61,6 +63,7 @@ export const tours: Record<string, Tour> = {
     id: 'shop-floor',
     name: 'Shop Floor',
     description: 'Learn how operators use the shop floor module',
+    startPath: '/shop-floor',
     steps: [
       {
         target: '[data-tour="sf-clock"]',
@@ -86,6 +89,7 @@ export const tours: Record<string, Tour> = {
     id: 'engineering',
     name: 'Engineering',
     description: 'Manage parts, BOMs, and routings',
+    startPath: '/parts',
     steps: [
       {
         target: '[data-tour="eng-parts"]',
@@ -111,6 +115,7 @@ export const tours: Record<string, Tour> = {
     id: 'quality',
     name: 'Quality Management',
     description: 'NCRs, CARs, FAIs, and calibration',
+    startPath: '/quality',
     steps: [
       {
         target: '[data-tour="qa-ncr"]',
@@ -136,6 +141,7 @@ export const tours: Record<string, Tour> = {
     id: 'quote-calculator',
     name: 'Quote Calculator',
     description: 'Generate instant quotes for CNC and sheet metal work',
+    startPath: '/quote-calculator',
     steps: [
       {
         target: '[data-tour="quote-type"]',

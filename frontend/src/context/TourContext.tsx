@@ -11,6 +11,7 @@ export interface Tour {
   id: string;
   name: string;
   description: string;
+  startPath?: string;  // Path to navigate to before starting the tour
   steps: TourStep[];
 }
 
