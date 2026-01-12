@@ -6,6 +6,7 @@ import { TourHighlight } from './components/Tour';
 import Layout from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
+import Unauthorized from './pages/Unauthorized';
 import WorkOrders from './pages/WorkOrders';
 import WorkOrderNew from './pages/WorkOrderNew';
 import WorkOrderDetail from './pages/WorkOrderDetail';
@@ -69,8 +70,9 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/login" />;
   }
   
-  if (user?.role !== 'admin') {
-    return <Navigate to="/" />;
+  // Allow admin role or superuser
+  if (user?.role !== 'admin' && !user?.is_superuser) {
+    return <Navigate to="/unauthorized" />;
   }
   
   return <>{children}</>;
@@ -80,6 +82,7 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/unauthorized" element={<Unauthorized />} />
       <Route path="/" element={
         <PrivateRoute>
           <Layout>
