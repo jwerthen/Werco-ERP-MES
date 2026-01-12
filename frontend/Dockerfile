@@ -9,7 +9,8 @@ COPY package*.json ./
 # Install dependencies
 RUN npm ci --legacy-peer-deps
 
-# Copy source code
+# Copy source code (cache bust)
+ARG CACHEBUST=1
 COPY . .
 
 # Build argument for API URL (set during Railway build)
