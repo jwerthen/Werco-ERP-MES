@@ -15,7 +15,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code (bust cache with ARG)
+ARG CACHEBUST=1
 COPY . .
 
 # Expose port (Railway sets PORT env var)
