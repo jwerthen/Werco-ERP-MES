@@ -280,7 +280,24 @@ export default function Parts() {
           <option value="assembly">Assembly</option>
           <option value="raw_material">Raw Material</option>
         </select>
+        <label className="flex items-center gap-2 text-sm text-gray-600 whitespace-nowrap">
+          <input
+            type="checkbox"
+            checked={showComponentsOnly}
+            onChange={(e) => setShowComponentsOnly(e.target.checked)}
+            className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+          />
+          Show BOM components
+        </label>
       </div>
+      
+      {/* Filter status message */}
+      {!search && !showComponentsOnly && allComponentIds.size > 0 && (
+        <div className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded-lg">
+          {allComponentIds.size} component part{allComponentIds.size !== 1 ? 's' : ''} hidden (used in BOMs). 
+          Check "Show BOM components" to see all parts.
+        </div>
+      )}
 
       {/* Parts Table */}
       <div className="card overflow-hidden">
