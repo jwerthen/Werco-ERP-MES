@@ -1527,6 +1527,11 @@ class ApiService {
     return response.data;
   }
 
+  async getProductionTrends(params?: { period?: string; start_date?: string; end_date?: string; group_by?: string; granularity?: string }) {
+    const response = await this.api.get('/analytics/production-trends', { params });
+    return response.data;
+  }
+
   async getInventoryDemandPrediction() {
     const response = await this.api.get('/analytics/predict/inventory-demand');
     return response.data;
