@@ -37,11 +37,11 @@ interface InventorySummary {
   locations: Array<{ location: string; quantity: number; lot_number?: string }>;
 }
 
-type TabType = 'summary' | 'details';
+type TabType = 'catalog' | 'summary' | 'details';
 
 export default function MaterialsInventoryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<TabType>('summary');
+  const [activeTab, setActiveTab] = useState<TabType>('catalog');
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [summary, setSummary] = useState<InventorySummary[]>([]);
   const [lowStockItems, setLowStockItems] = useState<any[]>([]);
@@ -213,8 +213,8 @@ export default function MaterialsInventoryPage() {
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="card">
-          <div className="text-2xl font-bold text-cyan-600">{summary.length}</div>
-          <div className="text-sm text-gray-500">Unique Materials</div>
+          <div className="text-2xl font-bold text-cyan-600">{parts.length}</div>
+          <div className="text-sm text-gray-500">Total Materials</div>
         </div>
         <div className="card">
           <div className="text-2xl font-bold">{summary.reduce((a, b) => a + b.total_on_hand, 0).toFixed(0)}</div>
@@ -256,7 +256,8 @@ export default function MaterialsInventoryPage() {
       <div className="border-b border-gray-200">
         <nav className="-mb-px flex space-x-8">
           {[
-            { id: 'summary', label: 'Summary by Material' },
+            { id: 'catalog', label: 'Materials Catalog' },
+            { id: 'summary', label: 'Inventory Summary' },
             { id: 'details', label: 'Detail by Location' },
           ].map((tab) => (
             <button
@@ -276,6 +277,66 @@ export default function MaterialsInventoryPage() {
 
       {/* Tab Content */}
       <div className="card">
+        {activeTab === 'catalog' && (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part Number</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">UOM</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Std Cost</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {parts.map((part) => {
+                  const inventoryItem = summary.find(s => s.part_id === part.id);
+                  return (
+                    <tr key={part.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-3">
+                        <div className="font-medium font-mono">{part.part_number}</div>
+                        <div className="text-xs text-gray-400">Rev {part.revision}</div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="text-sm">{part.name}</div>
+                        {part.description && (
+                          <div className="text-xs text-gray-400 truncate max-w-xs">{part.description}</div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+                          part.part_type === 'raw_material' 
+                            ? 'bg-blue-100 text-blue-700' 
+                            : 'bg-purple-100 text-purple-700'
+                        }`}>
+                          {getPartTypeIcon(part.part_type)}
+                          {getPartTypeLabel(part.part_type)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-sm capitalize">{part.unit_of_measure}</td>
+                      <td className="px-4 py-3 text-right text-sm">${parseFloat(part.standard_cost || 0).toFixed(2)}</td>
+                      <td className="px-4 py-3 text-center">
+                        {inventoryItem ? (
+                          <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">
+                            {inventoryItem.available} in stock
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-500">
+                            No inventory
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {parts.length === 0 && <p className="text-center text-gray-500 py-8">No materials defined. Click "New Material" to create one.</p>}
+          </div>
+        )}
+
         {activeTab === 'summary' && (
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
