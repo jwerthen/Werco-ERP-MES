@@ -24,7 +24,8 @@ describe('usePermissions', () => {
         user: {
           id: 1,
           email: 'admin@werco.com',
-          full_name: 'Admin User',
+          first_name: 'Admin',
+          last_name: 'User',
           role: 'admin',
           is_active: true,
           is_superuser: true,
@@ -76,7 +77,8 @@ describe('usePermissions', () => {
         user: {
           id: 2,
           email: 'operator@werco.com',
-          full_name: 'Operator User',
+          first_name: 'Operator',
+          last_name: 'User',
           role: 'operator',
           is_active: true,
           is_superuser: false,
@@ -138,7 +140,8 @@ describe('usePermissions', () => {
         user: {
           id: 3,
           email: 'manager@werco.com',
-          full_name: 'Manager User',
+          first_name: 'Manager',
+          last_name: 'User',
           role: 'manager',
           is_active: true,
           is_superuser: false,
@@ -214,7 +217,8 @@ describe('usePermissions', () => {
         user: {
           id: 4,
           email: 'quality@werco.com',
-          full_name: 'Quality User',
+          first_name: 'Quality',
+          last_name: 'User',
           role: 'quality',
           is_active: true,
           is_superuser: false,
@@ -247,7 +251,8 @@ describe('usePermissions', () => {
         user: {
           id: 5,
           email: 'viewer@werco.com',
-          full_name: 'Viewer User',
+          first_name: 'Viewer',
+          last_name: 'User',
           role: 'viewer',
           is_active: true,
           is_superuser: false,

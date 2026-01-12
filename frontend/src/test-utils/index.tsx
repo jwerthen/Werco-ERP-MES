@@ -14,7 +14,8 @@ import { TourProvider } from '../context/TourContext';
 export const mockUser = {
   id: 1,
   email: 'test@werco.com',
-  full_name: 'Test User',
+  first_name: 'Test',
+  last_name: 'User',
   role: 'admin' as const,
   is_active: true,
   is_superuser: true,

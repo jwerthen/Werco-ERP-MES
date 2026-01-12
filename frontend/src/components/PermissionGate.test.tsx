@@ -25,7 +25,8 @@ describe('PermissionGate', () => {
         user: {
           id: 1,
           email: 'admin@werco.com',
-          full_name: 'Admin User',
+          first_name: 'Admin',
+          last_name: 'User',
           role: 'admin',
           is_active: true,
           is_superuser: true,
@@ -63,7 +64,8 @@ describe('PermissionGate', () => {
         user: {
           id: 2,
           email: 'operator@werco.com',
-          full_name: 'Operator User',
+          first_name: 'Operator',
+          last_name: 'User',
           role: 'operator',
           is_active: true,
           is_superuser: false,
@@ -148,7 +150,8 @@ describe('PermissionGate', () => {
         user: {
           id: 3,
           email: 'manager@werco.com',
-          full_name: 'Manager User',
+          first_name: 'Manager',
+          last_name: 'User',
           role: 'manager',
           is_active: true,
           is_superuser: false,
@@ -191,7 +194,8 @@ describe('AdminOnly', () => {
       user: {
         id: 1,
         email: 'admin@werco.com',
-        full_name: 'Admin',
+        first_name: 'Admin',
+        last_name: 'User',
         role: 'admin',
         is_active: true,
         is_superuser: true,
@@ -216,7 +220,8 @@ describe('AdminOnly', () => {
       user: {
         id: 2,
         email: 'user@werco.com',
-        full_name: 'Regular User',
+        first_name: 'Regular',
+        last_name: 'User',
         role: 'operator',
         is_active: true,
         is_superuser: false,
@@ -243,7 +248,8 @@ describe('CanCreate', () => {
       user: {
         id: 1,
         email: 'manager@werco.com',
-        full_name: 'Manager',
+        first_name: 'Manager',
+        last_name: 'User',
         role: 'manager',
         is_active: true,
         is_superuser: false,
@@ -270,7 +276,8 @@ describe('CanEdit', () => {
       user: {
         id: 1,
         email: 'manager@werco.com',
-        full_name: 'Manager',
+        first_name: 'Manager',
+        last_name: 'User',
         role: 'manager',
         is_active: true,
         is_superuser: false,
@@ -297,7 +304,8 @@ describe('CanDelete', () => {
       user: {
         id: 1,
         email: 'admin@werco.com',
-        full_name: 'Admin',
+        first_name: 'Admin',
+        last_name: 'User',
         role: 'admin',
         is_active: true,
         is_superuser: true,
@@ -322,7 +330,8 @@ describe('CanDelete', () => {
       user: {
         id: 2,
         email: 'operator@werco.com',
-        full_name: 'Operator',
+        first_name: 'Operator',
+        last_name: 'User',
         role: 'operator',
         is_active: true,
         is_superuser: false,

@@ -178,7 +178,8 @@ export const createMockApi = () => ({
   getCurrentUser: jest.fn().mockResolvedValue({
     id: 1,
     email: 'test@werco.com',
-    full_name: 'Test User',
+    first_name: 'Test',
+    last_name: 'User',
     role: 'admin',
     is_active: true,
     is_superuser: true,
