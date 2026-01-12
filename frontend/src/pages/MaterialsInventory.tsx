@@ -67,10 +67,8 @@ export default function MaterialsInventoryPage() {
     name: '',
     description: '',
     part_type: 'raw_material' as 'raw_material' | 'purchased',
-    unit_of_measure: 'EA',
+    unit_of_measure: 'each',
     standard_cost: 0,
-    reorder_point: 0,
-    reorder_quantity: 0,
   });
 
   // Filter for raw materials and purchased parts only
@@ -137,9 +135,13 @@ export default function MaterialsInventoryPage() {
     e.preventDefault();
     try {
       await api.createPart({
-        ...createForm,
+        part_number: createForm.part_number,
+        name: createForm.name,
+        description: createForm.description || undefined,
+        part_type: createForm.part_type,
+        unit_of_measure: createForm.unit_of_measure,
+        standard_cost: createForm.standard_cost || 0,
         revision: 'A',
-        is_active: true,
       });
       setShowCreateModal(false);
       setCreateForm({
@@ -147,14 +149,17 @@ export default function MaterialsInventoryPage() {
         name: '',
         description: '',
         part_type: 'raw_material',
-        unit_of_measure: 'EA',
+        unit_of_measure: 'each',
         standard_cost: 0,
-        reorder_point: 0,
-        reorder_quantity: 0,
       });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create material');
+      const errorMsg = err.response?.data?.detail;
+      if (Array.isArray(errorMsg)) {
+        alert(errorMsg.map((e: any) => e.msg || e).join('\n'));
+      } else {
+        alert(errorMsg || 'Failed to create material');
+      }
     }
   };
 
@@ -520,14 +525,14 @@ export default function MaterialsInventoryPage() {
                     className="input" 
                     required
                   >
-                    <option value="EA">EA (Each)</option>
-                    <option value="FT">FT (Feet)</option>
-                    <option value="IN">IN (Inches)</option>
-                    <option value="LB">LB (Pounds)</option>
-                    <option value="KG">KG (Kilograms)</option>
-                    <option value="SHT">SHT (Sheet)</option>
-                    <option value="BOX">BOX (Box)</option>
-                    <option value="PK">PK (Pack)</option>
+                    <option value="each">Each</option>
+                    <option value="feet">Feet</option>
+                    <option value="inches">Inches</option>
+                    <option value="pounds">Pounds</option>
+                    <option value="kilograms">Kilograms</option>
+                    <option value="sheets">Sheets</option>
+                    <option value="gallons">Gallons</option>
+                    <option value="liters">Liters</option>
                   </select>
                 </div>
               </div>
@@ -552,38 +557,17 @@ export default function MaterialsInventoryPage() {
                   placeholder="Optional detailed description"
                 />
               </div>
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="label">Standard Cost</label>
-                  <input 
-                    type="number" 
-                    value={createForm.standard_cost} 
-                    onChange={(e) => setCreateForm({...createForm, standard_cost: parseFloat(e.target.value) || 0})} 
-                    className="input" 
-                    min={0} 
-                    step={0.01} 
-                  />
-                </div>
-                <div>
-                  <label className="label">Reorder Point</label>
-                  <input 
-                    type="number" 
-                    value={createForm.reorder_point} 
-                    onChange={(e) => setCreateForm({...createForm, reorder_point: parseFloat(e.target.value) || 0})} 
-                    className="input" 
-                    min={0} 
-                  />
-                </div>
-                <div>
-                  <label className="label">Reorder Qty</label>
-                  <input 
-                    type="number" 
-                    value={createForm.reorder_quantity} 
-                    onChange={(e) => setCreateForm({...createForm, reorder_quantity: parseFloat(e.target.value) || 0})} 
-                    className="input" 
-                    min={0} 
-                  />
-                </div>
+              <div>
+                <label className="label">Standard Cost ($)</label>
+                <input 
+                  type="number" 
+                  value={createForm.standard_cost} 
+                  onChange={(e) => setCreateForm({...createForm, standard_cost: parseFloat(e.target.value) || 0})} 
+                  className="input" 
+                  min={0} 
+                  step={0.01}
+                  placeholder="0.00"
+                />
               </div>
               <div className="flex justify-end gap-3 pt-4 border-t">
                 <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">Cancel</button>
