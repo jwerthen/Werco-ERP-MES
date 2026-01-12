@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.api.router import api_router
 from app.db.database import engine, Base
 from app.core.logging import configure_logging, get_logger
+from app.core.cache import init_cache, cache
 from app.middleware.logging_middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 
 # Configure structured logging with correlation IDs
@@ -137,6 +138,12 @@ async def lifespan(app: FastAPI):
     # Create tables (in production, use Alembic migrations)
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified")
+    # Initialize Redis cache
+    init_cache(settings.REDIS_URL)
+    if cache.enabled:
+        logger.info("Redis caching enabled")
+    else:
+        logger.info("Redis caching disabled (REDIS_URL not configured)")
     # Seed quote configuration if needed
     seed_quote_config_if_needed()
     yield
@@ -452,7 +459,15 @@ async def detailed_health_check():
         "rate_limiting": settings.RATE_LIMIT_ENABLED,
         "sentry": bool(settings.SENTRY_DSN),
         "redis": bool(settings.REDIS_URL),
+        "caching": cache.enabled,
     }
+    
+    # Cache stats (if enabled)
+    if cache.enabled:
+        checks["cache"] = {
+            "status": "healthy",
+            "stats": cache.stats,
+        }
     
     overall_status = "healthy" if checks.get("database", {}).get("status") == "healthy" else "degraded"
     

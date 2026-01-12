@@ -6,6 +6,10 @@ from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.schemas.work_center import WorkCenterCreate, WorkCenterUpdate, WorkCenterResponse
+from app.core.cache import (
+    cache, CacheKeys, CacheTTL,
+    get_cached_work_centers_list, cache_work_centers_list, invalidate_work_centers_cache
+)
 
 router = APIRouter()
 
@@ -18,11 +22,36 @@ def list_work_centers(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List all work centers"""
+    """List all work centers (cached for 15 minutes)"""
+    # Try cache first (only for default parameters)
+    if skip == 0 and limit == 100 and active_only:
+        cached = get_cached_work_centers_list()
+        if cached is not None:
+            return cached
+    
     query = db.query(WorkCenter)
     if active_only:
         query = query.filter(WorkCenter.is_active == True)
-    return query.offset(skip).limit(limit).all()
+    result = query.offset(skip).limit(limit).all()
+    
+    # Cache the result for default parameters
+    if skip == 0 and limit == 100 and active_only:
+        # Convert to dict for caching
+        cache_data = [
+            {
+                "id": wc.id, "code": wc.code, "name": wc.name,
+                "work_center_type": wc.work_center_type.value if wc.work_center_type else None,
+                "description": wc.description, "hourly_rate": float(wc.hourly_rate) if wc.hourly_rate else 0,
+                "capacity_hours_per_day": float(wc.capacity_hours_per_day) if wc.capacity_hours_per_day else 0,
+                "efficiency_factor": float(wc.efficiency_factor) if wc.efficiency_factor else 1,
+                "is_active": wc.is_active, "current_status": wc.current_status,
+                "version": wc.version,
+            }
+            for wc in result
+        ]
+        cache_work_centers_list(cache_data)
+    
+    return result
 
 
 @router.post("/", response_model=WorkCenterResponse)
@@ -43,6 +72,10 @@ def create_work_center(
     db.add(work_center)
     db.commit()
     db.refresh(work_center)
+    
+    # Invalidate cache
+    invalidate_work_centers_cache()
+    
     return work_center
 
 
@@ -77,6 +110,10 @@ def update_work_center(
     
     db.commit()
     db.refresh(work_center)
+    
+    # Invalidate cache
+    invalidate_work_centers_cache(work_center_id)
+    
     return work_center
 
 
@@ -93,6 +130,10 @@ def delete_work_center(
     
     work_center.is_active = False
     db.commit()
+    
+    # Invalidate cache
+    invalidate_work_centers_cache(work_center_id)
+    
     return {"message": "Work center deactivated"}
 
 
