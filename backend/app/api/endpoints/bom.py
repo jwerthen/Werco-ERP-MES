@@ -6,7 +6,7 @@ from sqlalchemy import and_
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
-from app.models.bom import BOM, BOMItem, BOMItemType
+from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.part import Part
 from app.schemas.bom import (
     BOMCreate, BOMUpdate, BOMResponse,
@@ -40,10 +40,13 @@ def build_bom_item_response(item: BOMItem, db: Session) -> BOMItemResponse:
         item_number=item.item_number,
         quantity=item.quantity,
         item_type=item.item_type,
+        line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
         unit_of_measure=item.unit_of_measure or "each",
         reference_designator=item.reference_designator,
         find_number=item.find_number,
         notes=item.notes,
+        torque_spec=item.torque_spec,
+        installation_notes=item.installation_notes,
         work_center_id=item.work_center_id,
         operation_sequence=item.operation_sequence,
         scrap_factor=item.scrap_factor,
@@ -451,10 +454,13 @@ def explode_bom_recursive(
             item_number=item.item_number,
             quantity=item.quantity,
             item_type=item.item_type,
+            line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
             unit_of_measure=item.unit_of_measure or "each",
             reference_designator=item.reference_designator,
             find_number=item.find_number,
             notes=item.notes,
+            torque_spec=item.torque_spec,
+            installation_notes=item.installation_notes,
             work_center_id=item.work_center_id,
             operation_sequence=item.operation_sequence,
             scrap_factor=item.scrap_factor,
@@ -525,6 +531,7 @@ def flatten_bom_items(
             part_name=item.component_part.name if item.component_part else "",
             part_type=item.component_part.part_type if item.component_part else "",
             item_type=item.item_type,
+            line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
             quantity_per=item.quantity,
             extended_quantity=item.extended_quantity,
             unit_of_measure=item.unit_of_measure,
@@ -532,7 +539,9 @@ def flatten_bom_items(
             lead_time_offset=item.lead_time_offset,
             is_optional=item.is_optional,
             is_alternate=item.is_alternate,
-            has_children=len(item.children) > 0
+            has_children=len(item.children) > 0,
+            torque_spec=item.torque_spec,
+            installation_notes=item.installation_notes
         )
         flat_list.append(flat_item)
         
