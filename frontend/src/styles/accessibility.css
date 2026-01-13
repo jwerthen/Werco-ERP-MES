@@ -1,0 +1,136 @@
+/**
+ * Accessibility Styles
+ * 
+ * WCAG 2.1 AA compliant styles for focus indicators and accessibility features.
+ */
+
+/* Focus visible - visible focus indicators for keyboard navigation */
+*:focus-visible {
+  outline: 2px solid #0891b2; /* cyan-600 */
+  outline-offset: 2px;
+}
+
+/* Remove default focus outline when using focus-visible */
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  *:focus-visible {
+    outline: 3px solid currentColor;
+    outline-offset: 3px;
+  }
+  
+  /* Increase border thickness for better visibility */
+  button, 
+  input, 
+  select, 
+  textarea {
+    border-width: 2px;
+  }
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Screen reader only - visually hidden but accessible */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Make sr-only visible on focus */
+.sr-only.focus\:not-sr-only:focus {
+  position: static;
+  width: auto;
+  height: auto;
+  padding: inherit;
+  margin: inherit;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+}
+
+/* Focus ring utility classes */
+.focus-ring {
+  --tw-ring-offset-width: 2px;
+  --tw-ring-offset-color: white;
+  --tw-ring-color: #0891b2;
+}
+
+.focus-ring:focus-visible {
+  box-shadow: 
+    0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color),
+    0 0 0 calc(var(--tw-ring-offset-width) + 2px) var(--tw-ring-color);
+}
+
+/* Ensure sufficient color contrast for links */
+a:not([class]) {
+  color: #0e7490; /* cyan-700 - 4.5:1 contrast on white */
+  text-decoration: underline;
+}
+
+a:not([class]):hover {
+  color: #0891b2; /* cyan-600 */
+}
+
+a:not([class]):visited {
+  color: #7c3aed; /* violet-600 - ensures visited links are distinguishable */
+}
+
+/* Ensure form elements have visible borders */
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  border: 1px solid #9ca3af; /* gray-400 - meets contrast requirements */
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus,
+textarea:focus {
+  border-color: #0891b2; /* cyan-600 */
+}
+
+/* Error states with sufficient contrast */
+.error-text {
+  color: #dc2626; /* red-600 - 4.5:1 contrast */
+}
+
+.error-border {
+  border-color: #dc2626 !important;
+}
+
+/* Success states with sufficient contrast */
+.success-text {
+  color: #16a34a; /* green-600 - 4.5:1 contrast */
+}
+
+/* Interactive element minimum touch target size (44x44px) */
+.touch-target {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* Ensure disabled states are distinguishable */
+[disabled],
+.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

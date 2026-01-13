@@ -1,0 +1,283 @@
+/**
+ * Print Styles
+ * 
+ * Styles for print-friendly views of reports, work orders, quotes, etc.
+ */
+
+@media print {
+  /* Reset and base styles for print */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  html, body {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    font-size: 12pt;
+    line-height: 1.4;
+    background: white !important;
+    color: black !important;
+  }
+
+  /* Hide non-essential elements */
+  nav,
+  .no-print,
+  [data-no-print],
+  .sidebar,
+  header:not(.print-header),
+  footer:not(.print-footer),
+  .mobile-nav,
+  .bottom-nav,
+  .tour-tooltip,
+  .modal-backdrop,
+  button:not(.print-button),
+  .global-search,
+  [role="dialog"],
+  [aria-modal="true"] {
+    display: none !important;
+  }
+
+  /* Show only main content */
+  main,
+  .print-content {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    position: static !important;
+    overflow: visible !important;
+  }
+
+  /* Remove background colors and shadows */
+  .bg-gradient-to-br,
+  .bg-gradient-to-b,
+  [class*="shadow"],
+  [class*="backdrop"] {
+    background: white !important;
+    box-shadow: none !important;
+  }
+
+  /* Ensure tables print well */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    page-break-inside: auto;
+  }
+
+  tr {
+    page-break-inside: avoid;
+    page-break-after: auto;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tfoot {
+    display: table-footer-group;
+  }
+
+  th, td {
+    border: 1px solid #000 !important;
+    padding: 4px 8px !important;
+    text-align: left;
+    background: transparent !important;
+  }
+
+  th {
+    font-weight: bold;
+    background-color: #f0f0f0 !important;
+  }
+
+  /* Links - show URL in print */
+  a[href]:after {
+    content: none; /* Don't show URLs by default */
+  }
+
+  a.print-show-url:after {
+    content: " (" attr(href) ")";
+    font-size: 10pt;
+    color: #666;
+  }
+
+  /* Page breaks */
+  .page-break-before {
+    page-break-before: always;
+  }
+
+  .page-break-after {
+    page-break-after: always;
+  }
+
+  .avoid-page-break {
+    page-break-inside: avoid;
+  }
+
+  /* Print header and footer */
+  .print-header {
+    display: block !important;
+    text-align: center;
+    padding: 10px 0;
+    border-bottom: 2px solid #000;
+    margin-bottom: 20px;
+  }
+
+  .print-footer {
+    display: block !important;
+    text-align: center;
+    padding: 10px 0;
+    border-top: 1px solid #000;
+    margin-top: 20px;
+    font-size: 10pt;
+    color: #666;
+  }
+
+  /* Company logo for print */
+  .print-logo {
+    max-height: 50px;
+    width: auto;
+  }
+
+  /* Document title styles */
+  .print-title {
+    font-size: 18pt;
+    font-weight: bold;
+    margin: 10px 0;
+    color: black !important;
+  }
+
+  .print-subtitle {
+    font-size: 12pt;
+    margin: 5px 0;
+    color: #333 !important;
+  }
+
+  /* Info sections */
+  .print-info-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin: 15px 0;
+  }
+
+  .print-info-item {
+    padding: 5px 0;
+  }
+
+  .print-info-label {
+    font-weight: bold;
+    font-size: 10pt;
+    color: #666;
+  }
+
+  .print-info-value {
+    font-size: 11pt;
+    color: black;
+  }
+
+  /* Status badges */
+  .print-status {
+    display: inline-block;
+    padding: 2px 8px;
+    border: 1px solid #000;
+    font-size: 10pt;
+    font-weight: bold;
+  }
+
+  /* Force colors for important elements */
+  .print-text-black {
+    color: black !important;
+  }
+
+  .print-bg-gray {
+    background-color: #f0f0f0 !important;
+  }
+
+  /* Section headers */
+  .print-section-title {
+    font-size: 14pt;
+    font-weight: bold;
+    border-bottom: 1px solid #000;
+    padding-bottom: 5px;
+    margin: 20px 0 10px 0;
+  }
+
+  /* Margins for page setup */
+  @page {
+    margin: 0.5in;
+    size: letter portrait;
+  }
+
+  @page :first {
+    margin-top: 0.5in;
+  }
+
+  /* Signature lines */
+  .print-signature {
+    margin-top: 40px;
+    padding-top: 10px;
+    border-top: 1px solid #000;
+    width: 200px;
+  }
+
+  .print-signature-label {
+    font-size: 10pt;
+    color: #666;
+  }
+
+  /* Date/time stamp */
+  .print-timestamp {
+    font-size: 9pt;
+    color: #999;
+    text-align: right;
+  }
+
+  /* QR codes and barcodes */
+  .print-barcode,
+  .print-qrcode {
+    display: block !important;
+    page-break-inside: avoid;
+  }
+
+  /* Hide interactive elements */
+  input,
+  select,
+  textarea {
+    border: none !important;
+    background: transparent !important;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    display: inline-block !important;
+    width: 12px !important;
+    height: 12px !important;
+    border: 1px solid #000 !important;
+  }
+
+  input[type="checkbox"]:checked::before {
+    content: "✓";
+  }
+}
+
+/* Print preview mode (screen) */
+.print-preview {
+  background: white;
+  color: black;
+  max-width: 8.5in;
+  margin: 0 auto;
+  padding: 0.5in;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.print-preview nav,
+.print-preview .no-print,
+.print-preview [data-no-print] {
+  display: none;
+}

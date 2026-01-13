@@ -2,6 +2,7 @@ import React, { Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TourProvider } from './context/TourContext';
+import { KeyboardShortcutsProvider } from './context/KeyboardShortcutsContext';
 import { TourHighlight } from './components/Tour';
 import Layout from './components/Layout';
 import { SkeletonDashboard, LoadingOverlay } from './components/ui/Skeleton';
@@ -396,8 +397,10 @@ function App() {
     <AuthProvider>
       <TourProvider>
         <Router>
-          <AppRoutes />
-          <TourHighlight />
+          <KeyboardShortcutsProvider>
+            <AppRoutes />
+            <TourHighlight />
+          </KeyboardShortcutsProvider>
         </Router>
       </TourProvider>
     </AuthProvider>

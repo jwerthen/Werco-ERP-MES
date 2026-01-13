@@ -5,6 +5,9 @@ import { TourMenu } from './Tour';
 import SessionWarningModal from './SessionWarningModal';
 import GlobalSearch, { useGlobalSearch } from './GlobalSearch';
 import BottomNav from './ui/BottomNav';
+import SkipLink from './SkipLink';
+import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
+import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
@@ -244,6 +247,16 @@ export default function Layout({ children }: LayoutProps) {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const globalSearch = useGlobalSearch();
+  const keyboardShortcuts = useKeyboardShortcutsContext();
+
+  // Global keyboard shortcuts for layout
+  useKeyboardShortcuts([
+    {
+      ...GLOBAL_SHORTCUTS.SEARCH,
+      action: globalSearch.open,
+      preventDefault: true,
+    },
+  ]);
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
@@ -264,6 +277,9 @@ export default function Layout({ children }: LayoutProps) {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50">
+      {/* Skip to main content link for accessibility */}
+      <SkipLink />
+      
       {/* Mobile sidebar backdrop */}
       {sidebarOpen && (
         <div 
@@ -300,13 +316,18 @@ export default function Layout({ children }: LayoutProps) {
           <button 
             onClick={() => setSidebarOpen(false)}
             className="lg:hidden p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+            aria-label="Close navigation menu"
           >
-            <XMarkIcon className="h-6 w-6" />
+            <XMarkIcon className="h-6 w-6" aria-hidden="true" />
           </button>
         </div>
 
         {/* Navigation */}
-        <nav className="relative flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide" data-tour="sidebar">
+        <nav 
+          className="relative flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide" 
+          data-tour="sidebar"
+          aria-label="Main navigation"
+        >
           {navigation.map((item) => (
             <NavGroup 
               key={item.name} 
@@ -388,6 +409,18 @@ export default function Layout({ children }: LayoutProps) {
                 </kbd>
               </button>
 
+              {/* Keyboard shortcuts help */}
+              <button
+                onClick={keyboardShortcuts.showHelp}
+                className="hidden md:flex items-center justify-center p-2 rounded-xl text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-all duration-200"
+                title="Keyboard shortcuts (Ctrl+/)"
+                aria-label="Show keyboard shortcuts"
+              >
+                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+                </svg>
+              </button>
+
               {/* Help & Tours menu */}
               <div className="hidden lg:block">
                 <TourMenu />
@@ -404,7 +437,12 @@ export default function Layout({ children }: LayoutProps) {
         </header>
 
         {/* Main content - extra bottom padding for mobile nav */}
-        <main className="flex-1 p-4 sm:p-6 lg:p-8 pb-20 lg:pb-8">
+        <main 
+          id="main-content" 
+          className="flex-1 p-4 sm:p-6 lg:p-8 pb-20 lg:pb-8"
+          role="main"
+          tabIndex={-1}
+        >
           <div className="max-w-7xl mx-auto animate-fade-in">
             {children}
           </div>
