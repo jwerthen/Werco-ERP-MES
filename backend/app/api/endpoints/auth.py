@@ -14,10 +14,14 @@ from app.models.user import User, UserRole
 from app.models.audit_log import AuditLog
 from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest
 from app.api.deps import get_current_user, require_role
-from app.services.mfa_service import (
-    setup_mfa, verify_totp, verify_backup_code, hash_backup_codes
-)
 from app.services.audit_service import AuditService
+
+# Lazy import MFA service to prevent app crash if pyotp not installed
+def get_mfa_service():
+    from app.services.mfa_service import (
+        setup_mfa, verify_totp, verify_backup_code, hash_backup_codes, generate_backup_codes
+    )
+    return setup_mfa, verify_totp, verify_backup_code, hash_backup_codes, generate_backup_codes
 
 router = APIRouter()
 
@@ -157,7 +161,9 @@ def login(
     db.commit()
     
     # Check if MFA is required (CMMC Level 2 AC-3.1.1)
-    if user.mfa_enabled:
+    # Use getattr to handle case where migration hasn't run yet
+    mfa_enabled = getattr(user, 'mfa_enabled', False)
+    if mfa_enabled:
         # User has MFA enabled - require second factor
         mfa_token = create_mfa_token(user.id)
         log_auth_event(db, "LOGIN_MFA_REQUIRED", user=user, success=True, request=request)
@@ -385,6 +391,7 @@ def initiate_mfa_setup(
         )
     
     # Generate MFA setup data
+    setup_mfa, _, _, _, _ = get_mfa_service()
     mfa_data = setup_mfa(current_user.email)
     
     # Store pending setup (expires in 10 minutes)
@@ -432,6 +439,7 @@ def complete_mfa_setup(
         )
     
     # Verify the code
+    _, verify_totp, _, _, _ = get_mfa_service()
     if not verify_totp(pending["secret"], verify_request.code):
         log_auth_event(db, "MFA_SETUP_FAILED", user=current_user, success=False, 
                       request=request, error="Invalid verification code")
@@ -487,6 +495,7 @@ def verify_mfa_login(
         )
     
     # Try TOTP verification first
+    _, verify_totp, verify_backup_code, _, _ = get_mfa_service()
     code = mfa_request.code.replace("-", "").replace(" ", "")
     
     if len(code) == 6 and code.isdigit():
@@ -563,6 +572,7 @@ def disable_mfa(
         )
     
     # Verify TOTP code
+    _, verify_totp, _, _, _ = get_mfa_service()
     if not verify_totp(current_user.mfa_secret, disable_request.code):
         log_auth_event(db, "MFA_DISABLE_FAILED", user=current_user, success=False, 
                       request=request, error="Invalid TOTP code")
@@ -605,6 +615,7 @@ def regenerate_backup_codes(
         )
     
     # Verify TOTP code
+    _, verify_totp, _, hash_backup_codes, generate_backup_codes = get_mfa_service()
     if not verify_totp(current_user.mfa_secret, verify_request.code):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -612,7 +623,6 @@ def regenerate_backup_codes(
         )
     
     # Generate new backup codes
-    from app.services.mfa_service import generate_backup_codes
     new_codes = generate_backup_codes()
     
     current_user.mfa_backup_codes = hash_backup_codes(new_codes)
