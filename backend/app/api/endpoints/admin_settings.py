@@ -730,3 +730,148 @@ def seed_outside_services(
     
     db.commit()
     return {"status": "ok", "created": created}
+
+
+# ============ ROLE PERMISSIONS ============
+
+from app.models.role_permission import (
+    RolePermission, DEFAULT_ROLE_PERMISSIONS, ALL_PERMISSIONS, PERMISSION_CATEGORIES
+)
+
+@router.get("/role-permissions")
+def get_all_role_permissions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only)
+):
+    """
+    Get permissions for all roles.
+    Returns stored custom permissions or defaults if not customized.
+    """
+    stored = db.query(RolePermission).all()
+    stored_map = {rp.role: rp.permissions for rp in stored}
+    
+    result = {}
+    for role in UserRole:
+        if role in stored_map:
+            result[role.value] = stored_map[role]
+        else:
+            result[role.value] = DEFAULT_ROLE_PERMISSIONS.get(role, [])
+    
+    return {
+        "role_permissions": result,
+        "all_permissions": ALL_PERMISSIONS,
+        "permission_categories": PERMISSION_CATEGORIES,
+        "roles": [{"value": r.value, "label": r.value.title()} for r in UserRole]
+    }
+
+
+@router.get("/role-permissions/{role}")
+def get_role_permissions(
+    role: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only)
+):
+    """Get permissions for a specific role"""
+    try:
+        user_role = UserRole(role)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
+    
+    stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
+    
+    if stored:
+        return {"role": role, "permissions": stored.permissions, "is_customized": True}
+    else:
+        return {
+            "role": role,
+            "permissions": DEFAULT_ROLE_PERMISSIONS.get(user_role, []),
+            "is_customized": False
+        }
+
+
+@router.put("/role-permissions/{role}")
+def update_role_permissions(
+    role: str,
+    request: Request,
+    permissions: list[str],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only)
+):
+    """Update permissions for a specific role"""
+    try:
+        user_role = UserRole(role)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
+    
+    # Validate permissions
+    invalid = [p for p in permissions if p not in ALL_PERMISSIONS]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid permissions: {invalid}")
+    
+    # Get or create role permission record
+    stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
+    
+    old_permissions = stored.permissions if stored else DEFAULT_ROLE_PERMISSIONS.get(user_role, [])
+    
+    if stored:
+        stored.permissions = permissions
+        stored.updated_by = current_user.id
+    else:
+        stored = RolePermission(
+            role=user_role,
+            permissions=permissions,
+            updated_by=current_user.id
+        )
+        db.add(stored)
+    
+    # Log the change
+    log_change(
+        db, "role_permission", stored.id if stored.id else 0, role,
+        "update", current_user.id,
+        field_changed="permissions",
+        old_value=old_permissions,
+        new_value=permissions,
+        ip_address=get_client_ip(request)
+    )
+    
+    db.commit()
+    db.refresh(stored)
+    
+    return {"role": role, "permissions": stored.permissions, "is_customized": True}
+
+
+@router.post("/role-permissions/{role}/reset")
+def reset_role_permissions(
+    role: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only)
+):
+    """Reset a role's permissions to defaults"""
+    try:
+        user_role = UserRole(role)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
+    
+    stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
+    
+    if stored:
+        old_permissions = stored.permissions
+        db.delete(stored)
+        
+        log_change(
+            db, "role_permission", stored.id, role,
+            "reset", current_user.id,
+            field_changed="permissions",
+            old_value=old_permissions,
+            new_value=DEFAULT_ROLE_PERMISSIONS.get(user_role, []),
+            ip_address=get_client_ip(request)
+        )
+        
+        db.commit()
+    
+    return {
+        "role": role,
+        "permissions": DEFAULT_ROLE_PERMISSIONS.get(user_role, []),
+        "is_customized": False
+    }

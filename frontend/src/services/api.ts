@@ -1361,6 +1361,22 @@ class ApiService {
     return response.data;
   }
 
+  // Admin Settings - Role Permissions
+  async getRolePermissions() {
+    const response = await this.api.get('/admin/settings/role-permissions');
+    return response.data;
+  }
+
+  async updateRolePermissions(role: string, permissions: string[]) {
+    const response = await this.api.put(`/admin/settings/role-permissions/${role}`, permissions);
+    return response.data;
+  }
+
+  async resetRolePermissions(role: string) {
+    const response = await this.api.post(`/admin/settings/role-permissions/${role}/reset`);
+    return response.data;
+  }
+
   // Receiving & Inspection
   async getOpenPOsForReceiving(vendorId?: number) {
     const response = await this.api.get('/receiving/open-pos', { params: { vendor_id: vendorId } });

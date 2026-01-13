@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { User } from '../types';
 import api from '../services/api';
+import { setCustomPermissions } from '../utils/permissions';
 
 // Idle timeout in milliseconds (15 minutes)
 const IDLE_TIMEOUT = 15 * 60 * 1000;
@@ -121,6 +122,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     setUser(response.user);
     localStorage.setItem('user', JSON.stringify(response.user));
+    
+    // Load custom role permissions from backend (non-blocking)
+    try {
+      const permData = await api.getRolePermissions();
+      if (permData?.role_permissions) {
+        setCustomPermissions(permData.role_permissions);
+      }
+    } catch (e) {
+      // Permissions loading failed - use defaults
+      console.warn('Failed to load custom permissions, using defaults');
+    }
   };
 
   const logout = () => {

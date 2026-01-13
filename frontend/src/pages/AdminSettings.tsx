@@ -17,9 +17,10 @@ import {
   TruckIcon,
   ClockIcon,
   DocumentTextIcon,
+  ShieldCheckIcon,
 } from '@heroicons/react/24/outline';
 
-type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'services' | 'overhead' | 'audit';
+type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'services' | 'overhead' | 'roles' | 'audit';
 
 const MATERIAL_CATEGORIES = ['steel', 'stainless', 'aluminum', 'brass', 'copper', 'titanium', 'plastic', 'other'];
 const MACHINE_TYPES = ['cnc_mill_3axis', 'cnc_mill_4axis', 'cnc_mill_5axis', 'cnc_lathe', 'laser_fiber', 'laser_co2', 'plasma', 'waterjet', 'press_brake', 'punch_press'];
@@ -34,6 +35,7 @@ const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
   { key: 'workcenters', label: 'Work Center Rates', icon: BuildingOfficeIcon },
   { key: 'services', label: 'Outside Services', icon: TruckIcon },
   { key: 'overhead', label: 'Overhead/Markup', icon: Cog6ToothIcon },
+  { key: 'roles', label: 'Roles & Permissions', icon: ShieldCheckIcon },
   { key: 'audit', label: 'Audit Log', icon: ClockIcon },
 ];
 
@@ -50,6 +52,12 @@ export default function AdminSettings() {
   const [workCenterRates, setWorkCenterRates] = useState<any[]>([]);
   const [outsideServices, setOutsideServices] = useState<any[]>([]);
   const [overhead, setOverhead] = useState<Record<string, any>>({});
+  const [rolePermissions, setRolePermissions] = useState<{
+    role_permissions: Record<string, string[]>;
+    all_permissions: string[];
+    permission_categories: Record<string, string[]>;
+    roles: { value: string; label: string }[];
+  } | null>(null);
   const [auditLog, setAuditLog] = useState<any[]>([]);
 
   // Modal states
@@ -80,6 +88,9 @@ export default function AdminSettings() {
           break;
         case 'overhead':
           setOverhead(await api.getAdminOverhead());
+          break;
+        case 'roles':
+          setRolePermissions(await api.getRolePermissions());
           break;
         case 'audit':
           setAuditLog(await api.getSettingsAuditLog());
@@ -244,6 +255,7 @@ export default function AdminSettings() {
             {activeTab === 'workcenters' && <WorkCenterRatesTable data={workCenterRates} onEdit={(item) => setEditModal({ type: 'workcenter', item })} />}
             {activeTab === 'services' && <OutsideServicesTable data={outsideServices} onEdit={(item) => setEditModal({ type: 'service', item })} onDelete={(item) => setDeleteConfirm({ type: 'service', item })} />}
             {activeTab === 'overhead' && <OverheadSettings data={overhead} onUpdate={handleOverheadUpdate} />}
+            {activeTab === 'roles' && rolePermissions && <RolePermissionsManager data={rolePermissions} onUpdate={() => loadTabData('roles')} />}
             {activeTab === 'audit' && <AuditLogTable data={auditLog} />}
           </>
         )}
@@ -605,6 +617,192 @@ function AuditLogTable({ data }: { data: any[] }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ============ ROLE PERMISSIONS MANAGER ============
+
+interface RolePermissionsData {
+  role_permissions: Record<string, string[]>;
+  all_permissions: string[];
+  permission_categories: Record<string, string[]>;
+  roles: { value: string; label: string }[];
+}
+
+function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData; onUpdate: () => void }) {
+  const [selectedRole, setSelectedRole] = useState<string>(data.roles[0]?.value || 'admin');
+  const [permissions, setPermissions] = useState<string[]>(data.role_permissions[selectedRole] || []);
+  const [saving, setSaving] = useState(false);
+  const [hasChanges, setHasChanges] = useState(false);
+
+  useEffect(() => {
+    setPermissions(data.role_permissions[selectedRole] || []);
+    setHasChanges(false);
+  }, [selectedRole, data]);
+
+  const togglePermission = (permission: string) => {
+    setPermissions(prev => {
+      const newPerms = prev.includes(permission)
+        ? prev.filter(p => p !== permission)
+        : [...prev, permission];
+      setHasChanges(true);
+      return newPerms;
+    });
+  };
+
+  const toggleCategory = (category: string) => {
+    const categoryPerms = data.permission_categories[category];
+    const allSelected = categoryPerms.every(p => permissions.includes(p));
+    
+    setPermissions(prev => {
+      const newPerms = allSelected
+        ? prev.filter(p => !categoryPerms.includes(p))
+        : Array.from(new Set([...prev, ...categoryPerms]));
+      setHasChanges(true);
+      return newPerms;
+    });
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await api.updateRolePermissions(selectedRole, permissions);
+      setHasChanges(false);
+      onUpdate();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to save permissions');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleReset = async () => {
+    if (!window.confirm(`Reset ${selectedRole} permissions to defaults?`)) return;
+    setSaving(true);
+    try {
+      await api.resetRolePermissions(selectedRole);
+      onUpdate();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to reset permissions');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const formatPermissionLabel = (permission: string) => {
+    const [, action] = permission.split(':');
+    return action.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Role selector and actions */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <label className="text-sm font-medium text-surface-700">Select Role:</label>
+          <select
+            value={selectedRole}
+            onChange={(e) => setSelectedRole(e.target.value)}
+            className="input w-48"
+          >
+            {data.roles.map(role => (
+              <option key={role.value} value={role.value}>
+                {role.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleReset}
+            disabled={saving}
+            className="btn-secondary btn-sm"
+          >
+            <ArrowPathIcon className="h-4 w-4 mr-1" />
+            Reset to Default
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || !hasChanges}
+            className="btn-primary btn-sm"
+          >
+            {saving ? (
+              <span className="spinner h-4 w-4 mr-1" />
+            ) : (
+              <CheckIcon className="h-4 w-4 mr-1" />
+            )}
+            Save Changes
+          </button>
+        </div>
+      </div>
+
+      {hasChanges && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 text-sm text-amber-800">
+          You have unsaved changes. Click "Save Changes" to apply them.
+        </div>
+      )}
+
+      {/* Permission categories */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {Object.entries(data.permission_categories).map(([category, categoryPerms]) => {
+          const selectedCount = categoryPerms.filter(p => permissions.includes(p)).length;
+          const allSelected = selectedCount === categoryPerms.length;
+          const someSelected = selectedCount > 0 && !allSelected;
+
+          return (
+            <div key={category} className="bg-surface-50 rounded-xl p-4">
+              <div className="flex items-center justify-between mb-3 pb-2 border-b border-surface-200">
+                <h4 className="font-medium text-surface-900">{category}</h4>
+                <button
+                  onClick={() => toggleCategory(category)}
+                  className={`text-xs px-2 py-1 rounded ${
+                    allSelected
+                      ? 'bg-werco-100 text-werco-700'
+                      : someSelected
+                      ? 'bg-amber-100 text-amber-700'
+                      : 'bg-surface-200 text-surface-600'
+                  }`}
+                >
+                  {selectedCount}/{categoryPerms.length}
+                </button>
+              </div>
+              <div className="space-y-2">
+                {categoryPerms.map(permission => (
+                  <label
+                    key={permission}
+                    className="flex items-center gap-2 cursor-pointer hover:bg-surface-100 rounded px-2 py-1 -mx-2"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={permissions.includes(permission)}
+                      onChange={() => togglePermission(permission)}
+                      className="checkbox"
+                    />
+                    <span className="text-sm text-surface-700">
+                      {formatPermissionLabel(permission)}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Permission summary */}
+      <div className="bg-surface-100 rounded-xl p-4">
+        <h4 className="font-medium text-surface-900 mb-2">
+          {selectedRole.charAt(0).toUpperCase() + selectedRole.slice(1)} has {permissions.length} of {data.all_permissions.length} permissions
+        </h4>
+        <div className="flex flex-wrap gap-1">
+          {permissions.map(p => (
+            <span key={p} className="badge badge-sm bg-werco-100 text-werco-700">
+              {p}
+            </span>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

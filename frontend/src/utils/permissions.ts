@@ -172,11 +172,34 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
 };
 
 /**
+ * Runtime permission overrides loaded from backend.
+ * When set, these take precedence over default ROLE_PERMISSIONS.
+ */
+let customPermissions: Record<string, Permission[]> | null = null;
+
+/**
+ * Load custom permissions from backend. Call this on app initialization.
+ */
+export function setCustomPermissions(permissions: Record<string, string[]> | null): void {
+  customPermissions = permissions as Record<string, Permission[]> | null;
+}
+
+/**
+ * Get current permissions for a role (custom if loaded, else default)
+ */
+function getCurrentRolePermissions(role: UserRole): Permission[] {
+  if (customPermissions && customPermissions[role]) {
+    return customPermissions[role];
+  }
+  return ROLE_PERMISSIONS[role] || [];
+}
+
+/**
  * Check if a user has a specific permission
  */
 export function hasPermission(userRole: UserRole | undefined, permission: Permission): boolean {
   if (!userRole) return false;
-  return ROLE_PERMISSIONS[userRole]?.includes(permission) ?? false;
+  return getCurrentRolePermissions(userRole).includes(permission);
 }
 
 /**
@@ -220,7 +243,7 @@ export function canApprove(userRole: UserRole | undefined): boolean {
  * Get all permissions for a role
  */
 export function getPermissionsForRole(role: UserRole): Permission[] {
-  return ROLE_PERMISSIONS[role] || [];
+  return getCurrentRolePermissions(role);
 }
 
 /**
