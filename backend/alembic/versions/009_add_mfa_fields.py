@@ -34,9 +34,9 @@ def column_exists(connection, table_name, column_name):
 def upgrade() -> None:
     connection = op.get_bind()
     
-    # Add mfa_enabled column
+    # Add mfa_enabled column (nullable to allow gradual migration)
     if not column_exists(connection, 'users', 'mfa_enabled'):
-        op.add_column('users', sa.Column('mfa_enabled', sa.Boolean(), nullable=False, server_default='false'))
+        op.add_column('users', sa.Column('mfa_enabled', sa.Boolean(), nullable=True, server_default='false'))
         print("Added mfa_enabled column")
     
     # Add mfa_secret column (encrypted TOTP secret)

@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Text, JSON
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, deferred
 from datetime import datetime
 import enum
 from app.db.database import Base
@@ -36,10 +36,11 @@ class User(Base):
     is_superuser = Column(Boolean, default=False)
     
     # CMMC Level 2 AC-3.1.1 - Multi-Factor Authentication (MFA)
-    mfa_enabled = Column(Boolean, default=False, nullable=False)
-    mfa_secret = Column(String(32), nullable=True)  # Base32 encoded TOTP secret
-    mfa_backup_codes = Column(JSON, nullable=True)  # List of one-time backup codes
-    mfa_setup_at = Column(DateTime, nullable=True)  # When MFA was enabled
+    # Using deferred loading to prevent query failures if migration hasn't run
+    mfa_enabled = deferred(Column(Boolean, default=False, nullable=True))
+    mfa_secret = deferred(Column(String(32), nullable=True))  # Base32 encoded TOTP secret
+    mfa_backup_codes = deferred(Column(JSON, nullable=True))  # List of one-time backup codes
+    mfa_setup_at = deferred(Column(DateTime, nullable=True))  # When MFA was enabled
     
     # CMMC Level 2 - Track last password change
     password_changed_at = Column(DateTime, default=datetime.utcnow)
