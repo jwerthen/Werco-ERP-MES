@@ -111,18 +111,24 @@ export default function Parts() {
     loadParts();
   }, [loadParts]);
 
-  // Filter parts - hide components that are part of assemblies (unless searching)
+  // Filter parts - only show manufactured/assembly parts (materials go to Materials & Hardware)
   const filteredParts = useMemo(() => {
-    let filtered = parts.filter(part => {
-      if (!search) return true;
+    // First filter to only manufactured and assembly parts
+    // Raw materials and purchased items belong in Materials & Hardware inventory
+    let filtered = parts.filter(part => 
+      part.part_type === 'manufactured' || part.part_type === 'assembly'
+    );
+    
+    // Apply search filter
+    if (search) {
       const searchLower = search.toLowerCase();
-      return (
+      filtered = filtered.filter(part =>
         part.part_number.toLowerCase().includes(searchLower) ||
         part.name.toLowerCase().includes(searchLower) ||
         part.description?.toLowerCase().includes(searchLower) ||
         part.customer_part_number?.toLowerCase().includes(searchLower)
       );
-    });
+    }
     
     // Hide parts that are components of assemblies (unless searching or toggled)
     if (!search && !showComponentsOnly && allComponentIds.size > 0) {
@@ -285,9 +291,7 @@ export default function Parts() {
         >
           <option value="">All Types</option>
           <option value="manufactured">Manufactured</option>
-          <option value="purchased">Purchased</option>
           <option value="assembly">Assembly</option>
-          <option value="raw_material">Raw Material</option>
         </select>
         <label className="flex items-center gap-2 text-sm text-gray-600 whitespace-nowrap">
           <input
@@ -554,9 +558,7 @@ export default function Parts() {
                     required
                   >
                     <option value="manufactured">Manufactured (Make)</option>
-                    <option value="purchased">Purchased (Buy)</option>
                     <option value="assembly">Assembly</option>
-                    <option value="raw_material">Raw Material</option>
                   </select>
                 </div>
                 <div>
