@@ -365,8 +365,55 @@ def consume_mfa_token(token: str) -> Optional[int]:
     return user_id
 
 
+# =============================================================================
+# MFA Helper Functions (using raw SQL for compatibility)
+# =============================================================================
+
+def _mfa_columns_exist(db: Session) -> bool:
+    """Check if MFA columns exist in the database."""
+    try:
+        db.execute(text("SELECT mfa_enabled FROM users LIMIT 1"))
+        return True
+    except Exception:
+        return False
+
+
+def _get_user_mfa_data(db: Session, user_id: int) -> dict:
+    """Get MFA data for a user using raw SQL."""
+    try:
+        result = db.execute(text(
+            "SELECT mfa_enabled, mfa_secret, mfa_backup_codes, mfa_setup_at "
+            "FROM users WHERE id = :user_id"
+        ), {"user_id": user_id}).fetchone()
+        if result:
+            return {
+                "mfa_enabled": result[0] or False,
+                "mfa_secret": result[1],
+                "mfa_backup_codes": result[2],
+                "mfa_setup_at": result[3]
+            }
+    except Exception as e:
+        logger.debug(f"Could not get MFA data: {e}")
+    return {"mfa_enabled": False, "mfa_secret": None, "mfa_backup_codes": None, "mfa_setup_at": None}
+
+
+def _update_user_mfa(db: Session, user_id: int, **kwargs) -> bool:
+    """Update MFA fields for a user using raw SQL."""
+    try:
+        set_clauses = ", ".join([f"{k} = :{k}" for k in kwargs.keys()])
+        params = {"user_id": user_id, **kwargs}
+        db.execute(text(f"UPDATE users SET {set_clauses} WHERE id = :user_id"), params)
+        db.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to update MFA: {e}")
+        db.rollback()
+        return False
+
+
 @router.get("/mfa/status", summary="Get MFA status for current user")
 def get_mfa_status(
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -374,11 +421,23 @@ def get_mfa_status(
     
     **CMMC Level 2 Control**: AC-3.1.1 - Multi-factor authentication
     """
+    if not _mfa_columns_exist(db):
+        return {
+            "mfa_enabled": False,
+            "mfa_required": True,
+            "mfa_pending_setup": True,
+            "mfa_setup_at": None,
+            "mfa_available": False,
+            "message": "MFA feature pending database migration"
+        }
+    
+    mfa_data = _get_user_mfa_data(db, current_user.id)
     return {
-        "mfa_enabled": current_user.mfa_enabled,
-        "mfa_required": current_user.mfa_required,
-        "mfa_pending_setup": current_user.mfa_pending_setup,
-        "mfa_setup_at": current_user.mfa_setup_at.isoformat() if current_user.mfa_setup_at else None
+        "mfa_enabled": mfa_data["mfa_enabled"],
+        "mfa_required": True,
+        "mfa_pending_setup": not mfa_data["mfa_enabled"],
+        "mfa_setup_at": mfa_data["mfa_setup_at"].isoformat() if mfa_data["mfa_setup_at"] else None,
+        "mfa_available": True
     }
 
 
@@ -399,7 +458,14 @@ def initiate_mfa_setup(
     **Important**: Save the backup codes securely. They can be used if you lose access
     to your authenticator app.
     """
-    if current_user.mfa_enabled:
+    if not _mfa_columns_exist(db):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MFA feature pending database migration. Please try again later."
+        )
+    
+    mfa_data_existing = _get_user_mfa_data(db, current_user.id)
+    if mfa_data_existing["mfa_enabled"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA is already enabled. Disable it first to set up again."
@@ -463,12 +529,16 @@ def complete_mfa_setup(
             detail="Invalid verification code. Please try again."
         )
     
-    # Save MFA to user
-    current_user.mfa_enabled = True
-    current_user.mfa_secret = pending["secret"]
-    current_user.mfa_backup_codes = pending["backup_codes_hashed"]
-    current_user.mfa_setup_at = datetime.utcnow()
-    db.commit()
+    # Save MFA to user using raw SQL
+    import json
+    backup_codes_json = json.dumps(pending["backup_codes_hashed"])
+    _update_user_mfa(
+        db, current_user.id,
+        mfa_enabled=True,
+        mfa_secret=pending["secret"],
+        mfa_backup_codes=backup_codes_json,
+        mfa_setup_at=datetime.utcnow()
+    )
     
     # Clean up pending setup
     del _mfa_setup_pending[current_user.email]
@@ -509,13 +579,16 @@ def verify_mfa_login(
             detail="User not found"
         )
     
+    # Get MFA data using raw SQL
+    mfa_data = _get_user_mfa_data(db, user.id)
+    
     # Try TOTP verification first
     _, verify_totp, verify_backup_code, _, _ = get_mfa_service()
     code = mfa_request.code.replace("-", "").replace(" ", "")
     
     if len(code) == 6 and code.isdigit():
         # Standard TOTP code
-        if not verify_totp(user.mfa_secret, code):
+        if not verify_totp(mfa_data["mfa_secret"], code):
             log_auth_event(db, "MFA_VERIFY_FAILED", user=user, success=False, 
                           request=request, error="Invalid TOTP code")
             raise HTTPException(
@@ -524,7 +597,11 @@ def verify_mfa_login(
             )
     else:
         # Try backup code
-        is_valid, used_index = verify_backup_code(mfa_request.code, user.mfa_backup_codes or [])
+        backup_codes = mfa_data["mfa_backup_codes"] or []
+        if isinstance(backup_codes, str):
+            import json
+            backup_codes = json.loads(backup_codes)
+        is_valid, used_index = verify_backup_code(mfa_request.code, backup_codes)
         if not is_valid:
             log_auth_event(db, "MFA_VERIFY_FAILED", user=user, success=False, 
                           request=request, error="Invalid code")
@@ -534,11 +611,10 @@ def verify_mfa_login(
             )
         
         # Invalidate used backup code
-        if used_index is not None and user.mfa_backup_codes:
-            codes = list(user.mfa_backup_codes)
-            codes[used_index] = None  # Mark as used
-            user.mfa_backup_codes = codes
-            db.commit()
+        if used_index is not None and backup_codes:
+            import json
+            backup_codes[used_index] = None  # Mark as used
+            _update_user_mfa(db, user.id, mfa_backup_codes=json.dumps(backup_codes))
             log_auth_event(db, "MFA_BACKUP_CODE_USED", user=user, success=True, request=request)
     
     # MFA verified - issue tokens
@@ -571,7 +647,8 @@ def disable_mfa(
     
     **Note**: Disabling MFA may affect CMMC compliance. Consider carefully.
     """
-    if not current_user.mfa_enabled:
+    mfa_data = _get_user_mfa_data(db, current_user.id)
+    if not mfa_data["mfa_enabled"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA is not enabled"
@@ -588,7 +665,7 @@ def disable_mfa(
     
     # Verify TOTP code
     _, verify_totp, _, _, _ = get_mfa_service()
-    if not verify_totp(current_user.mfa_secret, disable_request.code):
+    if not verify_totp(mfa_data["mfa_secret"], disable_request.code):
         log_auth_event(db, "MFA_DISABLE_FAILED", user=current_user, success=False, 
                       request=request, error="Invalid TOTP code")
         raise HTTPException(
@@ -596,12 +673,14 @@ def disable_mfa(
             detail="Invalid verification code"
         )
     
-    # Disable MFA
-    current_user.mfa_enabled = False
-    current_user.mfa_secret = None
-    current_user.mfa_backup_codes = None
-    current_user.mfa_setup_at = None
-    db.commit()
+    # Disable MFA using raw SQL
+    _update_user_mfa(
+        db, current_user.id,
+        mfa_enabled=False,
+        mfa_secret=None,
+        mfa_backup_codes=None,
+        mfa_setup_at=None
+    )
     
     log_auth_event(db, "MFA_DISABLED", user=current_user, success=True, request=request)
     
@@ -623,7 +702,8 @@ def regenerate_backup_codes(
     
     Requires current TOTP code to confirm.
     """
-    if not current_user.mfa_enabled:
+    mfa_data = _get_user_mfa_data(db, current_user.id)
+    if not mfa_data["mfa_enabled"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA is not enabled"
@@ -631,7 +711,7 @@ def regenerate_backup_codes(
     
     # Verify TOTP code
     _, verify_totp, _, hash_backup_codes, generate_backup_codes = get_mfa_service()
-    if not verify_totp(current_user.mfa_secret, verify_request.code):
+    if not verify_totp(mfa_data["mfa_secret"], verify_request.code):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid verification code"
@@ -640,8 +720,8 @@ def regenerate_backup_codes(
     # Generate new backup codes
     new_codes = generate_backup_codes()
     
-    current_user.mfa_backup_codes = hash_backup_codes(new_codes)
-    db.commit()
+    import json
+    _update_user_mfa(db, current_user.id, mfa_backup_codes=json.dumps(hash_backup_codes(new_codes)))
     
     log_auth_event(db, "MFA_BACKUP_CODES_REGENERATED", user=current_user, success=True, request=request)
     
