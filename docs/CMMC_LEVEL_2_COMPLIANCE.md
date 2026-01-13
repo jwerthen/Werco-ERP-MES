@@ -14,10 +14,14 @@
 
 | Category | Status |
 |----------|--------|
-| Controls Implemented | ~45 of 110 |
-| Critical Gaps | 6 |
-| High Priority Items | 10 |
-| Estimated Remediation | 8-12 weeks |
+| Controls Implemented | ~47 of 110 |
+| Critical Gaps | 4 |
+| High Priority Items | 9 |
+| Estimated Remediation | 6-10 weeks |
+
+### Recently Completed
+- ✅ **AU-3.3.8** - Immutable Audit Logs (Hash chain integrity)
+- ✅ **AC-3.1.1** - Multi-Factor Authentication (TOTP)
 
 ---
 
@@ -36,9 +40,17 @@
 - [ ] **AC-3.1.10 - Session Inactivity Timeout** ⚠️ HIGH
   - Need: 15-30 minute inactivity lockout
   - Effort: 3-5 days
-- [ ] **AC-3.1.1 - Multi-Factor Authentication** 🔴 CRITICAL
-  - Need: TOTP/SMS/Hardware token support
-  - Effort: 2-3 weeks
+- [x] **AC-3.1.1 - Multi-Factor Authentication** ✅ COMPLETE
+  - Implemented: TOTP-based MFA using RFC 6238
+  - Features:
+    - QR code setup for authenticator apps (Google/Microsoft/Authy/1Password)
+    - 6-digit TOTP codes with 30-second interval
+    - 10 one-time backup codes (SHA-256 hashed)
+    - Two-step login flow (password -> MFA code)
+    - MFA enable/disable with verification
+    - Backup code regeneration
+  - API: /auth/mfa/setup, /auth/mfa/verify, /auth/mfa/status, /auth/mfa/disable
+  - Frontend: MFA verification during login, 6-digit code input with auto-submit
 - [ ] **AC-3.1.12 - Remote Access Control**
   - Need: VPN or additional controls for remote access
   - Effort: 1 week

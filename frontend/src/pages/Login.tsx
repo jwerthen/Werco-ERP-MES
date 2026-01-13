@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { ShieldCheckIcon, LockClosedIcon, EnvelopeIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
+import { ShieldCheckIcon, LockClosedIcon, EnvelopeIcon, EyeIcon, EyeSlashIcon, DevicePhoneMobileIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
 
 // Animated particle component for background
 const AnimatedParticles = () => {
@@ -86,6 +86,70 @@ const PowerFlowLines = () => (
   </div>
 );
 
+// MFA Code Input Component
+const MFACodeInput = ({ value, onChange, onComplete, disabled }: { 
+  value: string; 
+  onChange: (val: string) => void; 
+  onComplete: () => void;
+  disabled?: boolean;
+}) => {
+  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const digits = value.split('').concat(Array(6 - value.length).fill(''));
+  
+  const handleInput = (index: number, inputValue: string) => {
+    const digit = inputValue.slice(-1);
+    if (!/^\d*$/.test(digit)) return;
+    
+    const newValue = digits.map((d, i) => i === index ? digit : d).join('').slice(0, 6);
+    onChange(newValue);
+    
+    if (digit && index < 5) {
+      inputRefs.current[index + 1]?.focus();
+    }
+    
+    if (newValue.length === 6) {
+      onComplete();
+    }
+  };
+  
+  const handleKeyDown = (index: number, e: React.KeyboardEvent) => {
+    if (e.key === 'Backspace' && !digits[index] && index > 0) {
+      inputRefs.current[index - 1]?.focus();
+    }
+  };
+  
+  const handlePaste = (e: React.ClipboardEvent) => {
+    e.preventDefault();
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+    onChange(pasted);
+    if (pasted.length === 6) {
+      onComplete();
+    }
+  };
+  
+  return (
+    <div className="flex gap-2 justify-center" onPaste={handlePaste}>
+      {digits.map((digit, index) => (
+        <input
+          key={index}
+          ref={el => inputRefs.current[index] = el}
+          type="text"
+          inputMode="numeric"
+          maxLength={1}
+          value={digit}
+          onChange={(e) => handleInput(index, e.target.value)}
+          onKeyDown={(e) => handleKeyDown(index, e)}
+          disabled={disabled}
+          className="w-12 h-14 text-center text-2xl font-bold border-2 border-slate-200 rounded-xl 
+                     focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-200
+                     disabled:bg-slate-100 disabled:text-slate-400 transition-all"
+          autoFocus={index === 0}
+        />
+      ))}
+    </div>
+  );
+};
+
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -93,8 +157,15 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
-  const { login } = useAuth();
+  const [mfaCode, setMfaCode] = useState('');
+  const { login, mfaRequired, verifyMFA, cancelMFA } = useAuth();
   const navigate = useNavigate();
+
+  // Navigate after successful login (including after MFA)
+  useEffect(() => {
+    // If we have a user but no MFA pending, navigate
+    // This is handled in the login/verifyMFA flow
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,12 +174,40 @@ export default function Login() {
 
     try {
       await login(email, password);
-      navigate('/');
+      // If MFA is required, the mfaRequired state will be set
+      // If not, navigate to dashboard
+      if (!mfaRequired) {
+        navigate('/');
+      }
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Login failed. Please try again.');
     } finally {
       setLoading(false);
     }
+  };
+  
+  const handleMFASubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (mfaCode.length !== 6 && !mfaCode.includes('-')) return;
+    
+    setError('');
+    setLoading(true);
+    
+    try {
+      await verifyMFA(mfaCode);
+      navigate('/');
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Invalid verification code');
+      setMfaCode('');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const handleCancelMFA = () => {
+    cancelMFA();
+    setMfaCode('');
+    setError('');
   };
 
   return (
@@ -264,30 +363,99 @@ export default function Login() {
             {/* Subtle gradient accent at top */}
             <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-cyan-500 via-cyan-600 to-blue-500" />
             
-            <div className="text-center mb-8">
-              {/* Animated lock icon container */}
-              <div className="relative w-16 h-16 mx-auto mb-5">
-                <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl rotate-3 opacity-20" />
-                <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl -rotate-3 opacity-20" />
-                <div className="relative w-full h-full bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl flex items-center justify-center shadow-lg">
-                  <LockClosedIcon className="h-8 w-8 text-cyan-400" />
+            {/* MFA Verification View */}
+            {mfaRequired ? (
+              <>
+                <div className="text-center mb-8">
+                  <div className="relative w-16 h-16 mx-auto mb-5">
+                    <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl rotate-3 opacity-20" />
+                    <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl -rotate-3 opacity-20" />
+                    <div className="relative w-full h-full bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl flex items-center justify-center shadow-lg">
+                      <DevicePhoneMobileIcon className="h-8 w-8 text-cyan-400" />
+                    </div>
+                  </div>
+                  <h2 className="text-2xl font-bold text-slate-800">Two-Factor Authentication</h2>
+                  <p className="text-slate-500 mt-2">Enter the 6-digit code from your authenticator app</p>
                 </div>
-              </div>
-              <h2 className="text-2xl font-bold text-slate-800">Welcome back</h2>
-              <p className="text-slate-500 mt-2">Sign in to access your dashboard</p>
-            </div>
-
-            <form onSubmit={handleSubmit} className="space-y-6">
-              {error && (
-                <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-center gap-2 animate-fade-in">
-                  <svg className="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                  </svg>
-                  <span className="text-sm">{error}</span>
+                
+                <form onSubmit={handleMFASubmit} className="space-y-6">
+                  {error && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-center gap-2 animate-fade-in">
+                      <svg className="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                      </svg>
+                      <span className="text-sm">{error}</span>
+                    </div>
+                  )}
+                  
+                  <div className="py-4">
+                    <MFACodeInput 
+                      value={mfaCode}
+                      onChange={setMfaCode}
+                      onComplete={handleMFASubmit}
+                      disabled={loading}
+                    />
+                  </div>
+                  
+                  <p className="text-xs text-slate-500 text-center">
+                    You can also use a backup code if you've lost access to your authenticator
+                  </p>
+                  
+                  <button
+                    type="submit"
+                    disabled={loading || mfaCode.length < 6}
+                    className="btn-glow w-full py-4 text-base font-semibold text-white rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {loading ? (
+                      <span className="flex items-center justify-center gap-3">
+                        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                        </svg>
+                        Verifying...
+                      </span>
+                    ) : (
+                      'Verify Code'
+                    )}
+                  </button>
+                  
+                  <button
+                    type="button"
+                    onClick={handleCancelMFA}
+                    className="w-full py-3 text-sm font-medium text-slate-600 hover:text-slate-800 flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <ArrowLeftIcon className="h-4 w-4" />
+                    Back to login
+                  </button>
+                </form>
+              </>
+            ) : (
+              <>
+                {/* Standard Login View */}
+                <div className="text-center mb-8">
+                  {/* Animated lock icon container */}
+                  <div className="relative w-16 h-16 mx-auto mb-5">
+                    <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl rotate-3 opacity-20" />
+                    <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl -rotate-3 opacity-20" />
+                    <div className="relative w-full h-full bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl flex items-center justify-center shadow-lg">
+                      <LockClosedIcon className="h-8 w-8 text-cyan-400" />
+                    </div>
+                  </div>
+                  <h2 className="text-2xl font-bold text-slate-800">Welcome back</h2>
+                  <p className="text-slate-500 mt-2">Sign in to access your dashboard</p>
                 </div>
-              )}
 
-              {/* Email field */}
+                <form onSubmit={handleSubmit} className="space-y-6">
+                  {error && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-center gap-2 animate-fade-in">
+                      <svg className="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                      </svg>
+                      <span className="text-sm">{error}</span>
+                    </div>
+                  )}
+
+                  {/* Email field */}
               <div className="space-y-2">
                 <label htmlFor="email" className="block text-sm font-medium text-slate-700">
                   Email Address
@@ -383,7 +551,9 @@ export default function Login() {
                   </span>
                 )}
               </button>
-            </form>
+                </form>
+              </>
+            )}
             
             {/* Security badge */}
             <div className="mt-8 pt-6 border-t border-slate-100">

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Text, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -16,6 +16,12 @@ class UserRole(str, enum.Enum):
 
 
 class User(Base):
+    """
+    User model with CMMC Level 2 compliance features.
+    
+    MFA (AC-3.1.1): Multi-factor authentication via TOTP
+    Password Policy (IA-3.5.7/8/9): Tracking for policy enforcement
+    """
     __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -29,10 +35,19 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     is_superuser = Column(Boolean, default=False)
     
+    # CMMC Level 2 AC-3.1.1 - Multi-Factor Authentication (MFA)
+    mfa_enabled = Column(Boolean, default=False, nullable=False)
+    mfa_secret = Column(String(32), nullable=True)  # Base32 encoded TOTP secret
+    mfa_backup_codes = Column(JSON, nullable=True)  # List of one-time backup codes
+    mfa_setup_at = Column(DateTime, nullable=True)  # When MFA was enabled
+    
     # CMMC Level 2 - Track last password change
     password_changed_at = Column(DateTime, default=datetime.utcnow)
     failed_login_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
+    
+    # Optimistic locking
+    version = Column(Integer, default=1, nullable=False)
     
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -46,3 +61,14 @@ class User(Base):
     @property
     def full_name(self) -> str:
         return f"{self.first_name} {self.last_name}"
+    
+    @property
+    def mfa_required(self) -> bool:
+        """Check if MFA is required for this user based on role."""
+        # All roles require MFA for CMMC compliance
+        return True
+    
+    @property 
+    def mfa_pending_setup(self) -> bool:
+        """Check if user needs to set up MFA."""
+        return self.mfa_required and not self.mfa_enabled

@@ -7,12 +7,20 @@ const IDLE_TIMEOUT = 15 * 60 * 1000;
 // Warning before timeout (1 minute before)
 const IDLE_WARNING = 60 * 1000;
 
+interface MFARequired {
+  mfaToken: string;
+  message: string;
+}
+
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   sessionWarning: boolean;
+  mfaRequired: MFARequired | null;
   login: (email: string, password: string) => Promise<void>;
+  verifyMFA: (code: string) => Promise<void>;
+  cancelMFA: () => void;
   logout: () => void;
   extendSession: () => void;
 }
@@ -23,6 +31,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [sessionWarning, setSessionWarning] = useState(false);
+  const [mfaRequired, setMfaRequired] = useState<MFARequired | null>(null);
   
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
   const warningTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -113,7 +122,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string) => {
     const response = await api.login(email, password);
-    // Use setTokens for new refresh token flow, fallback to setToken for backwards compatibility
+    
+    // Check if MFA is required (CMMC Level 2 AC-3.1.1)
+    if (response.mfa_required) {
+      setMfaRequired({
+        mfaToken: response.mfa_token,
+        message: response.message
+      });
+      return; // Don't complete login yet - need MFA verification
+    }
+    
+    // No MFA required or not enabled - complete login
     if (response.refresh_token && response.expires_in) {
       api.setTokens(response.access_token, response.refresh_token, response.expires_in);
     } else {
@@ -121,6 +140,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     setUser(response.user);
     localStorage.setItem('user', JSON.stringify(response.user));
+  };
+  
+  const verifyMFA = async (code: string) => {
+    if (!mfaRequired) {
+      throw new Error('No MFA session active');
+    }
+    
+    const response = await api.verifyMFALogin(mfaRequired.mfaToken, code);
+    
+    // MFA verified - complete login
+    if (response.refresh_token && response.expires_in) {
+      api.setTokens(response.access_token, response.refresh_token, response.expires_in);
+    } else {
+      api.setToken(response.access_token);
+    }
+    setUser(response.user);
+    localStorage.setItem('user', JSON.stringify(response.user));
+    setMfaRequired(null);
+  };
+  
+  const cancelMFA = () => {
+    setMfaRequired(null);
   };
 
   const logout = () => {
@@ -135,7 +176,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: !!user,
       isLoading,
       sessionWarning,
+      mfaRequired,
       login,
+      verifyMFA,
+      cancelMFA,
       logout,
       extendSession
     }}>
