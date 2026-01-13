@@ -36,45 +36,88 @@ Then say: "You are focused on testing and quality assurance. Run tests, fix issu
 
 ## BACKEND SESSION TASKS (Terminal 1)
 
-### Priority 1: Data Export Functionality (CSV/Excel)
+### ✅ COMPLETED - Round 1
+- [x] Data Export Functionality (CSV/Excel)
+- [x] Print-Friendly Report Endpoints
+- [x] Unit Tests for PO Upload Raw Material Fix
+
+---
+
+### Priority 1: Email Notifications for Critical Events
 **Priority**: Medium | **Category**: Features  
 **Files**: `backend/app/` only
 
-- [ ] Create export endpoints for key entities:
-  - GET /work-orders/export?format=csv|xlsx
-  - GET /parts/export?format=csv|xlsx
-  - GET /inventory/export?format=csv|xlsx
-  - GET /purchase-orders/export?format=csv|xlsx
-  - GET /quotes/export?format=csv|xlsx
-- [ ] Add date range filtering (start_date, end_date params)
-- [ ] Add column selection parameter
-- [ ] Use openpyxl or xlsxwriter for Excel generation
-- [ ] Use csv module for CSV generation
-- [ ] Set proper Content-Disposition headers for download
+- [ ] Create email service (`backend/app/services/email_service.py`)
+  - Use SendGrid, AWS SES, or SMTP
+  - Environment config for email provider
+  - HTML email templates
+- [ ] Create notification preferences model
+  - User can opt-in/out of notification types
+  - Store in database
+- [ ] Implement notifications for:
+  - Work order status changes (released, completed, on hold)
+  - Low inventory alerts (below reorder point)
+  - Quality hold/NCR created
+  - Purchase order received
+  - Quote approved/rejected
+- [ ] Add background task queue (Celery or similar) for async email sending
+- [ ] Create API endpoint to update notification preferences
 
-**Estimated Time**: 4-6 hours
+**Estimated Time**: 6-8 hours
 
-### Priority 2: Print-Friendly Report Endpoints
-**Priority**: Low | **Category**: Features
+### Priority 2: Application Metrics (Prometheus)
+**Priority**: Low | **Category**: Monitoring
 
-- [ ] Create simplified JSON endpoints for print views:
-  - GET /work-orders/{id}/print-data
-  - GET /quotes/{id}/print-data
-  - GET /purchase-orders/{id}/print-data
-- [ ] Include all related data in single response (no additional API calls needed)
-- [ ] Format dates and numbers for display
+- [ ] Add prometheus-fastapi-instrumentator package
+- [ ] Create /metrics endpoint
+- [ ] Track key metrics:
+  - Request count by endpoint
+  - Request latency (p50, p95, p99)
+  - Error rates
+  - Active database connections
+  - Cache hit/miss rates
+- [ ] Add custom business metrics:
+  - Work orders created/completed per day
+  - Parts manufactured count
+  - API usage by user role
 
-**Estimated Time**: 2-3 hours
+**Estimated Time**: 3-4 hours
 
-### Priority 3: Unit Tests for PO Upload Raw Material Fix
-**Priority**: Medium | **Category**: Testing
+### Priority 3: Vendor Management API
+**Priority**: Medium | **Category**: Features
 
-- [ ] Write tests for PO upload endpoint
-- [ ] Test raw material parsing logic
-- [ ] Test edge cases (missing fields, invalid data)
-- [ ] Add to `backend/tests/`
+- [ ] Create Vendor model if not exists:
+  - name, code, address, city, state, zip
+  - contact_name, contact_email, contact_phone
+  - payment_terms, status (active/inactive)
+  - notes, website
+- [ ] CRUD endpoints:
+  - GET /vendors (list with search/filter)
+  - GET /vendors/{id}
+  - POST /vendors
+  - PUT /vendors/{id}
+  - DELETE /vendors/{id} (soft delete)
+- [ ] GET /vendors/{id}/purchase-orders (vendor's PO history)
+- [ ] Vendor performance metrics endpoint
 
-**Estimated Time**: 2-3 hours
+**Estimated Time**: 4-5 hours
+
+### Priority 4: Customer Management Enhancement
+**Priority**: Medium | **Category**: Features
+
+- [ ] Enhance Customer model if needed:
+  - Multiple contacts per customer
+  - Shipping addresses (multiple)
+  - Billing address
+  - Credit terms, credit limit
+- [ ] Customer contacts sub-resource:
+  - GET /customers/{id}/contacts
+  - POST /customers/{id}/contacts
+- [ ] Customer addresses sub-resource
+- [ ] GET /customers/{id}/orders (order history)
+- [ ] GET /customers/{id}/quotes (quote history)
+
+**Estimated Time**: 4-5 hours
 
 ---
 
@@ -177,9 +220,13 @@ Then say: "You are focused on testing and quality assurance. Run tests, fix issu
 
 | Task | Priority | Backend | Frontend | Tested |
 |------|----------|---------|----------|--------|
-| Data Export (CSV/Excel) | Medium | ⬜ | N/A | ⬜ |
-| PO Upload Unit Tests | Medium | ⬜ | N/A | ⬜ |
-| Print Report Endpoints | Low | ⬜ | N/A | ⬜ |
+| Data Export (CSV/Excel) | Medium | ✅ | N/A | ⬜ |
+| PO Upload Unit Tests | Medium | ✅ | N/A | ⬜ |
+| Print Report Endpoints | Low | ✅ | N/A | ⬜ |
+| Email Notifications | Medium | ⬜ | N/A | ⬜ |
+| Application Metrics | Low | ⬜ | N/A | ⬜ |
+| Vendor Management API | Medium | ⬜ | N/A | ⬜ |
+| Customer Enhancement | Medium | ⬜ | N/A | ⬜ |
 | Frontend Unit Tests >70% | High | N/A | 🔄 | ⬜ |
 | Keyboard Navigation | Low | N/A | ⬜ | ⬜ |
 | WCAG 2.1 AA Accessibility | Medium | N/A | ⬜ | ⬜ |
