@@ -9,30 +9,33 @@ from app.core.security import (
 )
 from app.core.config import settings
 from app.models.user import User, UserRole
-from app.models.audit_log import AuditLog
 from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest
 from app.api.deps import get_current_user, require_role
+from app.services.audit_service import AuditService
 
 router = APIRouter()
 
 
 def log_auth_event(db: Session, action: str, user: User = None, email: str = None, 
                    success: bool = True, request: Request = None, error: str = None):
-    """Log authentication events for CMMC compliance"""
-    log = AuditLog(
-        user_id=user.id if user else None,
-        user_email=user.email if user else email,
-        user_name=user.full_name if user else None,
-        action=action,
-        resource_type="authentication",
-        description=f"{action} attempt for {email or (user.email if user else 'unknown')}",
-        success="true" if success else "false",
-        error_message=error,
-        ip_address=request.client.host if request else None,
-        user_agent=request.headers.get("user-agent") if request else None,
-    )
-    db.add(log)
-    db.commit()
+    """Log authentication events for CMMC compliance using AuditService"""
+    try:
+        AuditService.log(
+            db=db,
+            action=action,
+            resource_type="authentication",
+            description=f"{action} attempt for {email or (user.email if user else 'unknown')}",
+            user_id=user.id if user else None,
+            user_email=user.email if user else email,
+            user_name=user.full_name if user else None,
+            success=success,
+            error_message=error,
+            request=request,
+        )
+    except Exception as e:
+        # Don't let audit logging failures break authentication
+        import logging
+        logging.warning(f"Failed to log auth event: {e}")
 
 
 @router.post("/login", response_model=Token, summary="User login")
