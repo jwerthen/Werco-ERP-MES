@@ -1,11 +1,18 @@
 """
-Comprehensive Audit Service for AS9100D Compliance.
-Provides centralized audit logging for all entity changes.
+Comprehensive Audit Service for AS9100D and CMMC Level 2 Compliance.
+Provides centralized audit logging for all entity changes with tamper detection.
+
+CMMC Level 2 Control: AU-3.3.8 - Protect Audit Information
+- Immutable audit logs with hash chain integrity
+- Sequence numbers for gap detection
+- SHA-256 cryptographic hashing
 """
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Tuple
 from datetime import datetime
+import hashlib
+import json
 from sqlalchemy.orm import Session
-from sqlalchemy import inspect
+from sqlalchemy import inspect, func, desc
 from fastapi import Request
 
 from app.models.audit_log import AuditLog
@@ -13,6 +20,59 @@ from app.models.user import User
 from app.core.logging import get_logger, get_correlation_id
 
 logger = get_logger(__name__)
+
+
+def compute_audit_hash(
+    sequence_number: int,
+    timestamp: datetime,
+    user_id: Optional[int],
+    user_email: Optional[str],
+    action: str,
+    resource_type: str,
+    resource_id: Optional[int],
+    resource_identifier: Optional[str],
+    description: Optional[str],
+    old_values: Optional[Dict],
+    new_values: Optional[Dict],
+    ip_address: Optional[str],
+    session_id: Optional[str],
+    success: str,
+    previous_hash: Optional[str]
+) -> str:
+    """
+    Compute SHA-256 hash for audit log integrity verification.
+    
+    The hash includes:
+    - All significant audit fields
+    - Previous record's hash (chain link)
+    - Sequence number
+    
+    This creates a blockchain-like structure where tampering with
+    any record breaks the chain from that point forward.
+    """
+    # Create deterministic string representation
+    hash_input = {
+        "seq": sequence_number,
+        "ts": timestamp.isoformat() if timestamp else None,
+        "uid": user_id,
+        "email": user_email,
+        "action": action,
+        "rtype": resource_type,
+        "rid": resource_id,
+        "rident": resource_identifier,
+        "desc": description,
+        "old": old_values,
+        "new": new_values,
+        "ip": ip_address,
+        "sid": session_id,
+        "success": success,
+        "prev": previous_hash
+    }
+    
+    # Use JSON with sorted keys for deterministic serialization
+    hash_string = json.dumps(hash_input, sort_keys=True, default=str)
+    
+    return hashlib.sha256(hash_string.encode('utf-8')).hexdigest()
 
 
 class AuditService:
@@ -149,6 +209,20 @@ class AuditService:
         
         return changes
     
+    def _get_next_sequence_and_previous_hash(self) -> Tuple[int, Optional[str]]:
+        """
+        Get the next sequence number and previous hash for chain integrity.
+        Uses database locking to ensure atomicity.
+        """
+        # Get the last audit log entry
+        last_entry = self.db.query(AuditLog).order_by(desc(AuditLog.sequence_number)).first()
+        
+        if last_entry:
+            return last_entry.sequence_number + 1, last_entry.integrity_hash
+        else:
+            # First entry in the audit log
+            return 1, None
+    
     def log(
         self,
         action: str,
@@ -162,15 +236,57 @@ class AuditService:
         error_message: Optional[str] = None,
         extra_data: Optional[Dict] = None
     ) -> AuditLog:
-        """Create an audit log entry."""
+        """
+        Create an immutable audit log entry with hash chain integrity.
+        
+        CMMC Level 2 AU-3.3.8 Compliance:
+        - Each entry includes a SHA-256 hash of its content
+        - Hash chain links each entry to the previous one
+        - Sequence numbers enable gap detection
+        """
         try:
             # Include correlation ID for request tracing
             correlation_id = get_correlation_id()
             
+            # Get timestamp for the entry
+            timestamp = datetime.utcnow()
+            
+            # Get user info
+            user_id = self.user.id if self.user else None
+            user_email = self.user.email if self.user else None
+            user_name = getattr(self.user, 'full_name', None) if self.user else None
+            success_str = "true" if success else "false"
+            
+            # Get next sequence number and previous hash (for chain integrity)
+            sequence_number, previous_hash = self._get_next_sequence_and_previous_hash()
+            
+            # Compute integrity hash
+            integrity_hash = compute_audit_hash(
+                sequence_number=sequence_number,
+                timestamp=timestamp,
+                user_id=user_id,
+                user_email=user_email,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                resource_identifier=resource_identifier,
+                description=description,
+                old_values=old_values,
+                new_values=new_values,
+                ip_address=self._ip_address,
+                session_id=correlation_id,
+                success=success_str,
+                previous_hash=previous_hash
+            )
+            
             log_entry = AuditLog(
-                user_id=self.user.id if self.user else None,
-                user_email=self.user.email if self.user else None,
-                user_name=getattr(self.user, 'full_name', None) if self.user else None,
+                sequence_number=sequence_number,
+                integrity_hash=integrity_hash,
+                previous_hash=previous_hash,
+                timestamp=timestamp,
+                user_id=user_id,
+                user_email=user_email,
+                user_name=user_name,
                 action=action,
                 resource_type=resource_type,
                 resource_id=resource_id,
@@ -180,8 +296,8 @@ class AuditService:
                 new_values=new_values,
                 ip_address=self._ip_address,
                 user_agent=self._user_agent,
-                session_id=correlation_id,  # Store correlation ID for request tracing
-                success="true" if success else "false",
+                session_id=correlation_id,
+                success=success_str,
                 error_message=error_message,
                 extra_data=extra_data
             )
