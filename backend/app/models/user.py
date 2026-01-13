@@ -16,15 +16,6 @@ class UserRole(str, enum.Enum):
 
 
 class User(Base):
-    """
-    User model with CMMC Level 2 compliance features.
-    
-    MFA (AC-3.1.1): Multi-factor authentication via TOTP - columns added via migration
-    Password Policy (IA-3.5.7/8/9): Tracking for policy enforcement
-    
-    Note: MFA columns (mfa_enabled, mfa_secret, mfa_backup_codes, mfa_setup_at) are
-    managed separately via raw SQL queries to allow for gradual migration.
-    """
     __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)

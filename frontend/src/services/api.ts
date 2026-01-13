@@ -259,37 +259,6 @@ class ApiService {
     return response.data;
   }
 
-  // MFA (Multi-Factor Authentication) - CMMC Level 2 AC-3.1.1
-  async getMFAStatus() {
-    const response = await this.api.get('/auth/mfa/status');
-    return response.data;
-  }
-
-  async setupMFA() {
-    const response = await this.api.post('/auth/mfa/setup');
-    return response.data;
-  }
-
-  async verifyMFASetup(code: string) {
-    const response = await this.api.post('/auth/mfa/setup/verify', { code });
-    return response.data;
-  }
-
-  async verifyMFALogin(mfaToken: string, code: string) {
-    const response = await this.api.post('/auth/mfa/verify', { mfa_token: mfaToken, code });
-    return response.data;
-  }
-
-  async disableMFA(code: string, password: string) {
-    const response = await this.api.post('/auth/mfa/disable', { code, password });
-    return response.data;
-  }
-
-  async regenerateBackupCodes(code: string) {
-    const response = await this.api.post('/auth/mfa/backup-codes/regenerate', { code });
-    return response.data;
-  }
-
   async register(userData: any) {
     const response = await this.api.post('/auth/register', userData);
     return response.data;
