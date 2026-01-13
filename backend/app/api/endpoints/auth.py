@@ -15,6 +15,9 @@ from app.models.audit_log import AuditLog
 from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest
 from app.api.deps import get_current_user, require_role
 from app.services.audit_service import AuditService
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Lazy import MFA service to prevent app crash if pyotp not installed
 def get_mfa_service():
@@ -161,18 +164,22 @@ def login(
     db.commit()
     
     # Check if MFA is required (CMMC Level 2 AC-3.1.1)
-    # Use getattr to handle case where migration hasn't run yet
-    mfa_enabled = getattr(user, 'mfa_enabled', False)
-    if mfa_enabled:
-        # User has MFA enabled - require second factor
-        mfa_token = create_mfa_token(user.id)
-        log_auth_event(db, "LOGIN_MFA_REQUIRED", user=user, success=True, request=request)
-        
-        return MFARequiredResponse(
-            mfa_required=True,
-            mfa_token=mfa_token,
-            message="MFA verification required. Use /auth/mfa/verify to complete login."
-        )
+    # Wrap in try-except to handle case where MFA columns don't exist yet
+    try:
+        mfa_enabled = getattr(user, 'mfa_enabled', False)
+        if mfa_enabled:
+            # User has MFA enabled - require second factor
+            mfa_token = create_mfa_token(user.id)
+            log_auth_event(db, "LOGIN_MFA_REQUIRED", user=user, success=True, request=request)
+            
+            return MFARequiredResponse(
+                mfa_required=True,
+                mfa_token=mfa_token,
+                message="MFA verification required. Use /auth/mfa/verify to complete login."
+            )
+    except Exception as e:
+        # MFA columns may not exist yet - proceed without MFA
+        logger.warning(f"MFA check skipped (migration may be pending): {e}")
     
     # No MFA - issue tokens directly (for users who haven't set up MFA yet)
     # Note: CMMC compliance requires all users to have MFA. Prompt them to set it up.

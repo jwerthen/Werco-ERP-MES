@@ -6,18 +6,40 @@ to privileged and non-privileged accounts.
 
 Implements TOTP (Time-based One-Time Password) using RFC 6238.
 """
-import pyotp
 import secrets
 import hashlib
 import base64
 from io import BytesIO
 from typing import Optional, List, Tuple
 from datetime import datetime
-import qrcode
 
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Lazy import pyotp and qrcode to handle missing dependencies gracefully
+_pyotp = None
+_qrcode = None
+
+def _ensure_pyotp():
+    global _pyotp
+    if _pyotp is None:
+        try:
+            import pyotp
+            _pyotp = pyotp
+        except ImportError:
+            raise ImportError("pyotp is required for MFA. Install with: pip install pyotp")
+    return _pyotp
+
+def _ensure_qrcode():
+    global _qrcode
+    if _qrcode is None:
+        try:
+            import qrcode
+            _qrcode = qrcode
+        except ImportError:
+            raise ImportError("qrcode is required for MFA. Install with: pip install qrcode[pil]")
+    return _qrcode
 
 # MFA Configuration
 MFA_ISSUER = "Werco ERP"
@@ -32,11 +54,13 @@ def generate_mfa_secret() -> str:
     Generate a new TOTP secret for MFA setup.
     Returns a base32-encoded secret string.
     """
+    pyotp = _ensure_pyotp()
     return pyotp.random_base32()
 
 
-def get_totp(secret: str) -> pyotp.TOTP:
+def get_totp(secret: str):
     """Create a TOTP object for verification."""
+    pyotp = _ensure_pyotp()
     return pyotp.TOTP(secret, digits=MFA_DIGITS, interval=MFA_INTERVAL)
 
 
@@ -84,6 +108,7 @@ def generate_qr_code_base64(provisioning_uri: str) -> str:
     Returns:
         Base64 encoded PNG image string for embedding in HTML/JSON
     """
+    qrcode = _ensure_qrcode()
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_L,
