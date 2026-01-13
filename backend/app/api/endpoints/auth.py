@@ -3,6 +3,7 @@ from typing import Optional, List, Union
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from pydantic import BaseModel
 from app.db.database import get_db
 from app.core.security import (
@@ -164,22 +165,29 @@ def login(
     db.commit()
     
     # Check if MFA is required (CMMC Level 2 AC-3.1.1)
-    # Wrap in try-except to handle case where MFA columns don't exist yet
+    # MFA check is skipped if columns don't exist (migration pending)
+    mfa_enabled = False
     try:
-        mfa_enabled = getattr(user, 'mfa_enabled', False)
-        if mfa_enabled:
-            # User has MFA enabled - require second factor
-            mfa_token = create_mfa_token(user.id)
-            log_auth_event(db, "LOGIN_MFA_REQUIRED", user=user, success=True, request=request)
-            
-            return MFARequiredResponse(
-                mfa_required=True,
-                mfa_token=mfa_token,
-                message="MFA verification required. Use /auth/mfa/verify to complete login."
-            )
+        # Direct query to check if column exists and get value
+        result = db.execute(text(
+            "SELECT mfa_enabled FROM users WHERE id = :user_id"
+        ), {"user_id": user.id}).fetchone()
+        if result and result[0]:
+            mfa_enabled = True
     except Exception as e:
         # MFA columns may not exist yet - proceed without MFA
-        logger.warning(f"MFA check skipped (migration may be pending): {e}")
+        logger.debug(f"MFA check skipped: {e}")
+    
+    if mfa_enabled:
+        # User has MFA enabled - require second factor
+        mfa_token = create_mfa_token(user.id)
+        log_auth_event(db, "LOGIN_MFA_REQUIRED", user=user, success=True, request=request)
+        
+        return MFARequiredResponse(
+            mfa_required=True,
+            mfa_token=mfa_token,
+            message="MFA verification required. Use /auth/mfa/verify to complete login."
+        )
     
     # No MFA - issue tokens directly (for users who haven't set up MFA yet)
     # Note: CMMC compliance requires all users to have MFA. Prompt them to set it up.
