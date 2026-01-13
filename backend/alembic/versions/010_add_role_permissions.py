@@ -31,26 +31,18 @@ def upgrade() -> None:
     conn = op.get_bind()
     
     if not table_exists(conn, 'role_permissions'):
-        # Create role enum type if it doesn't exist
+        # Use raw SQL to create table with existing userrole enum
         op.execute("""
-            DO $$ BEGIN
-                CREATE TYPE userrole AS ENUM ('admin', 'manager', 'supervisor', 'operator', 'quality', 'shipping', 'viewer');
-            EXCEPTION
-                WHEN duplicate_object THEN null;
-            END $$;
+            CREATE TABLE role_permissions (
+                id SERIAL PRIMARY KEY,
+                role userrole NOT NULL,
+                permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_by INTEGER
+            )
         """)
-        
-        op.create_table(
-            'role_permissions',
-            sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
-            sa.Column('role', sa.Enum('admin', 'manager', 'supervisor', 'operator', 'quality', 'shipping', 'viewer', name='userrole'), nullable=False),
-            sa.Column('permissions', sa.JSON(), nullable=False, server_default='[]'),
-            sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP')),
-            sa.Column('updated_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP')),
-            sa.Column('updated_by', sa.Integer(), nullable=True),
-        )
-        
-        op.create_index('ix_role_permissions_role', 'role_permissions', ['role'], unique=True)
+        op.execute("CREATE UNIQUE INDEX ix_role_permissions_role ON role_permissions (role)")
         print("Created role_permissions table")
     else:
         print("role_permissions table already exists")
