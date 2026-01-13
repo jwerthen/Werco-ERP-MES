@@ -70,27 +70,36 @@ export default function Parts() {
     try {
       const params: any = {};
       if (typeFilter) params.part_type = typeFilter;
-      const [partsResponse, bomsResponse] = await Promise.all([
-        api.getParts(params),
-        api.getBOMs({ active_only: true })
-      ]);
+      
+      // Load parts first - this is the critical call
+      const partsResponse = await api.getParts(params);
       setParts(partsResponse);
       
-      // Build set of all component part IDs from all BOMs
-      const componentIds = new Set<number>();
-      const bomDataMap: Record<number, BOMItem[]> = {};
-      
-      for (const bom of bomsResponse) {
-        if (bom.items && bom.items.length > 0) {
-          bomDataMap[bom.part_id] = bom.items;
-          bom.items.forEach((item: BOMItem) => {
-            componentIds.add(item.component_part_id);
-          });
+      // Try to load BOMs separately - don't fail if this fails
+      try {
+        const bomsResponse = await api.getBOMs({ active_only: true });
+        
+        // Build set of all component part IDs from all BOMs
+        const componentIds = new Set<number>();
+        const bomDataMap: Record<number, BOMItem[]> = {};
+        
+        for (const bom of bomsResponse) {
+          if (bom.items && bom.items.length > 0) {
+            bomDataMap[bom.part_id] = bom.items;
+            bom.items.forEach((item: BOMItem) => {
+              componentIds.add(item.component_part_id);
+            });
+          }
         }
+        
+        setAllComponentIds(componentIds);
+        setBomData(bomDataMap);
+      } catch (bomErr) {
+        console.error('Failed to load BOMs (parts still loaded):', bomErr);
+        // Clear component IDs so all parts show
+        setAllComponentIds(new Set());
+        setBomData({});
       }
-      
-      setAllComponentIds(componentIds);
-      setBomData(bomDataMap);
     } catch (err) {
       console.error('Failed to load parts:', err);
     } finally {
