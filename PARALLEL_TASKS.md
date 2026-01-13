@@ -1,6 +1,7 @@
 # Parallel Development Task Split
 
 **Created**: January 13, 2026  
+**Source**: Notion V1.0 Production Roadmap Task Board  
 **Purpose**: Coordinate work across multiple droid sessions
 
 ---
@@ -35,90 +36,115 @@ Then say: "You are focused on testing and quality assurance. Run tests, fix issu
 
 ## BACKEND SESSION TASKS (Terminal 1)
 
-### Priority 1: CMMC Password Policy (IA-3.5.7/8/9)
-**Branch**: `feat/backend-work`  
+### Priority 1: Data Export Functionality (CSV/Excel)
+**Priority**: Medium | **Category**: Features  
 **Files**: `backend/app/` only
 
-- [ ] Add password validation to User model/auth
-  - Minimum 12 characters
-  - Uppercase, lowercase, numbers, special chars
-  - Check against common passwords list
-- [ ] Add password history tracking
-  - New table: `password_history` (user_id, hashed_password, created_at)
-  - Prevent reuse of last 12 passwords
-- [ ] Add password expiration
-  - Add `password_expires_at` to User model
-  - 90-day expiration policy
-  - Force password change on login if expired
-- [ ] Migration for new fields/tables
+- [ ] Create export endpoints for key entities:
+  - GET /work-orders/export?format=csv|xlsx
+  - GET /parts/export?format=csv|xlsx
+  - GET /inventory/export?format=csv|xlsx
+  - GET /purchase-orders/export?format=csv|xlsx
+  - GET /quotes/export?format=csv|xlsx
+- [ ] Add date range filtering (start_date, end_date params)
+- [ ] Add column selection parameter
+- [ ] Use openpyxl or xlsxwriter for Excel generation
+- [ ] Use csv module for CSV generation
+- [ ] Set proper Content-Disposition headers for download
 
 **Estimated Time**: 4-6 hours
 
-### Priority 2: Session Inactivity Enhancement (AC-3.1.10)
-- [ ] Add `last_activity_at` timestamp to session tracking
-- [ ] Create middleware to check inactivity on each request
-- [ ] Return 401 with `session_expired` reason if inactive > 15 min
-- [ ] Add API endpoint to refresh activity timestamp
+### Priority 2: Print-Friendly Report Endpoints
+**Priority**: Low | **Category**: Features
+
+- [ ] Create simplified JSON endpoints for print views:
+  - GET /work-orders/{id}/print-data
+  - GET /quotes/{id}/print-data
+  - GET /purchase-orders/{id}/print-data
+- [ ] Include all related data in single response (no additional API calls needed)
+- [ ] Format dates and numbers for display
 
 **Estimated Time**: 2-3 hours
 
-### Priority 3: Vendor Management API
-- [ ] Create Vendor model (name, code, address, contact, status)
-- [ ] CRUD endpoints: GET/POST/PUT/DELETE /vendors
-- [ ] Vendor search endpoint
-- [ ] Link to existing PurchaseOrder model
+### Priority 3: Unit Tests for PO Upload Raw Material Fix
+**Priority**: Medium | **Category**: Testing
 
-**Estimated Time**: 3-4 hours
+- [ ] Write tests for PO upload endpoint
+- [ ] Test raw material parsing logic
+- [ ] Test edge cases (missing fields, invalid data)
+- [ ] Add to `backend/tests/`
+
+**Estimated Time**: 2-3 hours
 
 ---
 
 ## FRONTEND SESSION TASKS (Terminal 2)
 
-### Priority 1: Password Change UI
-**Branch**: `feat/frontend-work`  
+### Priority 1: Frontend Unit Tests (>70% Coverage)
+**Priority**: High | **Category**: Testing  
+**Status**: In Progress  
 **Files**: `frontend/src/` only
 
-- [ ] Create PasswordChangeModal component
-  - Current password field
-  - New password field with strength indicator
-  - Confirm password field
-  - Show requirements (12 chars, uppercase, etc.)
-- [ ] Add "Change Password" option to user menu/settings
-- [ ] Handle password expiration redirect
-  - If API returns 401 with `password_expired`, show change modal
-- [ ] Add API methods for password change
+- [ ] Review current test coverage
+- [ ] Add tests for hooks:
+  - usePermissions
+  - useDebounce
+  - Other custom hooks
+- [ ] Add tests for utility functions:
+  - permissions.ts
+  - formatters/helpers
+- [ ] Add component tests for critical components:
+  - PermissionGate
+  - ProtectedRoute
+  - Key form components
+- [ ] Run: `npm test -- --coverage`
+
+**Target**: >70% coverage  
+**Estimated Time**: 4-6 hours
+
+### Priority 2: Keyboard Navigation Support
+**Priority**: Low | **Category**: UX
+
+- [ ] Add keyboard shortcuts for common actions:
+  - Ctrl+N: New (work order, part, etc. based on page)
+  - Ctrl+S: Save (in edit modals)
+  - Escape: Close modals
+  - Arrow keys: Navigate tables
+- [ ] Add keyboard shortcut help modal (Ctrl+?)
+- [ ] Ensure all interactive elements are focusable
+- [ ] Add visible focus indicators
+- [ ] Test tab order on all pages
 
 **Estimated Time**: 3-4 hours
 
-### Priority 2: Session Timeout Warning UI
-- [ ] Update AuthContext to track activity
-- [ ] Show warning modal at 14 minutes of inactivity
-- [ ] "Stay Logged In" button to refresh session
-- [ ] Auto-logout at 15 minutes with message
+### Priority 3: WCAG 2.1 AA Accessibility Compliance
+**Priority**: Medium | **Category**: UX
 
-**Note**: Frontend already has 15-min idle timeout, verify it matches backend.
+- [ ] Add ARIA labels to interactive elements
+- [ ] Ensure color contrast meets AA standards (4.5:1 for text)
+- [ ] Add alt text to all images/icons
+- [ ] Ensure form labels are properly associated
+- [ ] Add skip navigation link
+- [ ] Test with screen reader (NVDA or VoiceOver)
+- [ ] Fix any accessibility warnings in browser dev tools
 
-**Estimated Time**: 1-2 hours
+**Estimated Time**: 4-6 hours
 
-### Priority 3: Vendors Page
-- [ ] Create Vendors.tsx page
-  - List view with search/filter
-  - Add/Edit modal
-  - Status badges (active/inactive)
-- [ ] Add to navigation (under Purchasing or Admin)
-- [ ] Connect to backend API (once available)
+### Priority 4: Print-Friendly Views for Reports
+**Priority**: Low | **Category**: Features
+
+- [ ] Create print stylesheet (`print.css` or Tailwind @media print)
+- [ ] Add print button to key pages:
+  - Work Order Detail
+  - Quote Detail
+  - Purchase Order Detail
+  - Packing Slip (already exists)
+  - Traveler (already exists)
+- [ ] Hide navigation, buttons, non-essential elements in print
+- [ ] Ensure tables don't break across pages
+- [ ] Test print preview in browser
 
 **Estimated Time**: 3-4 hours
-
-### Priority 4: MFA Setup UI (Prep for later)
-- [ ] Create MFASetupModal component
-  - QR code display area
-  - 6-digit code input
-  - Backup codes display
-- [ ] Add to user settings/security section
-- [ ] Stub API methods (will implement backend later)
-
-**Estimated Time**: 2-3 hours
 
 ---
 
@@ -128,12 +154,14 @@ Then say: "You are focused on testing and quality assurance. Run tests, fix issu
 - [ ] Run backend tests after backend changes: `cd backend && pytest -v`
 - [ ] Run frontend build after frontend changes: `cd frontend && npm run build`
 - [ ] Run frontend tests: `cd frontend && npm test`
+- [ ] Check test coverage: `cd frontend && npm test -- --coverage`
 - [ ] Review code in both branches for issues
 
 ### Integration Testing
-- [ ] Once both branches are ready, test password flow end-to-end
-- [ ] Test session timeout behavior
-- [ ] Verify no regressions in existing features
+- [ ] Test data export downloads (CSV/Excel)
+- [ ] Test print functionality across browsers
+- [ ] Test keyboard navigation
+- [ ] Verify accessibility with browser tools
 
 ---
 
@@ -145,25 +173,32 @@ Then say: "You are focused on testing and quality assurance. Run tests, fix issu
 
 ---
 
-## Communication Points
+## Status Tracking
 
-When backend completes an API:
-- Update this file with "✅ DONE" 
-- Note any API changes from the original plan
+| Task | Priority | Backend | Frontend | Tested |
+|------|----------|---------|----------|--------|
+| Data Export (CSV/Excel) | Medium | ⬜ | N/A | ⬜ |
+| PO Upload Unit Tests | Medium | ⬜ | N/A | ⬜ |
+| Print Report Endpoints | Low | ⬜ | N/A | ⬜ |
+| Frontend Unit Tests >70% | High | N/A | 🔄 | ⬜ |
+| Keyboard Navigation | Low | N/A | ⬜ | ⬜ |
+| WCAG 2.1 AA Accessibility | Medium | N/A | ⬜ | ⬜ |
+| Print-Friendly Views | Low | N/A | ⬜ | ⬜ |
 
-When frontend needs an API not yet ready:
-- Use mock data temporarily
-- Note the dependency here
+Legend: ⬜ Not Started | 🔄 In Progress | ✅ Done | ❌ Blocked
 
 ---
 
-## Status Tracking
+## Dependencies
 
-| Task | Backend | Frontend | Tested |
-|------|---------|----------|--------|
-| Password Policy | ⬜ | ⬜ | ⬜ |
-| Session Inactivity | ⬜ | ⬜ | ⬜ |
-| Vendors | ⬜ | ⬜ | ⬜ |
-| MFA Prep | N/A | ⬜ | ⬜ |
+- Print-Friendly Views (frontend) can start immediately using existing API data
+- Data Export endpoints are independent of frontend work
+- Accessibility work is independent and can proceed in parallel
 
-Legend: ⬜ Not Started | 🔄 In Progress | ✅ Done | ❌ Blocked
+---
+
+## Notes
+
+- Frontend unit tests are already in progress per Notion board
+- Most tasks are independent and can run fully in parallel
+- No blocking dependencies between backend and frontend tasks
