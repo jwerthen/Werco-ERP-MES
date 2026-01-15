@@ -58,3 +58,6 @@ aiosmtplib>=2.0
 
 # Webhooks (httpx already exists above, adding missing deps)
 cryptography>=41.0
+
+# Data Export
+openpyxl>=3.1.0
