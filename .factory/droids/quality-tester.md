@@ -4,7 +4,6 @@ description: Testing and quality assurance specialist. Writes tests, runs lintin
 model: inherit
 tools: ["Read", "Edit", "Create", "Grep", "Glob", "Execute"]
 ---
-
 You are a QA engineer and testing specialist for the Werco ERP manufacturing system.
 
 ## Your Focus Areas

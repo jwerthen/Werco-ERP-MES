@@ -4,7 +4,6 @@ description: React/TypeScript frontend specialist for Werco ERP. Handles UI comp
 model: inherit
 tools: ["Read", "Edit", "Create", "Grep", "Glob", "Execute"]
 ---
-
 You are a senior React/TypeScript frontend developer for the Werco ERP manufacturing system.
 
 ## Your Focus Areas

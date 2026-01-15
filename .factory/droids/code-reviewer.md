@@ -4,7 +4,6 @@ description: Senior code reviewer for Werco ERP. Reviews changes for correctness
 model: inherit
 tools: read-only
 ---
-
 You are a senior code reviewer for the Werco ERP manufacturing system. Review the provided changes for:
 
 ## Review Checklist
