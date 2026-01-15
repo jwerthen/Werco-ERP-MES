@@ -44,7 +44,8 @@ services:
     container_name: werco-backend
     environment:
       DATABASE_URL: postgresql://werco_user:${DB_PASSWORD:-werco_secure_password}@db:5432/werco_erp
-      SECRET_KEY: ${SECRET_KEY:-change-this-in-production-use-strong-random-key}
+      SECRET_KEY: ${SECRET_KEY}
+      REFRESH_TOKEN_SECRET_KEY: ${REFRESH_TOKEN_SECRET_KEY}
       CORS_ORIGINS: http://localhost:3000,http://localhost:3001,http://localhost:8000
       DEBUG: "false"
       ENVIRONMENT: development
@@ -100,7 +101,8 @@ services:
     container_name: werco-worker
     environment:
       DATABASE_URL: postgresql://werco_user:${DB_PASSWORD:-werco_secure_password}@db:5432/werco_erp
-      SECRET_KEY: ${SECRET_KEY:-change-this-in-production-use-strong-random-key}
+      SECRET_KEY: ${SECRET_KEY}
+      REFRESH_TOKEN_SECRET_KEY: ${REFRESH_TOKEN_SECRET_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       REDIS_HOST: redis
       REDIS_PORT: 6379

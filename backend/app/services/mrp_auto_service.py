@@ -14,6 +14,7 @@ from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine, POStatus
 from app.models.vendor import Vendor
 from app.models.audit_log import AuditLog
 from app.models.user import User
+from app.models.supplier_part import SupplierPartMapping
 from app.services.notification_service import NotificationService, NotificationEvent
 import logging
 
@@ -245,18 +246,96 @@ class MRPAutoService:
         action.processed_at = datetime.utcnow()
 
     def _get_preferred_vendor(self, part_id: int) -> Vendor:
-        """Get preferred vendor for a part"""
-        # TODO: Implement supplier part mapping
-        # For now, get first active vendor
+        """
+        Get preferred vendor for a part.
+        
+        Lookup priority:
+        1. Check SupplierPartMapping for vendor associations
+        2. Check recent purchase order history for most-used vendor
+        3. Fall back to first active vendor
+        
+        Args:
+            part_id: The part ID to find a vendor for
+            
+        Returns:
+            Vendor object or None if no active vendors exist
+        """
+        # Priority 1: Check supplier part mappings for this part
+        mapping = self.db.query(SupplierPartMapping).filter(
+            SupplierPartMapping.part_id == part_id,
+            SupplierPartMapping.is_active == True,
+            SupplierPartMapping.vendor_id.isnot(None)
+        ).join(Vendor).filter(Vendor.is_active == True).first()
+        
+        if mapping and mapping.vendor:
+            logger.debug(f"Found preferred vendor {mapping.vendor.name} from supplier mapping for part {part_id}")
+            return mapping.vendor
+        
+        # Priority 2: Check recent PO history to find most-used vendor for this part
+        recent_vendor_query = (
+            self.db.query(Vendor, func.count(PurchaseOrderLine.id).label('order_count'))
+            .join(PurchaseOrder, PurchaseOrder.vendor_id == Vendor.id)
+            .join(PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
+            .filter(
+                PurchaseOrderLine.part_id == part_id,
+                Vendor.is_active == True
+            )
+            .group_by(Vendor.id)
+            .order_by(func.count(PurchaseOrderLine.id).desc())
+            .first()
+        )
+        
+        if recent_vendor_query:
+            vendor = recent_vendor_query[0]
+            logger.debug(f"Found vendor {vendor.name} from PO history for part {part_id}")
+            return vendor
+        
+        # Priority 3: Fall back to first active vendor
+        logger.debug(f"No specific vendor found for part {part_id}, using first active vendor")
         vendor = self.db.query(Vendor).filter(Vendor.is_active == True).first()
         return vendor
 
     def _get_part_cost(self, part_id: int, vendor_id: int) -> float:
-        """Get part cost from vendor"""
-        # TODO: Implement supplier part pricing
-        # For now, use part standard cost
+        """
+        Get part cost from vendor.
+        
+        Lookup priority:
+        1. Check recent purchase orders from this vendor for actual pricing
+        2. Fall back to part's standard cost
+        
+        Args:
+            part_id: The part ID to get cost for
+            vendor_id: The vendor ID (if known) to check pricing for
+            
+        Returns:
+            Float representing unit cost for the part
+        """
+        # Priority 1: Check recent PO pricing from this vendor
+        if vendor_id:
+            recent_price = (
+                self.db.query(PurchaseOrderLine.unit_price)
+                .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id)
+                .filter(
+                    PurchaseOrderLine.part_id == part_id,
+                    PurchaseOrder.vendor_id == vendor_id,
+                    PurchaseOrder.status != POStatus.CANCELLED
+                )
+                .order_by(PurchaseOrder.created_at.desc())
+                .first()
+            )
+            
+            if recent_price and recent_price[0]:
+                logger.debug(f"Using recent PO price ${recent_price[0]} for part {part_id} from vendor {vendor_id}")
+                return recent_price[0]
+        
+        # Priority 2: Fall back to part standard cost
         part = self.db.query(Part).filter(Part.id == part_id).first()
-        return part.standard_cost if part else 0.0
+        if part and part.standard_cost:
+            logger.debug(f"Using standard cost ${part.standard_cost} for part {part_id}")
+            return part.standard_cost
+        
+        logger.warning(f"No cost information found for part {part_id}, returning 0.0")
+        return 0.0
 
     def _generate_po_number(self) -> str:
         """Generate PO number"""

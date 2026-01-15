@@ -148,13 +148,21 @@ async def send_error_alert(error: ErrorLogEntry):
     """
     Send alert for critical errors.
     
-    Could integrate with:
-    - Slack
-    - Email
-    - PagerDuty
-    - Sentry
+    Current implementation:
+    - Logs critical errors prominently to server logs
+    - If Sentry DSN is configured, errors are captured via Sentry
+    
+    Future integration options (configure via environment variables):
+    - Slack: Set SLACK_WEBHOOK_URL for Slack notifications
+    - Email: Use SMTP settings for email alerts  
+    - PagerDuty: Set PAGERDUTY_API_KEY for incident management
+    
+    The error boundary information helps identify where in the React
+    component tree the error occurred, aiding in debugging.
     """
-    # Log critical error prominently
+    from app.core.config import settings
+    
+    # Log critical error prominently to server logs
     logger.critical(
         f"CRITICAL FRONTEND ERROR [{error.id}]: {error.message}\n"
         f"URL: {error.url}\n"
@@ -162,11 +170,47 @@ async def send_error_alert(error: ErrorLogEntry):
         f"Boundary: {error.boundaryName}"
     )
     
-    # TODO: Add integration with alerting service
-    # Examples:
-    # - await slack_client.send_message(...)
-    # - await email_service.send_alert(...)
-    # - sentry_sdk.capture_message(...)
+    # If Sentry is configured, capture the error there
+    # Sentry integration is already handled in main.py lifespan
+    # Critical errors are automatically captured by Sentry's logging integration
+    if settings.SENTRY_DSN:
+        try:
+            import sentry_sdk
+            sentry_sdk.capture_message(
+                f"Frontend Error [{error.boundaryName}]: {error.message}",
+                level="error",
+                extras={
+                    "error_id": error.id,
+                    "url": error.url,
+                    "user_id": error.userId,
+                    "boundary_name": error.boundaryName,
+                    "boundary_level": error.boundaryLevel,
+                    "stack": error.stack,
+                    "component_stack": error.componentStack,
+                }
+            )
+            logger.info(f"Error {error.id} sent to Sentry")
+        except ImportError:
+            logger.debug("Sentry SDK not installed, skipping Sentry capture")
+        except Exception as e:
+            logger.warning(f"Failed to send error to Sentry: {e}")
+    
+    # NOTE: Additional alerting integrations can be added here as needed:
+    #
+    # Slack Integration (future):
+    # if settings.SLACK_WEBHOOK_URL:
+    #     await slack_client.send_webhook(settings.SLACK_WEBHOOK_URL, {
+    #         "text": f"🚨 Frontend Error: {error.message}",
+    #         "blocks": [...error details...]
+    #     })
+    #
+    # Email Integration (future):
+    # if settings.ALERT_EMAIL:
+    #     await email_service.send_alert(
+    #         to=settings.ALERT_EMAIL,
+    #         subject=f"Frontend Error Alert: {error.boundaryName}",
+    #         body=f"Error: {error.message}\nURL: {error.url}"
+    #     )
 
 
 @router.get("/health")

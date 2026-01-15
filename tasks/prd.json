@@ -1,114 +1,92 @@
 {
-  "name": "Werco ERP QA Fixes",
-  "description": "Fix issues identified in QA/QC code review - prioritized by severity",
-  "tasks": [
+  "name": "Werco ERP QA Fixes - Thorough Implementation",
+  "branchName": "fix/qa-findings",
+  "userStories": [
     {
-      "id": "CRIT-001",
-      "title": "Migrate JWT token storage from localStorage to httpOnly cookies",
-      "description": "JWT access tokens, refresh tokens, and expiry times are currently stored in localStorage which is vulnerable to XSS attacks. Implement httpOnly cookie-based authentication:\n\n1. Backend: Update auth endpoints to set httpOnly cookies instead of returning tokens in response body\n2. Backend: Add CSRF protection for cookie-based auth\n3. Frontend: Remove localStorage token storage, rely on cookies\n4. Frontend: Update API service to work with cookie-based auth\n\nFiles to modify:\n- backend/app/api/endpoints/auth.py\n- backend/app/core/security.py\n- frontend/src/services/api.ts\n- frontend/src/context/AuthContext.tsx",
-      "status": "pending",
+      "id": "US-001",
+      "title": "[CRITICAL] Migrate JWT tokens from localStorage to httpOnly cookies",
+      "description": "This is a CRITICAL security fix. JWT tokens stored in localStorage are vulnerable to XSS attacks.\n\nYOU MUST:\n1. Read and understand the current auth implementation in backend/app/api/endpoints/auth.py\n2. Read frontend/src/services/api.ts to understand current token handling\n3. Read frontend/src/context/AuthContext.tsx to understand auth state management\n\nIMPLEMENTATION STEPS:\n\nBACKEND CHANGES:\n- Modify /auth/login endpoint to set httpOnly cookies instead of returning tokens in body\n- Add Set-Cookie header with: HttpOnly, Secure, SameSite=Strict flags\n- Modify /auth/refresh endpoint similarly\n- Update /auth/logout to clear cookies\n- Ensure CSRF protection works with cookie-based auth\n\nFRONTEND CHANGES:\n- Remove ALL localStorage.setItem calls for tokens in api.ts\n- Remove ALL localStorage.getItem calls for tokens in api.ts  \n- Remove ALL localStorage.removeItem calls for tokens in api.ts\n- Update AuthContext.tsx to not store tokens in localStorage\n- Ensure axios sends credentials: 'include' for cookie auth\n- Test that login, logout, and token refresh all work\n\nDO NOT mark this complete until you have:\n1. Actually modified the backend auth endpoints\n2. Actually modified the frontend api.ts and AuthContext.tsx\n3. Verified NO localStorage token calls remain with grep\n4. Tested the auth flow works",
+      "acceptanceCriteria": [
+        "VERIFY: grep -r 'localStorage.*token' frontend/src/ returns NO results",
+        "VERIFY: backend/app/api/endpoints/auth.py sets httpOnly cookies",
+        "VERIFY: frontend/src/services/api.ts has withCredentials: true",
+        "VERIFY: Login flow works end-to-end",
+        "VERIFY: Logout clears cookies properly"
+      ],
       "priority": 1,
-      "tags": ["security", "critical", "backend", "frontend"],
-      "blockers": []
+      "passes": true,
+      "completionNotes": "Completed by agent"
     },
     {
-      "id": "HIGH-001",
-      "title": "Replace all `any` types with proper TypeScript interfaces",
-      "description": "Found 100+ instances of `: any` type annotations in frontend code. Create proper TypeScript interfaces for all API data types.\n\n1. Create frontend/src/types/api.ts with interfaces for all API responses\n2. Update frontend/src/services/api.ts to use typed methods\n3. Fix catch blocks to use typed error handling\n4. Update page components with proper types\n\nKey locations:\n- api.ts: 50+ instances\n- AdminSettings.tsx: 20+ instances\n- Various page components",
-      "status": "pending",
+      "id": "US-002",
+      "title": "[HIGH] Replace ALL 'any' types with TypeScript interfaces",
+      "description": "There are 100+ instances of ': any' in the frontend codebase. This defeats TypeScript's purpose.\n\nYOU MUST:\n1. Run: grep -rn ': any' frontend/src/ to find ALL instances\n2. Create proper interfaces for each usage\n\nIMPLEMENTATION STEPS:\n\n1. Create frontend/src/types/api.ts with interfaces for:\n   - WorkOrder, WorkOrderCreate, WorkOrderUpdate\n   - Part, PartCreate, PartUpdate\n   - BOM, BOMCreate\n   - User, UserCreate\n   - WorkCenter, WorkCenterCreate\n   - All other API response types\n\n2. Update frontend/src/services/api.ts:\n   - Import all interfaces from types/api.ts\n   - Replace every 'data: any' parameter with proper type\n   - Replace every 'catch (err: any)' with typed error handling\n   - Add return type annotations to all methods\n\n3. Update page components:\n   - AdminSettings.tsx has 20+ any types - fix them all\n   - Other pages with any types\n\nDO NOT mark complete until:\n1. grep -rn ': any' frontend/src/ shows ZERO results (or only acceptable exceptions)\n2. TypeScript compiles without errors\n3. Actually created the types file with real interfaces",
+      "acceptanceCriteria": [
+        "VERIFY: frontend/src/types/api.ts exists with 20+ interfaces",
+        "VERIFY: grep ': any' frontend/src/services/api.ts returns < 5 results",
+        "VERIFY: Run 'cd frontend && npm run build' succeeds",
+        "VERIFY: Each interface has proper field definitions, not just 'any'"
+      ],
       "priority": 2,
-      "tags": ["code-quality", "high", "frontend"],
-      "blockers": []
+      "passes": true,
+      "completionNotes": "Completed by agent"
     },
     {
-      "id": "HIGH-002",
-      "title": "Add startup validation for required secret keys",
-      "description": "Default SECRET_KEY and REFRESH_TOKEN_SECRET_KEY values are defined in code. Add validation to ensure these are set via environment variables.\n\nFiles to modify:\n- backend/app/core/config.py\n\nChanges:\n1. Remove default values for SECRET_KEY and REFRESH_TOKEN_SECRET_KEY\n2. Add Pydantic validation to fail fast if not configured\n3. Add startup check in main.py lifespan to verify secrets are set",
-      "status": "pending",
+      "id": "US-003",
+      "title": "[HIGH] Validate secret keys on startup - COMPLETED",
+      "description": "This task was completed by a previous iteration. Secret key validation is now in backend/app/core/config.py with Pydantic validators that reject insecure defaults.",
+      "acceptanceCriteria": [
+        "ALREADY DONE: Pydantic validators in config.py",
+        "ALREADY DONE: Tests in backend/tests/test_config.py"
+      ],
       "priority": 3,
-      "tags": ["security", "high", "backend"],
-      "blockers": []
+      "passes": true,
+      "completionNotes": "Completed - validators added to config.py"
     },
     {
-      "id": "HIGH-003",
-      "title": "Implement Redis-based rate limiting for webhooks",
-      "description": "TODO comment at backend/app/jobs/webhook_jobs.py:151 indicates rate limiting is not implemented for webhooks.\n\n1. Implement Redis-based rate limiter using existing Redis cache\n2. Add configurable rate limits for webhook endpoints\n3. Return 429 Too Many Requests when limit exceeded\n4. Add tests for rate limiting behavior",
-      "status": "pending",
+      "id": "US-004",
+      "title": "[HIGH] Remove ALL console.log statements from production code",
+      "description": "Console.log statements can leak sensitive information in production.\n\nYOU MUST:\n1. Run: grep -rn 'console.log' frontend/src/ to find ALL instances\n2. Remove or replace each one\n\nKNOWN LOCATIONS:\n- frontend/src/services/errorLogging.ts:119-124\n- frontend/src/pages/WorkOrderNew.tsx:133, 137\n- frontend/src/components/Tour/TourMenu.tsx:21, 27, 32\n\nFOR EACH console.log:\n- If it's debug logging: REMOVE IT\n- If it's error logging: Replace with proper error handling or remove\n- If it's needed for development: Wrap in if (process.env.NODE_ENV !== 'production')\n\nDO NOT mark complete until:\n1. grep -rn 'console.log' frontend/src/ returns ZERO results (except test files)\n2. The build still succeeds",
+      "acceptanceCriteria": [
+        "VERIFY: grep 'console.log' frontend/src/services/errorLogging.ts returns 0 results",
+        "VERIFY: grep 'console.log' frontend/src/pages/WorkOrderNew.tsx returns 0 results",
+        "VERIFY: grep 'console.log' frontend/src/components/Tour/TourMenu.tsx returns 0 results",
+        "VERIFY: Run 'cd frontend && npm run build' succeeds"
+      ],
       "priority": 4,
-      "tags": ["security", "performance", "high", "backend"],
-      "blockers": []
+      "passes": true,
+      "completionNotes": "Completed by agent"
     },
     {
-      "id": "HIGH-004",
-      "title": "Remove or conditionally disable console.log statements",
-      "description": "Console.log statements left in production code can leak sensitive information.\n\nLocations:\n- frontend/src/services/errorLogging.ts:119-124\n- frontend/src/pages/WorkOrderNew.tsx:133, 137\n- frontend/src/components/Tour/TourMenu.tsx:21, 27, 32\n\nFix:\n1. Remove debug console.log statements\n2. Or replace with conditional logging that's disabled in production",
-      "status": "pending",
+      "id": "US-005",
+      "title": "[MEDIUM] Implement webhook rate limiting with Redis",
+      "description": "The TODO at backend/app/jobs/webhook_jobs.py needs Redis-based rate limiting.\n\nYOU MUST:\n1. Read backend/app/jobs/webhook_jobs.py to understand the context\n2. Read backend/app/core/cache.py to understand Redis usage\n\nIMPLEMENTATION:\n1. Create a rate limiter class/function that:\n   - Uses Redis to track request counts per webhook URL\n   - Configurable limits (requests per minute)\n   - Returns True/False if request allowed\n\n2. Integrate into webhook_jobs.py:\n   - Check rate limit before processing webhook\n   - Skip/delay if rate limited\n   - Log rate limit events\n\n3. Add configuration:\n   - WEBHOOK_RATE_LIMIT_PER_MINUTE in config.py\n   - Default to reasonable value (e.g., 60/minute)\n\nDO NOT mark complete until:\n1. Rate limiter code exists and uses Redis\n2. webhook_jobs.py calls the rate limiter\n3. Config option exists",
+      "acceptanceCriteria": [
+        "VERIFY: Rate limiter function/class exists",
+        "VERIFY: webhook_jobs.py uses rate limiter",
+        "VERIFY: Config has WEBHOOK_RATE_LIMIT setting",
+        "VERIFY: TODO comment is removed or addressed"
+      ],
       "priority": 5,
-      "tags": ["code-quality", "security", "high", "frontend"],
-      "blockers": []
+      "passes": true,
+      "completionNotes": "Completed by agent"
     },
     {
-      "id": "HIGH-005",
-      "title": "Address TODO comments for incomplete critical features",
-      "description": "Several TODO comments indicate incomplete features:\n\n1. backend/app/services/mrp_auto_service.py:249 - Implement supplier part mapping\n2. backend/app/services/mrp_auto_service.py:256 - Implement supplier part pricing\n3. backend/app/jobs/report_jobs.py:19 - Implement report generation logic\n4. backend/app/api/endpoints/errors.py:165 - Add integration with alerting service\n\nEither implement these features or document why they're deferred.",
-      "status": "pending",
+      "id": "US-006",
+      "title": "[MEDIUM] Address TODO comments for MRP and reports",
+      "description": "Several TODO comments indicate incomplete features.\n\nYOU MUST address each:\n\n1. backend/app/services/mrp_auto_service.py:249 - 'TODO: Implement supplier part mapping'\n   - Check if SupplierPartMapping model exists\n   - Implement the mapping lookup or document why deferred\n\n2. backend/app/services/mrp_auto_service.py:256 - 'TODO: Implement supplier part pricing'\n   - Implement pricing lookup from supplier parts\n   - Or document why deferred\n\n3. backend/app/jobs/report_jobs.py:19 - 'TODO: Implement report generation logic'\n   - Implement basic report generation\n   - Or add detailed comment explaining the deferral\n\n4. backend/app/api/endpoints/errors.py:165 - 'TODO: Add integration with alerting service'\n   - Implement alerting or add comment explaining deferral\n\nFor each TODO, either:\n- IMPLEMENT the feature, or\n- Replace TODO with detailed DEFERRED comment explaining why and what's needed\n\nDO NOT just delete TODOs without addressing them.",
+      "acceptanceCriteria": [
+        "VERIFY: grep 'TODO.*supplier part mapping' returns 0 results OR feature implemented",
+        "VERIFY: grep 'TODO.*supplier part pricing' returns 0 results OR feature implemented",
+        "VERIFY: grep 'TODO.*report generation' returns 0 results OR feature implemented",
+        "VERIFY: grep 'TODO.*alerting service' returns 0 results OR feature implemented"
+      ],
       "priority": 6,
-      "tags": ["code-quality", "high", "backend"],
-      "blockers": []
-    },
-    {
-      "id": "MED-003",
-      "title": "Audit nullable database columns and add constraints",
-      "description": "Many columns are marked as nullable=True (200+ instances). Review each to ensure this is intentional.\n\n1. Audit all models in backend/app/models/\n2. Identify columns that should be required\n3. Create migration to add NOT NULL constraints\n4. Update any code that creates records without required fields",
-      "status": "pending",
-      "priority": 7,
-      "tags": ["database", "medium", "backend"],
-      "blockers": []
-    },
-    {
-      "id": "MED-004",
-      "title": "Add pagination to all list endpoints",
-      "description": "Several queries use .all() without LIMIT which can cause performance issues.\n\n1. Review all endpoint files for .all() queries\n2. Add pagination using existing pagination utility\n3. Update frontend to handle paginated responses\n4. Add limit parameters where appropriate",
-      "status": "pending",
-      "priority": 8,
-      "tags": ["performance", "medium", "backend"],
-      "blockers": []
-    },
-    {
-      "id": "MED-006",
-      "title": "Create typed error handling utilities",
-      "description": "Most error handling uses catch (err: any) pattern, losing type information.\n\n1. Create frontend/src/utils/errorHandling.ts\n2. Define error types for API errors, validation errors, network errors\n3. Create helper functions to extract error messages\n4. Update all catch blocks to use typed error handling",
-      "status": "pending",
-      "priority": 9,
-      "tags": ["code-quality", "medium", "frontend"],
-      "blockers": ["HIGH-001"]
-    },
-    {
-      "id": "LOW-001",
-      "title": "Complete WCAG 2.1 AA accessibility audit",
-      "description": "ARIA attributes found in 12 component files but needs full audit.\n\n1. Run accessibility audit tool (axe, WAVE)\n2. Add missing ARIA labels to interactive elements\n3. Ensure keyboard navigation works\n4. Check color contrast ratios\n5. Add skip links and focus management",
-      "status": "pending",
-      "priority": 10,
-      "tags": ["accessibility", "low", "frontend"],
-      "blockers": []
-    },
-    {
-      "id": "LOW-002",
-      "title": "Expand test coverage",
-      "description": "Limited test files exist. Expand coverage to all critical paths.\n\nBackend priority:\n- All API endpoints need integration tests\n- Service layer unit tests\n\nFrontend priority:\n- Page component tests\n- API service tests (mocked)\n- Form validation tests",
-      "status": "pending",
-      "priority": 11,
-      "tags": ["testing", "low", "backend", "frontend"],
-      "blockers": []
-    },
-    {
-      "id": "LOW-003",
-      "title": "Review localStorage usage for security",
-      "description": "Several items stored in localStorage:\n- User object (AuthContext.tsx)\n- Form backups (FormErrorBoundary.tsx)\n- Tour state (TourContext.tsx)\n\nReview each and document security implications. Keep user data in memory/context only.",
-      "status": "pending",
-      "priority": 12,
-      "tags": ["security", "low", "frontend"],
-      "blockers": ["CRIT-001"]
+      "passes": true,
+      "completionNotes": "Implemented: 1) Supplier part mapping using SupplierPartMapping model and PO history for vendor lookup. 2) Supplier pricing using recent PO prices. 3) Report generation with proper documentation, validation, and report type constants. 4) Error alerting with Sentry integration and documented future integration points for Slack/Email/PagerDuty."
     }
-  ]
+  ],
+  "metadata": {
+    "updatedAt": "2026-01-15T22:16:27.939Z"
+  }
 }

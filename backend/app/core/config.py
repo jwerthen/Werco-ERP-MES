@@ -1,6 +1,20 @@
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from typing import List, Optional
 import os
+
+
+# List of known insecure default secret key values that should be rejected
+INSECURE_SECRET_KEYS = {
+    "CHANGE-THIS-IN-PRODUCTION",
+    "CHANGE-THIS-REFRESH-SECRET",
+    "change-this-to-a-random-string-at-least-32-characters",
+    "change-this-different-key-for-refresh-tokens",
+    "secret",
+    "password",
+    "changeme",
+    "",
+}
 
 
 class Settings(BaseSettings):
@@ -23,13 +37,47 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE: int = 1800  # Recycle connections after 30 minutes
     DB_POOL_PRE_PING: bool = True  # Test connections before use (handles stale connections)
     
-    # Security - MUST be overridden in production
+    # Security - MUST be overridden via environment variables
     SECRET_KEY: str = "CHANGE-THIS-IN-PRODUCTION"
     REFRESH_TOKEN_SECRET_KEY: str = "CHANGE-THIS-REFRESH-SECRET"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # Short-lived access tokens
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # Refresh tokens valid for 7 days
     SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 24  # Force re-login after 24 hours regardless
+    
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        """Validate SECRET_KEY is secure - reject known insecure defaults."""
+        if v in INSECURE_SECRET_KEYS:
+            raise ValueError(
+                "SECRET_KEY is set to an insecure default value. "
+                "Please set a secure SECRET_KEY environment variable. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+            )
+        if len(v) < 32:
+            raise ValueError(
+                f"SECRET_KEY must be at least 32 characters long (got {len(v)}). "
+                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+            )
+        return v
+    
+    @field_validator("REFRESH_TOKEN_SECRET_KEY")
+    @classmethod
+    def validate_refresh_token_secret_key(cls, v: str) -> str:
+        """Validate REFRESH_TOKEN_SECRET_KEY is secure - reject known insecure defaults."""
+        if v in INSECURE_SECRET_KEYS:
+            raise ValueError(
+                "REFRESH_TOKEN_SECRET_KEY is set to an insecure default value. "
+                "Please set a secure REFRESH_TOKEN_SECRET_KEY environment variable. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+            )
+        if len(v) < 32:
+            raise ValueError(
+                f"REFRESH_TOKEN_SECRET_KEY must be at least 32 characters long (got {len(v)}). "
+                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+            )
+        return v
     
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
