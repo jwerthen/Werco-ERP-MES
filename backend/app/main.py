@@ -254,11 +254,22 @@ app.add_middleware(
     allow_headers=settings.CORS_ALLOW_HEADERS.split(","),
 )
 
+# Helper to add CORS headers to error responses
+def add_cors_headers(response: JSONResponse, origin: str = None):
+    """Add CORS headers to a response for cross-origin error handling"""
+    if origin and origin in settings.cors_origins_list:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+
 # CSRF Protection middleware
 # For JWT-based SPAs, CSRF is mitigated by using Authorization header (not cookies)
 # This adds defense-in-depth by validating Origin/Referer for state-changing requests
 @app.middleware("http")
 async def csrf_protection(request: Request, call_next):
+    origin = request.headers.get("origin")
+    
     # Only check state-changing methods
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
         # Skip CSRF check for certain endpoints
@@ -278,27 +289,30 @@ async def csrf_protection(request: Request, call_next):
             auth_header = request.headers.get("authorization")
             if not auth_header or not auth_header.startswith("Bearer "):
                 logger.warning(f"CSRF: Missing X-Requested-With header for {request.url.path}")
-                return JSONResponse(
+                response = JSONResponse(
                     status_code=403,
                     content={"detail": "Missing required security header"}
                 )
+                return add_cors_headers(response, origin)
         
         # Defense 2: Validate Origin/Referer header
-        origin = request.headers.get("origin") or request.headers.get("referer")
+        referer = request.headers.get("referer")
+        check_origin = origin or referer
         
-        if origin:
+        if check_origin:
             # Parse origin to get host
             from urllib.parse import urlparse
-            parsed = urlparse(origin)
+            parsed = urlparse(check_origin)
             origin_host = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else None
             
             # Check if origin is in allowed list
             if origin_host and origin_host not in settings.cors_origins_list:
                 logger.warning(f"CSRF: Blocked request from untrusted origin: {origin_host}")
-                return JSONResponse(
+                response = JSONResponse(
                     status_code=403,
                     content={"detail": "Request origin not allowed"}
                 )
+                return add_cors_headers(response, origin)
     
     return await call_next(request)
 
