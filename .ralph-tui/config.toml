@@ -1,0 +1,42 @@
+# Ralph TUI Configuration for Werco ERP
+# AI Agent Loop Orchestrator
+
+# Agent configuration - using Factory Droid
+agent = "factory"
+
+# Tracker configuration - using JSON mode for simplicity
+tracker = "json"
+
+# Maximum iterations before stopping (can be extended with + key during run)
+max_iterations = 50
+
+# Auto-commit changes after each successful task
+auto_commit = true
+
+# Working directory (defaults to project root)
+# cwd = "."
+
+# Session persistence
+[session]
+# Save session state for crash recovery
+persist = true
+# Auto-resume on startup if session exists
+auto_resume = true
+
+# Notifications
+[notifications]
+# Play sound on task completion
+sound = "system"  # "off", "system", or "ralph" (Ralph Wiggum quotes)
+# Desktop notifications
+desktop = true
+
+# Prompt template customization
+[template]
+# Use default template (can be customized)
+# path = ".ralph-tui/prompt.hbs"
+
+# Factory Droid specific settings
+[agents.factory]
+# Use specific droids for different task types
+# The prompt will include which droid to use based on task tags
+default_model = "sonnet"

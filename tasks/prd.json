@@ -1,0 +1,114 @@
+{
+  "name": "Werco ERP QA Fixes",
+  "description": "Fix issues identified in QA/QC code review - prioritized by severity",
+  "tasks": [
+    {
+      "id": "CRIT-001",
+      "title": "Migrate JWT token storage from localStorage to httpOnly cookies",
+      "description": "JWT access tokens, refresh tokens, and expiry times are currently stored in localStorage which is vulnerable to XSS attacks. Implement httpOnly cookie-based authentication:\n\n1. Backend: Update auth endpoints to set httpOnly cookies instead of returning tokens in response body\n2. Backend: Add CSRF protection for cookie-based auth\n3. Frontend: Remove localStorage token storage, rely on cookies\n4. Frontend: Update API service to work with cookie-based auth\n\nFiles to modify:\n- backend/app/api/endpoints/auth.py\n- backend/app/core/security.py\n- frontend/src/services/api.ts\n- frontend/src/context/AuthContext.tsx",
+      "status": "pending",
+      "priority": 1,
+      "tags": ["security", "critical", "backend", "frontend"],
+      "blockers": []
+    },
+    {
+      "id": "HIGH-001",
+      "title": "Replace all `any` types with proper TypeScript interfaces",
+      "description": "Found 100+ instances of `: any` type annotations in frontend code. Create proper TypeScript interfaces for all API data types.\n\n1. Create frontend/src/types/api.ts with interfaces for all API responses\n2. Update frontend/src/services/api.ts to use typed methods\n3. Fix catch blocks to use typed error handling\n4. Update page components with proper types\n\nKey locations:\n- api.ts: 50+ instances\n- AdminSettings.tsx: 20+ instances\n- Various page components",
+      "status": "pending",
+      "priority": 2,
+      "tags": ["code-quality", "high", "frontend"],
+      "blockers": []
+    },
+    {
+      "id": "HIGH-002",
+      "title": "Add startup validation for required secret keys",
+      "description": "Default SECRET_KEY and REFRESH_TOKEN_SECRET_KEY values are defined in code. Add validation to ensure these are set via environment variables.\n\nFiles to modify:\n- backend/app/core/config.py\n\nChanges:\n1. Remove default values for SECRET_KEY and REFRESH_TOKEN_SECRET_KEY\n2. Add Pydantic validation to fail fast if not configured\n3. Add startup check in main.py lifespan to verify secrets are set",
+      "status": "pending",
+      "priority": 3,
+      "tags": ["security", "high", "backend"],
+      "blockers": []
+    },
+    {
+      "id": "HIGH-003",
+      "title": "Implement Redis-based rate limiting for webhooks",
+      "description": "TODO comment at backend/app/jobs/webhook_jobs.py:151 indicates rate limiting is not implemented for webhooks.\n\n1. Implement Redis-based rate limiter using existing Redis cache\n2. Add configurable rate limits for webhook endpoints\n3. Return 429 Too Many Requests when limit exceeded\n4. Add tests for rate limiting behavior",
+      "status": "pending",
+      "priority": 4,
+      "tags": ["security", "performance", "high", "backend"],
+      "blockers": []
+    },
+    {
+      "id": "HIGH-004",
+      "title": "Remove or conditionally disable console.log statements",
+      "description": "Console.log statements left in production code can leak sensitive information.\n\nLocations:\n- frontend/src/services/errorLogging.ts:119-124\n- frontend/src/pages/WorkOrderNew.tsx:133, 137\n- frontend/src/components/Tour/TourMenu.tsx:21, 27, 32\n\nFix:\n1. Remove debug console.log statements\n2. Or replace with conditional logging that's disabled in production",
+      "status": "pending",
+      "priority": 5,
+      "tags": ["code-quality", "security", "high", "frontend"],
+      "blockers": []
+    },
+    {
+      "id": "HIGH-005",
+      "title": "Address TODO comments for incomplete critical features",
+      "description": "Several TODO comments indicate incomplete features:\n\n1. backend/app/services/mrp_auto_service.py:249 - Implement supplier part mapping\n2. backend/app/services/mrp_auto_service.py:256 - Implement supplier part pricing\n3. backend/app/jobs/report_jobs.py:19 - Implement report generation logic\n4. backend/app/api/endpoints/errors.py:165 - Add integration with alerting service\n\nEither implement these features or document why they're deferred.",
+      "status": "pending",
+      "priority": 6,
+      "tags": ["code-quality", "high", "backend"],
+      "blockers": []
+    },
+    {
+      "id": "MED-003",
+      "title": "Audit nullable database columns and add constraints",
+      "description": "Many columns are marked as nullable=True (200+ instances). Review each to ensure this is intentional.\n\n1. Audit all models in backend/app/models/\n2. Identify columns that should be required\n3. Create migration to add NOT NULL constraints\n4. Update any code that creates records without required fields",
+      "status": "pending",
+      "priority": 7,
+      "tags": ["database", "medium", "backend"],
+      "blockers": []
+    },
+    {
+      "id": "MED-004",
+      "title": "Add pagination to all list endpoints",
+      "description": "Several queries use .all() without LIMIT which can cause performance issues.\n\n1. Review all endpoint files for .all() queries\n2. Add pagination using existing pagination utility\n3. Update frontend to handle paginated responses\n4. Add limit parameters where appropriate",
+      "status": "pending",
+      "priority": 8,
+      "tags": ["performance", "medium", "backend"],
+      "blockers": []
+    },
+    {
+      "id": "MED-006",
+      "title": "Create typed error handling utilities",
+      "description": "Most error handling uses catch (err: any) pattern, losing type information.\n\n1. Create frontend/src/utils/errorHandling.ts\n2. Define error types for API errors, validation errors, network errors\n3. Create helper functions to extract error messages\n4. Update all catch blocks to use typed error handling",
+      "status": "pending",
+      "priority": 9,
+      "tags": ["code-quality", "medium", "frontend"],
+      "blockers": ["HIGH-001"]
+    },
+    {
+      "id": "LOW-001",
+      "title": "Complete WCAG 2.1 AA accessibility audit",
+      "description": "ARIA attributes found in 12 component files but needs full audit.\n\n1. Run accessibility audit tool (axe, WAVE)\n2. Add missing ARIA labels to interactive elements\n3. Ensure keyboard navigation works\n4. Check color contrast ratios\n5. Add skip links and focus management",
+      "status": "pending",
+      "priority": 10,
+      "tags": ["accessibility", "low", "frontend"],
+      "blockers": []
+    },
+    {
+      "id": "LOW-002",
+      "title": "Expand test coverage",
+      "description": "Limited test files exist. Expand coverage to all critical paths.\n\nBackend priority:\n- All API endpoints need integration tests\n- Service layer unit tests\n\nFrontend priority:\n- Page component tests\n- API service tests (mocked)\n- Form validation tests",
+      "status": "pending",
+      "priority": 11,
+      "tags": ["testing", "low", "backend", "frontend"],
+      "blockers": []
+    },
+    {
+      "id": "LOW-003",
+      "title": "Review localStorage usage for security",
+      "description": "Several items stored in localStorage:\n- User object (AuthContext.tsx)\n- Form backups (FormErrorBoundary.tsx)\n- Tour state (TourContext.tsx)\n\nReview each and document security implications. Keep user data in memory/context only.",
+      "status": "pending",
+      "priority": 12,
+      "tags": ["security", "low", "frontend"],
+      "blockers": ["CRIT-001"]
+    }
+  ]
+}
