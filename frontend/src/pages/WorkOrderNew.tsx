@@ -129,12 +129,10 @@ export default function WorkOrderNew() {
           }));
           setOperations(ops);
         } else if (previewRes?.bom_found === false) {
-          // Assembly has no BOM defined
-          console.log('Assembly has no BOM');
+          // Assembly has no BOM defined - show manual entry
           setShowManualEntry(true);
         } else {
-          // Assembly has BOM but no component routings
-          console.log('Assembly BOM has no component routings');
+          // Assembly has BOM but no component routings - show manual entry
           setShowManualEntry(true);
         }
       } else {

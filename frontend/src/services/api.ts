@@ -1,11 +1,38 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
+import {
+  LoginResponse,
+  RefreshTokenResponse,
+  UserCreate,
+  UserUpdate,
+  PartCreate,
+  PartUpdate,
+  PartListParams,
+  WorkOrderCreate,
+  WorkOrderUpdate,
+  WorkOrderListParams,
+  WorkCenterCreate,
+  WorkCenterUpdate,
+  BOMCreate,
+  BOMUpdate,
+  BOMResponse,
+  InventoryTransaction,
+  PurchaseOrderCreate,
+  QuoteCreate,
+  RoutingCreate,
+  CustomerCreate,
+  VendorCreate,
+  ReportParams,
+  GlobalSearchParams,
+  getErrorMessage,
+} from '../types/api';
+import { User, Part, WorkOrder, WorkCenter } from '../types';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 
 // ETag cache for conditional requests
 interface CacheEntry {
   etag: string;
-  data: any;
+  data: unknown;
   timestamp: number;
 }
 
@@ -248,61 +275,61 @@ class ApiService {
   }
 
   // Auth
-  async login(email: string, password: string) {
+  async login(email: string, password: string): Promise<LoginResponse> {
     const formData = new URLSearchParams();
     formData.append('username', email);
     formData.append('password', password);
     
-    const response = await this.api.post('/auth/login', formData, {
+    const response = await this.api.post<LoginResponse>('/auth/login', formData, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
     return response.data;
   }
 
-  async register(userData: any) {
-    const response = await this.api.post('/auth/register', userData);
+  async register(userData: UserCreate): Promise<User> {
+    const response = await this.api.post<User>('/auth/register', userData);
     return response.data;
   }
 
   // Work Centers
-  async getWorkCenters(activeOnly = true) {
-    const response = await this.api.get('/work-centers/', { params: { active_only: activeOnly } });
+  async getWorkCenters(activeOnly = true): Promise<WorkCenter[]> {
+    const response = await this.api.get<WorkCenter[]>('/work-centers/', { params: { active_only: activeOnly } });
     return response.data;
   }
 
-  async createWorkCenter(data: any) {
-    const response = await this.api.post('/work-centers/', data);
+  async createWorkCenter(data: WorkCenterCreate): Promise<WorkCenter> {
+    const response = await this.api.post<WorkCenter>('/work-centers/', data);
     return response.data;
   }
 
-  async updateWorkCenter(id: number, data: any) {
-    const response = await this.api.put(`/work-centers/${id}`, data);
+  async updateWorkCenter(id: number, data: WorkCenterUpdate): Promise<WorkCenter> {
+    const response = await this.api.put<WorkCenter>(`/work-centers/${id}`, data);
     return response.data;
   }
 
-  async updateWorkCenterStatus(id: number, status: string) {
-    const response = await this.api.post(`/work-centers/${id}/status`, null, { params: { status } });
+  async updateWorkCenterStatus(id: number, status: string): Promise<WorkCenter> {
+    const response = await this.api.post<WorkCenter>(`/work-centers/${id}/status`, null, { params: { status } });
     return response.data;
   }
 
   // Parts
-  async getParts(params?: { search?: string; part_type?: string; active_only?: boolean; limit?: number }) {
-    const response = await this.api.get('/parts/', { params: { limit: 500, ...params } });
+  async getParts(params?: PartListParams): Promise<Part[]> {
+    const response = await this.api.get<Part[]>('/parts/', { params: { limit: 500, ...params } });
     return response.data;
   }
 
-  async getPart(id: number) {
-    const response = await this.api.get(`/parts/${id}`);
+  async getPart(id: number): Promise<Part> {
+    const response = await this.api.get<Part>(`/parts/${id}`);
     return response.data;
   }
 
-  async createPart(data: any) {
-    const response = await this.api.post('/parts/', data);
+  async createPart(data: PartCreate): Promise<Part> {
+    const response = await this.api.post<Part>('/parts/', data);
     return response.data;
   }
 
-  async updatePart(id: number, data: any) {
-    const response = await this.api.put(`/parts/${id}`, data);
+  async updatePart(id: number, data: PartUpdate): Promise<Part> {
+    const response = await this.api.put<Part>(`/parts/${id}`, data);
     return response.data;
   }
 
