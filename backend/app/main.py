@@ -1,9 +1,11 @@
 # Werco ERP Main Application - v1.0.1
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager
 from datetime import datetime
 from sqlalchemy import text
@@ -361,7 +363,7 @@ async def add_security_headers(request: Request, call_next):
 # Rate limiting middleware (if enabled)
 if settings.RATE_LIMIT_ENABLED:
     try:
-        from slowapi import Limiter, _rate_limit_exceeded_handler
+        from slowapi import Limiter
         from slowapi.util import get_remote_address
         from slowapi.errors import RateLimitExceeded
         
@@ -387,7 +389,17 @@ if settings.RATE_LIMIT_ENABLED:
             storage_uri=settings.REDIS_URL if settings.REDIS_URL else "memory://"
         )
         app.state.limiter = limiter
-        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        
+        # Custom rate limit handler with CORS headers
+        async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": f"Rate limit exceeded: {exc.detail}"}
+            )
+            origin = request.headers.get("origin")
+            return add_cors_headers(response, origin)
+        
+        app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
         
         # Add middleware for path-specific rate limiting
         @app.middleware("http")
@@ -409,17 +421,42 @@ if settings.RATE_LIMIT_ENABLED:
         logger.warning("Rate limiting requested but slowapi not installed")
 
 
-# Global exception handler
+# Global exception handler - ensures CORS headers on all error responses
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     if settings.SENTRY_DSN:
         import sentry_sdk
         sentry_sdk.capture_exception(exc)
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={"detail": "Internal server error"}
     )
+    # Add CORS headers so browser doesn't mask the error as CORS failure
+    origin = request.headers.get("origin")
+    return add_cors_headers(response, origin)
+
+
+# HTTP exception handler - ensures CORS headers on HTTP errors (401, 403, 404, etc.)
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
+    origin = request.headers.get("origin")
+    return add_cors_headers(response, origin)
+
+
+# Validation error handler - ensures CORS headers on validation errors (422)
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    response = JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()}
+    )
+    origin = request.headers.get("origin")
+    return add_cors_headers(response, origin)
 
 
 # Health check endpoints
