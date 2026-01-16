@@ -19,14 +19,14 @@ router = APIRouter()
 
 
 def get_component_part_info(part: Part, db: Session) -> ComponentPartInfo:
-    """Build component part info with has_bom flag"""
+    """Build component part info with has_bom flag - handles NULL values defensively"""
     has_bom = db.query(BOM).filter(BOM.part_id == part.id, BOM.is_active == True).first() is not None
     return ComponentPartInfo(
         id=part.id,
-        part_number=part.part_number,
-        name=part.name,
-        revision=part.revision,
-        part_type=part.part_type.value,
+        part_number=part.part_number or "",
+        name=part.name or "",
+        revision=part.revision or "A",
+        part_type=part.part_type.value if part.part_type else "manufactured",
         has_bom=has_bom
     )
 
@@ -98,10 +98,10 @@ def list_boms(
             updated_at=bom.updated_at,
             part=PartInfo(
                 id=bom.part.id,
-                part_number=bom.part.part_number,
-                name=bom.part.name,
-                revision=bom.part.revision,
-                part_type=bom.part.part_type.value
+                part_number=bom.part.part_number or "",
+                name=bom.part.name or "",
+                revision=bom.part.revision or "A",
+                part_type=bom.part.part_type.value if bom.part.part_type else "manufactured"
             ) if bom.part else None,
             items=[build_bom_item_response(item, db) for item in bom.items]
         )
@@ -193,10 +193,10 @@ def get_bom(
         updated_at=bom.updated_at,
         part=PartInfo(
             id=bom.part.id,
-            part_number=bom.part.part_number,
-            name=bom.part.name,
-            revision=bom.part.revision,
-            part_type=bom.part.part_type.value
+            part_number=bom.part.part_number or "",
+            name=bom.part.name or "",
+            revision=bom.part.revision or "A",
+            part_type=bom.part.part_type.value if bom.part.part_type else "manufactured"
         ) if bom.part else None,
         items=[build_bom_item_response(item, db) for item in bom.items]
     )
