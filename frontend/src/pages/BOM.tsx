@@ -127,7 +127,7 @@ export default function BOMPage() {
   const loadData = async () => {
     try {
       const [bomsRes, partsRes] = await Promise.all([
-        api.getBOMs(),
+        api.getBOMs({ active_only: true }),
         api.getParts({ active_only: true })
       ]);
       setBoms(bomsRes);
