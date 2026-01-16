@@ -33,13 +33,21 @@ def get_component_part_info(part: Part, db: Session) -> ComponentPartInfo:
 
 def build_bom_item_response(item: BOMItem, db: Session) -> BOMItemResponse:
     """Build BOM item response with part info - handles NULL values defensively"""
+    # Handle component_part safely - it might be None if the part was deleted
+    component_info = None
+    if item.component_part:
+        try:
+            component_info = get_component_part_info(item.component_part, db)
+        except Exception:
+            pass  # Silently handle any errors getting component info
+    
     return BOMItemResponse(
         id=item.id,
         bom_id=item.bom_id,
         component_part_id=item.component_part_id,
-        item_number=item.item_number,
-        quantity=item.quantity or 1.0,
-        item_type=item.item_type or BOMItemType.MAKE,
+        item_number=item.item_number if item.item_number is not None else 10,
+        quantity=item.quantity if item.quantity is not None else 1.0,
+        item_type=item.item_type if item.item_type else BOMItemType.MAKE,
         line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
         unit_of_measure=item.unit_of_measure or "each",
         reference_designator=item.reference_designator,
@@ -51,10 +59,10 @@ def build_bom_item_response(item: BOMItem, db: Session) -> BOMItemResponse:
         operation_sequence=item.operation_sequence if item.operation_sequence is not None else 10,
         scrap_factor=item.scrap_factor if item.scrap_factor is not None else 0.0,
         lead_time_offset=item.lead_time_offset if item.lead_time_offset is not None else 0,
-        is_optional=item.is_optional or False,
-        is_alternate=item.is_alternate or False,
+        is_optional=item.is_optional if item.is_optional is not None else False,
+        is_alternate=item.is_alternate if item.is_alternate is not None else False,
         alternate_group=item.alternate_group,
-        component_part=get_component_part_info(item.component_part, db) if item.component_part else None,
+        component_part=component_info,
         created_at=item.created_at,
         updated_at=item.updated_at
     )
@@ -85,27 +93,46 @@ def list_boms(
     
     result = []
     for bom in boms:
-        bom_response = BOMResponse(
-            id=bom.id,
-            part_id=bom.part_id,
-            revision=bom.revision,
-            description=bom.description,
-            bom_type=bom.bom_type or "standard",
-            status=bom.status,
-            is_active=bom.is_active,
-            effective_date=bom.effective_date,
-            created_at=bom.created_at,
-            updated_at=bom.updated_at,
-            part=PartInfo(
-                id=bom.part.id,
-                part_number=bom.part.part_number or "",
-                name=bom.part.name or "",
-                revision=bom.part.revision or "A",
-                part_type=bom.part.part_type.value if bom.part.part_type else "manufactured"
-            ) if bom.part else None,
-            items=[build_bom_item_response(item, db) for item in bom.items]
-        )
-        result.append(bom_response)
+        try:
+            # Build items list safely
+            items_list = []
+            for item in bom.items:
+                try:
+                    items_list.append(build_bom_item_response(item, db))
+                except Exception:
+                    pass  # Skip items that fail to serialize
+            
+            # Build part info safely
+            part_info = None
+            if bom.part:
+                try:
+                    part_info = PartInfo(
+                        id=bom.part.id,
+                        part_number=bom.part.part_number or "",
+                        name=bom.part.name or "",
+                        revision=bom.part.revision or "A",
+                        part_type=bom.part.part_type.value if bom.part.part_type else "manufactured"
+                    )
+                except Exception:
+                    pass
+            
+            bom_response = BOMResponse(
+                id=bom.id,
+                part_id=bom.part_id,
+                revision=bom.revision or "A",
+                description=bom.description or "",
+                bom_type=bom.bom_type or "standard",
+                status=bom.status or "draft",
+                is_active=bom.is_active if bom.is_active is not None else True,
+                effective_date=bom.effective_date,
+                created_at=bom.created_at,
+                updated_at=bom.updated_at,
+                part=part_info,
+                items=items_list
+            )
+            result.append(bom_response)
+        except Exception:
+            pass  # Skip BOMs that fail to serialize
     
     return result
 
