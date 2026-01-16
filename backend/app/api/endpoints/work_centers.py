@@ -36,16 +36,24 @@ def list_work_centers(
     
     # Cache the result for default parameters
     if skip == 0 and limit == 100 and active_only:
-        # Convert to dict for caching
+        # Convert to dict for caching - must include ALL fields required by WorkCenterResponse
         cache_data = [
             {
-                "id": wc.id, "code": wc.code, "name": wc.name,
-                "work_center_type": wc.work_center_type.value if wc.work_center_type else None,
-                "description": wc.description, "hourly_rate": float(wc.hourly_rate) if wc.hourly_rate else 0,
-                "capacity_hours_per_day": float(wc.capacity_hours_per_day) if wc.capacity_hours_per_day else 0,
-                "efficiency_factor": float(wc.efficiency_factor) if wc.efficiency_factor else 1,
-                "is_active": wc.is_active, "current_status": wc.current_status,
-                "version": wc.version,
+                "id": wc.id, 
+                "code": wc.code, 
+                "name": wc.name,
+                "work_center_type": wc.work_center_type.value if wc.work_center_type else "fabrication",
+                "description": wc.description or "",
+                "hourly_rate": float(wc.hourly_rate) if wc.hourly_rate else 0.0,
+                "capacity_hours_per_day": float(wc.capacity_hours_per_day) if wc.capacity_hours_per_day else 8.0,
+                "efficiency_factor": float(wc.efficiency_factor) if wc.efficiency_factor else 1.0,
+                "building": wc.building,
+                "area": wc.area,
+                "is_active": wc.is_active, 
+                "current_status": wc.current_status or "available",
+                "version": getattr(wc, 'version', 0),
+                "created_at": wc.created_at.isoformat() if wc.created_at else None,
+                "updated_at": wc.updated_at.isoformat() if wc.updated_at else None,
             }
             for wc in result
         ]
