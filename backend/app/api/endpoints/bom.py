@@ -529,7 +529,7 @@ def flatten_bom_items(
             part_id=item.component_part_id,
             part_number=item.component_part.part_number if item.component_part else "",
             part_name=item.component_part.name if item.component_part else "",
-            part_type=item.component_part.part_type if item.component_part else "",
+            part_type=item.component_part.part_type.value if item.component_part else "",
             item_type=item.item_type,
             line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
             quantity_per=item.quantity,
