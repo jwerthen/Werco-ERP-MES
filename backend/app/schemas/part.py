@@ -77,6 +77,7 @@ class PartUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=255)
     revision: Optional[str] = Field(None, min_length=1, max_length=20, pattern=r'^[A-Z0-9]+$')
     description: Optional[str] = Field(None, max_length=2000)
+    part_type: Optional[PartType] = Field(None, description="Type of part (manufactured, purchased, assembly, raw_material)")
     unit_of_measure: Optional[UnitOfMeasure] = None
     standard_cost: Optional[Decimal] = Field(None, ge=0)
     material_cost: Optional[Decimal] = Field(None, ge=0)
