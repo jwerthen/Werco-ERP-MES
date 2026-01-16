@@ -19,8 +19,13 @@ depends_on = None
 def upgrade():
     conn = op.get_bind()
     
-    # Update any NULL line_type values to 'component' (the default)
+    # Fix any NULL values in bom_items that could cause serialization errors
     conn.execute(text("UPDATE bom_items SET line_type = 'component' WHERE line_type IS NULL"))
+    conn.execute(text("UPDATE bom_items SET item_type = 'make' WHERE item_type IS NULL"))
+    conn.execute(text("UPDATE bom_items SET scrap_factor = 0.0 WHERE scrap_factor IS NULL"))
+    conn.execute(text("UPDATE bom_items SET operation_sequence = 10 WHERE operation_sequence IS NULL"))
+    conn.execute(text("UPDATE bom_items SET quantity = 1.0 WHERE quantity IS NULL"))
+    conn.execute(text("UPDATE bom_items SET lead_time_offset = 0 WHERE lead_time_offset IS NULL"))
 
 
 def downgrade():

@@ -32,14 +32,14 @@ def get_component_part_info(part: Part, db: Session) -> ComponentPartInfo:
 
 
 def build_bom_item_response(item: BOMItem, db: Session) -> BOMItemResponse:
-    """Build BOM item response with part info"""
+    """Build BOM item response with part info - handles NULL values defensively"""
     return BOMItemResponse(
         id=item.id,
         bom_id=item.bom_id,
         component_part_id=item.component_part_id,
         item_number=item.item_number,
-        quantity=item.quantity,
-        item_type=item.item_type,
+        quantity=item.quantity or 1.0,
+        item_type=item.item_type or BOMItemType.MAKE,
         line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
         unit_of_measure=item.unit_of_measure or "each",
         reference_designator=item.reference_designator,
@@ -48,9 +48,9 @@ def build_bom_item_response(item: BOMItem, db: Session) -> BOMItemResponse:
         torque_spec=item.torque_spec,
         installation_notes=item.installation_notes,
         work_center_id=item.work_center_id,
-        operation_sequence=item.operation_sequence,
-        scrap_factor=item.scrap_factor,
-        lead_time_offset=item.lead_time_offset or 0,
+        operation_sequence=item.operation_sequence if item.operation_sequence is not None else 10,
+        scrap_factor=item.scrap_factor if item.scrap_factor is not None else 0.0,
+        lead_time_offset=item.lead_time_offset if item.lead_time_offset is not None else 0,
         is_optional=item.is_optional or False,
         is_alternate=item.is_alternate or False,
         alternate_group=item.alternate_group,
@@ -426,7 +426,10 @@ def explode_bom_recursive(
         if item.component_part_id in visited:
             continue  # Skip to prevent infinite loops
         
-        extended_qty = item.quantity * parent_qty * (1 + item.scrap_factor)
+        # Handle NULL values defensively
+        qty = item.quantity or 1.0
+        scrap = item.scrap_factor if item.scrap_factor is not None else 0.0
+        extended_qty = qty * parent_qty * (1 + scrap)
         
         # Check if component has its own BOM
         component_bom = db.query(BOM).filter(
@@ -435,7 +438,8 @@ def explode_bom_recursive(
         ).first()
         
         children = []
-        if component_bom and item.item_type != BOMItemType.BUY:
+        item_type = item.item_type or BOMItemType.MAKE
+        if component_bom and item_type != BOMItemType.BUY:
             new_visited = visited.copy()
             new_visited.add(item.component_part_id)
             children = explode_bom_recursive(
@@ -452,8 +456,8 @@ def explode_bom_recursive(
             bom_id=item.bom_id,
             component_part_id=item.component_part_id,
             item_number=item.item_number,
-            quantity=item.quantity,
-            item_type=item.item_type,
+            quantity=qty,
+            item_type=item_type,
             line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
             unit_of_measure=item.unit_of_measure or "each",
             reference_designator=item.reference_designator,
@@ -462,9 +466,9 @@ def explode_bom_recursive(
             torque_spec=item.torque_spec,
             installation_notes=item.installation_notes,
             work_center_id=item.work_center_id,
-            operation_sequence=item.operation_sequence,
-            scrap_factor=item.scrap_factor,
-            lead_time_offset=item.lead_time_offset or 0,
+            operation_sequence=item.operation_sequence if item.operation_sequence is not None else 10,
+            scrap_factor=scrap,
+            lead_time_offset=item.lead_time_offset if item.lead_time_offset is not None else 0,
             is_optional=item.is_optional or False,
             is_alternate=item.is_alternate or False,
             alternate_group=item.alternate_group,
