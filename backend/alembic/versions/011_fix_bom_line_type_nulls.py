@@ -11,7 +11,7 @@ from alembic import op
 from sqlalchemy import text
 
 revision = '011_fix_bom_line_type'
-down_revision = '010'
+down_revision = '010_add_role_permissions'
 branch_labels = None
 depends_on = None
 
