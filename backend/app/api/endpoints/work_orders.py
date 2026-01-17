@@ -279,6 +279,7 @@ def create_work_order(
                 ).first()
             
             if bom:
+                pass  # BOM found, will be used below
         
         if is_assembly and bom:
             # Assembly with BOM: collect all component operations and group by work center
