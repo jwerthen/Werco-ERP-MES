@@ -78,70 +78,101 @@ def list_boms(
     current_user: User = Depends(get_current_user)
 ):
     """List all BOMs"""
-    try:
-        query = db.query(BOM).options(
-            joinedload(BOM.part),
-            joinedload(BOM.items).joinedload(BOMItem.component_part)
-        )
-        
-        if active_only:
-            query = query.filter(BOM.is_active == True)
-        
-        if status:
-            query = query.filter(BOM.status == status)
-        
-        boms = query.offset(skip).limit(limit).all()
-        
-        result = []
-        for bom in boms:
-            try:
-                # Build items list safely
-                items_list = []
-                for item in bom.items:
-                    try:
-                        items_list.append(build_bom_item_response(item, db))
-                    except Exception:
-                        pass  # Skip items that fail to serialize
-                
-                # Build part info safely
-                part_info = None
-                if bom.part:
-                    try:
-                        part_info = PartInfo(
-                            id=bom.part.id,
-                            part_number=bom.part.part_number or "",
-                            name=bom.part.name or "",
-                            revision=bom.part.revision or "A",
-                            part_type=bom.part.part_type.value if bom.part.part_type else "manufactured"
-                        )
-                    except Exception:
-                        pass
-                
-                bom_response = BOMResponse(
-                    id=bom.id,
-                    part_id=bom.part_id,
-                    revision=bom.revision or "A",
-                    description=bom.description or "",
-                    bom_type=bom.bom_type or "standard",
-                    status=bom.status or "draft",
-                    is_active=bom.is_active if bom.is_active is not None else True,
-                    effective_date=bom.effective_date,
-                    created_at=bom.created_at,
-                    updated_at=bom.updated_at,
-                    part=part_info,
-                    items=items_list
+    # Simple query without eager loading to avoid join issues
+    query = db.query(BOM)
+    
+    if active_only:
+        query = query.filter(BOM.is_active == True)
+    
+    if status:
+        query = query.filter(BOM.status == status)
+    
+    boms = query.offset(skip).limit(limit).all()
+    
+    result = []
+    for bom in boms:
+        try:
+            # Load part separately
+            part = db.query(Part).filter(Part.id == bom.part_id).first()
+            
+            # Build part info safely
+            part_info = None
+            if part:
+                part_info = PartInfo(
+                    id=part.id,
+                    part_number=part.part_number or "",
+                    name=part.name or "",
+                    revision=part.revision or "A",
+                    part_type=part.part_type.value if part.part_type else "manufactured"
                 )
-                result.append(bom_response)
-            except Exception:
-                pass  # Skip BOMs that fail to serialize
-        
-        return result
-    except Exception as e:
-        # Log the actual error - don't hide it, raise it so we can debug
-        import logging
-        import traceback
-        logging.error(f"Error listing BOMs: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error listing BOMs: {str(e)}")
+            
+            # Load items separately
+            items = db.query(BOMItem).filter(BOMItem.bom_id == bom.id).all()
+            items_list = []
+            for item in items:
+                try:
+                    # Load component part for this item
+                    component = db.query(Part).filter(Part.id == item.component_part_id).first()
+                    
+                    component_info = None
+                    if component:
+                        has_bom = db.query(BOM).filter(BOM.part_id == component.id, BOM.is_active == True).first() is not None
+                        component_info = ComponentPartInfo(
+                            id=component.id,
+                            part_number=component.part_number or "",
+                            name=component.name or "",
+                            revision=component.revision or "A",
+                            part_type=component.part_type.value if component.part_type else "manufactured",
+                            has_bom=has_bom
+                        )
+                    
+                    items_list.append(BOMItemResponse(
+                        id=item.id,
+                        bom_id=item.bom_id,
+                        component_part_id=item.component_part_id,
+                        item_number=item.item_number if item.item_number is not None else 10,
+                        quantity=item.quantity if item.quantity is not None else 1.0,
+                        item_type=item.item_type if item.item_type else BOMItemType.MAKE,
+                        line_type=item.line_type if item.line_type else BOMLineType.COMPONENT,
+                        unit_of_measure=item.unit_of_measure or "each",
+                        reference_designator=item.reference_designator,
+                        find_number=item.find_number,
+                        notes=item.notes,
+                        torque_spec=item.torque_spec,
+                        installation_notes=item.installation_notes,
+                        work_center_id=item.work_center_id,
+                        operation_sequence=item.operation_sequence if item.operation_sequence is not None else 10,
+                        scrap_factor=item.scrap_factor if item.scrap_factor is not None else 0.0,
+                        lead_time_offset=item.lead_time_offset if item.lead_time_offset is not None else 0,
+                        is_optional=item.is_optional if item.is_optional is not None else False,
+                        is_alternate=item.is_alternate if item.is_alternate is not None else False,
+                        alternate_group=item.alternate_group,
+                        component_part=component_info,
+                        created_at=item.created_at,
+                        updated_at=item.updated_at
+                    ))
+                except Exception:
+                    pass  # Skip items that fail
+            
+            bom_response = BOMResponse(
+                id=bom.id,
+                part_id=bom.part_id,
+                revision=bom.revision or "A",
+                description=bom.description or "",
+                bom_type=bom.bom_type or "standard",
+                status=bom.status or "draft",
+                is_active=bom.is_active if bom.is_active is not None else True,
+                effective_date=bom.effective_date,
+                created_at=bom.created_at,
+                updated_at=bom.updated_at,
+                part=part_info,
+                items=items_list
+            )
+            result.append(bom_response)
+        except Exception:
+            pass  # Skip BOMs that fail
+    
+    return result
 
 
 @router.post("/", response_model=BOMResponse)
