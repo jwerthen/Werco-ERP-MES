@@ -19,11 +19,11 @@ depends_on = None
 def upgrade():
     conn = op.get_bind()
     
-    # Fix any NULL part_type values - default to 'manufactured'
-    conn.execute(text("UPDATE parts SET part_type = 'manufactured' WHERE part_type IS NULL"))
+    # Fix any NULL part_type values - default to 'MANUFACTURED' (uppercase for PostgreSQL enum)
+    conn.execute(text("UPDATE parts SET part_type = 'MANUFACTURED' WHERE part_type IS NULL"))
     
-    # Fix any NULL unit_of_measure values - default to 'each'
-    conn.execute(text("UPDATE parts SET unit_of_measure = 'each' WHERE unit_of_measure IS NULL"))
+    # Fix any NULL unit_of_measure values - default to 'EACH' (uppercase for PostgreSQL enum)
+    conn.execute(text("UPDATE parts SET unit_of_measure = 'EACH' WHERE unit_of_measure IS NULL"))
     
     # Fix any NULL status values
     conn.execute(text("UPDATE parts SET status = 'active' WHERE status IS NULL"))
