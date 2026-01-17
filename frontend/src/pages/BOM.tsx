@@ -237,6 +237,20 @@ export default function BOMPage() {
     }
   };
 
+  const handleDeleteBOM = async (bomId: number) => {
+    if (!window.confirm('Delete this BOM? This action cannot be undone.')) return;
+    
+    try {
+      await api.deleteBOM(bomId);
+      setBoms(boms.filter(b => b.id !== bomId));
+      if (selectedBOM?.id === bomId) {
+        setSelectedBOM(null);
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to delete BOM');
+    }
+  };
+
   const handleReleaseBOM = async () => {
     if (!selectedBOM) return;
     try {
@@ -393,6 +407,13 @@ export default function BOMPage() {
                       </button>
                       <button onClick={handleReleaseBOM} className="btn-success">
                         Release
+                      </button>
+                      <button 
+                        onClick={() => handleDeleteBOM(selectedBOM.id)} 
+                        className="btn-danger flex items-center"
+                      >
+                        <TrashIcon className="h-4 w-4 mr-1" />
+                        Delete
                       </button>
                     </>
                   )}
