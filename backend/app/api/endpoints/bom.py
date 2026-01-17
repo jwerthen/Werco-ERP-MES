@@ -137,10 +137,11 @@ def list_boms(
         
         return result
     except Exception as e:
-        # Log the actual error and return empty list instead of 500
+        # Log the actual error - don't hide it, raise it so we can debug
         import logging
-        logging.error(f"Error listing BOMs: {str(e)}")
-        return []
+        import traceback
+        logging.error(f"Error listing BOMs: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error listing BOMs: {str(e)}")
 
 
 @router.post("/", response_model=BOMResponse)
