@@ -250,11 +250,9 @@ def create_work_order(
     db.flush()  # Get the work order ID
     
     # Auto-generate operations from routing if enabled and no operations provided
-    print(f"DEBUG: auto_routing={auto_routing}, operations={work_order_in.operations}, len={len(work_order_in.operations) if work_order_in.operations else 0}")
     
     if auto_routing and not work_order_in.operations:
         is_assembly = part.part_type == PartType.ASSEMBLY
-        print(f"DEBUG: part_type={part.part_type}, is_assembly={is_assembly}")
         
         # Check for BOM (for assemblies)
         bom = None
@@ -265,7 +263,6 @@ def create_work_order(
                 BOM.is_active == True,
                 BOM.status == "released"
             ).first()
-            print(f"DEBUG: BOM (released) found={bom is not None}")
             
             if not bom:
                 bom = db.query(BOM).filter(
@@ -273,7 +270,6 @@ def create_work_order(
                     BOM.is_active == True,
                     BOM.status == "draft"
                 ).first()
-                print(f"DEBUG: BOM (draft) found={bom is not None}")
             
             # Also try without status filter as fallback
             if not bom:
@@ -281,10 +277,8 @@ def create_work_order(
                     BOM.part_id == work_order_in.part_id,
                     BOM.is_active == True
                 ).first()
-                print(f"DEBUG: BOM (any active) found={bom is not None}")
             
             if bom:
-                print(f"DEBUG: BOM id={bom.id}, status={bom.status}, is_active={bom.is_active}")
         
         if is_assembly and bom:
             # Assembly with BOM: collect all component operations and group by work center
@@ -371,21 +365,17 @@ def _create_grouped_assembly_operations(
     2. Operators can run similar parts back-to-back
     3. Each operation shows which part it's for and how many
     """
-    print(f"DEBUG _create_grouped: bom_id={bom.id}, wo_quantity={wo_quantity}")
     
     # Collect all operations from all component parts
     all_operations = []  # List of (group, work_center_id, part, bom_item, routing_op)
     
     bom_items = db.query(BOMItem).filter(BOMItem.bom_id == bom.id).all()
-    print(f"DEBUG _create_grouped: found {len(bom_items)} BOM items")
     
     for item in bom_items:
         component = db.query(Part).filter(Part.id == item.component_part_id).first()
         if not component:
-            print(f"DEBUG: component not found for component_part_id={item.component_part_id}")
             continue
         
-        print(f"DEBUG: Processing component {component.part_number} (id={component.id})")
             
         # Calculate quantity needed for this component
         component_qty = float(item.quantity) * wo_quantity
@@ -398,7 +388,6 @@ def _create_grouped_assembly_operations(
             Routing.is_active == True,
             Routing.status == "released"
         ).first()
-        print(f"DEBUG: Routing (released) for {component.part_number}: found={routing is not None}")
         
         # Fall back to draft routing if no released routing exists
         if not routing:
@@ -409,13 +398,10 @@ def _create_grouped_assembly_operations(
                 Routing.is_active == True,
                 Routing.status == "draft"
             ).first()
-            print(f"DEBUG: Routing (draft) for {component.part_number}: found={routing is not None}")
         
         if not routing:
-            print(f"DEBUG: No routing found for {component.part_number}, skipping")
             continue
         
-        print(f"DEBUG: Routing {routing.id} has {len(routing.operations)} operations")
             
         for rop in routing.operations:
             if not rop.is_active:
@@ -454,7 +440,6 @@ def _create_grouped_assembly_operations(
         x['original_sequence']
     ))
     
-    print(f"DEBUG: Total operations collected: {len(all_operations)}")
     
     # Create work order operations with new sequences
     sequence = 10
