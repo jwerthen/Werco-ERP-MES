@@ -126,12 +126,23 @@ export default function BOMPage() {
 
   const loadData = async () => {
     try {
-      const [bomsRes, partsRes] = await Promise.all([
+      // Load BOMs and parts separately so one failure doesn't block the other
+      const [bomsResult, partsResult] = await Promise.allSettled([
         api.getBOMs({ active_only: true }),
         api.getParts({ active_only: true })
       ]);
-      setBoms(bomsRes);
-      setParts(partsRes);
+      
+      if (bomsResult.status === 'fulfilled') {
+        setBoms(bomsResult.value);
+      } else {
+        console.error('Failed to load BOMs:', bomsResult.reason);
+      }
+      
+      if (partsResult.status === 'fulfilled') {
+        setParts(partsResult.value);
+      } else {
+        console.error('Failed to load parts:', partsResult.reason);
+      }
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
