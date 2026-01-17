@@ -393,10 +393,44 @@ def add_bom_item(
     db.commit()
     db.refresh(item)
     
-    # Load the component_part relationship for the response
-    item = db.query(BOMItem).options(joinedload(BOMItem.component_part)).filter(BOMItem.id == item.id).first()
+    # Build response manually to avoid joinedload issues
+    component_info = None
+    if component:
+        has_bom = db.query(BOM).filter(BOM.part_id == component.id, BOM.is_active == True).first() is not None
+        component_info = ComponentPartInfo(
+            id=component.id,
+            part_number=component.part_number or "",
+            name=component.name or "",
+            revision=component.revision or "A",
+            part_type=component.part_type.value if component.part_type else "manufactured",
+            has_bom=has_bom
+        )
     
-    return build_bom_item_response(item, db)
+    return BOMItemResponse(
+        id=item.id,
+        bom_id=item.bom_id,
+        component_part_id=item.component_part_id,
+        item_number=item.item_number,
+        quantity=item.quantity,
+        item_type=item.item_type,
+        line_type=item.line_type,
+        unit_of_measure=item.unit_of_measure or "each",
+        reference_designator=item.reference_designator,
+        find_number=item.find_number,
+        notes=item.notes,
+        torque_spec=item.torque_spec,
+        installation_notes=item.installation_notes,
+        work_center_id=item.work_center_id,
+        operation_sequence=item.operation_sequence or 10,
+        scrap_factor=item.scrap_factor or 0.0,
+        lead_time_offset=item.lead_time_offset or 0,
+        is_optional=item.is_optional or False,
+        is_alternate=item.is_alternate or False,
+        alternate_group=item.alternate_group,
+        component_part=component_info,
+        created_at=item.created_at,
+        updated_at=item.updated_at
+    )
 
 
 @router.put("/items/{item_id}", response_model=BOMItemResponse)
