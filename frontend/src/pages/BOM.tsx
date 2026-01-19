@@ -319,8 +319,8 @@ export default function BOMPage() {
             </div>
           </td>
           <td className="px-4 py-3">
-            <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${itemTypeColors[item.item_type]}`}>
-              {item.item_type}
+            <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${lineTypeColors[item.line_type || 'component']}`}>
+              {lineTypeLabels[item.line_type || 'component']}
             </span>
           </td>
           <td className="px-4 py-3 text-right">{item.quantity}</td>
@@ -480,14 +480,9 @@ export default function BOMPage() {
                             </div>
                           </td>
                           <td className="px-4 py-3">
-                            <div className="flex flex-col gap-1">
-                              <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${lineTypeColors[item.line_type || 'component']}`}>
-                                {lineTypeLabels[item.line_type || 'component']}
-                              </span>
-                              <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${itemTypeColors[item.item_type]}`}>
-                                {item.item_type}
-                              </span>
-                            </div>
+                            <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${lineTypeColors[item.line_type || 'component']}`}>
+                              {lineTypeLabels[item.line_type || 'component']}
+                            </span>
                           </td>
                           <td className="px-4 py-3 text-right">{item.quantity}</td>
                           <td className="px-4 py-3 text-center">{item.unit_of_measure}</td>
