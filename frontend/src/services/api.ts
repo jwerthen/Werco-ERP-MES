@@ -369,6 +369,11 @@ class ApiService {
     return response.data;
   }
 
+  async unreleaseBOM(id: number) {
+    const response = await this.api.post(`/bom/${id}/unrelease`);
+    return response.data;
+  }
+
   async deleteBOM(id: number) {
     const response = await this.api.delete(`/bom/${id}`);
     return response.data;

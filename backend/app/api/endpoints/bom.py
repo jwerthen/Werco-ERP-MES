@@ -332,6 +332,25 @@ def release_bom(
     return {"message": "BOM released", "bom_id": bom.id}
 
 
+@router.post("/{bom_id}/unrelease")
+def unrelease_bom(
+    bom_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+):
+    """Unrelease a BOM to allow editing"""
+    bom = db.query(BOM).filter(BOM.id == bom_id).first()
+    if not bom:
+        raise HTTPException(status_code=404, detail="BOM not found")
+    if bom.status != "released":
+        raise HTTPException(status_code=400, detail="BOM is not released")
+    bom.status = "draft"
+    bom.approved_by = None
+    bom.approved_at = None
+    db.commit()
+    return {"message": "BOM unreleased", "bom_id": bom.id}
+
+
 @router.delete("/{bom_id}")
 def delete_bom(
     bom_id: int,

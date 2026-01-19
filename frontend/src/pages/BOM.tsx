@@ -265,6 +265,19 @@ export default function BOMPage() {
     }
   };
 
+  const handleUnreleaseBOM = async () => {
+    if (!selectedBOM) return;
+    if (!window.confirm('Unrelease this BOM? It will return to draft status and can be edited.')) return;
+    try {
+      await api.unreleaseBOM(selectedBOM.id);
+      const updated = await api.getBOM(selectedBOM.id);
+      setSelectedBOM(updated);
+      setBoms(boms.map(b => b.id === updated.id ? updated : b));
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to unrelease BOM');
+    }
+  };
+
   const toggleExpanded = (itemId: number) => {
     const newExpanded = new Set(expandedItems);
     if (newExpanded.has(itemId)) {
@@ -418,6 +431,11 @@ export default function BOMPage() {
                         Delete
                       </button>
                     </>
+                  )}
+                  {selectedBOM.status === 'released' && (
+                    <button onClick={handleUnreleaseBOM} className="btn-warning">
+                      Unrelease
+                    </button>
                   )}
                 </div>
               </div>
