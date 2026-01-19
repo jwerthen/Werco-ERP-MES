@@ -339,16 +339,23 @@ def unrelease_bom(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
 ):
     """Unrelease a BOM to allow editing"""
-    bom = db.query(BOM).filter(BOM.id == bom_id).first()
-    if not bom:
-        raise HTTPException(status_code=404, detail="BOM not found")
-    if bom.status != "released":
-        raise HTTPException(status_code=400, detail="BOM is not released")
-    bom.status = "draft"
-    bom.approved_by = None
-    bom.approved_at = None
-    db.commit()
-    return {"message": "BOM unreleased", "bom_id": bom.id}
+    try:
+        bom = db.query(BOM).filter(BOM.id == bom_id).first()
+        if not bom:
+            raise HTTPException(status_code=404, detail="BOM not found")
+        if bom.status != "released":
+            raise HTTPException(status_code=400, detail="BOM is not released")
+        bom.status = "draft"
+        bom.approved_by = None
+        bom.approved_at = None
+        db.commit()
+        return {"message": "BOM unreleased", "bom_id": bom.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Error unreleasing BOM: {str(e)}\n{traceback.format_exc()}")
 
 
 @router.delete("/{bom_id}")
