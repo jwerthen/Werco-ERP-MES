@@ -177,6 +177,7 @@ export default function BOMPage() {
     if (!selectedBOM) return;
 
     try {
+      console.log('Adding BOM item:', { bomId: selectedBOM.id, newItem });
       await api.addBOMItem(selectedBOM.id, newItem);
       // Reload the BOM
       const updated = await api.getBOM(selectedBOM.id);
@@ -198,6 +199,7 @@ export default function BOMPage() {
         installation_notes: ''
       });
     } catch (err: any) {
+      console.error('Failed to add BOM item:', err.response?.data || err);
       alert(err.response?.data?.detail || 'Failed to add item');
     }
   };
