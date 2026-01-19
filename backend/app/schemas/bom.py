@@ -23,10 +23,14 @@ class BOMItemBase(BaseModel):
     is_optional: bool = False
     is_alternate: bool = False
     alternate_group: Optional[str] = None
+    
+    class Config:
+        use_enum_values = True
 
 
 class BOMItemCreate(BOMItemBase):
-    pass
+    class Config:
+        use_enum_values = True
 
 
 class BOMItemUpdate(BaseModel):
