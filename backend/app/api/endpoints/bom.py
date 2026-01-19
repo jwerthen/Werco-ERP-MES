@@ -389,7 +389,14 @@ def add_bom_item(
         if parent_part and parent_part.customer_name and not component.customer_name:
             component.customer_name = parent_part.customer_name
         
-        item = BOMItem(bom_id=bom_id, **item_in.model_dump())
+        # Get item data and ensure enum values are lowercase for PostgreSQL
+        item_data = item_in.model_dump()
+        if 'item_type' in item_data and item_data['item_type']:
+            item_data['item_type'] = item_data['item_type'].lower() if isinstance(item_data['item_type'], str) else item_data['item_type'].value
+        if 'line_type' in item_data and item_data['line_type']:
+            item_data['line_type'] = item_data['line_type'].lower() if isinstance(item_data['line_type'], str) else item_data['line_type'].value
+        
+        item = BOMItem(bom_id=bom_id, **item_data)
         db.add(item)
         db.commit()
         db.refresh(item)
