@@ -63,8 +63,9 @@ class BOMItem(Base):
     # Item details
     item_number = Column(Integer, nullable=False)  # Line item number (10, 20, 30...)
     quantity = Column(Float, nullable=False, default=1.0)
-    item_type = Column(SQLEnum(BOMItemType), nullable=False)
-    line_type = Column(SQLEnum(BOMLineType), nullable=False, default=BOMLineType.COMPONENT)
+    # Use String to bypass SQLAlchemy's enum handling - PostgreSQL cast will handle it
+    item_type = Column(String(20), nullable=False)  # stores: 'make', 'buy', 'phantom'
+    line_type = Column(String(20), nullable=False, default='component')  # stores: 'component', 'hardware', etc.
     
     # Unit of measure for this line (may differ from part UOM)
     unit_of_measure = Column(String(20), default="each")
