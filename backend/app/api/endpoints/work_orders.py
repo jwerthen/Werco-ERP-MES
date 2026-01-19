@@ -58,8 +58,8 @@ def list_work_orders(
     if status:
         query = query.filter(WorkOrder.status == status)
     else:
-        # Default: exclude closed/cancelled
-        query = query.filter(WorkOrder.status.not_in([WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]))
+        # Default: exclude complete/closed/cancelled (only show active work orders)
+        query = query.filter(WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]))
     
     if search:
         search_filter = f"%{search}%"
