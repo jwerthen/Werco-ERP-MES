@@ -237,34 +237,48 @@ def get_bom(
     current_user: User = Depends(get_current_user)
 ):
     """Get a specific BOM with all items"""
-    bom = db.query(BOM).options(
-        joinedload(BOM.part),
-        joinedload(BOM.items).joinedload(BOMItem.component_part)
-    ).filter(BOM.id == bom_id).first()
-    
-    if not bom:
-        raise HTTPException(status_code=404, detail="BOM not found")
-    
-    return BOMResponse(
-        id=bom.id,
-        part_id=bom.part_id,
-        revision=bom.revision,
-        description=bom.description,
-        bom_type=bom.bom_type or "standard",
-        status=bom.status,
-        is_active=bom.is_active,
-        effective_date=bom.effective_date,
-        created_at=bom.created_at,
-        updated_at=bom.updated_at,
-        part=PartInfo(
-            id=bom.part.id,
-            part_number=bom.part.part_number or "",
-            name=bom.part.name or "",
-            revision=bom.part.revision or "A",
-            part_type=bom.part.part_type.value if bom.part.part_type else "manufactured"
-        ) if bom.part else None,
-        items=[build_bom_item_response(item, db) for item in bom.items]
-    )
+    try:
+        bom = db.query(BOM).options(
+            joinedload(BOM.part),
+            joinedload(BOM.items).joinedload(BOMItem.component_part)
+        ).filter(BOM.id == bom_id).first()
+        
+        if not bom:
+            raise HTTPException(status_code=404, detail="BOM not found")
+        
+        # Safely get part_type - handle both enum and string values
+        part_type_val = "manufactured"
+        if bom.part and bom.part.part_type:
+            if hasattr(bom.part.part_type, 'value'):
+                part_type_val = bom.part.part_type.value
+            else:
+                part_type_val = str(bom.part.part_type)
+        
+        return BOMResponse(
+            id=bom.id,
+            part_id=bom.part_id,
+            revision=bom.revision,
+            description=bom.description,
+            bom_type=bom.bom_type or "standard",
+            status=bom.status,
+            is_active=bom.is_active,
+            effective_date=bom.effective_date,
+            created_at=bom.created_at,
+            updated_at=bom.updated_at,
+            part=PartInfo(
+                id=bom.part.id,
+                part_number=bom.part.part_number or "",
+                name=bom.part.name or "",
+                revision=bom.part.revision or "A",
+                part_type=part_type_val
+            ) if bom.part else None,
+            items=[build_bom_item_response(item, db) for item in bom.items]
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Error getting BOM: {str(e)}\n{traceback.format_exc()}")
 
 
 @router.get("/by-part/{part_id}", response_model=BOMResponse)
