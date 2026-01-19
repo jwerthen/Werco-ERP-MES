@@ -363,74 +363,81 @@ def add_bom_item(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
     """Add an item to a BOM"""
-    bom = db.query(BOM).filter(BOM.id == bom_id).first()
-    if not bom:
-        raise HTTPException(status_code=404, detail="BOM not found")
-    
-    # Validate component exists
-    component = db.query(Part).filter(Part.id == item_in.component_part_id).first()
-    if not component:
-        raise HTTPException(status_code=404, detail="Component part not found")
-    
-    # Check for circular reference
-    if item_in.component_part_id == bom.part_id:
-        raise HTTPException(status_code=400, detail="BOM cannot contain itself")
-    
-    # Check for deeper circular references
-    if would_create_circular_reference(db, bom.part_id, item_in.component_part_id):
-        raise HTTPException(
-            status_code=400, 
-            detail="Adding this component would create a circular reference in the BOM structure"
+    try:
+        bom = db.query(BOM).filter(BOM.id == bom_id).first()
+        if not bom:
+            raise HTTPException(status_code=404, detail="BOM not found")
+        
+        # Validate component exists
+        component = db.query(Part).filter(Part.id == item_in.component_part_id).first()
+        if not component:
+            raise HTTPException(status_code=404, detail="Component part not found")
+        
+        # Check for circular reference
+        if item_in.component_part_id == bom.part_id:
+            raise HTTPException(status_code=400, detail="BOM cannot contain itself")
+        
+        # Check for deeper circular references
+        if would_create_circular_reference(db, bom.part_id, item_in.component_part_id):
+            raise HTTPException(
+                status_code=400, 
+                detail="Adding this component would create a circular reference in the BOM structure"
+            )
+        
+        # Inherit customer_name from parent assembly if component doesn't have one
+        parent_part = db.query(Part).filter(Part.id == bom.part_id).first()
+        if parent_part and parent_part.customer_name and not component.customer_name:
+            component.customer_name = parent_part.customer_name
+        
+        item = BOMItem(bom_id=bom_id, **item_in.model_dump())
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        
+        # Build response manually to avoid joinedload issues
+        component_info = None
+        if component:
+            has_bom = db.query(BOM).filter(BOM.part_id == component.id, BOM.is_active == True).first() is not None
+            component_info = ComponentPartInfo(
+                id=component.id,
+                part_number=component.part_number or "",
+                name=component.name or "",
+                revision=component.revision or "A",
+                part_type=component.part_type.value if component.part_type else "manufactured",
+                has_bom=has_bom
+            )
+        
+        return BOMItemResponse(
+            id=item.id,
+            bom_id=item.bom_id,
+            component_part_id=item.component_part_id,
+            item_number=item.item_number,
+            quantity=item.quantity,
+            item_type=item.item_type,
+            line_type=item.line_type,
+            unit_of_measure=item.unit_of_measure or "each",
+            reference_designator=item.reference_designator,
+            find_number=item.find_number,
+            notes=item.notes,
+            torque_spec=item.torque_spec,
+            installation_notes=item.installation_notes,
+            work_center_id=item.work_center_id,
+            operation_sequence=item.operation_sequence or 10,
+            scrap_factor=item.scrap_factor or 0.0,
+            lead_time_offset=item.lead_time_offset or 0,
+            is_optional=item.is_optional or False,
+            is_alternate=item.is_alternate or False,
+            alternate_group=item.alternate_group,
+            component_part=component_info,
+            created_at=item.created_at,
+            updated_at=item.updated_at
         )
-    
-    # Inherit customer_name from parent assembly if component doesn't have one
-    parent_part = db.query(Part).filter(Part.id == bom.part_id).first()
-    if parent_part and parent_part.customer_name and not component.customer_name:
-        component.customer_name = parent_part.customer_name
-    
-    item = BOMItem(bom_id=bom_id, **item_in.model_dump())
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    
-    # Build response manually to avoid joinedload issues
-    component_info = None
-    if component:
-        has_bom = db.query(BOM).filter(BOM.part_id == component.id, BOM.is_active == True).first() is not None
-        component_info = ComponentPartInfo(
-            id=component.id,
-            part_number=component.part_number or "",
-            name=component.name or "",
-            revision=component.revision or "A",
-            part_type=component.part_type.value if component.part_type else "manufactured",
-            has_bom=has_bom
-        )
-    
-    return BOMItemResponse(
-        id=item.id,
-        bom_id=item.bom_id,
-        component_part_id=item.component_part_id,
-        item_number=item.item_number,
-        quantity=item.quantity,
-        item_type=item.item_type,
-        line_type=item.line_type,
-        unit_of_measure=item.unit_of_measure or "each",
-        reference_designator=item.reference_designator,
-        find_number=item.find_number,
-        notes=item.notes,
-        torque_spec=item.torque_spec,
-        installation_notes=item.installation_notes,
-        work_center_id=item.work_center_id,
-        operation_sequence=item.operation_sequence or 10,
-        scrap_factor=item.scrap_factor or 0.0,
-        lead_time_offset=item.lead_time_offset or 0,
-        is_optional=item.is_optional or False,
-        is_alternate=item.is_alternate or False,
-        alternate_group=item.alternate_group,
-        component_part=component_info,
-        created_at=item.created_at,
-        updated_at=item.updated_at
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Error adding BOM item: {str(e)}\n{traceback.format_exc()}"
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 @router.put("/items/{item_id}", response_model=BOMItemResponse)
