@@ -391,10 +391,22 @@ def add_bom_item(
         
         # Get item data and ensure enum values are lowercase for PostgreSQL
         item_data = item_in.model_dump()
+        
+        # Convert item_type to lowercase string
         if 'item_type' in item_data and item_data['item_type']:
-            item_data['item_type'] = item_data['item_type'].lower() if isinstance(item_data['item_type'], str) else item_data['item_type'].value
+            val = item_data['item_type']
+            if hasattr(val, 'value'):
+                item_data['item_type'] = val.value.lower()
+            elif isinstance(val, str):
+                item_data['item_type'] = val.lower()
+        
+        # Convert line_type to lowercase string
         if 'line_type' in item_data and item_data['line_type']:
-            item_data['line_type'] = item_data['line_type'].lower() if isinstance(item_data['line_type'], str) else item_data['line_type'].value
+            val = item_data['line_type']
+            if hasattr(val, 'value'):
+                item_data['line_type'] = val.value.lower()
+            elif isinstance(val, str):
+                item_data['line_type'] = val.lower()
         
         item = BOMItem(bom_id=bom_id, **item_data)
         db.add(item)
