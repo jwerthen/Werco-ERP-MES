@@ -473,14 +473,20 @@ def calculate_sheet_metal_quote(
     
     total_cutting_minutes = cutting_minutes + pierce_time_minutes
     
-    # Add 17.5% buffer for parts with more than 20 holes (accounts for repositioning, heat management)
+    # Add 30% buffer for head retractions, repositioning, and laser dynamics
+    total_cutting_minutes = total_cutting_minutes * 1.30
+    
+    # Additional buffer for parts with many holes (heat management, extra positioning)
     if request.num_holes > 20:
-        total_cutting_minutes = total_cutting_minutes * 1.175
+        total_cutting_minutes = total_cutting_minutes * 1.10
     cutting_hours = total_cutting_minutes / 60
     cutting_cost = cutting_hours * laser_rate
     
     # Bending time and cost
-    bend_run_time = request.num_bends * bend_time_sec / 3600  # hours
+    # Each bend takes time for: part handling, positioning, forming, and repositioning
+    # Use 30 seconds per bend minimum (more realistic than 15 sec default)
+    effective_bend_time = max(bend_time_sec, 30.0)
+    bend_run_time = request.num_bends * effective_bend_time / 3600  # hours
     bend_setup_time = request.num_unique_bends * bend_setup_sec / 3600  # hours
     total_bend_hours = bend_run_time + bend_setup_time / request.quantity
     bending_cost = total_bend_hours * brake_rate * request.quantity
@@ -568,7 +574,10 @@ def calculate_sheet_metal_quote(
             "flat_area_sqft": round(flat_area_sqft, 2),
             "cutting_minutes": round(total_cutting_minutes, 1),
             "cutting_speed_ipm": cutting_speed,
+            "laser_buffer_pct": "30%",
             "bend_time_hours": round(total_bend_hours, 2),
+            "seconds_per_bend": effective_bend_time,
+            "num_bends": request.num_bends,
             "laser_rate": laser_rate,
             "brake_rate": brake_rate
         }
