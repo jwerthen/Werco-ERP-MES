@@ -81,8 +81,8 @@ export default function MaterialsInventoryPage() {
     shelf: '',
   });
 
-  // Filter for raw materials and purchased parts only
-  const materialTypes = ['raw_material', 'purchased'];
+  // Filter for raw materials, hardware, consumables, and purchased parts
+  const materialTypes = ['raw_material', 'purchased', 'hardware', 'consumable'];
 
   useEffect(() => {
     loadData();
@@ -225,7 +225,19 @@ export default function MaterialsInventoryPage() {
     switch (type) {
       case 'raw_material': return <CubeIcon className="h-4 w-4" />;
       case 'purchased': return <WrenchScrewdriverIcon className="h-4 w-4" />;
+      case 'hardware': return <WrenchScrewdriverIcon className="h-4 w-4" />;
+      case 'consumable': return <CubeIcon className="h-4 w-4" />;
       default: return null;
+    }
+  };
+  
+  const getPartTypeLabel = (type: string) => {
+    switch (type) {
+      case 'raw_material': return 'Raw Material';
+      case 'purchased': return 'Purchased';
+      case 'hardware': return 'Hardware';
+      case 'consumable': return 'Consumable';
+      default: return type;
     }
   };
 
@@ -609,12 +621,14 @@ export default function MaterialsInventoryPage() {
                 <label className="label">Material Type *</label>
                 <select 
                   value={createForm.part_type} 
-                  onChange={(e) => setCreateForm({...createForm, part_type: e.target.value as 'raw_material' | 'purchased'})} 
+                  onChange={(e) => setCreateForm({...createForm, part_type: e.target.value as 'raw_material' | 'purchased' | 'hardware' | 'consumable'})} 
                   className="input" 
                   required
                 >
                   <option value="raw_material">Raw Material (steel, aluminum, etc.)</option>
-                  <option value="purchased">Hardware/Purchased (bolts, screws, etc.)</option>
+                  <option value="hardware">Hardware (bolts, nuts, fasteners)</option>
+                  <option value="consumable">Consumable (adhesives, lubricants)</option>
+                  <option value="purchased">Other Purchased</option>
                 </select>
               </div>
               <div className="grid grid-cols-2 gap-4">
