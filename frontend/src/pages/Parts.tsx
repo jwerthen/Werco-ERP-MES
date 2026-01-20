@@ -10,6 +10,8 @@ const typeColors: Record<PartType, string> = {
   purchased: 'bg-green-100 text-green-800',
   assembly: 'bg-purple-100 text-purple-800',
   raw_material: 'bg-yellow-100 text-yellow-800',
+  hardware: 'bg-amber-100 text-amber-800',
+  consumable: 'bg-orange-100 text-orange-800',
 };
 
 interface BOMItem {
@@ -292,6 +294,10 @@ export default function Parts() {
           <option value="">All Types</option>
           <option value="manufactured">Manufactured</option>
           <option value="assembly">Assembly</option>
+          <option value="purchased">Purchased</option>
+          <option value="hardware">Hardware</option>
+          <option value="consumable">Consumable</option>
+          <option value="raw_material">Raw Material</option>
         </select>
         <label className="flex items-center gap-2 text-sm text-gray-600 whitespace-nowrap">
           <input
@@ -559,6 +565,10 @@ export default function Parts() {
                   >
                     <option value="manufactured">Manufactured (Make)</option>
                     <option value="assembly">Assembly</option>
+                    <option value="purchased">Purchased (Buy)</option>
+                    <option value="hardware">Hardware (Fasteners, etc.)</option>
+                    <option value="consumable">Consumable (Adhesives, etc.)</option>
+                    <option value="raw_material">Raw Material</option>
                   </select>
                 </div>
                 <div>

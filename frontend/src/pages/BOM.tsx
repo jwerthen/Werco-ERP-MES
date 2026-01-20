@@ -610,25 +610,54 @@ export default function BOMPage() {
                     />
                     <select
                       value={newItem.component_part_id}
-                      onChange={(e) => setNewItem({ ...newItem, component_part_id: parseInt(e.target.value) })}
+                      onChange={(e) => {
+                        const partId = parseInt(e.target.value);
+                        const selectedPart = parts.find(p => p.id === partId);
+                        // Auto-set line_type and item_type based on part type
+                        let lineType = newItem.line_type;
+                        let itemType = newItem.item_type;
+                        if (selectedPart) {
+                          if (selectedPart.part_type === 'hardware') {
+                            lineType = 'hardware';
+                            itemType = 'buy';
+                          } else if (selectedPart.part_type === 'consumable') {
+                            lineType = 'consumable';
+                            itemType = 'buy';
+                          } else if (selectedPart.part_type === 'purchased' || selectedPart.part_type === 'raw_material') {
+                            itemType = 'buy';
+                          } else if (selectedPart.part_type === 'manufactured' || selectedPart.part_type === 'assembly') {
+                            itemType = 'make';
+                          }
+                        }
+                        setNewItem({ ...newItem, component_part_id: partId, line_type: lineType, item_type: itemType });
+                      }}
                       className="input"
                       required
                       size={5}
                     >
                       <option value={0}>-- Select a part --</option>
-                      {parts
-                        .filter(p => p.id !== selectedBOM.part_id)
-                        .filter(p => {
-                          if (!partSearch) return true;
-                          const search = partSearch.toLowerCase();
-                          return p.part_number.toLowerCase().includes(search) || 
-                                 p.name.toLowerCase().includes(search);
-                        })
-                        .map(part => (
-                          <option key={part.id} value={part.id}>
-                            {part.part_number} - {part.name} ({part.part_type})
-                          </option>
-                        ))}
+                      {/* Group parts by type for better organization */}
+                      {['manufactured', 'assembly', 'purchased', 'hardware', 'consumable', 'raw_material'].map(partType => {
+                        const typeParts = parts
+                          .filter(p => p.id !== selectedBOM.part_id)
+                          .filter(p => p.part_type === partType)
+                          .filter(p => {
+                            if (!partSearch) return true;
+                            const search = partSearch.toLowerCase();
+                            return p.part_number.toLowerCase().includes(search) || 
+                                   p.name.toLowerCase().includes(search);
+                          });
+                        if (typeParts.length === 0) return null;
+                        return (
+                          <optgroup key={partType} label={partType.charAt(0).toUpperCase() + partType.slice(1).replace('_', ' ')}>
+                            {typeParts.map(part => (
+                              <option key={part.id} value={part.id}>
+                                {part.part_number} - {part.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        );
+                      })}
                     </select>
                   </div>
                   <button

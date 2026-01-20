@@ -10,7 +10,9 @@ class PartType(str, enum.Enum):
     MANUFACTURED = "manufactured"  # Parts we make
     PURCHASED = "purchased"  # Off the shelf / buy parts
     ASSEMBLY = "assembly"  # Assemblies we build
-    RAW_MATERIAL = "raw_material"
+    RAW_MATERIAL = "raw_material"  # Raw stock material (sheets, bars, etc.)
+    HARDWARE = "hardware"  # COTS hardware (bolts, nuts, washers, fasteners)
+    CONSUMABLE = "consumable"  # Consumables (adhesives, lubricants, etc.)
 
 
 class UnitOfMeasure(str, enum.Enum):

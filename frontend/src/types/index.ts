@@ -56,7 +56,7 @@ export interface Part {
   updated_at: string;
 }
 
-export type PartType = 'manufactured' | 'purchased' | 'assembly' | 'raw_material';
+export type PartType = 'manufactured' | 'purchased' | 'assembly' | 'raw_material' | 'hardware' | 'consumable';
 
 export interface WorkOrder {
   id: number;
