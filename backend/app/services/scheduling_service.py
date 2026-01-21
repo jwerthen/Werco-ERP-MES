@@ -17,6 +17,7 @@ import logging
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
 from app.models.work_center import WorkCenter
 from app.models.part import Part
+from app.core.cache import invalidate_work_centers_cache
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,8 @@ class SchedulingService:
         self,
         work_center_ids: List[int] = None,
         horizon_days: int = 90,
-        optimize_setup: bool = False
+        optimize_setup: bool = False,
+        work_order_ids: List[int] = None
     ) -> Dict[str, any]:
         """
         Run constraint-based scheduling algorithm
@@ -62,6 +64,7 @@ class SchedulingService:
             work_center_ids: List of work centers to schedule (None = all)
             horizon_days: Scheduling horizon in days
             optimize_setup: Group similar parts to minimize setup changes
+            work_order_ids: List of work orders to schedule (None = all)
 
         Returns:
             Dict with scheduling results
@@ -74,9 +77,13 @@ class SchedulingService:
         self._initialize_capacity(work_centers, horizon_days)
 
         # Get unscheduled operations
-        operations = self._get_operations_to_schedule(work_center_ids)
+        operations = self._get_operations_to_schedule(work_center_ids, work_order_ids)
 
         if not operations:
+            self.update_availability_rates(
+                work_center_ids=[wc.id for wc in work_centers] or None,
+                horizon_days=horizon_days
+            )
             return {"scheduled_count": 0, "message": "No operations to schedule"}
 
         # Sort operations by priority and due date
@@ -99,7 +106,13 @@ class SchedulingService:
                 })
 
         # Commit changes
+        self.update_availability_rates(
+            work_center_ids=[wc.id for wc in work_centers] or None,
+            horizon_days=horizon_days,
+            commit=False
+        )
         self.db.commit()
+        invalidate_work_centers_cache()
 
         logger.info(f"Scheduling complete: {len(scheduled)} scheduled, "
                    f"{len(conflicts)} conflicts")
@@ -125,7 +138,7 @@ class SchedulingService:
         for wc in work_centers:
             self.capacity_map[wc.id] = WorkCenterCapacity(
                 work_center_id=wc.id,
-                hours_per_day=wc.hours_per_day or 8.0,  # Default 8 hours
+                hours_per_day=wc.capacity_hours_per_day or 8.0,  # Default 8 hours
                 daily_load={}
             )
 
@@ -149,7 +162,11 @@ class SchedulingService:
                     (op.setup_time_hours or 0) + (op.run_time_hours or 0)
                 )
 
-    def _get_operations_to_schedule(self, work_center_ids: List[int] = None) -> List[WorkOrderOperation]:
+    def _get_operations_to_schedule(
+        self,
+        work_center_ids: List[int] = None,
+        work_order_ids: List[int] = None
+    ) -> List[WorkOrderOperation]:
         """Get operations that need scheduling"""
         from sqlalchemy.orm import joinedload
 
@@ -169,6 +186,9 @@ class SchedulingService:
 
         if work_center_ids:
             query = query.filter(WorkOrderOperation.work_center_id.in_(work_center_ids))
+
+        if work_order_ids:
+            query = query.filter(WorkOrderOperation.work_order_id.in_(work_order_ids))
 
         return query.all()
 
@@ -318,6 +338,85 @@ class SchedulingService:
             capacity.daily_load[scheduled_date] = 0
 
         capacity.daily_load[scheduled_date] += hours
+
+    def _count_business_days(self, start_date: date, end_date: date) -> int:
+        """Count business days (Mon-Fri) between two dates inclusive"""
+        count = 0
+        current = start_date
+
+        while current <= end_date:
+            if current.weekday() < 5:
+                count += 1
+            current += timedelta(days=1)
+
+        return count
+
+    def _get_scheduled_hours_by_work_center(
+        self,
+        start_date: date,
+        end_date: date,
+        work_center_ids: Optional[List[int]] = None
+    ) -> Dict[int, float]:
+        """Get total scheduled hours by work center for a date range"""
+        hours_expr = func.coalesce(WorkOrderOperation.setup_time_hours, 0) + func.coalesce(
+            WorkOrderOperation.run_time_hours, 0
+        )
+
+        query = self.db.query(
+            WorkOrderOperation.work_center_id,
+            func.coalesce(func.sum(hours_expr), 0).label("scheduled_hours")
+        ).filter(
+            WorkOrderOperation.scheduled_start != None,
+            WorkOrderOperation.scheduled_start >= start_date,
+            WorkOrderOperation.scheduled_start <= end_date,
+            WorkOrderOperation.status != OperationStatus.COMPLETE
+        )
+
+        if work_center_ids:
+            query = query.filter(WorkOrderOperation.work_center_id.in_(work_center_ids))
+
+        results = query.group_by(WorkOrderOperation.work_center_id).all()
+
+        return {wc_id: float(hours or 0) for wc_id, hours in results}
+
+    def update_availability_rates(
+        self,
+        work_center_ids: Optional[List[int]] = None,
+        horizon_days: int = 90,
+        commit: bool = True
+    ) -> Dict[int, float]:
+        """Update work center availability rates based on scheduled load"""
+        work_centers = self._get_work_centers(work_center_ids)
+        if not work_centers:
+            return {}
+
+        start_date = date.today()
+        end_date = start_date + timedelta(days=horizon_days)
+        business_days = self._count_business_days(start_date, end_date)
+        scheduled_hours = self._get_scheduled_hours_by_work_center(
+            start_date,
+            end_date,
+            [wc.id for wc in work_centers]
+        )
+
+        availability_rates = {}
+        for wc in work_centers:
+            available_hours = (wc.capacity_hours_per_day or 8.0) * business_days
+            used_hours = scheduled_hours.get(wc.id, 0)
+
+            if available_hours <= 0:
+                availability = 0.0
+            else:
+                availability = max(0.0, min(100.0, (1 - (used_hours / available_hours)) * 100))
+
+            wc.availability_rate = round(availability, 1)
+            availability_rates[wc.id] = wc.availability_rate
+
+        if commit:
+            self.db.commit()
+            invalidate_work_centers_cache()
+
+        return availability_rates
 
     def get_load_chart(
         self,

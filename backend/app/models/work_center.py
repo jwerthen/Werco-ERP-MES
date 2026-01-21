@@ -31,6 +31,7 @@ class WorkCenter(Base):
     hourly_rate = Column(Float, default=0.0)  # Cost per hour
     capacity_hours_per_day = Column(Float, default=8.0)
     efficiency_factor = Column(Float, default=1.0)  # 1.0 = 100%
+    availability_rate = Column(Float, default=100.0)
     
     # Status
     is_active = Column(Boolean, default=True)

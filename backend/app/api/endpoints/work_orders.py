@@ -12,6 +12,7 @@ from app.models.part import Part, PartType
 from app.models.routing import Routing, RoutingOperation
 from app.models.bom import BOM, BOMItem
 from app.models.work_center import WorkCenter
+from app.services.scheduling_service import SchedulingService
 from app.schemas.work_order import (
     WorkOrderCreate, WorkOrderUpdate, WorkOrderResponse, WorkOrderSummary,
     WorkOrderOperationCreate, WorkOrderOperationUpdate, WorkOrderOperationResponse
@@ -705,6 +706,14 @@ def release_work_order(
         work_order.operations[0].status = OperationStatus.READY
     
     db.commit()
+
+    work_center_ids = list({op.work_center_id for op in work_order.operations if op.work_center_id})
+    SchedulingService(db).run_scheduling(
+        work_center_ids=work_center_ids or None,
+        horizon_days=90,
+        optimize_setup=False,
+        work_order_ids=[work_order.id]
+    )
     
     # Audit log for status change
     audit = AuditService(db, current_user, request)
@@ -923,9 +932,30 @@ def complete_operation(
     # Check if next operation should be set to ready
     work_order = operation.work_order
     next_ops = [op for op in work_order.operations if op.sequence > operation.sequence]
+    affected_work_centers = {operation.work_center_id}
     if next_ops:
         next_op = min(next_ops, key=lambda x: x.sequence)
         next_op.status = OperationStatus.READY
+        affected_work_centers.add(next_op.work_center_id)
+
+        scheduling_service = SchedulingService(db)
+        if not next_op.scheduled_start:
+            scheduling_service.run_scheduling(
+                work_center_ids=list(affected_work_centers),
+                horizon_days=90,
+                optimize_setup=False,
+                work_order_ids=[work_order.id]
+            )
+        else:
+            scheduling_service.update_availability_rates(
+                work_center_ids=list(affected_work_centers),
+                horizon_days=90
+            )
+    else:
+        SchedulingService(db).update_availability_rates(
+            work_center_ids=list(affected_work_centers),
+            horizon_days=90
+        )
     
     db.commit()
     return {"message": "Operation completed"}

@@ -14,6 +14,7 @@ from app.models.work_center import WorkCenter
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.audit_log import AuditLog
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
+from app.services.scheduling_service import SchedulingService
 
 
 class OperationCompleteRequest(BaseModel):
@@ -640,6 +641,10 @@ def complete_operation(
             work_order.status = WorkOrderStatus.COMPLETE
             work_order.actual_end = datetime.utcnow()
             work_order.quantity_complete = completion_data.quantity_complete
+            SchedulingService(db).update_availability_rates(
+                work_center_ids=[operation.work_center_id],
+                horizon_days=90
+            )
         else:
             # Mark next operation as ready and auto-schedule it
             next_op = db.query(WorkOrderOperation).filter(
@@ -652,17 +657,25 @@ def complete_operation(
             
             if next_op:
                 next_op.status = OperationStatus.READY
-                # Auto-schedule: start next op tomorrow (or today if before noon)
-                from datetime import timedelta
-                now = datetime.utcnow()
-                if now.hour < 12:
-                    next_op.scheduled_start = now.date()
+                affected_work_centers = {operation.work_center_id, next_op.work_center_id}
+                scheduling_service = SchedulingService(db)
+                if not next_op.scheduled_start:
+                    scheduling_service.run_scheduling(
+                        work_center_ids=list(affected_work_centers),
+                        horizon_days=90,
+                        optimize_setup=False,
+                        work_order_ids=[work_order.id]
+                    )
                 else:
-                    next_op.scheduled_start = (now + timedelta(days=1)).date()
-                # Calculate estimated end based on hours
-                total_hours = float(next_op.setup_time_hours or 0) + float(next_op.run_time_hours or 0)
-                days_needed = max(1, int(total_hours / 8) + (1 if total_hours % 8 > 0 else 0))
-                next_op.scheduled_end = next_op.scheduled_start + timedelta(days=days_needed - 1)
+                    scheduling_service.update_availability_rates(
+                        work_center_ids=list(affected_work_centers),
+                        horizon_days=90
+                    )
+            else:
+                SchedulingService(db).update_availability_rates(
+                    work_center_ids=[operation.work_center_id],
+                    horizon_days=90
+                )
     
     # Update work order quantity tracking
     work_order.quantity_complete = completion_data.quantity_complete

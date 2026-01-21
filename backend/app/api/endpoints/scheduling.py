@@ -229,8 +229,14 @@ def schedule_work_order(
     for op in operations[1:]:
         op.scheduled_start = None
         op.scheduled_end = None
-    
+    work_center_ids = list({op.work_center_id for op in operations if op.work_center_id})
     db.commit()
+
+    if work_center_ids:
+        SchedulingService(db).update_availability_rates(
+            work_center_ids=work_center_ids,
+            horizon_days=90
+        )
     
     return {
         "message": f"Work order {work_order.work_order_number} scheduled",
@@ -257,9 +263,13 @@ def schedule_operation(
     
     operation.scheduled_start = schedule.scheduled_start
     operation.scheduled_end = schedule.scheduled_end
-    
     db.commit()
-    
+
+    SchedulingService(db).update_availability_rates(
+        work_center_ids=[operation.work_center_id],
+        horizon_days=90
+    )
+
     return {"message": "Operation scheduled", "operation_id": operation_id}
 
 
@@ -287,9 +297,13 @@ def update_operation_work_center(
     
     old_wc_id = operation.work_center_id
     operation.work_center_id = update.work_center_id
-    
     db.commit()
-    
+
+    SchedulingService(db).update_availability_rates(
+        work_center_ids=list({old_wc_id, update.work_center_id}),
+        horizon_days=90
+    )
+
     return {
         "message": "Operation moved to new work center",
         "operation_id": operation_id,

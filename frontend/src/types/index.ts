@@ -25,6 +25,7 @@ export interface WorkCenter {
   hourly_rate: number;
   capacity_hours_per_day: number;
   efficiency_factor: number;
+  availability_rate?: number;
   is_active: boolean;
   current_status: string;
   building?: string;

@@ -47,6 +47,7 @@ def list_work_centers(
                 "hourly_rate": float(wc.hourly_rate) if wc.hourly_rate else 0.0,
                 "capacity_hours_per_day": float(wc.capacity_hours_per_day) if wc.capacity_hours_per_day else 8.0,
                 "efficiency_factor": float(wc.efficiency_factor) if wc.efficiency_factor else 1.0,
+                "availability_rate": float(wc.availability_rate) if wc.availability_rate is not None else 100.0,
                 "building": wc.building,
                 "area": wc.area,
                 "is_active": wc.is_active, 

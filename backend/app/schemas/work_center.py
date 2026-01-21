@@ -38,6 +38,7 @@ class WorkCenterResponse(WorkCenterBase):
     version: Optional[int] = 0  # For optimistic locking
     is_active: bool
     current_status: str
+    availability_rate: Optional[float] = None
     created_at: datetime
     updated_at: datetime
     
