@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { Part } from '../types';
 import { 
@@ -79,6 +79,24 @@ const lineTypeLabels: Record<string, string> = {
   reference: 'Reference',
 };
 
+const partTypeLabels: Record<string, string> = {
+  manufactured: 'Manufactured',
+  assembly: 'Assembly',
+  purchased: 'Purchased',
+  raw_material: 'Raw Material',
+  hardware: 'Hardware',
+  consumable: 'Consumable',
+};
+
+const partTypeBadge: Record<string, string> = {
+  manufactured: 'bg-cyan-100 text-cyan-800',
+  assembly: 'bg-indigo-100 text-indigo-800',
+  purchased: 'bg-emerald-100 text-emerald-800',
+  raw_material: 'bg-blue-100 text-blue-800',
+  hardware: 'bg-amber-100 text-amber-800',
+  consumable: 'bg-orange-100 text-orange-800',
+};
+
 export default function BOMPage() {
   const [boms, setBoms] = useState<BOM[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
@@ -91,6 +109,7 @@ export default function BOMPage() {
   const [showNewPartModal, setShowNewPartModal] = useState(false);
   const [viewMode, setViewMode] = useState<'single' | 'exploded'>('single');
   const [partSearch, setPartSearch] = useState('');
+  const [partTypeFilter, setPartTypeFilter] = useState('all');
 
   const [newBOM, setNewBOM] = useState({ part_id: 0, revision: 'A', description: '', bom_type: 'standard' });
   const [newItem, setNewItem] = useState({
@@ -150,6 +169,52 @@ export default function BOMPage() {
     }
   };
 
+  const partTypeOptions = [
+    { id: 'all', label: 'All' },
+    { id: 'manufactured', label: 'Manufactured' },
+    { id: 'assembly', label: 'Assembly' },
+    { id: 'purchased', label: 'Purchased' },
+    { id: 'raw_material', label: 'Raw Material' },
+    { id: 'hardware', label: 'Hardware' },
+    { id: 'consumable', label: 'Consumable' },
+  ];
+
+  const filteredParts = useMemo(() => {
+    const search = partSearch.toLowerCase();
+    return parts
+      .filter(p => p.id !== selectedBOM?.part_id)
+      .filter(p => (partTypeFilter === 'all' ? true : p.part_type === partTypeFilter))
+      .filter(p => {
+        if (!search) return true;
+        return (
+          p.part_number.toLowerCase().includes(search) ||
+          p.name.toLowerCase().includes(search) ||
+          p.description?.toLowerCase().includes(search)
+        );
+      })
+      .sort((a, b) => a.part_number.localeCompare(b.part_number));
+  }, [partSearch, partTypeFilter, parts, selectedBOM?.part_id]);
+
+  const handleSelectPart = (partId: number) => {
+    const selectedPart = parts.find(p => p.id === partId);
+    let lineType = newItem.line_type;
+    let itemType = newItem.item_type;
+    if (selectedPart) {
+      if (selectedPart.part_type === 'hardware') {
+        lineType = 'hardware';
+        itemType = 'buy';
+      } else if (selectedPart.part_type === 'consumable') {
+        lineType = 'consumable';
+        itemType = 'buy';
+      } else if (selectedPart.part_type === 'purchased' || selectedPart.part_type === 'raw_material') {
+        itemType = 'buy';
+      } else if (selectedPart.part_type === 'manufactured' || selectedPart.part_type === 'assembly') {
+        itemType = 'make';
+      }
+    }
+    setNewItem({ ...newItem, component_part_id: partId, line_type: lineType, item_type: itemType });
+  };
+
   const loadExplodedBOM = async (bomId: number) => {
     try {
       const response = await api.explodeBOM(bomId);
@@ -175,6 +240,10 @@ export default function BOMPage() {
   const handleAddItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedBOM) return;
+    if (newItem.component_part_id <= 0) {
+      alert('Select a component part before adding.');
+      return;
+    }
 
     try {
       console.log('Adding BOM item:', { bomId: selectedBOM.id, newItem });
@@ -210,7 +279,7 @@ export default function BOMPage() {
       const createdPart = await api.createPart(newPart);
       // Add to parts list and select it
       setParts([...parts, createdPart]);
-      setNewItem({ ...newItem, component_part_id: createdPart.id });
+      handleSelectPart(createdPart.id);
       setShowNewPartModal(false);
       setNewPart({
         part_number: '',
@@ -594,149 +663,170 @@ export default function BOMPage() {
       {/* Add Item Modal */}
       {showAddItemModal && selectedBOM && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Add BOM Item</h3>
-            <form onSubmit={handleAddItem} className="space-y-4">
+          <div className="bg-white rounded-2xl p-6 max-w-5xl w-full mx-4">
+            <div className="flex items-center justify-between mb-5">
               <div>
-                <label className="label">Component Part</label>
-                <div className="flex gap-2">
-                  <div className="flex-1 relative">
+                <h3 className="text-lg font-semibold">Add BOM Item</h3>
+                <p className="text-sm text-gray-500">Pick a component and configure its usage</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowNewPartModal(true)}
+                className="btn-secondary"
+                title="Create a new part"
+              >
+                <PlusIcon className="h-4 w-4 mr-1 inline" />
+                New Part
+              </button>
+            </div>
+            <form onSubmit={handleAddItem} className="space-y-5">
+              <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+                <div className="lg:col-span-2 space-y-3">
+                  <div className="relative">
                     <input
                       type="text"
                       placeholder="Search parts..."
                       value={partSearch}
                       onChange={(e) => setPartSearch(e.target.value)}
-                      className="input mb-1"
+                      className="input pr-10"
                     />
-                    <select
-                      value={newItem.component_part_id}
-                      onChange={(e) => {
-                        const partId = parseInt(e.target.value);
-                        const selectedPart = parts.find(p => p.id === partId);
-                        // Auto-set line_type and item_type based on part type
-                        let lineType = newItem.line_type;
-                        let itemType = newItem.item_type;
-                        if (selectedPart) {
-                          if (selectedPart.part_type === 'hardware') {
-                            lineType = 'hardware';
-                            itemType = 'buy';
-                          } else if (selectedPart.part_type === 'consumable') {
-                            lineType = 'consumable';
-                            itemType = 'buy';
-                          } else if (selectedPart.part_type === 'purchased' || selectedPart.part_type === 'raw_material') {
-                            itemType = 'buy';
-                          } else if (selectedPart.part_type === 'manufactured' || selectedPart.part_type === 'assembly') {
-                            itemType = 'make';
-                          }
-                        }
-                        setNewItem({ ...newItem, component_part_id: partId, line_type: lineType, item_type: itemType });
-                      }}
-                      className="input"
-                      required
-                      size={5}
-                    >
-                      <option value={0}>-- Select a part --</option>
-                      {/* Group parts by type for better organization */}
-                      {['manufactured', 'assembly', 'purchased', 'hardware', 'consumable', 'raw_material'].map(partType => {
-                        const typeParts = parts
-                          .filter(p => p.id !== selectedBOM.part_id)
-                          .filter(p => p.part_type === partType)
-                          .filter(p => {
-                            if (!partSearch) return true;
-                            const search = partSearch.toLowerCase();
-                            return p.part_number.toLowerCase().includes(search) || 
-                                   p.name.toLowerCase().includes(search);
-                          });
-                        if (typeParts.length === 0) return null;
-                        return (
-                          <optgroup key={partType} label={partType.charAt(0).toUpperCase() + partType.slice(1).replace('_', ' ')}>
-                            {typeParts.map(part => (
-                              <option key={part.id} value={part.id}>
-                                {part.part_number} - {part.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                        );
-                      })}
-                    </select>
+                    {partSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setPartSearch('')}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        aria-label="Clear search"
+                      >
+                        <XMarkIcon className="h-4 w-4" />
+                      </button>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowNewPartModal(true)}
-                    className="btn-secondary h-fit whitespace-nowrap"
-                    title="Create a new part"
-                  >
-                    <PlusIcon className="h-4 w-4 mr-1 inline" />
-                    New Part
-                  </button>
-                </div>
-                {newItem.component_part_id > 0 && (
-                  <div className="mt-1 text-sm text-green-600">
-                    Selected: {parts.find(p => p.id === newItem.component_part_id)?.part_number}
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    {partTypeOptions.map(option => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => setPartTypeFilter(option.id)}
+                        className={`rounded-full border px-3 py-1 font-medium transition ${
+                          partTypeFilter === option.id
+                            ? 'border-werco-500 bg-werco-50 text-werco-700'
+                            : 'border-gray-200 text-gray-600 hover:border-werco-300'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
                   </div>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Line Type</label>
-                  <select
-                    value={newItem.line_type}
-                    onChange={(e) => setNewItem({ ...newItem, line_type: e.target.value as LineType })}
-                    className="input"
-                  >
-                    <option value="component">Component (Made Part)</option>
-                    <option value="hardware">Hardware (Bolts, Nuts, etc.)</option>
-                    <option value="consumable">Consumable (Adhesive, etc.)</option>
-                    <option value="reference">Reference Only</option>
-                  </select>
+                  <div className="text-xs text-gray-500">
+                    Showing {filteredParts.length} part{filteredParts.length === 1 ? '' : 's'}
+                  </div>
+                  <div className="max-h-[360px] overflow-y-auto space-y-2 pr-1">
+                    {filteredParts.map(part => (
+                      <button
+                        key={part.id}
+                        type="button"
+                        onClick={() => handleSelectPart(part.id)}
+                        className={`w-full text-left rounded-xl border px-3 py-2.5 transition ${
+                          newItem.component_part_id === part.id
+                            ? 'border-werco-500 bg-werco-50 shadow-sm'
+                            : 'border-gray-200 hover:border-werco-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="font-semibold text-gray-900">{part.part_number}</div>
+                            <div className="text-sm text-gray-500">{part.name}</div>
+                          </div>
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${partTypeBadge[part.part_type] || 'bg-gray-100 text-gray-600'}`}>
+                            {partTypeLabels[part.part_type] || part.part_type}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                    {filteredParts.length === 0 && (
+                      <div className="border border-dashed border-gray-200 rounded-xl p-4 text-sm text-gray-500 text-center">
+                        No parts match your filters.
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <label className="label">Make/Buy</label>
-                  <select
-                    value={newItem.item_type}
-                    onChange={(e) => setNewItem({ ...newItem, item_type: e.target.value as any })}
-                    className="input"
-                  >
-                    <option value="make">Make</option>
-                    <option value="buy">Buy</option>
-                    <option value="phantom">Phantom</option>
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="label">Item #</label>
-                  <input
-                    type="number"
-                    value={newItem.item_number}
-                    onChange={(e) => setNewItem({ ...newItem, item_number: parseInt(e.target.value) })}
-                    className="input"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Quantity</label>
-                  <input
-                    type="number"
-                    step="0.001"
-                    min="0"
-                    value={newItem.quantity}
-                    onChange={(e) => setNewItem({ ...newItem, quantity: parseFloat(e.target.value) })}
-                    className="input"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Find Number</label>
-                  <input
-                    type="text"
-                    value={newItem.find_number}
-                    onChange={(e) => setNewItem({ ...newItem, find_number: e.target.value })}
-                    className="input"
-                    placeholder="e.g., 1, 2, 3"
-                  />
-                </div>
-              </div>
+                <div className="lg:col-span-3 space-y-4">
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                    <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Selected Component</div>
+                    {newItem.component_part_id > 0 ? (
+                      <div>
+                        <div className="font-semibold text-gray-900">
+                          {parts.find(p => p.id === newItem.component_part_id)?.part_number}
+                        </div>
+                        <div className="text-sm text-gray-600">
+                          {parts.find(p => p.id === newItem.component_part_id)?.name}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-gray-500">Select a part to continue.</div>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="label">Line Type</label>
+                      <select
+                        value={newItem.line_type}
+                        onChange={(e) => setNewItem({ ...newItem, line_type: e.target.value as LineType })}
+                        className="input"
+                      >
+                        <option value="component">Component (Made Part)</option>
+                        <option value="hardware">Hardware (Bolts, Nuts, etc.)</option>
+                        <option value="consumable">Consumable (Adhesive, etc.)</option>
+                        <option value="reference">Reference Only</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="label">Make/Buy</label>
+                      <select
+                        value={newItem.item_type}
+                        onChange={(e) => setNewItem({ ...newItem, item_type: e.target.value as any })}
+                        className="input"
+                      >
+                        <option value="make">Make</option>
+                        <option value="buy">Buy</option>
+                        <option value="phantom">Phantom</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-4">
+                    <div>
+                      <label className="label">Item #</label>
+                      <input
+                        type="number"
+                        value={newItem.item_number}
+                        onChange={(e) => setNewItem({ ...newItem, item_number: parseInt(e.target.value) })}
+                        className="input"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Quantity</label>
+                      <input
+                        type="number"
+                        step="0.001"
+                        min="0"
+                        value={newItem.quantity}
+                        onChange={(e) => setNewItem({ ...newItem, quantity: parseFloat(e.target.value) })}
+                        className="input"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Find Number</label>
+                      <input
+                        type="text"
+                        value={newItem.find_number}
+                        onChange={(e) => setNewItem({ ...newItem, find_number: e.target.value })}
+                        className="input"
+                        placeholder="e.g., 1, 2, 3"
+                      />
+                    </div>
+                  </div>
               
               {/* Hardware-specific fields */}
               {(newItem.line_type === 'hardware') && (
@@ -808,10 +898,20 @@ export default function BOMPage() {
                 </label>
               </div>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => { setShowAddItemModal(false); setPartSearch(''); }} className="btn-secondary">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddItemModal(false);
+                    setPartSearch('');
+                    setPartTypeFilter('all');
+                  }}
+                  className="btn-secondary"
+                >
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary">Add Item</button>
+                <button type="submit" className="btn-primary" disabled={newItem.component_part_id <= 0}>
+                  Add Item
+                </button>
               </div>
             </form>
           </div>
