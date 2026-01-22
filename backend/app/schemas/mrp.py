@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, date
 from app.models.mrp import MRPRunStatus, PlanningAction
@@ -82,8 +82,8 @@ class MRPActionResponse(BaseModel):
 
 
 class MRPRunDetail(MRPRunResponse):
-    requirements: List[MRPRequirementResponse] = []
-    actions: List[MRPActionResponse] = []
+    requirements: List[MRPRequirementResponse] = Field(default_factory=list)
+    actions: List[MRPActionResponse] = Field(default_factory=list)
 
 
 class MRPPartAnalysis(BaseModel):

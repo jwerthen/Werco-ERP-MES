@@ -29,7 +29,7 @@ class KPIValue(BaseModel):
     prior_value: Optional[float] = None
     change_pct: Optional[float] = None
     trend: TrendDirection = TrendDirection.FLAT
-    sparkline: List[float] = []
+    sparkline: List[float] = Field(default_factory=list)
     
     class Config:
         from_attributes = True
@@ -244,9 +244,9 @@ class ReportSort(BaseModel):
 class CustomReportRequest(BaseModel):
     data_source: ReportDataSource
     columns: List[ReportColumn]
-    filters: List[ReportFilter] = []
-    group_by: List[ReportGroupBy] = []
-    sort: List[ReportSort] = []
+    filters: List[ReportFilter] = Field(default_factory=list)
+    group_by: List[ReportGroupBy] = Field(default_factory=list)
+    sort: List[ReportSort] = Field(default_factory=list)
     limit: Optional[int] = 1000
 
 
@@ -255,9 +255,9 @@ class ReportTemplateCreate(BaseModel):
     description: Optional[str] = None
     data_source: ReportDataSource
     columns: List[ReportColumn]
-    filters: List[ReportFilter] = []
-    group_by: List[ReportGroupBy] = []
-    sort: List[ReportSort] = []
+    filters: List[ReportFilter] = Field(default_factory=list)
+    group_by: List[ReportGroupBy] = Field(default_factory=list)
+    sort: List[ReportSort] = Field(default_factory=list)
     is_shared: bool = False
 
 

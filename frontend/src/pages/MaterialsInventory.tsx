@@ -38,6 +38,7 @@ interface InventorySummary {
 }
 
 type TabType = 'catalog' | 'summary' | 'details';
+type MaterialPartType = 'raw_material' | 'purchased' | 'hardware' | 'consumable';
 
 export default function MaterialsInventoryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -67,7 +68,7 @@ export default function MaterialsInventoryPage() {
     part_number: '',
     name: '',
     description: '',
-    part_type: 'raw_material' as 'raw_material' | 'purchased',
+    part_type: 'raw_material' as MaterialPartType,
     unit_of_measure: 'each',
     standard_cost: 0,
   });
@@ -82,7 +83,7 @@ export default function MaterialsInventoryPage() {
   });
 
   // Filter for raw materials, hardware, consumables, and purchased parts
-  const materialTypes = ['raw_material', 'purchased', 'hardware', 'consumable'];
+  const materialTypes: MaterialPartType[] = ['raw_material', 'purchased', 'hardware', 'consumable'];
 
   useEffect(() => {
     loadData();
@@ -613,7 +614,7 @@ export default function MaterialsInventoryPage() {
                 <label className="label">Material Type *</label>
                 <select 
                   value={createForm.part_type} 
-                  onChange={(e) => setCreateForm({...createForm, part_type: e.target.value as 'raw_material' | 'purchased' | 'hardware' | 'consumable'})} 
+                  onChange={(e) => setCreateForm({...createForm, part_type: e.target.value as MaterialPartType})} 
                   className="input" 
                   required
                 >

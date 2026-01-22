@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 
@@ -122,7 +122,7 @@ class RoutingResponse(RoutingBase):
     total_labor_cost: float
     total_overhead_cost: float
     part: Optional[PartSummary] = None
-    operations: List[RoutingOperationResponse] = []
+    operations: List[RoutingOperationResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     

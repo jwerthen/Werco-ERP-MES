@@ -246,7 +246,7 @@ class FAIResponse(BaseModel):
     completed_date: Optional[date]
     customer_approval_required: bool
     customer_approved: bool
-    characteristics: List[FAICharacteristicResponse] = []
+    characteristics: List[FAICharacteristicResponse] = Field(default_factory=list)
     created_at: datetime
     
     class Config:

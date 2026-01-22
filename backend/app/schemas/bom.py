@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Any
 from datetime import datetime
 from app.models.bom import BOMItemType, BOMLineType
@@ -78,7 +78,7 @@ class BOMItemResponse(BOMItemBase):
 
 class BOMItemWithChildren(BOMItemResponse):
     """BOM item with nested children for multi-level explosion"""
-    children: List["BOMItemWithChildren"] = []
+    children: List["BOMItemWithChildren"] = Field(default_factory=list)
     level: int = 0
     extended_quantity: float = 0.0  # quantity * parent quantities
     
@@ -94,7 +94,7 @@ class BOMBase(BaseModel):
 
 
 class BOMCreate(BOMBase):
-    items: List[BOMItemCreate] = []
+    items: List[BOMItemCreate] = Field(default_factory=list)
 
 
 class BOMUpdate(BaseModel):
@@ -125,7 +125,7 @@ class BOMResponse(BOMBase):
     created_at: datetime
     updated_at: datetime
     part: Optional[PartInfo] = None
-    items: List[BOMItemResponse] = []
+    items: List[BOMItemResponse] = Field(default_factory=list)
     
     class Config:
         from_attributes = True

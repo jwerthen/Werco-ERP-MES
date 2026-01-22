@@ -27,15 +27,24 @@ def get_low_stock_alerts(
         Part.reorder_point > 0,
         Part.is_active == True
     ).all()
-    
+    if not parts_with_reorder:
+        return []
+
+    # Aggregate inventory quantities in a single query
+    totals = db.query(
+        InventoryItem.part_id,
+        func.sum(InventoryItem.quantity_on_hand).label("total_qty")
+    ).filter(
+        InventoryItem.is_active == True,
+        InventoryItem.part_id.in_([p.id for p in parts_with_reorder])
+    ).group_by(InventoryItem.part_id).all()
+
+    totals_by_part_id = {row.part_id: float(row.total_qty or 0) for row in totals}
+
     alerts = []
     for part in parts_with_reorder:
-        # Sum inventory for this part
-        total_qty = db.query(func.sum(InventoryItem.quantity_on_hand)).filter(
-            InventoryItem.part_id == part.id,
-            InventoryItem.is_active == True
-        ).scalar() or 0
-        
+        total_qty = totals_by_part_id.get(part.id, 0.0)
+
         if total_qty <= part.reorder_point:
             alerts.append({
                 "part_id": part.id,

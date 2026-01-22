@@ -38,15 +38,15 @@ class WorkOrder(Base, SoftDeleteMixin):
     quantity_scrapped = Column(Float, default=0.0)
     
     # Status tracking
-    status = Column(SQLEnum(WorkOrderStatus), default=WorkOrderStatus.DRAFT)
-    priority = Column(Integer, default=5)  # 1=highest, 10=lowest
+    status = Column(SQLEnum(WorkOrderStatus), default=WorkOrderStatus.DRAFT, index=True)
+    priority = Column(Integer, default=5, index=True)  # 1=highest, 10=lowest
     
     # Scheduling
     scheduled_start = Column(DateTime, nullable=True)
     scheduled_end = Column(DateTime, nullable=True)
     actual_start = Column(DateTime, nullable=True)
     actual_end = Column(DateTime, nullable=True)
-    due_date = Column(Date, nullable=True)
+    due_date = Column(Date, nullable=True, index=True)
     must_ship_by = Column(Date, nullable=True)  # "Must Leave By" date
     
     # Customer/Sales Order reference

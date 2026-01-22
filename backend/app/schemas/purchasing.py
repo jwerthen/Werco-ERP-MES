@@ -126,7 +126,7 @@ class POBase(BaseModel):
 
 
 class POCreate(POBase):
-    lines: List[POLineCreate] = []
+    lines: List[POLineCreate] = Field(default_factory=list)
 
 
 class POUpdate(BaseModel):
@@ -159,7 +159,7 @@ class POResponse(POBase):
     shipping: Money
     total: Money
     vendor: Optional[VendorSummary] = None
-    lines: List[POLineResponse] = []
+    lines: List[POLineResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: Optional[datetime] = None
 

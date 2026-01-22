@@ -265,7 +265,7 @@ export default function Layout({ children }: LayoutProps) {
   }, [location.pathname]);
 
   // Get current page title
-  const getPageTitle = () => {
+  const pageTitle = useMemo(() => {
     for (const item of navigation) {
       if (item.href === location.pathname) return item.name;
       if (item.children) {
@@ -274,7 +274,7 @@ export default function Layout({ children }: LayoutProps) {
       }
     }
     return 'Werco ERP';
-  };
+  }, [location.pathname]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50">
@@ -382,7 +382,7 @@ export default function Layout({ children }: LayoutProps) {
 
             {/* Page title (desktop) */}
             <div className="hidden lg:block">
-              <h1 className="text-lg font-semibold text-slate-800">{getPageTitle()}</h1>
+              <h1 className="text-lg font-semibold text-slate-800">{pageTitle}</h1>
             </div>
 
             {/* Mobile logo */}

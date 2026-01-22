@@ -1,7 +1,7 @@
 from typing import List, Optional, Set
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import and_
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
@@ -31,13 +31,27 @@ def get_component_part_info(part: Part, db: Session) -> ComponentPartInfo:
     )
 
 
-def build_bom_item_response(item: BOMItem, db: Session) -> BOMItemResponse:
+def build_bom_item_response(
+    item: BOMItem,
+    db: Session,
+    has_bom_by_part_id: Optional[dict] = None
+) -> BOMItemResponse:
     """Build BOM item response with part info - handles NULL values defensively"""
     # Handle component_part safely - it might be None if the part was deleted
     component_info = None
     if item.component_part:
         try:
-            component_info = get_component_part_info(item.component_part, db)
+            if has_bom_by_part_id is not None:
+                component_info = ComponentPartInfo(
+                    id=item.component_part.id,
+                    part_number=item.component_part.part_number or "",
+                    name=item.component_part.name or "",
+                    revision=item.component_part.revision or "A",
+                    part_type=item.component_part.part_type.value if item.component_part.part_type else "manufactured",
+                    has_bom=has_bom_by_part_id.get(item.component_part.id, False)
+                )
+            else:
+                component_info = get_component_part_info(item.component_part, db)
         except Exception:
             pass  # Silently handle any errors getting component info
     
@@ -78,8 +92,11 @@ def list_boms(
     current_user: User = Depends(get_current_user)
 ):
     """List all BOMs"""
-    # Simple query without eager loading to avoid join issues
-    query = db.query(BOM)
+    # Use selectinload to avoid N+1 queries for parts and items
+    query = db.query(BOM).options(
+        selectinload(BOM.part),
+        selectinload(BOM.items).selectinload(BOMItem.component_part),
+    )
     
     if active_only:
         query = query.filter(BOM.is_active == True)
@@ -88,12 +105,27 @@ def list_boms(
         query = query.filter(BOM.status == status)
     
     boms = query.offset(skip).limit(limit).all()
+
+    # Preload BOM existence for component parts to avoid per-item queries
+    component_ids = {
+        item.component_part_id
+        for bom in boms
+        for item in (bom.items or [])
+        if item.component_part_id
+    }
+    has_bom_by_part_id = {}
+    if component_ids:
+        existing_boms = db.query(BOM.part_id).filter(
+            BOM.part_id.in_(component_ids),
+            BOM.is_active == True
+        ).all()
+        has_bom_by_part_id = {row.part_id: True for row in existing_boms}
     
     result = []
     for bom in boms:
         try:
-            # Load part separately
-            part = db.query(Part).filter(Part.id == bom.part_id).first()
+            # Part is already loaded via selectinload
+            part = bom.part
             
             # Build part info safely
             part_info = None
@@ -106,17 +138,17 @@ def list_boms(
                     part_type=part.part_type.value if part.part_type else "manufactured"
                 )
             
-            # Load items separately
-            items = db.query(BOMItem).filter(BOMItem.bom_id == bom.id).all()
+            # Items are already loaded via selectinload
+            items = bom.items or []
             items_list = []
             for item in items:
                 try:
-                    # Load component part for this item
-                    component = db.query(Part).filter(Part.id == item.component_part_id).first()
+                    # Component part is already loaded via selectinload
+                    component = item.component_part
                     
                     component_info = None
                     if component:
-                        has_bom = db.query(BOM).filter(BOM.part_id == component.id, BOM.is_active == True).first() is not None
+                        has_bom = has_bom_by_part_id.get(component.id, False)
                         component_info = ComponentPartInfo(
                             id=component.id,
                             part_number=component.part_number or "",
@@ -254,6 +286,15 @@ def get_bom(
             else:
                 part_type_val = str(bom.part.part_type)
         
+        component_ids = {item.component_part_id for item in bom.items if item.component_part_id}
+        has_bom_by_part_id = {}
+        if component_ids:
+            existing_boms = db.query(BOM.part_id).filter(
+                BOM.part_id.in_(component_ids),
+                BOM.is_active == True
+            ).all()
+            has_bom_by_part_id = {row.part_id: True for row in existing_boms}
+
         return BOMResponse(
             id=bom.id,
             part_id=bom.part_id,
@@ -272,7 +313,7 @@ def get_bom(
                 revision=bom.part.revision or "A",
                 part_type=part_type_val
             ) if bom.part else None,
-            items=[build_bom_item_response(item, db) for item in bom.items]
+            items=[build_bom_item_response(item, db, has_bom_by_part_id) for item in bom.items]
         )
     except HTTPException:
         raise

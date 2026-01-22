@@ -139,7 +139,7 @@ class InventoryItem(Base):
     __tablename__ = "inventory_items"
     
     id = Column(Integer, primary_key=True, index=True)
-    part_id = Column(Integer, ForeignKey("parts.id"), nullable=False)
+    part_id = Column(Integer, ForeignKey("parts.id"), nullable=False, index=True)
     
     # Location
     location = Column(String(100), nullable=False)  # Warehouse/bin location
@@ -187,10 +187,10 @@ class InventoryTransaction(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=True)
-    part_id = Column(Integer, ForeignKey("parts.id"), nullable=False)
+    part_id = Column(Integer, ForeignKey("parts.id"), nullable=False, index=True)
     
     # Transaction details
-    transaction_type = Column(SQLEnum(TransactionType), nullable=False)
+    transaction_type = Column(SQLEnum(TransactionType), nullable=False, index=True)
     quantity = Column(Float, nullable=False)  # Positive for in, negative for out
     
     # Reference
@@ -215,7 +215,7 @@ class InventoryTransaction(Base):
     reason_code = Column(String(100))
     
     # Audit fields - CMMC Level 2 requires full audit trail
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     # Relationships

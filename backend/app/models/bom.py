@@ -57,8 +57,8 @@ class BOMItem(Base):
     __tablename__ = "bom_items"
     
     id = Column(Integer, primary_key=True, index=True)
-    bom_id = Column(Integer, ForeignKey("boms.id"), nullable=False)
-    component_part_id = Column(Integer, ForeignKey("parts.id"), nullable=False)
+    bom_id = Column(Integer, ForeignKey("boms.id"), nullable=False, index=True)
+    component_part_id = Column(Integer, ForeignKey("parts.id"), nullable=False, index=True)
     
     # Item details
     item_number = Column(Integer, nullable=False)  # Line item number (10, 20, 30...)

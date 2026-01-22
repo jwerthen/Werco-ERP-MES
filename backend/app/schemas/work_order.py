@@ -104,7 +104,7 @@ class WorkOrderBase(BaseModel):
 
 
 class WorkOrderCreate(WorkOrderBase):
-    operations: List[WorkOrderOperationCreate] = []
+    operations: List[WorkOrderOperationCreate] = Field(default_factory=list)
 
 
 class WorkOrderUpdate(BaseModel):
@@ -140,7 +140,7 @@ class WorkOrderResponse(WorkOrderBase):
     actual_cost: Money
     created_at: datetime
     updated_at: datetime
-    operations: List[WorkOrderOperationResponse] = []
+    operations: List[WorkOrderOperationResponse] = Field(default_factory=list)
     
     class Config:
         from_attributes = True

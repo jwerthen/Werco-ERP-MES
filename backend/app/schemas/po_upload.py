@@ -40,7 +40,7 @@ class POExtractionResult(BaseModel):
     shipping_method: Optional[str] = None
     ship_to: Optional[str] = None
     
-    line_items: List[LineItemExtracted] = []
+    line_items: List[LineItemExtracted] = Field(default_factory=list)
     
     subtotal: Optional[float] = None
     tax: Optional[float] = None
@@ -55,7 +55,7 @@ class POExtractionResult(BaseModel):
     pdf_path: str = ""
     
     # Validation
-    validation_issues: List[Dict[str, str]] = []
+    validation_issues: List[Dict[str, str]] = Field(default_factory=list)
     po_number_exists: bool = False
     
     class Config:
@@ -94,7 +94,7 @@ class POCreateFromUpload(BaseModel):
     line_items: List[LineItemConfirm]
     
     # Parts to create - each dict should have: part_number, description, part_type (optional: 'purchased' or 'raw_material')
-    create_parts: List[Dict[str, Any]] = []
+    create_parts: List[Dict[str, Any]] = Field(default_factory=list)
     
     # PDF reference
     pdf_path: str
