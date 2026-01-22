@@ -18,6 +18,8 @@ os.environ["TEST_DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["SECRET_KEY"] = "test-secret-key-abcdefghijklmnopqrstuvwxyz123456"
 os.environ["REFRESH_TOKEN_SECRET_KEY"] = "test-refresh-secret-key-abcdefghijklmnopqrstuvwxyz123456"
+os.environ["ENVIRONMENT"] = "test"
+os.environ["SENTRY_DSN"] = ""
 
 from app.main import app
 from app.core.security import create_access_token, get_password_hash

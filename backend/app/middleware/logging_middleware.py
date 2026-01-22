@@ -73,7 +73,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Skip logging for certain paths
-        if request.url.path in self.SKIP_PATHS:
+        if request.url.path in self.SKIP_PATHS or request.method in ("OPTIONS", "HEAD"):
             return await call_next(request)
         
         start_time = time.perf_counter()
@@ -90,8 +90,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         # Set request context for logging
         set_request_context(request_context)
         
-        # Log request start
-        logger.info(f"Request started: {request.method} {request.url.path}")
+        # Log request start only in debug to reduce log volume in production
+        if logger.isEnabledFor(10):
+            logger.debug(f"Request started: {request.method} {request.url.path}")
         
         try:
             response = await call_next(request)
@@ -111,7 +112,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             elif response.status_code >= 400:
                 logger.warning(f"Request error: {request.method} {request.url.path}", data=log_data)
             else:
-                logger.info(f"Request completed: {request.method} {request.url.path}", data=log_data)
+                if logger.isEnabledFor(10):
+                    logger.debug(f"Request completed: {request.method} {request.url.path}", data=log_data)
             
             return response
             

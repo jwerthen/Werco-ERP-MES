@@ -96,18 +96,24 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<NodeJS.Timeout>();
+  const recentFetchRef = useRef<number>(0);
+  const searchSeqRef = useRef(0);
 
   // Fetch recent items when dialog opens
   useEffect(() => {
     if (isOpen) {
-      fetchRecentItems();
+      const now = Date.now();
+      if (!recentItems.length || now - recentFetchRef.current > 60000) {
+        recentFetchRef.current = now;
+        fetchRecentItems();
+      }
       setQuery('');
       setResults([]);
       setSelectedIndex(0);
       // Focus input after a short delay to allow animation
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [isOpen]);
+  }, [isOpen, recentItems.length]);
 
   const fetchRecentItems = async () => {
     try {
@@ -126,15 +132,22 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
     }
 
     setIsLoading(true);
+    const seq = ++searchSeqRef.current;
     try {
       const data = await api.search(searchQuery);
-      setResults(data.results || []);
-      setSelectedIndex(0);
+      if (seq === searchSeqRef.current) {
+        setResults(data.results || []);
+        setSelectedIndex(0);
+      }
     } catch (error) {
       console.error('Search failed:', error);
-      setResults([]);
+      if (seq === searchSeqRef.current) {
+        setResults([]);
+      }
     } finally {
-      setIsLoading(false);
+      if (seq === searchSeqRef.current) {
+        setIsLoading(false);
+      }
     }
   }, []);
 
@@ -339,11 +352,11 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
               <div className="flex items-center justify-between gap-4 px-4 py-3 border-t border-gray-700 text-xs text-gray-500">
                 <div className="flex items-center gap-4">
                   <span className="flex items-center gap-1">
-                    <kbd className="px-1.5 py-0.5 bg-gray-700 rounded">↑↓</kbd>
+                    <kbd className="px-1.5 py-0.5 bg-gray-700 rounded">Up/Down</kbd>
                     Navigate
                   </span>
                   <span className="flex items-center gap-1">
-                    <kbd className="px-1.5 py-0.5 bg-gray-700 rounded">↵</kbd>
+                    <kbd className="px-1.5 py-0.5 bg-gray-700 rounded">Enter</kbd>
                     Select
                   </span>
                   <span className="flex items-center gap-1">

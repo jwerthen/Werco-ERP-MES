@@ -149,8 +149,9 @@ async def lifespan(app: FastAPI):
         logger.info("Redis caching enabled")
     else:
         logger.info("Redis caching disabled (REDIS_URL not configured)")
-    # Seed quote configuration if needed
-    seed_quote_config_if_needed()
+    # Seed quote configuration if needed (skip in tests to speed startup)
+    if settings.ENVIRONMENT != "test":
+        seed_quote_config_if_needed()
     yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
@@ -247,7 +248,7 @@ app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
 
 # GZip compression middleware
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)
 
 # CORS middleware with configurable settings
 app.add_middleware(

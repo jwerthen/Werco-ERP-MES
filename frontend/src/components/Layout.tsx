@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { TourMenu } from './Tour';
@@ -121,7 +121,7 @@ const navigation: NavItem[] = [
   },
 ];
 
-function NavGroup({ item, location, onNavigate, collapsed, isAdmin }: { 
+const NavGroup = React.memo(function NavGroup({ item, location, onNavigate, collapsed, isAdmin }: { 
   item: NavItem; 
   location: any; 
   onNavigate?: () => void;
@@ -129,7 +129,10 @@ function NavGroup({ item, location, onNavigate, collapsed, isAdmin }: {
   isAdmin?: boolean;
 }) {
   // Filter children based on admin status
-  const visibleChildren = item.children?.filter(child => !child.adminOnly || isAdmin);
+  const visibleChildren = useMemo(
+    () => item.children?.filter(child => !child.adminOnly || isAdmin),
+    [item.children, isAdmin]
+  );
   
   const [isOpen, setIsOpen] = useState(() => {
     if (visibleChildren) {
@@ -225,11 +228,9 @@ function NavGroup({ item, location, onNavigate, collapsed, isAdmin }: {
         </div>
       )}
 
-      {/* Session Warning Modal */}
-      <SessionWarningModal />
     </div>
   );
-}
+});
 // Hexagon grid pattern for sidebar
 const SidebarPattern = () => (
   <svg className="absolute inset-0 w-full h-full opacity-[0.03]" xmlns="http://www.w3.org/2000/svg">
@@ -405,7 +406,7 @@ export default function Layout({ children }: LayoutProps) {
                 <MagnifyingGlassIcon className="h-4 w-4" />
                 <span className="hidden md:inline text-sm">Search...</span>
                 <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 text-xs font-medium text-slate-400 bg-slate-100 rounded">
-                  ⌘K
+                  Ctrl+K
                 </kbd>
               </button>
 
@@ -466,6 +467,10 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Global Search Modal */}
       <GlobalSearch isOpen={globalSearch.isOpen} onClose={globalSearch.close} />
+
+      {/* Session Warning Modal */}
+      <SessionWarningModal />
     </div>
   );
 }
+
