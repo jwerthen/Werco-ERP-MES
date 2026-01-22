@@ -46,7 +46,7 @@ class TestWorkOrdersAPI:
     ):
         """Test creating a work order without authentication."""
         response = client.post("/api/v1/work-orders/", json=sample_work_order_data)
-        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_get_work_order_by_id(
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder

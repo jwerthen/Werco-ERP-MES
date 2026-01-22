@@ -386,11 +386,11 @@ if settings.RATE_LIMIT_ENABLED:
             for auth_path, limit in AUTH_RATE_LIMITS.items():
                 if path.startswith(auth_path):
                     return limit
-            return f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS}s"
+            return f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"
         
         limiter = Limiter(
             key_func=get_remote_address,
-            default_limits=[f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS}s"],
+            default_limits=[f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"],
             storage_uri=settings.REDIS_URL if settings.REDIS_URL else "memory://"
         )
         app.state.limiter = limiter
@@ -398,13 +398,16 @@ if settings.RATE_LIMIT_ENABLED:
         
         # Custom rate limit handler with CORS headers
         async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+            detail = getattr(exc, "detail", str(exc))
             response = JSONResponse(
                 status_code=429,
-                content={"detail": f"Rate limit exceeded: {exc.detail}"}
+                content={"detail": f"Rate limit exceeded: {detail}"}
             )
             origin = request.headers.get("origin")
             return add_cors_headers(response, origin)
         
+        # Ensure SlowAPI uses our safe handler as well
+        limiter._rate_limit_exceeded_handler = rate_limit_exceeded_handler
         app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
         
         # Add middleware for path-specific rate limiting

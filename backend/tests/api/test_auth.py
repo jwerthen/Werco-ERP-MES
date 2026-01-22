@@ -139,7 +139,7 @@ class TestAuthLogout:
     def test_logout_without_auth(self, client: TestClient):
         """Test logout without authentication."""
         response = client.post("/api/v1/auth/logout")
-        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 @pytest.mark.api
@@ -177,7 +177,7 @@ class TestAuthRegister:
             "role": "operator"
         }
         response = client.post("/api/v1/auth/register", json=new_user_data)
-        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_register_as_non_admin(self, client: TestClient, auth_headers, fake_data):
         """Test non-admin cannot register users."""

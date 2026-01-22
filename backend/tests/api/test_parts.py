@@ -41,7 +41,7 @@ class TestPartsAPI:
     def test_create_part_unauthorized(self, client: TestClient, sample_part_data: dict):
         """Test creating a part without authentication."""
         response = client.post("/api/v1/parts/", json=sample_part_data)
-        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_get_part_by_id(
         self, client: TestClient, auth_headers: dict, test_part: Part
