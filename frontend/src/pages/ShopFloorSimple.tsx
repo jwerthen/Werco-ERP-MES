@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { format } from 'date-fns';
@@ -85,6 +85,7 @@ export default function ShopFloorSimple() {
   
   // Toast notifications
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const operationsRef = useRef<HTMLDivElement | null>(null);
 
   // Debounce search
   useEffect(() => {
@@ -216,6 +217,13 @@ export default function ShopFloorSimple() {
 
     return Array.from(buckets.values()).sort((a, b) => a.name.localeCompare(b.name));
   }, [operations, workCenters]);
+
+  const focusOperations = (centerId: number | '') => {
+    setWorkCenterId(centerId);
+    setTimeout(() => {
+      operationsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
+  };
 
   // Action handlers
   const handleStart = async (operation: Operation) => {
@@ -399,120 +407,128 @@ export default function ShopFloorSimple() {
       </div>
 
       {/* Work Cell Buckets */}
-      <div className="space-y-3">
+      <div className="space-y-4">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Work Cell Buckets</h2>
-            <p className="text-sm text-gray-500">Click a cell to focus the queue</p>
+            <h2 className="text-lg font-semibold text-gray-900">Work Center Status</h2>
+            <p className="text-sm text-gray-500">Real-time work cell availability and queue</p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setStatusFilter('')}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                statusFilter === '' ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-gray-200 text-gray-600 hover:border-werco-300'
-              }`}
-            >
-              All
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatusFilter('pending')}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                statusFilter === 'pending' ? 'border-gray-500 bg-gray-100 text-gray-700' : 'border-gray-200 text-gray-600 hover:border-gray-400'
-              }`}
-            >
-              Open
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatusFilter('in_progress')}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                statusFilter === 'in_progress' ? 'border-amber-500 bg-amber-100 text-amber-700' : 'border-gray-200 text-gray-600 hover:border-amber-300'
-              }`}
-            >
-              In Progress
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatusFilter('on_hold')}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                statusFilter === 'on_hold' ? 'border-red-500 bg-red-100 text-red-700' : 'border-gray-200 text-gray-600 hover:border-red-300'
-              }`}
-            >
-              On Hold
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatusFilter('ready')}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                statusFilter === 'ready' ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
-              }`}
-            >
-              Ready
-            </button>
-            <button
-              type="button"
-              onClick={() => setDueTodayOnly((prev) => !prev)}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                dueTodayOnly ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
-              }`}
-            >
-              Due Today
-            </button>
-          </div>
-        </div>
-        <div className="flex gap-3 overflow-x-auto pb-1">
           <button
             type="button"
-            onClick={() => setWorkCenterId('')}
-            className={`min-w-[220px] text-left rounded-xl border px-4 py-3 transition ${
-              workCenterId === '' ? 'border-werco-500 bg-werco-50 shadow-sm' : 'border-gray-200 bg-white hover:border-werco-300'
+            onClick={() => focusOperations('')}
+            className="text-sm font-semibold text-werco-700 hover:text-werco-800"
+          >
+            View All
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setStatusFilter('')}
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+              statusFilter === '' ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-gray-200 text-gray-600 hover:border-werco-300'
             }`}
           >
-            <div className="text-sm text-gray-500">All Cells</div>
-            <div className="text-lg font-semibold text-gray-900">{operations.length} ops</div>
-            <div className="mt-2 flex flex-wrap gap-2 text-xs">
-              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
-                Open {operations.filter(op => op.status === 'pending' || op.status === 'ready').length}
-              </span>
-              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">
-                In Progress {operations.filter(op => op.status === 'in_progress').length}
-              </span>
-              <span className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700">
-                Due Today {operations.filter(op => isDueToday(op.due_date)).length}
-              </span>
-            </div>
+            All
           </button>
-          {workCenterBuckets.map((bucket) => (
-            <button
-              key={bucket.id}
-              type="button"
-              onClick={() => setWorkCenterId(bucket.id)}
-              className={`min-w-[220px] text-left rounded-xl border px-4 py-3 transition ${
-                workCenterId === bucket.id ? 'border-werco-500 bg-werco-50 shadow-sm' : 'border-gray-200 bg-white hover:border-werco-300'
-              }`}
-            >
-              <div className="text-sm text-gray-500">{bucket.name}</div>
-              <div className="text-lg font-semibold text-gray-900">{bucket.total} ops</div>
-              <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
-                  Open {bucket.open}
-                </span>
-                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">
-                  In Progress {bucket.inProgress}
-                </span>
-                <span className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700">
-                  Due Today {bucket.dueToday}
-                </span>
-                {bucket.overdue > 0 && (
-                  <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">
-                    Overdue {bucket.overdue}
+          <button
+            type="button"
+            onClick={() => setStatusFilter('pending')}
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+              statusFilter === 'pending' ? 'border-gray-500 bg-gray-100 text-gray-700' : 'border-gray-200 text-gray-600 hover:border-gray-400'
+            }`}
+          >
+            Open
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter('in_progress')}
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+              statusFilter === 'in_progress' ? 'border-amber-500 bg-amber-100 text-amber-700' : 'border-gray-200 text-gray-600 hover:border-amber-300'
+            }`}
+          >
+            In Progress
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter('on_hold')}
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+              statusFilter === 'on_hold' ? 'border-red-500 bg-red-100 text-red-700' : 'border-gray-200 text-gray-600 hover:border-red-300'
+            }`}
+          >
+            On Hold
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter('ready')}
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+              statusFilter === 'ready' ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
+            }`}
+          >
+            Ready
+          </button>
+          <button
+            type="button"
+            onClick={() => setDueTodayOnly((prev) => !prev)}
+            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+              dueTodayOnly ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
+            }`}
+          >
+            Due Today
+          </button>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          {workCenterBuckets.map((bucket) => {
+            const isActive = bucket.inProgress > 0;
+            const hasQueue = bucket.open > 0;
+            const statusLabel = isActive ? 'ACTIVE' : hasQueue ? 'QUEUED' : 'AVAILABLE';
+            const statusPill =
+              statusLabel === 'ACTIVE'
+                ? 'bg-amber-100 text-amber-700'
+                : statusLabel === 'QUEUED'
+                ? 'bg-blue-100 text-blue-700'
+                : 'bg-emerald-100 text-emerald-700';
+            const statusBar =
+              statusLabel === 'ACTIVE'
+                ? 'bg-amber-500'
+                : statusLabel === 'QUEUED'
+                ? 'bg-blue-500'
+                : 'bg-emerald-500';
+            return (
+              <button
+                key={bucket.id}
+                type="button"
+                onClick={() => focusOperations(bucket.id)}
+                className={`relative text-left rounded-2xl border px-5 py-4 transition hover:shadow-md ${
+                  workCenterId === bucket.id ? 'border-werco-500 bg-werco-50 shadow-sm' : 'border-gray-200 bg-emerald-50/30'
+                }`}
+              >
+                <div className="flex items-center gap-2 text-xs font-semibold">
+                  <span className={`inline-flex items-center gap-2 rounded-full px-2.5 py-1 ${statusPill}`}>
+                    <span className="h-2 w-2 rounded-full bg-current" />
+                    {statusLabel}
                   </span>
+                </div>
+                <div className="mt-3 text-base font-semibold text-gray-900">{bucket.name}</div>
+                <div className="mt-1 text-xs text-gray-500">Work cell queue</div>
+                <div className="mt-4 flex items-center gap-4 text-sm text-gray-600">
+                  <span>Active: <span className="font-semibold text-gray-800">{bucket.inProgress}</span></span>
+                  <span>Queue: <span className="font-semibold text-gray-800">{bucket.open}</span></span>
+                </div>
+                {bucket.dueToday > 0 && (
+                  <div className="mt-3 text-xs font-medium text-blue-700">
+                    Due Today: {bucket.dueToday}
+                  </div>
                 )}
-              </div>
-            </button>
-          ))}
+                {bucket.overdue > 0 && (
+                  <div className="mt-1 text-xs font-medium text-red-700">
+                    Overdue: {bucket.overdue}
+                  </div>
+                )}
+                <span className={`absolute right-4 top-6 h-12 w-1.5 rounded-full ${statusBar}`} />
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -524,7 +540,7 @@ export default function ShopFloorSimple() {
           <p className="text-sm text-gray-500 mt-1">Try adjusting your filters</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
+        <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
           {operations.map(op => {
             const colors = STATUS_COLORS[op.status] || STATUS_COLORS.pending;
             const progress = op.quantity_ordered > 0 
