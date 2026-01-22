@@ -828,6 +828,7 @@ export default function BOMPage() {
                     </div>
                   </div>
                 </div>
+                </div>
                 
               {/* Hardware-specific fields */}
               {(newItem.line_type === 'hardware') && (
