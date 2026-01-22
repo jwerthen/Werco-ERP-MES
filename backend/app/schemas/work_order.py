@@ -88,9 +88,13 @@ class WorkOrderBase(BaseModel):
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
 
+
+class WorkOrderCreate(WorkOrderBase):
+    operations: List[WorkOrderOperationCreate] = Field(default_factory=list)
+
     @model_validator(mode='after')
-    def validate_dates(self) -> 'WorkOrderBase':
-        """Validate date relationships"""
+    def validate_dates(self) -> 'WorkOrderCreate':
+        """Validate date relationships on input"""
         today = date.today()
 
         if self.due_date and self.due_date < today:
@@ -101,10 +105,6 @@ class WorkOrderBase(BaseModel):
                 raise ValueError('Must ship by date must be after due date')
 
         return self
-
-
-class WorkOrderCreate(WorkOrderBase):
-    operations: List[WorkOrderOperationCreate] = Field(default_factory=list)
 
 
 class WorkOrderUpdate(BaseModel):
