@@ -34,8 +34,14 @@ class Part(Base, SoftDeleteMixin):
     revision = Column(String(20), default="A")
     name = Column(String(255), nullable=False)
     description = Column(Text)
-    part_type = Column(SQLEnum(PartType), nullable=False)
-    unit_of_measure = Column(SQLEnum(UnitOfMeasure), default=UnitOfMeasure.EACH)
+    part_type = Column(
+        SQLEnum(PartType, name="parttype", values_callable=lambda enum: [e.value for e in enum]),
+        nullable=False
+    )
+    unit_of_measure = Column(
+        SQLEnum(UnitOfMeasure, name="unitofmeasure", values_callable=lambda enum: [e.value for e in enum]),
+        default=UnitOfMeasure.EACH
+    )
     
     # Costing
     standard_cost = Column(Float, default=0.0)
