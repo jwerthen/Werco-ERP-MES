@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import {
@@ -6,12 +6,15 @@ import {
   ArrowDownTrayIcon,
   XMarkIcon,
   ExclamationTriangleIcon,
+  CubeIcon,
+  Squares2X2Icon,
+  WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 
 interface InventoryItem {
   id: number;
   part_id: number;
-  part?: { id: number; part_number: string; name: string };
+  part?: { id: number; part_number: string; name: string; part_type?: string };
   location: string;
   warehouse: string;
   quantity_on_hand: number;
@@ -34,10 +37,18 @@ interface InventorySummary {
 }
 
 type TabType = 'summary' | 'details' | 'receive' | 'transactions';
+type InventoryGroup = 'all' | 'parts' | 'materials';
+
+const MATERIAL_TYPES = new Set(['raw_material', 'purchased', 'hardware', 'consumable']);
+const PART_TYPES = new Set(['manufactured', 'assembly']);
 
 export default function InventoryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('summary');
+  const [groupFilter, setGroupFilter] = useState<InventoryGroup>(() => {
+    const group = searchParams.get('group');
+    return group === 'parts' || group === 'materials' ? group : 'all';
+  });
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [summary, setSummary] = useState<InventorySummary[]>([]);
   const [lowStockItems, setLowStockItems] = useState<any[]>([]);
@@ -62,27 +73,50 @@ export default function InventoryPage() {
     () => new Set(lowStockItems.map((item: any) => item.part_id)),
     [lowStockItems]
   );
+  const partsById = useMemo(() => new Map(parts.map((p: any) => [p.id, p])), [parts]);
+  const getPartType = useCallback((partId: number) => {
+    return partsById.get(partId)?.part_type as string | undefined;
+  }, [partsById]);
+  const filterByGroup = useCallback((partType?: string) => {
+    if (!partType) return groupFilter === 'all';
+    if (groupFilter === 'parts') return PART_TYPES.has(partType);
+    if (groupFilter === 'materials') return MATERIAL_TYPES.has(partType);
+    return true;
+  }, [groupFilter]);
   const filteredSummary = useMemo(() => {
     const base = showLowStockOnly
       ? summary.filter((item) => lowStockPartIds.has(item.part_id))
       : summary;
-    if (!filterText) return base;
+    const grouped = base.filter((item) => filterByGroup(getPartType(item.part_id)));
+    if (!filterText) return grouped;
     const term = filterText.toLowerCase();
-    return base.filter((item) => (
+    return grouped.filter((item) => (
       item.part_number?.toLowerCase().includes(term) ||
       item.part_name?.toLowerCase().includes(term)
     ));
-  }, [filterText, lowStockPartIds, showLowStockOnly, summary]);
+  }, [filterText, filterByGroup, getPartType, lowStockPartIds, showLowStockOnly, summary]);
+  const groupSummary = useMemo(
+    () => summary.filter((item) => filterByGroup(getPartType(item.part_id))),
+    [filterByGroup, getPartType, summary]
+  );
   const filteredInventory = useMemo(() => {
-    if (!filterText) return inventory;
+    const grouped = inventory.filter((item) => filterByGroup(item.part?.part_type));
+    if (!filterText) return grouped;
     const term = filterText.toLowerCase();
-    return inventory.filter((item) => (
+    return grouped.filter((item) => (
       item.part?.part_number?.toLowerCase().includes(term) ||
       item.part?.name?.toLowerCase().includes(term)
     ));
-  }, [filterText, inventory]);
+  }, [filterByGroup, filterText, inventory]);
+  const groupInventory = useMemo(
+    () => inventory.filter((item) => filterByGroup(item.part?.part_type)),
+    [filterByGroup, inventory]
+  );
+  const filteredPartsForReceive = useMemo(() => {
+    return parts.filter((part: any) => filterByGroup(part.part_type));
+  }, [filterByGroup, parts]);
   const summaryTotals = useMemo(() => {
-    return summary.reduce(
+    return filteredSummary.reduce(
       (acc, item) => {
         acc.totalOnHand += item.total_on_hand;
         acc.totalAvailable += item.available;
@@ -90,7 +124,19 @@ export default function InventoryPage() {
       },
       { totalOnHand: 0, totalAvailable: 0 }
     );
-  }, [summary]);
+  }, [filteredSummary]);
+  const lowStockCount = useMemo(() => {
+    return lowStockItems.filter((item: any) => filterByGroup(getPartType(item.part_id))).length;
+  }, [filterByGroup, getPartType, lowStockItems]);
+
+  useEffect(() => {
+    const group = searchParams.get('group');
+    if (group === 'parts' || group === 'materials') {
+      setGroupFilter(group);
+    } else if (group === null) {
+      setGroupFilter('all');
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     loadData();
@@ -148,6 +194,30 @@ export default function InventoryPage() {
     setShowTransferModal(true);
   };
 
+  const getPartTypeLabel = (type?: string) => {
+    switch (type) {
+      case 'manufactured': return 'Manufactured';
+      case 'assembly': return 'Assembly';
+      case 'raw_material': return 'Raw Material';
+      case 'purchased': return 'Purchased';
+      case 'hardware': return 'Hardware';
+      case 'consumable': return 'Consumable';
+      default: return type || '—';
+    }
+  };
+
+  const getPartTypeIcon = (type?: string) => {
+    switch (type) {
+      case 'manufactured': return <CubeIcon className="h-4 w-4" />;
+      case 'assembly': return <Squares2X2Icon className="h-4 w-4" />;
+      case 'raw_material': return <CubeIcon className="h-4 w-4" />;
+      case 'purchased': return <WrenchScrewdriverIcon className="h-4 w-4" />;
+      case 'hardware': return <WrenchScrewdriverIcon className="h-4 w-4" />;
+      case 'consumable': return <CubeIcon className="h-4 w-4" />;
+      default: return null;
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -159,7 +229,10 @@ export default function InventoryPage() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Inventory Management</h1>
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
+          <p className="text-sm text-gray-500 mt-1">Parts, materials, hardware, and assemblies in one place</p>
+        </div>
         <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
           <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
         </button>
@@ -168,8 +241,8 @@ export default function InventoryPage() {
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="card">
-          <div className="text-2xl font-bold">{summary.length}</div>
-          <div className="text-sm text-gray-500">Unique Parts</div>
+          <div className="text-2xl font-bold">{filteredSummary.length}</div>
+          <div className="text-sm text-gray-500">Unique Items</div>
         </div>
         <div className="card">
           <div className="text-2xl font-bold">{summaryTotals.totalOnHand.toFixed(0)}</div>
@@ -180,8 +253,8 @@ export default function InventoryPage() {
           <div className="text-sm text-gray-500">Total Available</div>
         </div>
         <div className="card">
-          <div className="text-2xl font-bold">{locations.length}</div>
-          <div className="text-sm text-gray-500">Locations</div>
+          <div className="text-2xl font-bold text-amber-600">{lowStockCount}</div>
+          <div className="text-sm text-gray-500">Low Stock Alerts</div>
         </div>
       </div>
 
@@ -191,13 +264,15 @@ export default function InventoryPage() {
           <div className="flex items-center gap-3">
             <ExclamationTriangleIcon className="h-5 w-5 text-amber-600" />
             <span className="font-medium text-amber-800">
-              Showing {lowStockItems.length} low stock item(s)
+              Showing {lowStockCount} low stock item(s)
             </span>
           </div>
           <button
             onClick={() => {
               setShowLowStockOnly(false);
-              setSearchParams({});
+              const nextParams = new URLSearchParams(searchParams);
+              nextParams.delete('filter');
+              setSearchParams(nextParams);
             }}
             className="flex items-center gap-1 px-3 py-1.5 text-sm bg-amber-100 text-amber-700 rounded-full hover:bg-amber-200"
           >
@@ -209,24 +284,56 @@ export default function InventoryPage() {
 
       {/* Quick Filters */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="relative w-full sm:max-w-sm">
-          <input
-            type="text"
-            value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
-            placeholder="Filter by part number or name..."
-            className="input pr-10"
-          />
-          {filterText && (
-            <button
-              type="button"
-              onClick={() => setFilterText('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-              aria-label="Clear filter"
-            >
-              <XMarkIcon className="h-4 w-4" />
-            </button>
-          )}
+        <div className="flex flex-col gap-3 w-full sm:max-w-xl">
+          <div className="relative">
+            <input
+              type="text"
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+              placeholder="Filter by part number or name..."
+              className="input pr-10"
+            />
+            {filterText && (
+              <button
+                type="button"
+                onClick={() => setFilterText('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                aria-label="Clear filter"
+              >
+                <XMarkIcon className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {[
+              { id: 'all', label: 'All Inventory' },
+              { id: 'parts', label: 'Manufactured & Assemblies' },
+              { id: 'materials', label: 'Materials & Hardware' },
+            ].map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => {
+                  const next = chip.id as InventoryGroup;
+                  setGroupFilter(next);
+                  const nextParams = new URLSearchParams(searchParams);
+                  if (next === 'all') {
+                    nextParams.delete('group');
+                  } else {
+                    nextParams.set('group', next);
+                  }
+                  setSearchParams(nextParams);
+                }}
+                className={`rounded-full border px-3 py-1 font-medium transition ${
+                  groupFilter === chip.id
+                    ? 'border-werco-500 bg-werco-50 text-werco-700'
+                    : 'border-gray-200 text-gray-600 hover:border-werco-300'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
           <span>Showing</span>
@@ -235,7 +342,7 @@ export default function InventoryPage() {
           </span>
           <span>of</span>
           <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">
-            {activeTab === 'details' ? inventory.length : summary.length}
+            {activeTab === 'details' ? groupInventory.length : groupSummary.length}
           </span>
           <span>items</span>
           <button
@@ -243,7 +350,13 @@ export default function InventoryPage() {
             onClick={() => {
               const next = !showLowStockOnly;
               setShowLowStockOnly(next);
-              setSearchParams(next ? { filter: 'low_stock' } : {});
+              const nextParams = new URLSearchParams(searchParams);
+              if (next) {
+                nextParams.set('filter', 'low_stock');
+              } else {
+                nextParams.delete('filter');
+              }
+              setSearchParams(nextParams);
             }}
             className={`ml-2 px-3 py-1 rounded-full text-xs font-medium border ${
               showLowStockOnly
@@ -286,6 +399,7 @@ export default function InventoryPage() {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">On Hand</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Allocated</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Available</th>
@@ -295,12 +409,23 @@ export default function InventoryPage() {
                 <tbody className="bg-white divide-y divide-gray-200">
                 {filteredSummary.map((item) => {
                   const isLowStock = lowStockPartIds.has(item.part_id);
+                  const partType = getPartType(item.part_id);
                   return (
                     <tr key={item.part_id} className={`hover:bg-gray-50 align-top ${isLowStock ? 'bg-red-50' : ''}`}>
                       <td className="px-4 py-3">
                         <div className="font-medium">{item.part_number}</div>
                         <div className="text-sm text-gray-500">{item.part_name}</div>
                         {isLowStock && <span className="text-xs text-red-600 font-medium">LOW STOCK</span>}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+                          PART_TYPES.has(partType || '')
+                            ? 'bg-cyan-100 text-cyan-700'
+                            : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          {getPartTypeIcon(partType)}
+                          {getPartTypeLabel(partType)}
+                        </span>
                       </td>
                       <td className="px-4 py-3 text-right font-medium">{item.total_on_hand}</td>
                       <td className="px-4 py-3 text-right">{item.total_allocated}</td>
@@ -329,6 +454,7 @@ export default function InventoryPage() {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lot #</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
@@ -343,6 +469,16 @@ export default function InventoryPage() {
                     <td className="px-4 py-3">
                       <div className="font-medium">{item.part?.part_number}</div>
                       <div className="text-xs text-gray-500">{item.part?.name}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+                        PART_TYPES.has(item.part?.part_type || '')
+                          ? 'bg-cyan-100 text-cyan-700'
+                          : 'bg-amber-100 text-amber-700'
+                      }`}>
+                        {getPartTypeIcon(item.part?.part_type)}
+                        {getPartTypeLabel(item.part?.part_type)}
+                      </span>
                     </td>
                     <td className="px-4 py-3 font-mono text-sm">{item.location}</td>
                     <td className="px-4 py-3 text-sm">{item.lot_number || '-'}</td>
@@ -382,7 +518,9 @@ export default function InventoryPage() {
                 <label className="label">Part</label>
                 <select value={receiveForm.part_id} onChange={(e) => setReceiveForm({...receiveForm, part_id: parseInt(e.target.value)})} className="input" required>
                   <option value={0}>Select part...</option>
-                  {parts.map(p => <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>)}
+                  {filteredPartsForReceive.map(p => (
+                    <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>
+                  ))}
                 </select>
               </div>
               <div className="grid grid-cols-2 gap-4">

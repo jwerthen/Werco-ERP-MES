@@ -23,8 +23,6 @@ const Parts = lazy(() => import('./pages/Parts'));
 const BOM = lazy(() => import('./pages/BOM'));
 const Routing = lazy(() => import('./pages/Routing'));
 const Inventory = lazy(() => import('./pages/Inventory'));
-const PartsInventory = lazy(() => import('./pages/PartsInventory'));
-const MaterialsInventory = lazy(() => import('./pages/MaterialsInventory'));
 const MRP = lazy(() => import('./pages/MRP'));
 const Quality = lazy(() => import('./pages/Quality'));
 const CustomFields = lazy(() => import('./pages/CustomFields'));
@@ -189,16 +187,12 @@ function AppRoutes() {
       } />
       <Route path="/inventory/parts" element={
         <PrivateRoute>
-          <Layout>
-            <LazyRoute><PartsInventory /></LazyRoute>
-          </Layout>
+          <Navigate to="/inventory?group=parts" replace />
         </PrivateRoute>
       } />
       <Route path="/inventory/materials" element={
         <PrivateRoute>
-          <Layout>
-            <LazyRoute><MaterialsInventory /></LazyRoute>
-          </Layout>
+          <Navigate to="/inventory?group=materials" replace />
         </PrivateRoute>
       } />
       <Route path="/mrp" element={
