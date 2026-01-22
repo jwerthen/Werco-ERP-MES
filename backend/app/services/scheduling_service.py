@@ -312,6 +312,8 @@ class SchedulingService:
         capacity = self.capacity_map[work_center_id]
         end_date = date.today() + timedelta(days=horizon_days)
 
+        if isinstance(earliest_start, datetime):
+            earliest_start = earliest_start.date()
         current_date = max(earliest_start, date.today())
 
         while current_date <= end_date:
