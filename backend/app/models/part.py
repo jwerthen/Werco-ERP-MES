@@ -35,11 +35,21 @@ class Part(Base, SoftDeleteMixin):
     name = Column(String(255), nullable=False)
     description = Column(Text)
     part_type = Column(
-        SQLEnum(PartType, name="parttype", values_callable=lambda enum: [e.value for e in enum]),
+        SQLEnum(
+            PartType,
+            name="parttype",
+            values_callable=lambda enum: [e.value for e in enum],
+            validate_strings=False
+        ),
         nullable=False
     )
     unit_of_measure = Column(
-        SQLEnum(UnitOfMeasure, name="unitofmeasure", values_callable=lambda enum: [e.value for e in enum]),
+        SQLEnum(
+            UnitOfMeasure,
+            name="unitofmeasure",
+            values_callable=lambda enum: [e.value for e in enum],
+            validate_strings=False
+        ),
         default=UnitOfMeasure.EACH
     )
     

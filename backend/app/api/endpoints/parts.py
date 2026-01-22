@@ -63,18 +63,27 @@ def list_parts(
     
     parts = query.order_by(Part.part_number).offset(skip).limit(limit).all()
     
+    def normalize_enum(value, fallback):
+        if hasattr(value, "value"):
+            return str(value.value).strip().lower()
+        if isinstance(value, str):
+            return value.strip().lower()
+        return fallback
+
     # Build response manually to handle any edge cases
     result = []
     for part in parts:
         try:
+            part_type_val = normalize_enum(part.part_type, PartType.MANUFACTURED.value)
+            uom_val = normalize_enum(part.unit_of_measure, UnitOfMeasure.EACH.value)
             result.append(PartResponse(
                 id=part.id,
                 part_number=part.part_number or "",
                 revision=part.revision or "A",
                 name=part.name or "",
                 description=part.description,
-                part_type=part.part_type if part.part_type else PartType.MANUFACTURED,
-                unit_of_measure=part.unit_of_measure if part.unit_of_measure else UnitOfMeasure.EACH,
+                part_type=PartType(part_type_val),
+                unit_of_measure=UnitOfMeasure(uom_val),
                 standard_cost=part.standard_cost or 0.0,
                 material_cost=part.material_cost or 0.0,
                 labor_cost=part.labor_cost or 0.0,
@@ -197,6 +206,16 @@ def update_part(
     
     update_data = part_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
+        if field == "part_type":
+            if hasattr(value, "value"):
+                value = str(value.value).strip().lower()
+            elif isinstance(value, str):
+                value = value.strip().lower()
+        if field == "unit_of_measure":
+            if hasattr(value, "value"):
+                value = str(value.value).strip().lower()
+            elif isinstance(value, str):
+                value = value.strip().lower()
         setattr(part, field, value)
     
     db.commit()
