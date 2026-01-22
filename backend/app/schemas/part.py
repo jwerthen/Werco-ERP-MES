@@ -67,6 +67,20 @@ class PartBase(BaseModel):
 
         return self
 
+    @field_validator('part_type', mode='before')
+    @classmethod
+    def normalize_part_type(cls, v):
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
+
+    @field_validator('unit_of_measure', mode='before')
+    @classmethod
+    def normalize_unit_of_measure(cls, v):
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
+
 
 class PartCreate(PartBase):
     pass
