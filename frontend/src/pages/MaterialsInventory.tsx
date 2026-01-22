@@ -213,14 +213,6 @@ export default function MaterialsInventoryPage() {
     setShowTransferModal(true);
   };
 
-  const getPartTypeLabel = (type: string) => {
-    switch (type) {
-      case 'raw_material': return 'Raw Material';
-      case 'purchased': return 'Hardware/Purchased';
-      default: return type;
-    }
-  };
-
   const getPartTypeIcon = (type: string) => {
     switch (type) {
       case 'raw_material': return <CubeIcon className="h-4 w-4" />;
