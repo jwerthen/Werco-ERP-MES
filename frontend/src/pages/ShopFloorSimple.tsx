@@ -75,6 +75,7 @@ export default function ShopFloorSimple() {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [dueTodayOnly, setDueTodayOnly] = useState(false);
+  const [actionableOnly, setActionableOnly] = useState(false);
   
   // Modal states
   const [completeModal, setCompleteModal] = useState<Operation | null>(null);
@@ -220,10 +221,17 @@ export default function ShopFloorSimple() {
 
   const focusOperations = (centerId: number | '') => {
     setWorkCenterId(centerId);
+    setActionableOnly(centerId !== '');
     setTimeout(() => {
       operationsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 100);
   };
+
+  const actionableStatuses = useMemo(() => new Set(['pending', 'ready', 'in_progress', 'on_hold']), []);
+  const visibleOperations = useMemo(
+    () => (actionableOnly ? operations.filter(op => actionableStatuses.has(op.status)) : operations),
+    [actionableOnly, operations, actionableStatuses]
+  );
 
   // Action handlers
   const handleStart = async (operation: Operation) => {
@@ -424,7 +432,10 @@ export default function ShopFloorSimple() {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => setStatusFilter('')}
+            onClick={() => {
+              setStatusFilter('');
+              setActionableOnly(false);
+            }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
               statusFilter === '' ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-gray-200 text-gray-600 hover:border-werco-300'
             }`}
@@ -433,7 +444,10 @@ export default function ShopFloorSimple() {
           </button>
           <button
             type="button"
-            onClick={() => setStatusFilter('pending')}
+            onClick={() => {
+              setStatusFilter('pending');
+              setActionableOnly(false);
+            }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
               statusFilter === 'pending' ? 'border-gray-500 bg-gray-100 text-gray-700' : 'border-gray-200 text-gray-600 hover:border-gray-400'
             }`}
@@ -442,7 +456,10 @@ export default function ShopFloorSimple() {
           </button>
           <button
             type="button"
-            onClick={() => setStatusFilter('in_progress')}
+            onClick={() => {
+              setStatusFilter('in_progress');
+              setActionableOnly(false);
+            }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
               statusFilter === 'in_progress' ? 'border-amber-500 bg-amber-100 text-amber-700' : 'border-gray-200 text-gray-600 hover:border-amber-300'
             }`}
@@ -451,7 +468,10 @@ export default function ShopFloorSimple() {
           </button>
           <button
             type="button"
-            onClick={() => setStatusFilter('on_hold')}
+            onClick={() => {
+              setStatusFilter('on_hold');
+              setActionableOnly(false);
+            }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
               statusFilter === 'on_hold' ? 'border-red-500 bg-red-100 text-red-700' : 'border-gray-200 text-gray-600 hover:border-red-300'
             }`}
@@ -460,7 +480,10 @@ export default function ShopFloorSimple() {
           </button>
           <button
             type="button"
-            onClick={() => setStatusFilter('ready')}
+            onClick={() => {
+              setStatusFilter('ready');
+              setActionableOnly(false);
+            }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
               statusFilter === 'ready' ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
             }`}
@@ -533,7 +556,7 @@ export default function ShopFloorSimple() {
       </div>
 
       {/* Operations Grid */}
-      {operations.length === 0 ? (
+      {visibleOperations.length === 0 ? (
         <div className="card text-center py-16">
           <CubeIcon className="h-12 w-12 text-gray-300 mx-auto mb-4" />
           <p className="text-gray-600 font-medium">No operations found</p>
@@ -541,7 +564,7 @@ export default function ShopFloorSimple() {
         </div>
       ) : (
         <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
-          {operations.map(op => {
+          {visibleOperations.map(op => {
             const colors = STATUS_COLORS[op.status] || STATUS_COLORS.pending;
             const progress = op.quantity_ordered > 0 
               ? (op.quantity_complete / op.quantity_ordered) * 100 
