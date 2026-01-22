@@ -130,15 +130,15 @@ def create_part(
     # Normalize enum inputs in case clients send uppercase values or enum objects.
     part_type_val = data.get("part_type")
     if hasattr(part_type_val, "value"):
-        data["part_type"] = PartType(str(part_type_val.value).strip().lower())
+        data["part_type"] = str(part_type_val.value).strip().lower()
     elif isinstance(part_type_val, str):
-        data["part_type"] = PartType(part_type_val.strip().lower())
+        data["part_type"] = part_type_val.strip().lower()
 
     uom_val = data.get("unit_of_measure")
     if hasattr(uom_val, "value"):
-        data["unit_of_measure"] = UnitOfMeasure(str(uom_val.value).strip().lower())
+        data["unit_of_measure"] = str(uom_val.value).strip().lower()
     elif isinstance(uom_val, str):
-        data["unit_of_measure"] = UnitOfMeasure(uom_val.strip().lower())
+        data["unit_of_measure"] = uom_val.strip().lower()
 
     part = Part(**data, created_by=current_user.id)
     db.add(part)
