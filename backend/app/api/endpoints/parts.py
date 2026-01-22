@@ -126,7 +126,14 @@ def create_part(
             detail="Part number already exists"
         )
     
-    part = Part(**part_in.model_dump(), created_by=current_user.id)
+    data = part_in.model_dump()
+    # Normalize enum inputs in case clients send uppercase values.
+    if isinstance(data.get("part_type"), str):
+        data["part_type"] = PartType(data["part_type"].strip().lower())
+    if isinstance(data.get("unit_of_measure"), str):
+        data["unit_of_measure"] = UnitOfMeasure(data["unit_of_measure"].strip().lower())
+
+    part = Part(**data, created_by=current_user.id)
     db.add(part)
     db.commit()
     db.refresh(part)
