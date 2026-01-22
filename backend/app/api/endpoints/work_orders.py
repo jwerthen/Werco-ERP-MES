@@ -547,8 +547,24 @@ def get_work_order(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
-    # Enrich operations with component part info
+    # Normalize nullable numeric fields for serialization safety
+    work_order.quantity_complete = work_order.quantity_complete or 0
+    work_order.quantity_scrapped = work_order.quantity_scrapped or 0
+    work_order.estimated_hours = work_order.estimated_hours or 0
+    work_order.actual_hours = work_order.actual_hours or 0
+    work_order.estimated_cost = work_order.estimated_cost or 0
+    work_order.actual_cost = work_order.actual_cost or 0
+
+    # Enrich operations with component part info and normalize nullables
     for op in work_order.operations:
+        op.setup_time_hours = op.setup_time_hours or 0
+        op.run_time_hours = op.run_time_hours or 0
+        op.run_time_per_piece = op.run_time_per_piece or 0
+        op.actual_setup_hours = op.actual_setup_hours or 0
+        op.actual_run_hours = op.actual_run_hours or 0
+        op.quantity_complete = op.quantity_complete or 0
+        op.quantity_scrapped = op.quantity_scrapped or 0
+
         if op.component_part_id:
             component = op.component_part
             if component:
