@@ -84,6 +84,9 @@ export default function MaterialsInventoryPage() {
 
   // Filter for raw materials, hardware, consumables, and purchased parts
   const materialTypes: MaterialPartType[] = ['raw_material', 'purchased', 'hardware', 'consumable'];
+  const isMaterialPartType = (value: string): value is MaterialPartType => {
+    return materialTypes.includes(value as MaterialPartType);
+  };
 
   useEffect(() => {
     loadData();
@@ -106,7 +109,7 @@ export default function MaterialsInventoryPage() {
       setInventory(invRes.filter((i: InventoryItem) => materialPartIds.has(i.part_id)));
       setSummary(summaryRes.filter((s: InventorySummary) => {
         const part = partsRes.find((p: any) => p.id === s.part_id);
-        return part && materialTypes.includes(part.part_type);
+        return part && isMaterialPartType(String(part.part_type));
       }));
       setParts(materialParts);
       setLocations(locsRes);
