@@ -139,9 +139,10 @@ def seed_quote_config_if_needed():
 async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.APP_NAME}...")
-    # Create tables (in production, use Alembic migrations)
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database tables created/verified")
+    # Create tables in non-production environments only (production uses Alembic)
+    if settings.ENVIRONMENT != "production":
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables created/verified (non-production)")
     # Initialize Redis cache
     init_cache(settings.REDIS_URL)
     if cache.enabled:
@@ -355,10 +356,9 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    # Content Security Policy - restrict resource loading
-    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
-    # Add content type
-    response.headers["Content-Type"] = response.headers.get("Content-Type", "application/json")
+    # Content Security Policy - restrict resource loading (skip for API docs)
+    if request.url.path not in ("/api/docs", "/api/redoc", "/api/openapi.json"):
+        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
     return response
 
 # Rate limiting middleware (if enabled)
