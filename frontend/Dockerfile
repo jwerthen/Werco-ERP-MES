@@ -16,6 +16,7 @@ COPY . .
 # Build argument for API URL (set during Railway build)
 ARG REACT_APP_API_URL
 ENV REACT_APP_API_URL=$REACT_APP_API_URL
+RUN if [ -z "$REACT_APP_API_URL" ]; then echo "REACT_APP_API_URL is required at build time"; exit 1; fi
 
 # Build the app
 RUN npm run build

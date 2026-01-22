@@ -6,6 +6,7 @@ Stores errors in audit log and can trigger alerts for critical errors.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -92,7 +93,7 @@ async def process_error_logs(errors: List[ErrorLogEntry], client_ip: str):
             )
             
             # Store in database (audit log)
-            await store_error_log(error, client_ip)
+            await run_in_threadpool(store_error_log_sync, error, client_ip)
             
             # Alert on critical errors
             if error.boundaryLevel == "global":
@@ -103,7 +104,7 @@ async def process_error_logs(errors: List[ErrorLogEntry], client_ip: str):
             logger.exception(f"Failed to process error log: {e}")
 
 
-async def store_error_log(error: ErrorLogEntry, client_ip: str):
+def store_error_log_sync(error: ErrorLogEntry, client_ip: str):
     """
     Store error in database for analysis.
     

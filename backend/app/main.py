@@ -279,6 +279,7 @@ async def csrf_protection(request: Request, call_next):
         # Skip CSRF check for certain endpoints
         exempt_paths = (
             "/api/v1/auth/login",
+            "/api/v1/auth/register",
             "/api/v1/auth/refresh",
             "/health",
             "/api/v1/errors/log",
@@ -288,16 +289,18 @@ async def csrf_protection(request: Request, call_next):
         
         # Defense 1: Check for X-Requested-With header (cannot be set cross-origin without CORS)
         x_requested_with = request.headers.get("x-requested-with")
-        if x_requested_with != "XMLHttpRequest":
-            # Allow if request has valid Authorization header (API clients)
-            auth_header = request.headers.get("authorization")
-            if not auth_header or not auth_header.startswith("Bearer "):
-                logger.warning(f"CSRF: Missing X-Requested-With header for {request.url.path}")
-                response = JSONResponse(
-                    status_code=403,
-                    content={"detail": "Missing required security header"}
-                )
-                return add_cors_headers(response, origin)
+        # Only enforce X-Requested-With for browser-originated requests
+        if origin or request.headers.get("referer"):
+            if x_requested_with != "XMLHttpRequest":
+                # Allow if request has valid Authorization header (API clients)
+                auth_header = request.headers.get("authorization")
+                if not auth_header or not auth_header.startswith("Bearer "):
+                    logger.warning(f"CSRF: Missing X-Requested-With header for {request.url.path}")
+                    response = JSONResponse(
+                        status_code=403,
+                        content={"detail": "Missing required security header"}
+                    )
+                    return add_cors_headers(response, origin)
         
         # Defense 2: Validate Origin/Referer header
         referer = request.headers.get("referer")
@@ -367,6 +370,7 @@ if settings.RATE_LIMIT_ENABLED:
         from slowapi import Limiter
         from slowapi.util import get_remote_address
         from slowapi.errors import RateLimitExceeded
+        from slowapi.middleware import SlowAPIMiddleware
         
         # Define rate limits per endpoint type
         # Stricter limits for sensitive auth endpoints
@@ -390,6 +394,7 @@ if settings.RATE_LIMIT_ENABLED:
             storage_uri=settings.REDIS_URL if settings.REDIS_URL else "memory://"
         )
         app.state.limiter = limiter
+        app.add_middleware(SlowAPIMiddleware)
         
         # Custom rate limit handler with CORS headers
         async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
