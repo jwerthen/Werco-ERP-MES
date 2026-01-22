@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { format } from 'date-fns';
@@ -74,6 +74,7 @@ export default function ShopFloorSimple() {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [dueTodayOnly, setDueTodayOnly] = useState(false);
   
   // Modal states
   const [completeModal, setCompleteModal] = useState<Operation | null>(null);
@@ -97,6 +98,7 @@ export default function ShopFloorSimple() {
       const params: any = {};
       if (workCenterId) params.work_center_id = workCenterId;
       if (statusFilter) params.status = statusFilter;
+      if (dueTodayOnly) params.due_today = true;
       if (debouncedSearch) params.search = debouncedSearch;
       
       const response = await api.getShopFloorOperations(params);
@@ -105,7 +107,7 @@ export default function ShopFloorSimple() {
       console.error('Failed to load operations:', err);
       showToast('error', 'Failed to load operations');
     }
-  }, [workCenterId, statusFilter, debouncedSearch]);
+  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly]);
 
   const loadWorkCenters = async () => {
     try {
@@ -147,6 +149,73 @@ export default function ShopFloorSimple() {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 4000);
   };
+
+  const isOverdue = (dueDate: string | null) => {
+    if (!dueDate) return false;
+    return new Date(dueDate) < new Date();
+  };
+
+  const isDueToday = (dueDate: string | null) => {
+    if (!dueDate) return false;
+    const due = new Date(dueDate);
+    const today = new Date();
+    return (
+      due.getFullYear() === today.getFullYear() &&
+      due.getMonth() === today.getMonth() &&
+      due.getDate() === today.getDate()
+    );
+  };
+
+  const workCenterBuckets = useMemo(() => {
+    const buckets = new Map<number, {
+      id: number;
+      name: string;
+      total: number;
+      open: number;
+      inProgress: number;
+      onHold: number;
+      dueToday: number;
+      overdue: number;
+    }>();
+
+    workCenters.forEach((wc) => {
+      buckets.set(wc.id, {
+        id: wc.id,
+        name: wc.name,
+        total: 0,
+        open: 0,
+        inProgress: 0,
+        onHold: 0,
+        dueToday: 0,
+        overdue: 0,
+      });
+    });
+
+    operations.forEach((op) => {
+      if (!op.work_center_id) return;
+      const bucket = buckets.get(op.work_center_id) || {
+        id: op.work_center_id,
+        name: op.work_center_name || `Work Center ${op.work_center_id}`,
+        total: 0,
+        open: 0,
+        inProgress: 0,
+        onHold: 0,
+        dueToday: 0,
+        overdue: 0,
+      };
+
+      bucket.total += 1;
+      if (op.status === 'pending' || op.status === 'ready') bucket.open += 1;
+      if (op.status === 'in_progress') bucket.inProgress += 1;
+      if (op.status === 'on_hold') bucket.onHold += 1;
+      if (isDueToday(op.due_date)) bucket.dueToday += 1;
+      if (isOverdue(op.due_date)) bucket.overdue += 1;
+
+      buckets.set(bucket.id, bucket);
+    });
+
+    return Array.from(buckets.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [operations, workCenters]);
 
   // Action handlers
   const handleStart = async (operation: Operation) => {
@@ -226,11 +295,6 @@ export default function ShopFloorSimple() {
     } finally {
       setActionLoading(null);
     }
-  };
-
-  const isOverdue = (dueDate: string | null) => {
-    if (!dueDate) return false;
-    return new Date(dueDate) < new Date();
   };
 
   if (loading) {
@@ -331,6 +395,124 @@ export default function ShopFloorSimple() {
           <div className="text-sm text-gray-500">
             {operations.length} operation{operations.length !== 1 ? 's' : ''}
           </div>
+        </div>
+      </div>
+
+      {/* Work Cell Buckets */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Work Cell Buckets</h2>
+            <p className="text-sm text-gray-500">Click a cell to focus the queue</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setStatusFilter('')}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                statusFilter === '' ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-gray-200 text-gray-600 hover:border-werco-300'
+              }`}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('pending')}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                statusFilter === 'pending' ? 'border-gray-500 bg-gray-100 text-gray-700' : 'border-gray-200 text-gray-600 hover:border-gray-400'
+              }`}
+            >
+              Open
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('in_progress')}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                statusFilter === 'in_progress' ? 'border-amber-500 bg-amber-100 text-amber-700' : 'border-gray-200 text-gray-600 hover:border-amber-300'
+              }`}
+            >
+              In Progress
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('on_hold')}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                statusFilter === 'on_hold' ? 'border-red-500 bg-red-100 text-red-700' : 'border-gray-200 text-gray-600 hover:border-red-300'
+              }`}
+            >
+              On Hold
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('ready')}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                statusFilter === 'ready' ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
+              }`}
+            >
+              Ready
+            </button>
+            <button
+              type="button"
+              onClick={() => setDueTodayOnly((prev) => !prev)}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                dueTodayOnly ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
+              }`}
+            >
+              Due Today
+            </button>
+          </div>
+        </div>
+        <div className="flex gap-3 overflow-x-auto pb-1">
+          <button
+            type="button"
+            onClick={() => setWorkCenterId('')}
+            className={`min-w-[220px] text-left rounded-xl border px-4 py-3 transition ${
+              workCenterId === '' ? 'border-werco-500 bg-werco-50 shadow-sm' : 'border-gray-200 bg-white hover:border-werco-300'
+            }`}
+          >
+            <div className="text-sm text-gray-500">All Cells</div>
+            <div className="text-lg font-semibold text-gray-900">{operations.length} ops</div>
+            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
+                Open {operations.filter(op => op.status === 'pending' || op.status === 'ready').length}
+              </span>
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">
+                In Progress {operations.filter(op => op.status === 'in_progress').length}
+              </span>
+              <span className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700">
+                Due Today {operations.filter(op => isDueToday(op.due_date)).length}
+              </span>
+            </div>
+          </button>
+          {workCenterBuckets.map((bucket) => (
+            <button
+              key={bucket.id}
+              type="button"
+              onClick={() => setWorkCenterId(bucket.id)}
+              className={`min-w-[220px] text-left rounded-xl border px-4 py-3 transition ${
+                workCenterId === bucket.id ? 'border-werco-500 bg-werco-50 shadow-sm' : 'border-gray-200 bg-white hover:border-werco-300'
+              }`}
+            >
+              <div className="text-sm text-gray-500">{bucket.name}</div>
+              <div className="text-lg font-semibold text-gray-900">{bucket.total} ops</div>
+              <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
+                  Open {bucket.open}
+                </span>
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">
+                  In Progress {bucket.inProgress}
+                </span>
+                <span className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700">
+                  Due Today {bucket.dueToday}
+                </span>
+                {bucket.overdue > 0 && (
+                  <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">
+                    Overdue {bucket.overdue}
+                  </span>
+                )}
+              </div>
+            </button>
+          ))}
         </div>
       </div>
 

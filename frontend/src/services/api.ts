@@ -520,7 +520,7 @@ class ApiService {
   }
 
   // Simplified Shop Floor Operations
-  async getShopFloorOperations(params?: { work_center_id?: number; status?: string; search?: string }) {
+  async getShopFloorOperations(params?: { work_center_id?: number; status?: string; search?: string; due_today?: boolean }) {
     const response = await this.api.get('/shop-floor/operations', { params });
     return response.data;
   }

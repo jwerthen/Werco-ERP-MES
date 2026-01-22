@@ -1,6 +1,6 @@
 from typing import List, Optional
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 import hashlib
 import json
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Header, Response
@@ -439,6 +439,7 @@ def get_all_operations(
     work_center_id: Optional[int] = Query(None, description="Filter by work center"),
     status: Optional[str] = Query(None, description="Filter by status: pending, ready, in_progress, complete, on_hold"),
     search: Optional[str] = Query(None, description="Search by WO number or part number"),
+    due_today: bool = Query(False, description="Filter operations due today"),
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page (max 200)"),
     db: Session = Depends(get_db),
@@ -496,6 +497,9 @@ def get_all_operations(
         )
         if work_center_id:
             query = query.filter(WorkOrderOperation.work_center_id == work_center_id)
+
+    if due_today:
+        query = query.filter(WorkOrder.due_date == date.today())
     
     # Order by priority, then due date
     query = query.order_by(
