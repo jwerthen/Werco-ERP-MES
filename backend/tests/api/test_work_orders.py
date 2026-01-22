@@ -1,5 +1,9 @@
 import pytest
 from fastapi import status
+from fastapi.testclient import TestClient
+
+from app.models.part import Part
+from app.models.work_order import WorkOrder
 
 
 @pytest.mark.api
@@ -12,8 +16,7 @@ class TestWorkOrdersAPI:
         response = client.get("/api/v1/work-orders/", headers=auth_headers)
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        assert "items" in data
-        assert len(data["items"]) == 0
+        assert len(data) == 0
 
     def test_list_work_orders(
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
@@ -22,9 +25,8 @@ class TestWorkOrdersAPI:
         response = client.get("/api/v1/work-orders/", headers=auth_headers)
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        assert "items" in data
-        assert len(data["items"]) == 1
-        assert data["items"][0]["number"] == test_work_order.number
+        assert len(data) == 1
+        assert data[0]["work_order_number"] == test_work_order.work_order_number
 
     def test_create_work_order(
         self, client: TestClient, auth_headers: dict, sample_work_order_data: dict
@@ -35,16 +37,16 @@ class TestWorkOrdersAPI:
         )
         assert response.status_code == status.HTTP_201_CREATED
         data = response.json()
-        assert data["number"] == sample_work_order_data["number"]
+        assert data["work_order_number"].startswith("WO-")
         assert data["customer_name"] == sample_work_order_data["customer_name"]
-        assert data["quantity"] == sample_work_order_data["quantity"]
+        assert float(data["quantity_ordered"]) == sample_work_order_data["quantity_ordered"]
 
     def test_create_work_order_unauthorized(
         self, client: TestClient, sample_work_order_data: dict
     ):
         """Test creating a work order without authentication."""
         response = client.post("/api/v1/work-orders/", json=sample_work_order_data)
-        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert response.status_code == status.HTTP_403_FORBIDDEN
 
     def test_get_work_order_by_id(
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
@@ -56,7 +58,7 @@ class TestWorkOrdersAPI:
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["id"] == test_work_order.id
-        assert data["number"] == test_work_order.number
+        assert data["work_order_number"] == test_work_order.work_order_number
 
     def test_get_work_order_not_found(
         self, client: TestClient, auth_headers: dict
@@ -69,7 +71,7 @@ class TestWorkOrdersAPI:
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
     ):
         """Test updating an existing work order."""
-        update_data = {"status": "released", "priority": 1}
+        update_data = {"version": 0, "status": "released", "priority": 1}
         response = client.put(
             f"/api/v1/work-orders/{test_work_order.id}",
             headers=auth_headers,
@@ -119,8 +121,8 @@ class TestWorkOrdersAPI:
         )
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        assert len(data["items"]) >= 1
-        assert test_work_order.customer_name in data["items"][0]["customer_name"]
+        assert len(data) >= 1
+        assert test_work_order.customer_name in data[0]["customer_name"]
 
 
 @pytest.mark.api
@@ -141,23 +143,27 @@ class TestWorkOrdersValidation:
     ):
         """Test creating a work order with invalid quantity."""
         invalid_data = {
-            "number": "WO-TEST-001",
             "customer_name": "Test Customer",
             "part_id": test_part.id,
-            "quantity": -10,
+            "quantity_ordered": -10,
         }
         response = client.post("/api/v1/work-orders/", headers=auth_headers, json=invalid_data)
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
-    def test_create_work_order_duplicate_number(
-        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
+    def test_create_work_order_generates_unique_numbers(
+        self, client: TestClient, auth_headers: dict, sample_work_order_data: dict
     ):
-        """Test creating a work order with duplicate number."""
-        duplicate_data = {
-            "number": test_work_order.number,
-            "customer_name": "Another Customer",
-            "part_id": test_work_order.part_id,
-            "quantity": 100,
-        }
-        response = client.post("/api/v1/work-orders/", headers=auth_headers, json=duplicate_data)
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        """Test that work order numbers are generated uniquely."""
+        response_one = client.post(
+            "/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data
+        )
+        assert response_one.status_code == status.HTTP_201_CREATED
+        wo_number_one = response_one.json()["work_order_number"]
+
+        response_two = client.post(
+            "/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data
+        )
+        assert response_two.status_code == status.HTTP_201_CREATED
+        wo_number_two = response_two.json()["work_order_number"]
+
+        assert wo_number_one != wo_number_two

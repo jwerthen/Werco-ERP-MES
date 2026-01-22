@@ -1,6 +1,6 @@
 from typing import List, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 from app.db.database import get_db
@@ -218,7 +218,7 @@ def get_work_center_group(work_center: WorkCenter) -> str:
         return wc_type or "OTHER"
 
 
-@router.post("/", response_model=WorkOrderResponse)
+@router.post("/", response_model=WorkOrderResponse, status_code=status.HTTP_201_CREATED)
 def create_work_order(
     work_order_in: WorkOrderCreate,
     request: Request,
@@ -599,13 +599,13 @@ def update_work_order(
     return work_order
 
 
-@router.delete("/{work_order_id}")
+@router.delete("/{work_order_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_work_order(
     work_order_id: int,
     request: Request,
     hard_delete: bool = Query(False, description="Permanently delete (only for draft/cancelled WOs)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN]))
 ):
     """
     Soft delete or permanently delete a work order.
@@ -639,14 +639,14 @@ def delete_work_order(
         db.commit()
         
         audit.log_delete("work_order", wo_id, wo_number)
-        return {"message": f"Work order {wo_number} permanently deleted"}
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     
     # Soft delete - allowed for any status
     work_order.soft_delete(current_user.id)
     db.commit()
     
     audit.log_delete("work_order", wo_id, wo_number, soft_delete=True)
-    return {"message": f"Work order {wo_number} marked as deleted (soft delete)", "can_restore": True}
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{work_order_id}/restore", summary="Restore a soft-deleted work order")
@@ -677,7 +677,7 @@ def restore_work_order(
     return {"message": f"Work order {work_order.work_order_number} restored"}
 
 
-@router.post("/{work_order_id}/release")
+@router.post("/{work_order_id}/release", response_model=WorkOrderResponse)
 def release_work_order(
     work_order_id: int,
     request: Request,
@@ -724,8 +724,9 @@ def release_work_order(
         old_status=old_status,
         new_status="released"
     )
-    
-    return {"message": "Work order released", "work_order_number": work_order.work_order_number}
+
+    db.refresh(work_order)
+    return work_order
 
 
 @router.post("/{work_order_id}/start")

@@ -3,6 +3,7 @@ Fuzzy Matching Service for Vendors and Parts
 Matches extracted PO data to existing database records.
 """
 import logging
+import re
 from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
@@ -58,6 +59,7 @@ def match_vendor(vendor_name: str, db: Session, threshold: int = 70) -> MatchRes
         return MatchResult(matched=False)
     
     vendor_name = vendor_name.strip().upper()
+    normalized_vendor_name = re.sub(r"[^A-Z0-9]", "", vendor_name)
     
     # First try exact match (case-insensitive)
     exact = db.query(Vendor).filter(
@@ -80,9 +82,10 @@ def match_vendor(vendor_name: str, db: Session, threshold: int = 70) -> MatchRes
         return MatchResult(matched=False)
     
     if FUZZY_LIB is None:
-        # No fuzzy library, try simple contains match
+        # No fuzzy library, try normalized contains match
         for v in vendors:
-            if vendor_name in v.name.upper() or v.name.upper() in vendor_name:
+            normalized_db_name = re.sub(r"[^A-Z0-9]", "", v.name.upper())
+            if normalized_vendor_name in normalized_db_name or normalized_db_name in normalized_vendor_name:
                 return MatchResult(
                     matched=True,
                     match_id=v.id,
@@ -127,6 +130,18 @@ def match_vendor(vendor_name: str, db: Session, threshold: int = 70) -> MatchRes
             confidence=matches[0][1],
             suggestions=suggestions
         )
+
+    # Fallback to contains match when fuzzy score is below threshold
+    for vendor in vendors:
+        normalized_db_name = re.sub(r"[^A-Z0-9]", "", vendor.name.upper())
+        if normalized_vendor_name in normalized_db_name or normalized_db_name in normalized_vendor_name:
+            return MatchResult(
+                matched=True,
+                match_id=vendor.id,
+                match_name=vendor.name,
+                confidence=80.0,
+                suggestions=suggestions
+            )
     
     return MatchResult(
         matched=False,

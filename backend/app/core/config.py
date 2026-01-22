@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     
     # Database - Railway provides DATABASE_URL automatically for PostgreSQL plugin
     DATABASE_URL: str = "postgresql://user:pass@localhost:5432/werco_erp"
+    DB_PASSWORD: Optional[str] = None
     
     # Database Connection Pool Settings
     DB_POOL_SIZE: int = 5  # Number of connections to keep open
@@ -117,6 +118,7 @@ class Settings(BaseSettings):
     
     # LLM Integration
     ANTHROPIC_API_KEY: Optional[str] = None
+    NOTION_TOKEN: Optional[str] = None
 
     # Email Configuration
     SMTP_HOST: str = "smtp.gmail.com"

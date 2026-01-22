@@ -1,7 +1,7 @@
 """Add availability rate to work centers
 
 Revision ID: 015_add_work_center_availability_rate
-Revises: 014_add_hardware_consumable
+Revises: 014b_widen_alembic_version
 Create Date: 2026-01-21
 
 Adds availability_rate column to work_centers for scheduling availability metrics.
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.engine.reflection import Inspector
 
 revision = '015_add_work_center_availability_rate'
-down_revision = '014_add_hardware_consumable'
+down_revision = '014b_widen_alembic_version'
 branch_labels = None
 depends_on = None
 

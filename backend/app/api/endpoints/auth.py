@@ -16,21 +16,21 @@ from app.services.audit_service import AuditService
 router = APIRouter()
 
 
-def log_auth_event(db: Session, action: str, user: User = None, email: str = None, 
+def log_auth_event(db: Session, action: str, user: User = None, email: str = None,
                    success: bool = True, request: Request = None, error: str = None):
     """Log authentication events for CMMC compliance using AuditService"""
     try:
-        AuditService.log(
-            db=db,
+        resource_identifier = email or (user.email if user else None)
+        audit_service = AuditService(db, user, request)
+        audit_service.log(
             action=action,
             resource_type="authentication",
-            description=f"{action} attempt for {email or (user.email if user else 'unknown')}",
-            user_id=user.id if user else None,
-            user_email=user.email if user else email,
-            user_name=user.full_name if user else None,
+            resource_id=user.id if user else None,
+            resource_identifier=resource_identifier,
+            description=f"{action} attempt for {resource_identifier or 'unknown'}",
             success=success,
             error_message=error,
-            request=request,
+            extra_data={"email": email} if email and not user else None,
         )
     except Exception as e:
         # Don't let audit logging failures break authentication
@@ -213,9 +213,9 @@ def register(
     request: Request,
     user_in: UserCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN]))
 ):
-    """Register a new user (admin or manager only)"""
+    """Register a new user (admin only)"""
     # Check if email already exists
     if db.query(User).filter(User.email == user_in.email).first():
         raise HTTPException(

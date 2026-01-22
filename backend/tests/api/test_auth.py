@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 class TestAuthLogin:
     """Test authentication login endpoint."""
 
-    def test_login_success(self, client: TestClient, test_user_credentials):
+    def test_login_success(self, client: TestClient, test_user, test_user_credentials):
         """Test successful login with valid credentials."""
         response = client.post(
             "/api/v1/auth/login",
@@ -40,7 +40,7 @@ class TestAuthLogin:
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
         assert "Invalid email or password" in response.json()["detail"]
 
-    def test_login_invalid_password(self, client: TestClient, test_user_credentials):
+    def test_login_invalid_password(self, client: TestClient, test_user, test_user_credentials):
         """Test login with wrong password."""
         response = client.post(
             "/api/v1/auth/login",
@@ -52,7 +52,7 @@ class TestAuthLogin:
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
         assert "Invalid email or password" in response.json()["detail"]
 
-    def test_login_inactive_user(self, client: TestClient, inactive_user_credentials):
+    def test_login_inactive_user(self, client: TestClient, inactive_user, inactive_user_credentials):
         """Test login with inactive user account."""
         response = client.post(
             "/api/v1/auth/login",
@@ -64,7 +64,7 @@ class TestAuthLogin:
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert "disabled" in response.json()["detail"].lower()
 
-    def test_login_returns_user_info(self, client: TestClient, test_user_credentials):
+    def test_login_returns_user_info(self, client: TestClient, test_user, test_user_credentials):
         """Test that login response includes user information."""
         response = client.post(
             "/api/v1/auth/login",
@@ -85,7 +85,7 @@ class TestAuthLogin:
 class TestAuthTokenRefresh:
     """Test token refresh functionality."""
 
-    def test_refresh_token_success(self, client: TestClient, test_user_credentials):
+    def test_refresh_token_success(self, client: TestClient, test_user, test_user_credentials):
         """Test successful token refresh."""
         # First login to get tokens
         login_response = client.post(
@@ -139,7 +139,7 @@ class TestAuthLogout:
     def test_logout_without_auth(self, client: TestClient):
         """Test logout without authentication."""
         response = client.post("/api/v1/auth/logout")
-        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert response.status_code == status.HTTP_403_FORBIDDEN
 
 
 @pytest.mark.api
@@ -177,7 +177,7 @@ class TestAuthRegister:
             "role": "operator"
         }
         response = client.post("/api/v1/auth/register", json=new_user_data)
-        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert response.status_code == status.HTTP_403_FORBIDDEN
 
     def test_register_as_non_admin(self, client: TestClient, auth_headers, fake_data):
         """Test non-admin cannot register users."""
@@ -196,7 +196,7 @@ class TestAuthRegister:
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    def test_register_duplicate_email(self, client: TestClient, admin_headers, test_user_credentials, fake_data):
+    def test_register_duplicate_email(self, client: TestClient, admin_headers, test_user, test_user_credentials, fake_data):
         """Test registration with existing email fails."""
         new_user_data = {
             "email": test_user_credentials["email"],

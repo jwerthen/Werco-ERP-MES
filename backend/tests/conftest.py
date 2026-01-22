@@ -1,22 +1,31 @@
-import pytest
 import os
 from typing import Generator
+
+import pytest
+from faker import Faker
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
-from faker import Faker
+
+WORKER_ID = os.getenv("PYTEST_XDIST_WORKER", "master")
+if WORKER_ID == "master":
+    TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "sqlite:///./test.db")
+else:
+    TEST_DATABASE_URL = f"sqlite:///./test_{WORKER_ID}.db"
+
+os.environ["TEST_DATABASE_URL"] = TEST_DATABASE_URL
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+os.environ["SECRET_KEY"] = "test-secret-key-abcdefghijklmnopqrstuvwxyz123456"
+os.environ["REFRESH_TOKEN_SECRET_KEY"] = "test-refresh-secret-key-abcdefghijklmnopqrstuvwxyz123456"
 
 from app.main import app
-from app.db.database import Base, get_db
 from app.core.security import create_access_token, get_password_hash
-from app.models.user import User, UserRole
-from app.models.work_order import WorkOrder
-from app.models.work_center import WorkCenter
+from app.db.database import Base, get_db
 from app.models.part import Part
-
-# Test database URL - use SQLite for testing
-TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "sqlite:///./test.db")
+from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
+from app.models.work_order import WorkOrder, WorkOrderOperation
 
 # Create test engine
 if "sqlite" in TEST_DATABASE_URL:
@@ -221,7 +230,7 @@ def test_work_center(db_session: Session) -> WorkCenter:
     work_center = WorkCenter(
         name=f"Sawing {fake.pyint(min_value=1, max_value=100)}",
         code=f"SAW-{fake.pyint(min_value=1, max_value=100)}",
-        type="sawing",
+        work_center_type="welding",
         description=fake.sentence(),
         hourly_rate=fake.pyfloat(min_value=50, max_value=150),
         is_active=True,
@@ -240,7 +249,7 @@ def test_part(db_session: Session) -> Part:
         name=fake.word(),
         description=fake.sentence(),
         part_type="manufactured",
-        unit_of_measure="EA",
+        unit_of_measure="each",
         is_active=True,
     )
     db_session.add(part)
@@ -250,18 +259,27 @@ def test_part(db_session: Session) -> Part:
 
 
 @pytest.fixture
-def test_work_order(db_session: Session, test_part: Part) -> WorkOrder:
+def test_work_order(db_session: Session, test_part: Part, test_work_center: WorkCenter) -> WorkOrder:
     """Create a test work order."""
     work_order = WorkOrder(
         work_order_number=f"WO-{fake.pyint(min_value=10000, max_value=99999)}",
         customer_name=fake.company(),
         part_id=test_part.id,
         quantity_ordered=fake.pyint(min_value=10, max_value=1000),
-        status="not_started",
+        status="draft",
         priority=2,
         due_date=fake.date_this_year(after_today=True),
     )
     db_session.add(work_order)
+
+    db_session.flush()
+    operation = WorkOrderOperation(
+        work_order_id=work_order.id,
+        work_center_id=test_work_center.id,
+        sequence=10,
+        name="Test Operation",
+    )
+    db_session.add(operation)
     db_session.commit()
     db_session.refresh(work_order)
     return work_order
@@ -271,11 +289,9 @@ def test_work_order(db_session: Session, test_part: Part) -> WorkOrder:
 def sample_work_order_data(test_part: Part):
     """Return sample work order data for API requests."""
     return {
-        "number": f"WO-{fake.pyint(min_value=10000, max_value=99999)}",
-        "customer_name": fake.company(),
         "part_id": test_part.id,
-        "quantity": fake.pyint(min_value=10, max_value=1000),
-        "status": "planned",
+        "quantity_ordered": fake.pyint(min_value=10, max_value=1000),
+        "customer_name": fake.company(),
         "priority": 2,
         "due_date": fake.date_this_year(after_today=True).isoformat(),
     }
@@ -285,12 +301,11 @@ def sample_work_order_data(test_part: Part):
 def sample_part_data():
     """Return sample part data for API requests."""
     return {
-        "number": f"P-{fake.pyint(min_value=10000, max_value=99999)}",
+        "part_number": f"P-{fake.pyint(min_value=10000, max_value=99999)}",
         "name": fake.word(),
         "description": fake.sentence(),
-        "type": "manufactured",
-        "unit_of_measure": "EA",
-        "material_type": "ST-304",
+        "part_type": "manufactured",
+        "unit_of_measure": "each",
     }
 
 
@@ -300,7 +315,7 @@ def sample_work_center_data():
     return {
         "name": fake.word(),
         "code": f"WC-{fake.pyint(min_value=1, max_value=100)}",
-        "type": "welding",
+        "work_center_type": "welding",
         "description": fake.sentence(),
         "hourly_rate": fake.pyfloat(min_value=50, max_value=150),
     }
@@ -358,7 +373,7 @@ def part_factory(db_session: Session):
             name=name or fake.word(),
             description=fake.sentence(),
             part_type=choice(["manufactured", "purchased"]),
-            unit_of_measure="EA",
+            unit_of_measure="each",
             is_active=True
         )
         db_session.add(part)

@@ -1,7 +1,10 @@
 """Unit tests for backend services."""
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.models.part import Part
+from app.models.purchasing import Vendor
 from app.services.matching_service import (
     MatchResult,
     match_vendor,
@@ -135,8 +138,8 @@ class TestMatchPart:
         part = Part(
             part_number="P-123.45",
             name="Test Part with Dots",
-            type="purchased",
-            unit_of_measure="EA"
+            part_type="purchased",
+            unit_of_measure="each"
         )
         db_session.add(part)
         db_session.commit()
@@ -227,7 +230,7 @@ class TestMatchingIntegration:
         vendor_factory("Acme Supplies", "ACM003")
 
         # Try to match similar name
-        result = match_vendor("Acme Corp", db_session)
+        result = match_vendor("Acme Corp", db_session, threshold=60)
         assert result.matched is True
         assert len(result.suggestions) > 0
 

@@ -14,7 +14,7 @@ from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POStatus
 from app.models.part import Part
-from app.models.audit_log import AuditLog
+from app.services.audit_service import AuditService
 from app.schemas.po_upload import (
     POExtractionResult, POCreateFromUpload, POUploadResponse,
     VendorExtracted, LineItemExtracted
@@ -37,17 +37,21 @@ ALLOWED_MIME_TYPES = [
 ]
 
 
-def log_audit(db: Session, user_id: int, action: str, resource_type: str, resource_id: int, details: str):
+def log_audit(
+    db: Session,
+    user: Optional[User],
+    action: str,
+    resource_type: str,
+    resource_id: int,
+    details: str
+):
     """Create audit log entry."""
-    audit = AuditLog(
-        user_id=user_id,
+    AuditService(db, user).log(
         action=action,
         resource_type=resource_type,
         resource_id=resource_id,
-        description=details,
-        ip_address="system"
+        description=details
     )
-    db.add(audit)
 
 
 @router.post("/upload-po", response_model=POExtractionResult)
@@ -200,7 +204,7 @@ async def upload_and_extract_po(
         
         # Audit log
         log_audit(
-            db, current_user.id, "PO_DOC_UPLOAD", "purchase_order", 0,
+            db, current_user, "PO_DOC_UPLOAD", "purchase_order", 0,
             f"Uploaded PO document: {file.filename}, extracted {len(matched_items)} line items"
         )
         db.commit()
@@ -340,7 +344,7 @@ def create_po_from_upload(
     
     # Audit log
     log_audit(
-        db, current_user.id, "PO_CREATE_FROM_UPLOAD", "purchase_order", po.id,
+        db, current_user, "PO_CREATE_FROM_UPLOAD", "purchase_order", po.id,
         f"Created PO {po.po_number} from uploaded PDF with {len(data.line_items)} lines"
     )
     

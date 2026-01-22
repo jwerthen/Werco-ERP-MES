@@ -13,7 +13,7 @@ from app.models.purchasing import (
 from app.models.part import Part
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType, InventoryLocation
 from app.models.quality import NonConformanceReport, NCRStatus, NCRDisposition, NCRSource
-from app.models.audit_log import AuditLog
+from app.services.audit_service import AuditService
 from app.schemas.purchasing import (
     ReceiptCreate, ReceiptInspection, ReceiptResponse,
     InspectionQueueItem, InspectionResultResponse
@@ -56,17 +56,21 @@ def generate_ncr_number(db: Session) -> str:
     return f"{prefix}{new_num:03d}"
 
 
-def log_audit(db: Session, user_id: int, action: str, resource_type: str, resource_id: int, details: str):
+def log_audit(
+    db: Session,
+    user: Optional[User],
+    action: str,
+    resource_type: str,
+    resource_id: int,
+    details: str
+):
     """Create audit log entry for compliance"""
-    audit = AuditLog(
-        user_id=user_id,
+    AuditService(db, user).log(
         action=action,
         resource_type=resource_type,
         resource_id=resource_id,
-        details=details,
-        ip_address="system"
+        description=details
     )
-    db.add(audit)
 
 
 @router.get("/open-pos")
@@ -288,7 +292,7 @@ def receive_material(
     
     # Audit log
     log_audit(
-        db, current_user.id, "RECEIVE_MATERIAL", "po_receipt", receipt.id,
+        db, current_user, "RECEIVE_MATERIAL", "po_receipt", receipt.id,
         f"Received {receipt_in.quantity_received} of part {po_line.part.part_number if po_line.part else 'N/A'} on PO {po.po_number}, Lot: {receipt_in.lot_number}"
     )
     
@@ -481,7 +485,7 @@ def inspect_receipt(
     # Create NCR for rejected quantity
     if inspection.quantity_rejected > 0:
         ncr = _create_ncr_for_rejection(
-            db, receipt, inspection, current_user.id,
+            db, receipt, inspection, current_user,
             po.vendor.name if po.vendor else None,
             po.po_number,
             part
@@ -492,7 +496,7 @@ def inspect_receipt(
     
     # Audit log
     log_audit(
-        db, current_user.id, "INSPECT_RECEIPT", "po_receipt", receipt.id,
+        db, current_user, "INSPECT_RECEIPT", "po_receipt", receipt.id,
         f"Inspected receipt {receipt.receipt_number}: {inspection.quantity_accepted} accepted, {inspection.quantity_rejected} rejected. Method: {inspection.inspection_method}"
     )
     
@@ -559,8 +563,13 @@ def _add_to_inventory(
 
 
 def _create_ncr_for_rejection(
-    db: Session, receipt: POReceipt, inspection: ReceiptInspection,
-    user_id: int, supplier_name: Optional[str], po_number: str, part
+    db: Session,
+    receipt: POReceipt,
+    inspection: ReceiptInspection,
+    current_user: User,
+    supplier_name: Optional[str],
+    po_number: str,
+    part: Optional[Part]
 ) -> NonConformanceReport:
     """Create NCR in draft status for rejected material"""
     ncr_number = generate_ncr_number(db)
@@ -595,7 +604,7 @@ def _create_ncr_for_rejection(
         supplier_name=supplier_name,
         supplier_lot=receipt.lot_number,
         po_number=po_number,
-        detected_by=user_id,
+        detected_by=current_user.id,
         detected_date=date.today()
     )
     db.add(ncr)
@@ -603,7 +612,7 @@ def _create_ncr_for_rejection(
     
     # Audit log for NCR creation
     log_audit(
-        db, user_id, "CREATE_NCR", "ncr", ncr.id,
+        db, current_user, "CREATE_NCR", "ncr", ncr.id,
         f"Auto-created NCR {ncr_number} for incoming inspection rejection on receipt {receipt.receipt_number}"
     )
     

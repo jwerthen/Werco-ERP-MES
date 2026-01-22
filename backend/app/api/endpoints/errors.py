@@ -110,33 +110,35 @@ async def store_error_log(error: ErrorLogEntry, client_ip: str):
     Uses the existing AuditLog model to store frontend errors.
     """
     from app.db.database import SessionLocal
-    from app.models.audit_log import AuditLog
+    from app.models.user import User
+    from app.services.audit_service import AuditService
     
     try:
         db = SessionLocal()
         
-        audit_log = AuditLog(
+        user = None
+        if error.userId and error.userId.isdigit():
+            user = db.query(User).filter(User.id == int(error.userId)).first()
+
+        AuditService(db, user).log(
             action="FRONTEND_ERROR",
             resource_type="frontend",
             resource_identifier=error.id,
             description=f"{error.boundaryName or 'Unknown'}: {error.message[:500]}",
-            user_id=int(error.userId) if error.userId and error.userId.isdigit() else None,
-            ip_address=client_ip,
-            user_agent=error.userAgent[:500] if error.userAgent else None,
-            session_id=error.sessionId,
+            success=False,
+            error_message=error.message[:1000],
             extra_data={
                 "error_id": error.id,
                 "boundary_level": error.boundaryLevel,
                 "url": error.url,
+                "client_ip": client_ip,
+                "user_agent": error.userAgent[:500] if error.userAgent else None,
+                "session_id": error.sessionId,
                 "stack": error.stack[:2000] if error.stack else None,
                 "component_stack": error.componentStack[:1000] if error.componentStack else None,
                 "metadata": error.metadata,
-            },
-            success="false",
-            error_message=error.message[:1000],
+            }
         )
-        
-        db.add(audit_log)
         db.commit()
         db.close()
         

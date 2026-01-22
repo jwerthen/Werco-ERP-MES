@@ -449,7 +449,7 @@ class TestPOCreateFromUpload:
             "create_vendor": False,
             "line_items": [
                 {
-                    "part_id": None,
+                    "part_id": 0,
                     "part_number": "NONEXISTENT-PART",
                     "description": "Test",
                     "quantity_ordered": 1,

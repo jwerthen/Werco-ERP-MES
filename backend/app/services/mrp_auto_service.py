@@ -12,9 +12,9 @@ from app.models.part import Part, PartType
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine, POStatus
 from app.models.vendor import Vendor
-from app.models.audit_log import AuditLog
 from app.models.user import User
 from app.models.supplier_part import SupplierPartMapping
+from app.services.audit_service import AuditService
 from app.services.notification_service import NotificationService, NotificationEvent
 import logging
 
@@ -380,13 +380,21 @@ class MRPAutoService:
         user_id: int = None
     ):
         """Create audit log entry"""
+        user = None
+        if user_id is not None:
+            user = self.db.query(User).filter(User.id == user_id).first()
 
-        log = AuditLog(
-            user_id=user_id,
+        resource_type_map = {
+            "PurchaseOrder": "purchase_order",
+            "WorkOrder": "work_order",
+        }
+        resource_type = resource_type_map.get(entity_type, entity_type)
+        description = f"{action} {resource_type} {entity_id}"
+
+        AuditService(self.db, user).log(
             action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            details=details,
-            timestamp=datetime.utcnow()
+            resource_type=resource_type,
+            resource_id=entity_id,
+            description=description,
+            extra_data=details
         )
-        self.db.add(log)

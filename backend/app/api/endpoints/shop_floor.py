@@ -14,6 +14,7 @@ from app.models.work_center import WorkCenter
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.audit_log import AuditLog
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
+from app.services.audit_service import AuditService
 from app.services.scheduling_service import SchedulingService
 
 
@@ -543,14 +544,12 @@ def start_operation(
             work_order.actual_start = datetime.utcnow()
     
     # Create audit log
-    audit = AuditLog(
-        user_id=current_user.id,
+    AuditService(db, current_user).log(
         action="START_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
         description=f"Started operation {operation.operation_number} on WO {work_order.work_order_number}"
     )
-    db.add(audit)
     
     db.commit()
     db.refresh(operation)
@@ -682,15 +681,16 @@ def complete_operation(
     work_order.updated_at = datetime.utcnow()
     
     # Create audit log
-    audit = AuditLog(
-        user_id=current_user.id,
+    AuditService(db, current_user).log(
         action="COMPLETE_OPERATION" if is_fully_complete else "UPDATE_OPERATION_PROGRESS",
         resource_type="work_order_operation",
         resource_id=operation_id,
-        description=f"{'Completed' if is_fully_complete else 'Updated'} operation {operation.operation_number} on WO {work_order.work_order_number}. Qty: {completion_data.quantity_complete}/{work_order.quantity_ordered}" + 
-                (f". Notes: {completion_data.notes}" if completion_data.notes else "")
+        description=(
+            f"{'Completed' if is_fully_complete else 'Updated'} operation {operation.operation_number} on WO {work_order.work_order_number}. "
+            f"Qty: {completion_data.quantity_complete}/{work_order.quantity_ordered}"
+            + (f". Notes: {completion_data.notes}" if completion_data.notes else "")
+        )
     )
-    db.add(audit)
     
     db.commit()
     db.refresh(operation)
@@ -831,14 +831,12 @@ def put_operation_on_hold(
     operation.updated_at = datetime.utcnow()
     
     # Create audit log
-    audit = AuditLog(
-        user_id=current_user.id,
+    AuditService(db, current_user).log(
         action="HOLD_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
         description=f"Put operation {operation.operation_number} on hold"
     )
-    db.add(audit)
     
     db.commit()
     
@@ -867,14 +865,12 @@ def resume_operation(
     operation.updated_at = datetime.utcnow()
     
     # Create audit log
-    audit = AuditLog(
-        user_id=current_user.id,
+    AuditService(db, current_user).log(
         action="RESUME_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
         description=f"Resumed operation {operation.operation_number}"
     )
-    db.add(audit)
     
     db.commit()
     

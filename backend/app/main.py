@@ -1,5 +1,6 @@
 # Werco ERP Main Application - v1.0.1
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -453,7 +454,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     response = JSONResponse(
         status_code=422,
-        content={"detail": exc.errors()}
+        content={"detail": jsonable_encoder(exc.errors())}
     )
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
