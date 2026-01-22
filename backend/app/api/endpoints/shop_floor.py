@@ -1,4 +1,5 @@
 from typing import List, Optional
+import math
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -648,6 +649,8 @@ def complete_operation(
         raise HTTPException(status_code=404, detail="Operation not found")
     
     work_order = operation.work_order
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found for this operation")
     
     # Validate operation state
     if operation.status == OperationStatus.COMPLETE:
@@ -660,6 +663,9 @@ def complete_operation(
         )
     
     # Validate quantity
+    if math.isnan(completion_data.quantity_complete) or math.isinf(completion_data.quantity_complete):
+        raise HTTPException(status_code=400, detail="Quantity must be a valid number")
+
     if completion_data.quantity_complete < 0:
         raise HTTPException(status_code=400, detail="Quantity cannot be negative")
     
