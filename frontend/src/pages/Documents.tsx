@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { format } from 'date-fns';
 import {
@@ -67,8 +67,10 @@ export default function Documents() {
     revision: 'A',
     file: null as File | null
   });
+  const partsById = useMemo(() => new Map(parts.map((part) => [part.id, part])), [parts]);
 
   const loadData = useCallback(async () => {
+    setLoading(true);
     try {
       const [docsRes, partsRes, typesRes] = await Promise.all([
         api.getDocuments({ document_type: filterType || undefined }),
@@ -148,15 +150,16 @@ export default function Documents() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const filteredDocs = documents.filter(doc => {
-    if (!search) return true;
+  const filteredDocs = useMemo(() => {
+    if (!search) return documents;
     const searchLower = search.toLowerCase();
-    return (
+    return documents.filter((doc) => (
       doc.document_number.toLowerCase().includes(searchLower) ||
       doc.title.toLowerCase().includes(searchLower) ||
       doc.file_name?.toLowerCase().includes(searchLower)
-    );
-  });
+    ));
+  }, [documents, search]);
+  const filteredCount = filteredDocs.length;
 
   if (loading) {
     return (
@@ -199,6 +202,13 @@ export default function Documents() {
           ))}
         </select>
       </div>
+      <div className="flex items-center gap-2 text-sm text-gray-600">
+        <span>Showing</span>
+        <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">{filteredCount}</span>
+        <span>of</span>
+        <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">{documents.length}</span>
+        <span>documents</span>
+      </div>
 
       {/* Documents Table */}
       <div className="card overflow-hidden">
@@ -234,7 +244,7 @@ export default function Documents() {
                     <div className="text-xs text-gray-500">{formatFileSize(doc.file_size)}</div>
                   </td>
                   <td className="px-4 py-3 text-sm">
-                    {doc.part_id ? parts.find(p => p.id === doc.part_id)?.part_number || '-' : '-'}
+                    {doc.part_id ? partsById.get(doc.part_id)?.part_number || '-' : '-'}
                   </td>
                   <td className="px-4 py-3 text-sm">
                     {format(new Date(doc.created_at), 'MMM d, yyyy')}

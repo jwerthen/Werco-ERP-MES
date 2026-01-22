@@ -388,6 +388,48 @@ function AppRoutes() {
           </Layout>
         </PrivateRoute>
       } />
+      <Route path="/analytics/production" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Analytics /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/analytics/quality" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Analytics /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/analytics/inventory" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Analytics /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/analytics/forecasting" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Analytics /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/analytics/costs" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Analytics /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/analytics/reports" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Analytics /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
     </Routes>
   );
 }

@@ -5,6 +5,7 @@ export interface TourStep {
   title: string;
   description: string;
   position?: 'top' | 'bottom' | 'left' | 'right' | 'auto';
+  path?: string;  // Optional path to navigate to for this step
 }
 
 export interface Tour {

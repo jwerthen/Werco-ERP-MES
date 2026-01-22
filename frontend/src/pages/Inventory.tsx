@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import {
@@ -45,6 +45,7 @@ export default function InventoryPage() {
   const [parts, setParts] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [showLowStockOnly, setShowLowStockOnly] = useState(() => searchParams.get('filter') === 'low_stock');
+  const [filterText, setFilterText] = useState('');
   
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -57,12 +58,46 @@ export default function InventoryPage() {
   const [transferForm, setTransferForm] = useState({
     inventory_item_id: 0, quantity: 0, to_location_code: '', notes: ''
   });
+  const lowStockPartIds = useMemo(
+    () => new Set(lowStockItems.map((item: any) => item.part_id)),
+    [lowStockItems]
+  );
+  const filteredSummary = useMemo(() => {
+    const base = showLowStockOnly
+      ? summary.filter((item) => lowStockPartIds.has(item.part_id))
+      : summary;
+    if (!filterText) return base;
+    const term = filterText.toLowerCase();
+    return base.filter((item) => (
+      item.part_number?.toLowerCase().includes(term) ||
+      item.part_name?.toLowerCase().includes(term)
+    ));
+  }, [filterText, lowStockPartIds, showLowStockOnly, summary]);
+  const filteredInventory = useMemo(() => {
+    if (!filterText) return inventory;
+    const term = filterText.toLowerCase();
+    return inventory.filter((item) => (
+      item.part?.part_number?.toLowerCase().includes(term) ||
+      item.part?.name?.toLowerCase().includes(term)
+    ));
+  }, [filterText, inventory]);
+  const summaryTotals = useMemo(() => {
+    return summary.reduce(
+      (acc, item) => {
+        acc.totalOnHand += item.total_on_hand;
+        acc.totalAvailable += item.available;
+        return acc;
+      },
+      { totalOnHand: 0, totalAvailable: 0 }
+    );
+  }, [summary]);
 
   useEffect(() => {
     loadData();
   }, []);
 
   const loadData = async () => {
+    setLoading(true);
     try {
       const [invRes, summaryRes, partsRes, locsRes, lowStockRes] = await Promise.all([
         api.getInventory(),
@@ -137,11 +172,11 @@ export default function InventoryPage() {
           <div className="text-sm text-gray-500">Unique Parts</div>
         </div>
         <div className="card">
-          <div className="text-2xl font-bold">{summary.reduce((a, b) => a + b.total_on_hand, 0).toFixed(0)}</div>
+          <div className="text-2xl font-bold">{summaryTotals.totalOnHand.toFixed(0)}</div>
           <div className="text-sm text-gray-500">Total On Hand</div>
         </div>
         <div className="card">
-          <div className="text-2xl font-bold">{summary.reduce((a, b) => a + b.available, 0).toFixed(0)}</div>
+          <div className="text-2xl font-bold">{summaryTotals.totalAvailable.toFixed(0)}</div>
           <div className="text-sm text-gray-500">Total Available</div>
         </div>
         <div className="card">
@@ -171,6 +206,55 @@ export default function InventoryPage() {
           </button>
         </div>
       )}
+
+      {/* Quick Filters */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative w-full sm:max-w-sm">
+          <input
+            type="text"
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            placeholder="Filter by part number or name..."
+            className="input pr-10"
+          />
+          {filterText && (
+            <button
+              type="button"
+              onClick={() => setFilterText('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              aria-label="Clear filter"
+            >
+              <XMarkIcon className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+          <span>Showing</span>
+          <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">
+            {activeTab === 'details' ? filteredInventory.length : filteredSummary.length}
+          </span>
+          <span>of</span>
+          <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">
+            {activeTab === 'details' ? inventory.length : summary.length}
+          </span>
+          <span>items</span>
+          <button
+            type="button"
+            onClick={() => {
+              const next = !showLowStockOnly;
+              setShowLowStockOnly(next);
+              setSearchParams(next ? { filter: 'low_stock' } : {});
+            }}
+            className={`ml-2 px-3 py-1 rounded-full text-xs font-medium border ${
+              showLowStockOnly
+                ? 'bg-amber-100 text-amber-700 border-amber-200'
+                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+            }`}
+          >
+            {showLowStockOnly ? 'Showing Low Stock' : 'Show Low Stock'}
+          </button>
+        </div>
+      </div>
 
       {/* Tabs */}
       <div className="border-b border-gray-200">
@@ -208,12 +292,9 @@ export default function InventoryPage() {
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Locations</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {(showLowStockOnly 
-                  ? summary.filter(item => lowStockItems.some(ls => ls.part_id === item.part_id))
-                  : summary
-                ).map((item) => {
-                  const isLowStock = lowStockItems.some(ls => ls.part_id === item.part_id);
+                <tbody className="bg-white divide-y divide-gray-200">
+                {filteredSummary.map((item) => {
+                  const isLowStock = lowStockPartIds.has(item.part_id);
                   return (
                     <tr key={item.part_id} className={`hover:bg-gray-50 align-top ${isLowStock ? 'bg-red-50' : ''}`}>
                       <td className="px-4 py-3">
@@ -257,7 +338,7 @@ export default function InventoryPage() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {inventory.map((item) => (
+                {filteredInventory.map((item) => (
                   <tr key={item.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
                       <div className="font-medium">{item.part?.part_number}</div>

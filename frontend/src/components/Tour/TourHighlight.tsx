@@ -1,4 +1,5 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import { useTour } from '../../context/TourContext';
 import TourTooltip from './TourTooltip';
@@ -14,6 +15,9 @@ export default function TourHighlight() {
   const { activeTour, currentStepIndex, isActive } = useTour();
   const [targetRect, setTargetRect] = useState<TargetRect | null>(null);
   const [targetElement, setTargetElement] = useState<Element | null>(null);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const lastTargetRef = useRef<Element | null>(null);
 
   const currentStep = activeTour?.steps[currentStepIndex];
 
@@ -24,29 +28,44 @@ export default function TourHighlight() {
       return;
     }
 
+    if (currentStep.path && location.pathname !== currentStep.path) {
+      setTargetRect(null);
+      setTargetElement(null);
+      return;
+    }
+
     const element = document.querySelector(currentStep.target);
     if (element) {
       const rect = element.getBoundingClientRect();
       setTargetRect({
-        top: rect.top + window.scrollY,
-        left: rect.left + window.scrollX,
+        top: rect.top,
+        left: rect.left,
         width: rect.width,
         height: rect.height,
       });
       setTargetElement(element);
       
       // Scroll element into view if needed
-      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (lastTargetRef.current !== element) {
+        lastTargetRef.current = element;
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
     } else {
       setTargetRect(null);
       setTargetElement(null);
+      lastTargetRef.current = null;
     }
-  }, [currentStep]);
+  }, [currentStep, location.pathname]);
 
   useEffect(() => {
     if (!isActive) {
       setTargetRect(null);
       setTargetElement(null);
+      return;
+    }
+
+    if (currentStep?.path && location.pathname !== currentStep.path) {
+      navigate(currentStep.path);
       return;
     }
 
@@ -70,7 +89,7 @@ export default function TourHighlight() {
       window.removeEventListener('scroll', handleUpdate, true);
       observer.disconnect();
     };
-  }, [isActive, updateTargetPosition]);
+  }, [currentStep?.path, isActive, location.pathname, navigate, updateTargetPosition]);
 
   if (!isActive || !currentStep) return null;
 
