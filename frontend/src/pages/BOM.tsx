@@ -6,7 +6,8 @@ import {
   ChevronRightIcon, 
   ChevronDownIcon,
   DocumentDuplicateIcon,
-  TrashIcon
+  TrashIcon,
+  XMarkIcon
 } from '@heroicons/react/24/outline';
 
 type LineType = 'component' | 'hardware' | 'consumable' | 'reference';
