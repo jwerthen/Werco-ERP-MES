@@ -294,7 +294,8 @@ class SchedulingService:
             ).order_by(WorkOrderOperation.sequence.desc()).first()
 
             if prev_op and prev_op.scheduled_end:
-                return prev_op.scheduled_end + timedelta(days=1)
+                prev_end = prev_op.scheduled_end.date() if isinstance(prev_op.scheduled_end, datetime) else prev_op.scheduled_end
+                return prev_end + timedelta(days=1)
 
         # Otherwise, earliest is today
         return date.today()
@@ -333,6 +334,9 @@ class SchedulingService:
     def _add_to_capacity(self, work_center_id: int, scheduled_date: date, hours: float):
         """Add hours to work center capacity tracking"""
         capacity = self.capacity_map[work_center_id]
+
+        if isinstance(scheduled_date, datetime):
+            scheduled_date = scheduled_date.date()
 
         if scheduled_date not in capacity.daily_load:
             capacity.daily_load[scheduled_date] = 0
