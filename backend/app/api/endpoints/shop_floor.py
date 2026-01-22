@@ -701,49 +701,49 @@ def complete_operation(
             )
         ).count()
         
-            if remaining_ops == 0:
-                # All operations complete - mark work order complete
-                work_order.status = WorkOrderStatus.COMPLETE
-                work_order.actual_end = datetime.utcnow()
-                work_order.quantity_complete = completion_data.quantity_complete
+        if remaining_ops == 0:
+            # All operations complete - mark work order complete
+            work_order.status = WorkOrderStatus.COMPLETE
+            work_order.actual_end = datetime.utcnow()
+            work_order.quantity_complete = completion_data.quantity_complete
+            if operation.work_center_id:
+                SchedulingService(db).update_availability_rates(
+                    work_center_ids=[operation.work_center_id],
+                    horizon_days=90
+                )
+        else:
+            # Mark next operation as ready and auto-schedule it
+            next_op = db.query(WorkOrderOperation).filter(
+                and_(
+                    WorkOrderOperation.work_order_id == work_order.id,
+                    WorkOrderOperation.sequence > operation.sequence,
+                    WorkOrderOperation.status == OperationStatus.PENDING
+                )
+            ).order_by(WorkOrderOperation.sequence).first()
+        
+            if next_op:
+                next_op.status = OperationStatus.READY
+                affected_work_centers = {wc_id for wc_id in [operation.work_center_id, next_op.work_center_id] if wc_id}
+                scheduling_service = SchedulingService(db)
+                if affected_work_centers:
+                    if not next_op.scheduled_start:
+                        scheduling_service.run_scheduling(
+                            work_center_ids=list(affected_work_centers),
+                            horizon_days=90,
+                            optimize_setup=False,
+                            work_order_ids=[work_order.id]
+                        )
+                    else:
+                        scheduling_service.update_availability_rates(
+                            work_center_ids=list(affected_work_centers),
+                            horizon_days=90
+                        )
+            else:
                 if operation.work_center_id:
                     SchedulingService(db).update_availability_rates(
                         work_center_ids=[operation.work_center_id],
                         horizon_days=90
                     )
-            else:
-                # Mark next operation as ready and auto-schedule it
-                next_op = db.query(WorkOrderOperation).filter(
-                    and_(
-                        WorkOrderOperation.work_order_id == work_order.id,
-                        WorkOrderOperation.sequence > operation.sequence,
-                        WorkOrderOperation.status == OperationStatus.PENDING
-                    )
-                ).order_by(WorkOrderOperation.sequence).first()
-            
-                if next_op:
-                    next_op.status = OperationStatus.READY
-                    affected_work_centers = {wc_id for wc_id in [operation.work_center_id, next_op.work_center_id] if wc_id}
-                    scheduling_service = SchedulingService(db)
-                    if affected_work_centers:
-                        if not next_op.scheduled_start:
-                            scheduling_service.run_scheduling(
-                                work_center_ids=list(affected_work_centers),
-                                horizon_days=90,
-                                optimize_setup=False,
-                                work_order_ids=[work_order.id]
-                            )
-                        else:
-                            scheduling_service.update_availability_rates(
-                                work_center_ids=list(affected_work_centers),
-                                horizon_days=90
-                            )
-                else:
-                    if operation.work_center_id:
-                        SchedulingService(db).update_availability_rates(
-                            work_center_ids=[operation.work_center_id],
-                            horizon_days=90
-                        )
     
     # Update work order quantity tracking
     work_order.quantity_complete = completion_data.quantity_complete
