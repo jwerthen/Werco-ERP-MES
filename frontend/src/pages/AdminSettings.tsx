@@ -886,7 +886,6 @@ function EmployeeModal({
                 placeholder="0000"
                 maxLength={4}
                 inputMode="numeric"
-                pattern="\\d{4}"
                 disabled={!!employee}
                 required
               />
