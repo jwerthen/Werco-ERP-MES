@@ -99,7 +99,10 @@ export default function Login() {
   const { login, loginWithEmployeeId } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const kioskMode = useMemo(() => isKioskMode(location.search), [location.search]);
+  const kioskMode = useMemo(
+    () => isKioskMode(location.pathname, location.search),
+    [location.pathname, location.search]
+  );
 
   useEffect(() => {
     if (kioskMode) {

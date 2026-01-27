@@ -1,6 +1,10 @@
 export const KIOSK_STORAGE_KEY = 'kiosk_mode';
 
-export function syncKioskMode(search: string): boolean {
+const isKioskEligiblePath = (pathname: string): boolean => {
+  return pathname.startsWith('/shop-floor') || pathname === '/login';
+};
+
+export function syncKioskMode(pathname: string, search: string): boolean {
   const params = new URLSearchParams(search);
   const kioskParam = params.get('kiosk');
 
@@ -14,15 +18,22 @@ export function syncKioskMode(search: string): boolean {
     return false;
   }
 
+  if (!isKioskEligiblePath(pathname)) {
+    localStorage.removeItem(KIOSK_STORAGE_KEY);
+    return false;
+  }
+
   return localStorage.getItem(KIOSK_STORAGE_KEY) === '1';
 }
 
-export function isKioskMode(search: string): boolean {
+export function isKioskMode(pathname: string, search: string): boolean {
   const params = new URLSearchParams(search);
   const kioskParam = params.get('kiosk');
 
   if (kioskParam === '1') return true;
   if (kioskParam === '0') return false;
+
+  if (!isKioskEligiblePath(pathname)) return false;
 
   return localStorage.getItem(KIOSK_STORAGE_KEY) === '1';
 }

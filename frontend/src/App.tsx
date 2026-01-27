@@ -84,7 +84,7 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
 function KioskGuard({ children }: { children: React.ReactNode }) {
   const { user, isAuthenticated, isLoading } = useAuth();
   const location = useLocation();
-  const kioskMode = isKioskMode(location.search);
+  const kioskMode = isKioskMode(location.pathname, location.search);
 
   if (!kioskMode) {
     return <>{children}</>;
@@ -107,7 +107,7 @@ function KioskGuard({ children }: { children: React.ReactNode }) {
 
 function KioskOnly({ children }: { children: React.ReactNode }) {
   const location = useLocation();
-  const kioskMode = isKioskMode(location.search);
+  const kioskMode = isKioskMode(location.pathname, location.search);
 
   if (!kioskMode) {
     return <Navigate to="/shop-floor" replace />;
@@ -129,7 +129,7 @@ function AppRoutes() {
   const location = useLocation();
 
   // Sync kiosk mode based on URL query params
-  syncKioskMode(location.search);
+  syncKioskMode(location.pathname, location.search);
 
   return (
     <Routes>
