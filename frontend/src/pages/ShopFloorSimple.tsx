@@ -89,6 +89,7 @@ export default function ShopFloorSimple() {
   // Toast notifications
   const [toasts, setToasts] = useState<Toast[]>([]);
   const operationsRef = useRef<HTMLDivElement | null>(null);
+  const [dashboardCounts, setDashboardCounts] = useState<Record<number, { active: number; queued: number }>>({});
   const kioskParams = useMemo(() => {
     return {
       dept: getKioskDept(location.search),
@@ -119,6 +120,23 @@ export default function ShopFloorSimple() {
       showToast('error', 'Failed to load operations');
     }
   }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly]);
+
+  const loadDashboardCounts = useCallback(async () => {
+    try {
+      const response = await api.getDashboardWithCache();
+      const centers = response.data?.work_centers || [];
+      const nextCounts: Record<number, { active: number; queued: number }> = {};
+      centers.forEach((wc: any) => {
+        nextCounts[wc.id] = {
+          active: Number(wc.active_operations || 0),
+          queued: Number(wc.queued_operations || 0),
+        };
+      });
+      setDashboardCounts(nextCounts);
+    } catch (err) {
+      console.error('Failed to load dashboard counts:', err);
+    }
+  }, []);
 
   const loadWorkCenters = async () => {
     try {
@@ -152,10 +170,11 @@ export default function ShopFloorSimple() {
       setLoading(true);
       await loadWorkCenters();
       await loadOperations();
+      await loadDashboardCounts();
       setLoading(false);
     };
     init();
-  }, [loadOperations]);
+  }, [loadOperations, loadDashboardCounts]);
 
   useEffect(() => {
     if (!loading) {
@@ -167,13 +186,15 @@ export default function ShopFloorSimple() {
   useEffect(() => {
     const interval = setInterval(() => {
       loadOperations();
+      loadDashboardCounts();
     }, 30000);
     return () => clearInterval(interval);
-  }, [loadOperations]);
+  }, [loadOperations, loadDashboardCounts]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
     await loadOperations();
+    await loadDashboardCounts();
     setRefreshing(false);
   };
 
@@ -249,8 +270,16 @@ export default function ShopFloorSimple() {
       buckets.set(bucket.id, bucket);
     });
 
+    Object.entries(dashboardCounts).forEach(([key, counts]) => {
+      const id = Number(key);
+      const bucket = buckets.get(id);
+      if (!bucket) return;
+      bucket.inProgress = counts.active;
+      bucket.open = counts.queued;
+    });
+
     return Array.from(buckets.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [operations, workCenters]);
+  }, [operations, workCenters, dashboardCounts]);
 
   const focusOperations = (centerId: number | '') => {
     setWorkCenterId(centerId);
