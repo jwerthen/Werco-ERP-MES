@@ -14,7 +14,6 @@ interface TargetRect {
 export default function TourHighlight() {
   const { activeTour, currentStepIndex, isActive } = useTour();
   const [targetRect, setTargetRect] = useState<TargetRect | null>(null);
-  const [targetElement, setTargetElement] = useState<Element | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
   const lastTargetRef = useRef<Element | null>(null);
@@ -24,13 +23,11 @@ export default function TourHighlight() {
   const updateTargetPosition = useCallback(() => {
     if (!currentStep) {
       setTargetRect(null);
-      setTargetElement(null);
       return;
     }
 
     if (currentStep.path && location.pathname !== currentStep.path) {
       setTargetRect(null);
-      setTargetElement(null);
       return;
     }
 
@@ -43,7 +40,6 @@ export default function TourHighlight() {
         width: rect.width,
         height: rect.height,
       });
-      setTargetElement(element);
       
       // Scroll element into view if needed
       if (lastTargetRef.current !== element) {
@@ -52,7 +48,6 @@ export default function TourHighlight() {
       }
     } else {
       setTargetRect(null);
-      setTargetElement(null);
       lastTargetRef.current = null;
     }
   }, [currentStep, location.pathname]);
@@ -60,7 +55,6 @@ export default function TourHighlight() {
   useEffect(() => {
     if (!isActive) {
       setTargetRect(null);
-      setTargetElement(null);
       return;
     }
 

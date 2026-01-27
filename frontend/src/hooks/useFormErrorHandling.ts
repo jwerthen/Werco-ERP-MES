@@ -42,7 +42,7 @@ interface UseFormErrorMappingProps {
   setFormError?: (message: string) => void;
 }
 
-export function useFormErrorMapping<T extends Record<string, unknown> = Record<string, unknown>>({
+export function useFormErrorMapping({
   setError,
   setFormError,
 }: UseFormErrorMappingProps) {

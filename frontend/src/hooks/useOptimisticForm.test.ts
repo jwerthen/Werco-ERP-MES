@@ -2,9 +2,8 @@
  * useOptimisticForm Hook Tests
  */
 
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { renderHook, act } from '@testing-library/react';
 import { useOptimisticForm } from './useOptimisticForm';
-import { ConflictError, ConflictData } from '../utils/optimisticLock';
 
 // Mock the optimisticLock module to make instanceof work in tests
 jest.mock('../utils/optimisticLock', () => {
@@ -150,15 +149,17 @@ describe('useOptimisticForm', () => {
 
       // The hook sets error state and then re-throws
       // We need to catch the error but the state should be updated
+      let thrown: unknown;
       await act(async () => {
         try {
           await result.current.handleSubmit({ name: 'Updated' });
         } catch (e) {
           // Expected to throw
-          expect((e as Error).message).toBe('Network error');
+          thrown = e;
         }
       });
 
+      expect((thrown as Error).message).toBe('Network error');
       expect(result.current.error).toBe('Network error');
       expect(result.current.conflict).toBeNull();
       expect(result.current.isSubmitting).toBe(false);

@@ -59,7 +59,7 @@ const partNumberSchema = z
   })
   .min(3, 'Part number must be at least 3 characters')
   .max(50, 'Part number must be at most 50 characters')
-  .regex(/^[A-Z0-9\-]+$/, 'Only letters, numbers, and dashes allowed')
+  .regex(/^[A-Z0-9-]+$/, 'Only letters, numbers, and dashes allowed')
   .transform((v: string) => v.toUpperCase().trim());
 
 const revisionSchema = z
@@ -99,20 +99,12 @@ const moneySchema = z
   .max(999999.99, 'Maximum $999,999.99')
   .multipleOf(0.01, 'Maximum 2 decimal places');
 
-const optionalMoneySchema = moneySchema.optional().nullable();
-
 const moneySmallSchema = z
   .number()
   .min(0, 'Amount must be positive or zero')
   .max(9999.9999, 'Maximum $9,999.9999')
   .multipleOf(0.0001, 'Maximum 4 decimal places')
   .default(0);
-
-const percentageSchema = z
-  .number()
-  .min(0, 'Percentage must be 0 or greater')
-  .max(100, 'Percentage must be 100 or less')
-  .multipleOf(0.01, 'Maximum 2 decimal places');
 
 const positiveIntegerSchema = z
   .number()
@@ -131,9 +123,7 @@ const emailSchema = z
   .email('Enter a valid email address')
   .max(255, 'Email must be at most 255 characters');
 
-const safeStringSchema = z
-  .string()
-  .regex(/^[^<>{}]*$/, 'Invalid characters detected (HTML/script tags not allowed)');
+const passwordSpecialCharRegex = /[!@#$%^&*()_+=\x5B\x5D{};':"\\|,.<>\x2F?-]/;
 
 // ============================================================================
 // PART SCHEMA
@@ -283,14 +273,14 @@ export const workOrderUpdateSchema = z.object({
 const firstNameSchema = z.string()
   .min(1, 'First name required')
   .max(50, 'Must be at most 50 characters')
-  .regex(/^[a-zA-Z\s\-']+$/, 'Letters only (spaces, hyphens, apostrophes allowed)')
+  .regex(/^[a-zA-Z\s-']+$/, 'Letters only (spaces, hyphens, apostrophes allowed)')
   .transform((v: string) => v.trim())
   .transform((v: string) => v.charAt(0).toUpperCase() + v.slice(1));
 
 const lastNameSchema = z.string()
   .min(1, 'Last name required')
   .max(50, 'Must be at most 50 characters')
-  .regex(/^[a-zA-Z\s\-']+$/, 'Letters only (spaces, hyphens, apostrophes allowed)')
+  .regex(/^[a-zA-Z\s-']+$/, 'Letters only (spaces, hyphens, apostrophes allowed)')
   .transform((v: string) => v.trim())
   .transform((v: string) => v.charAt(0).toUpperCase() + v.slice(1));
 
@@ -303,7 +293,7 @@ const passwordStrengthSchema = z
   .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
   .regex(/[a-z]/, 'Password must contain at least one lowercase letter')
   .regex(/[0-9]/, 'Password must contain at least one number')
-  .regex(/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/, 'Password must contain at least one special character')
+  .regex(passwordSpecialCharRegex, 'Password must contain at least one special character')
   .refine(
     (val) => !commonPatterns.some(pattern => val.toLowerCase().includes(pattern)),
     'Password contains a common pattern that is not allowed'
@@ -321,7 +311,7 @@ export function calculatePasswordStrength(password: string): {
     { met: /[A-Z]/.test(password), label: 'Uppercase letter' },
     { met: /[a-z]/.test(password), label: 'Lowercase letter' },
     { met: /[0-9]/.test(password), label: 'Number' },
-    { met: /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password), label: 'Special character' },
+    { met: passwordSpecialCharRegex.test(password), label: 'Special character' },
     { met: !commonPatterns.some(p => password.toLowerCase().includes(p)), label: 'No common patterns' },
   ];
 
@@ -397,7 +387,7 @@ export const vendorSchema = z.object({
     })
     .min(2, 'Code must be at least 2 characters')
     .max(20, 'Code must be at most 20 characters')
-    .regex(/^[A-Z0-9\-]+$/, 'Letters, numbers, and dashes only')
+    .regex(/^[A-Z0-9-]+$/, 'Letters, numbers, and dashes only')
     .transform((v: string) => v.toUpperCase().trim()),
   name: nameSchema,
   contact_name: z.string().max(100).optional(),

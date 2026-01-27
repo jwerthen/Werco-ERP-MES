@@ -71,9 +71,9 @@ export function UserLoginForm({
               </div>
 
               <div className="text-sm">
-                <a href="#" className="font-medium text-blue-600 hover:text-blue-500">
+                <button type="button" className="font-medium text-blue-600 hover:text-blue-500">
                   Forgot password?
-                </a>
+                </button>
               </div>
             </div>
           </>

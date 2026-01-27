@@ -27,6 +27,7 @@ export const Skeleton: React.FC<SkeletonProps> = ({
     <div 
       className={`animate-pulse bg-gray-200 rounded ${className}`}
       style={style}
+      data-testid="skeleton"
     />
   );
 };
@@ -68,7 +69,7 @@ export const SkeletonBadge: React.FC = () => (
 
 // Card skeleton
 export const SkeletonCard: React.FC<{ className?: string }> = ({ className = '' }) => (
-  <div className={`bg-white rounded-lg shadow p-6 ${className}`}>
+  <div className={`bg-white rounded-lg shadow p-6 ${className}`} data-testid="skeleton-card">
     <div className="animate-pulse space-y-4">
       <Skeleton className="h-6 w-1/3" />
       <SkeletonText lines={3} />
@@ -100,7 +101,7 @@ export const SkeletonTable: React.FC<{
   <div className="overflow-hidden">
     <table className="min-w-full divide-y divide-gray-200">
       {showHeader && (
-        <thead className="bg-gray-50">
+        <thead className="bg-gray-50" data-testid="skeleton-table-head">
           <tr>
             {Array.from({ length: columns }).map((_, i) => (
               <th key={i} className="px-4 py-3">
@@ -110,7 +111,7 @@ export const SkeletonTable: React.FC<{
           </tr>
         </thead>
       )}
-      <tbody className="bg-white divide-y divide-gray-200">
+      <tbody className="bg-white divide-y divide-gray-200" data-testid="skeleton-table-body">
         {Array.from({ length: rows }).map((_, i) => (
           <SkeletonTableRow key={i} columns={columns} />
         ))}
@@ -121,7 +122,7 @@ export const SkeletonTable: React.FC<{
 
 // Stats card skeleton (for dashboard)
 export const SkeletonStatCard: React.FC = () => (
-  <div className="bg-white rounded-lg shadow p-6 animate-pulse">
+  <div className="bg-white rounded-lg shadow p-6 animate-pulse" data-testid="skeleton-stat-card">
     <div className="flex items-center justify-between">
       <div className="space-y-2">
         <Skeleton className="h-4 w-24" />
@@ -134,7 +135,7 @@ export const SkeletonStatCard: React.FC = () => (
 
 // Dashboard skeleton
 export const SkeletonDashboard: React.FC = () => (
-  <div className="space-y-6">
+  <div className="space-y-6" data-testid="skeleton-dashboard">
     {/* Stats row */}
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
       {Array.from({ length: 4 }).map((_, i) => (
@@ -160,9 +161,9 @@ export const SkeletonDashboard: React.FC = () => (
 
 // Form skeleton
 export const SkeletonForm: React.FC<{ fields?: number }> = ({ fields = 4 }) => (
-  <div className="space-y-6 animate-pulse">
+  <div className="space-y-6 animate-pulse" data-testid="skeleton-form">
     {Array.from({ length: fields }).map((_, i) => (
-      <div key={i} className="space-y-2">
+      <div key={i} className="space-y-2" data-testid="skeleton-form-field">
         <Skeleton className="h-4 w-24" />
         <Skeleton className="h-10 w-full rounded-md" />
       </div>
@@ -176,7 +177,7 @@ export const SkeletonForm: React.FC<{ fields?: number }> = ({ fields = 4 }) => (
 
 // Detail page skeleton
 export const SkeletonDetail: React.FC = () => (
-  <div className="space-y-6">
+  <div className="space-y-6" data-testid="skeleton-detail">
     {/* Header */}
     <div className="flex items-center justify-between">
       <div className="space-y-2">
@@ -206,7 +207,7 @@ export const SkeletonDetail: React.FC = () => (
 
 // List item skeleton
 export const SkeletonListItem: React.FC = () => (
-  <div className="flex items-center gap-4 p-4 animate-pulse">
+  <div className="flex items-center gap-4 p-4 animate-pulse" data-testid="skeleton-list-item">
     <SkeletonAvatar />
     <div className="flex-1 space-y-2">
       <Skeleton className="h-4 w-1/3" />
@@ -238,13 +239,15 @@ export const Spinner: React.FC<{ size?: 'sm' | 'md' | 'lg'; className?: string }
   return (
     <div 
       className={`animate-spin rounded-full border-gray-300 border-t-cyan-600 ${sizes[size]} ${className}`}
+      role="status"
+      aria-label="Loading"
     />
   );
 };
 
 // Full page loading overlay
 export const LoadingOverlay: React.FC<{ message?: string }> = ({ message = 'Loading...' }) => (
-  <div className="fixed inset-0 bg-white/80 backdrop-blur-sm flex items-center justify-center z-50">
+  <div className="fixed inset-0 bg-white/80 backdrop-blur-sm flex items-center justify-center z-50" data-testid="loading-overlay">
     <div className="text-center space-y-4">
       <Spinner size="lg" className="mx-auto" />
       <p className="text-gray-600 font-medium">{message}</p>
@@ -254,7 +257,7 @@ export const LoadingOverlay: React.FC<{ message?: string }> = ({ message = 'Load
 
 // Inline loading state
 export const LoadingInline: React.FC<{ message?: string }> = ({ message = 'Loading...' }) => (
-  <div className="flex items-center justify-center py-8">
+  <div className="flex items-center justify-center py-8" data-testid="loading-inline">
     <Spinner size="md" className="mr-3" />
     <span className="text-gray-600">{message}</span>
   </div>

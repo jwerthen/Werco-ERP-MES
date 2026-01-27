@@ -19,7 +19,6 @@ interface TourTooltipProps {
 export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }: TourTooltipProps) {
   const { nextStep, prevStep, endTour } = useTour();
   const [position, setPosition] = useState({ top: 0, left: 0 });
-  const [placement, setPlacement] = useState<'top' | 'bottom' | 'left' | 'right'>('bottom');
   const tooltipRef = useRef<HTMLDivElement>(null);
 
   const tooltipWidth = 340;
@@ -95,7 +94,6 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
     newTop = Math.max(padding, Math.min(newTop, viewport.height - tooltipHeight - padding));
 
     setPosition({ top: newTop, left: newLeft });
-    setPlacement(bestPlacement as 'top' | 'bottom' | 'left' | 'right');
   }, [targetRect, step.position, stepIndex]); // Added stepIndex to recalculate on step change
 
   const isFirstStep = stepIndex === 0;

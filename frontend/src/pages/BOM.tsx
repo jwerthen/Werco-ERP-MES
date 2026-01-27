@@ -60,12 +60,6 @@ interface BOM {
   items: BOMItem[];
 }
 
-const itemTypeColors: Record<string, string> = {
-  make: 'bg-blue-100 text-blue-800',
-  buy: 'bg-green-100 text-green-800',
-  phantom: 'bg-purple-100 text-purple-800',
-};
-
 const lineTypeColors: Record<string, string> = {
   component: 'bg-cyan-100 text-cyan-800',
   hardware: 'bg-amber-100 text-amber-800',
@@ -247,7 +241,6 @@ export default function BOMPage() {
     }
 
     try {
-      console.log('Adding BOM item:', { bomId: selectedBOM.id, newItem });
       await api.addBOMItem(selectedBOM.id, newItem);
       // Reload the BOM
       const updated = await api.getBOM(selectedBOM.id);

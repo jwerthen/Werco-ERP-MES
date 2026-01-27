@@ -13,8 +13,8 @@ describe('LoadingButton', () => {
   });
 
   it('shows spinner when loading', () => {
-    const { container } = render(<LoadingButton loading>Click Me</LoadingButton>);
-    expect(container.querySelector('.animate-spin')).toBeInTheDocument();
+    render(<LoadingButton loading>Click Me</LoadingButton>);
+    expect(screen.getByRole('status', { name: /loading/i })).toBeInTheDocument();
   });
 
   it('shows loading text when provided', () => {

@@ -6,13 +6,11 @@
 
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
 import { usePermissions } from '../hooks/usePermissions';
 import { ROLE_LABELS, ROLE_DESCRIPTIONS } from '../utils/permissions';
 
 export default function Unauthorized() {
   const navigate = useNavigate();
-  const { user } = useAuth();
   const { role } = usePermissions();
   
   return (

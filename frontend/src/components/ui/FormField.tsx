@@ -23,14 +23,14 @@ export function FormField({ label, name, error, required, children, className = 
   }
 
   return (
-    <div className={`mb-4 ${className}`}>
+    <div className={`mb-4 ${className}`} data-testid={`form-field-${name}`}>
       <label htmlFor={name} className="block text-sm font-medium text-gray-700 mb-1">
         {label} {required && <span className="text-red-500">*</span>}
       </label>
       {children}
       {errorMessage && (
         <div className="mt-1 text-sm text-red-600 flex items-center gap-1 animate-fade-in">
-          <ExclamationCircleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+          <ExclamationCircleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" data-testid="error-icon" />
           <span role="alert">{errorMessage}</span>
         </div>
       )}

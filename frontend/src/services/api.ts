@@ -1,31 +1,14 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import {
   LoginResponse,
-  RefreshTokenResponse,
   UserCreate,
-  UserUpdate,
   PartCreate,
   PartUpdate,
   PartListParams,
-  WorkOrderCreate,
-  WorkOrderUpdate,
-  WorkOrderListParams,
   WorkCenterCreate,
   WorkCenterUpdate,
-  BOMCreate,
-  BOMUpdate,
-  BOMResponse,
-  InventoryTransaction,
-  PurchaseOrderCreate,
-  QuoteCreate,
-  RoutingCreate,
-  CustomerCreate,
-  VendorCreate,
-  ReportParams,
-  GlobalSearchParams,
-  getErrorMessage,
 } from '../types/api';
-import { User, Part, WorkOrder, WorkCenter } from '../types';
+import { User, Part, WorkCenter } from '../types';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 

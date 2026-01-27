@@ -178,12 +178,13 @@ describe('handleApiError', () => {
       },
     };
 
-    expect(() => handleApiError(error)).toThrow();
+    let thrown: any;
     try {
       handleApiError(error);
     } catch (e) {
-      expect(e).toBe(error);
+      thrown = e;
     }
+    expect(thrown).toBe(error);
   });
 
   it('re-throws original error for 409 without conflict response format', () => {
@@ -194,12 +195,13 @@ describe('handleApiError', () => {
       },
     };
 
-    expect(() => handleApiError(error)).toThrow();
+    let thrown: any;
     try {
       handleApiError(error);
     } catch (e) {
-      expect(e).toBe(error);
+      thrown = e;
     }
+    expect(thrown).toBe(error);
   });
 
   it('re-throws original error without response', () => {

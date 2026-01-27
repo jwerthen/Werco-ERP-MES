@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import {
   Skeleton,
   SkeletonText,
@@ -27,197 +27,201 @@ import {
 describe('Skeleton Components', () => {
   describe('Skeleton', () => {
     it('renders with default props', () => {
-      const { container } = render(<Skeleton />);
-      expect(container.firstChild).toHaveClass('animate-pulse', 'bg-gray-200', 'rounded');
+      render(<Skeleton />);
+      expect(screen.getByTestId('skeleton')).toHaveClass('animate-pulse', 'bg-gray-200', 'rounded');
     });
 
     it('applies custom className', () => {
-      const { container } = render(<Skeleton className="h-4 w-full" />);
-      expect(container.firstChild).toHaveClass('h-4', 'w-full');
+      render(<Skeleton className="h-4 w-full" />);
+      expect(screen.getByTestId('skeleton')).toHaveClass('h-4', 'w-full');
     });
 
     it('applies custom width and height', () => {
-      const { container } = render(<Skeleton width={100} height={50} />);
-      expect(container.firstChild).toHaveStyle({ width: '100px', height: '50px' });
+      render(<Skeleton width={100} height={50} />);
+      expect(screen.getByTestId('skeleton')).toHaveStyle({ width: '100px', height: '50px' });
     });
 
     it('applies string width and height', () => {
-      const { container } = render(<Skeleton width="50%" height="2rem" />);
-      expect(container.firstChild).toHaveStyle({ width: '50%', height: '2rem' });
+      render(<Skeleton width="50%" height="2rem" />);
+      expect(screen.getByTestId('skeleton')).toHaveStyle({ width: '50%', height: '2rem' });
     });
   });
 
   describe('SkeletonText', () => {
     it('renders single line by default', () => {
-      const { container } = render(<SkeletonText />);
-      expect(container.querySelectorAll('.animate-pulse')).toHaveLength(1);
+      render(<SkeletonText />);
+      expect(screen.getAllByTestId('skeleton')).toHaveLength(1);
     });
 
     it('renders multiple lines', () => {
-      const { container } = render(<SkeletonText lines={3} />);
-      expect(container.querySelectorAll('.animate-pulse')).toHaveLength(3);
+      render(<SkeletonText lines={3} />);
+      expect(screen.getAllByTestId('skeleton')).toHaveLength(3);
     });
 
     it('last line is shorter when multiple lines', () => {
-      const { container } = render(<SkeletonText lines={3} />);
-      const skeletons = container.querySelectorAll('.animate-pulse');
+      render(<SkeletonText lines={3} />);
+      const skeletons = screen.getAllByTestId('skeleton');
       expect(skeletons[2]).toHaveClass('w-3/4');
     });
   });
 
   describe('SkeletonAvatar', () => {
     it('renders medium size by default', () => {
-      const { container } = render(<SkeletonAvatar />);
-      expect(container.firstChild).toHaveClass('h-10', 'w-10', 'rounded-full');
+      render(<SkeletonAvatar />);
+      expect(screen.getByTestId('skeleton')).toHaveClass('h-10', 'w-10', 'rounded-full');
     });
 
     it('renders small size', () => {
-      const { container } = render(<SkeletonAvatar size="sm" />);
-      expect(container.firstChild).toHaveClass('h-8', 'w-8');
+      render(<SkeletonAvatar size="sm" />);
+      expect(screen.getByTestId('skeleton')).toHaveClass('h-8', 'w-8');
     });
 
     it('renders large size', () => {
-      const { container } = render(<SkeletonAvatar size="lg" />);
-      expect(container.firstChild).toHaveClass('h-12', 'w-12');
+      render(<SkeletonAvatar size="lg" />);
+      expect(screen.getByTestId('skeleton')).toHaveClass('h-12', 'w-12');
     });
   });
 
   describe('SkeletonButton', () => {
     it('renders with default width', () => {
-      const { container } = render(<SkeletonButton />);
-      expect(container.firstChild).toHaveClass('h-9', 'w-24', 'rounded-md');
+      render(<SkeletonButton />);
+      expect(screen.getByTestId('skeleton')).toHaveClass('h-9', 'w-24', 'rounded-md');
     });
 
     it('renders with custom width', () => {
-      const { container } = render(<SkeletonButton width="w-32" />);
-      expect(container.firstChild).toHaveClass('w-32');
+      render(<SkeletonButton width="w-32" />);
+      expect(screen.getByTestId('skeleton')).toHaveClass('w-32');
     });
   });
 
   describe('SkeletonBadge', () => {
     it('renders badge skeleton', () => {
-      const { container } = render(<SkeletonBadge />);
-      expect(container.firstChild).toHaveClass('h-6', 'w-16', 'rounded-full');
+      render(<SkeletonBadge />);
+      expect(screen.getByTestId('skeleton')).toHaveClass('h-6', 'w-16', 'rounded-full');
     });
   });
 
   describe('SkeletonCard', () => {
     it('renders card with skeleton content', () => {
-      const { container } = render(<SkeletonCard />);
-      expect(container.querySelector('.bg-white')).toBeInTheDocument();
-      expect(container.querySelector('.rounded-lg')).toBeInTheDocument();
+      render(<SkeletonCard />);
+      const card = screen.getByTestId('skeleton-card');
+      expect(card).toHaveClass('bg-white');
+      expect(card).toHaveClass('rounded-lg');
     });
 
     it('applies custom className', () => {
-      const { container } = render(<SkeletonCard className="h-80" />);
-      expect(container.firstChild).toHaveClass('h-80');
+      render(<SkeletonCard className="h-80" />);
+      expect(screen.getByTestId('skeleton-card')).toHaveClass('h-80');
     });
   });
 
   describe('SkeletonTable', () => {
     it('renders default rows and columns', () => {
-      const { container } = render(<SkeletonTable />);
-      // Default is 5 rows, 6 columns
-      expect(container.querySelectorAll('tbody tr')).toHaveLength(5);
+      render(<SkeletonTable />);
+      const body = screen.getByTestId('skeleton-table-body');
+      expect(within(body).getAllByRole('row')).toHaveLength(5);
     });
 
     it('renders custom rows and columns', () => {
-      const { container } = render(<SkeletonTable rows={3} columns={4} />);
-      expect(container.querySelectorAll('tbody tr')).toHaveLength(3);
-      expect(container.querySelectorAll('tbody tr:first-child td')).toHaveLength(4);
+      render(<SkeletonTable rows={3} columns={4} />);
+      const body = screen.getByTestId('skeleton-table-body');
+      const rows = within(body).getAllByRole('row');
+      expect(rows).toHaveLength(3);
+      expect(within(rows[0]).getAllByRole('cell')).toHaveLength(4);
     });
 
     it('hides header when showHeader is false', () => {
-      const { container } = render(<SkeletonTable showHeader={false} />);
-      expect(container.querySelector('thead')).not.toBeInTheDocument();
+      render(<SkeletonTable showHeader={false} />);
+      expect(screen.queryByTestId('skeleton-table-head')).not.toBeInTheDocument();
     });
   });
 
   describe('SkeletonTableRow', () => {
     it('renders correct number of columns', () => {
-      const { container } = render(
+      render(
         <table><tbody><SkeletonTableRow columns={5} /></tbody></table>
       );
-      expect(container.querySelectorAll('td')).toHaveLength(5);
+      expect(screen.getAllByRole('cell')).toHaveLength(5);
     });
   });
 
   describe('SkeletonStatCard', () => {
     it('renders stat card skeleton', () => {
-      const { container } = render(<SkeletonStatCard />);
-      expect(container.querySelector('.bg-white')).toBeInTheDocument();
-      expect(container.querySelector('.animate-pulse')).toBeInTheDocument();
+      render(<SkeletonStatCard />);
+      const card = screen.getByTestId('skeleton-stat-card');
+      expect(card).toHaveClass('bg-white');
+      expect(card).toHaveClass('animate-pulse');
     });
   });
 
   describe('SkeletonDashboard', () => {
     it('renders dashboard skeleton with stats and cards', () => {
-      const { container } = render(<SkeletonDashboard />);
-      // Should have 4 stat cards
-      expect(container.querySelectorAll('.bg-white.rounded-lg.shadow.p-6.animate-pulse')).toHaveLength(4);
+      render(<SkeletonDashboard />);
+      expect(screen.getAllByTestId('skeleton-stat-card')).toHaveLength(4);
     });
   });
 
   describe('SkeletonForm', () => {
     it('renders default 4 fields', () => {
-      const { container } = render(<SkeletonForm />);
-      const fieldGroups = container.querySelectorAll('.space-y-2');
+      render(<SkeletonForm />);
+      const fieldGroups = screen.getAllByTestId('skeleton-form-field');
       expect(fieldGroups.length).toBeGreaterThanOrEqual(4);
     });
 
     it('renders custom number of fields', () => {
-      const { container } = render(<SkeletonForm fields={6} />);
-      const fieldGroups = container.querySelectorAll('.space-y-2');
+      render(<SkeletonForm fields={6} />);
+      const fieldGroups = screen.getAllByTestId('skeleton-form-field');
       expect(fieldGroups.length).toBeGreaterThanOrEqual(6);
     });
   });
 
   describe('SkeletonDetail', () => {
     it('renders detail page skeleton', () => {
-      const { container } = render(<SkeletonDetail />);
-      expect(container.querySelector('.space-y-6')).toBeInTheDocument();
+      render(<SkeletonDetail />);
+      expect(screen.getByTestId('skeleton-detail')).toBeInTheDocument();
     });
   });
 
   describe('SkeletonList', () => {
     it('renders default 5 items', () => {
-      const { container } = render(<SkeletonList />);
-      expect(container.querySelectorAll('.flex.items-center.gap-4')).toHaveLength(5);
+      render(<SkeletonList />);
+      expect(screen.getAllByTestId('skeleton-list-item')).toHaveLength(5);
     });
 
     it('renders custom number of items', () => {
-      const { container } = render(<SkeletonList items={3} />);
-      expect(container.querySelectorAll('.flex.items-center.gap-4')).toHaveLength(3);
+      render(<SkeletonList items={3} />);
+      expect(screen.getAllByTestId('skeleton-list-item')).toHaveLength(3);
     });
   });
 
   describe('SkeletonListItem', () => {
     it('renders list item skeleton', () => {
-      const { container } = render(<SkeletonListItem />);
-      expect(container.querySelector('.animate-pulse')).toBeInTheDocument();
-      expect(container.querySelector('.rounded-full')).toBeInTheDocument(); // Avatar
+      render(<SkeletonListItem />);
+      expect(screen.getByTestId('skeleton-list-item')).toHaveClass('animate-pulse');
+      const skeletons = screen.getAllByTestId('skeleton');
+      expect(skeletons.some((el) => el.classList.contains('rounded-full'))).toBe(true);
     });
   });
 
   describe('Spinner', () => {
     it('renders medium size by default', () => {
-      const { container } = render(<Spinner />);
-      expect(container.firstChild).toHaveClass('h-6', 'w-6', 'animate-spin');
+      render(<Spinner />);
+      expect(screen.getByRole('status', { name: /loading/i })).toHaveClass('h-6', 'w-6', 'animate-spin');
     });
 
     it('renders small size', () => {
-      const { container } = render(<Spinner size="sm" />);
-      expect(container.firstChild).toHaveClass('h-4', 'w-4');
+      render(<Spinner size="sm" />);
+      expect(screen.getByRole('status', { name: /loading/i })).toHaveClass('h-4', 'w-4');
     });
 
     it('renders large size', () => {
-      const { container } = render(<Spinner size="lg" />);
-      expect(container.firstChild).toHaveClass('h-8', 'w-8');
+      render(<Spinner size="lg" />);
+      expect(screen.getByRole('status', { name: /loading/i })).toHaveClass('h-8', 'w-8');
     });
 
     it('applies custom className', () => {
-      const { container } = render(<Spinner className="text-blue-500" />);
-      expect(container.firstChild).toHaveClass('text-blue-500');
+      render(<Spinner className="text-blue-500" />);
+      expect(screen.getByRole('status', { name: /loading/i })).toHaveClass('text-blue-500');
     });
   });
 
@@ -233,8 +237,8 @@ describe('Skeleton Components', () => {
     });
 
     it('has fixed positioning', () => {
-      const { container } = render(<LoadingOverlay />);
-      expect(container.firstChild).toHaveClass('fixed', 'inset-0');
+      render(<LoadingOverlay />);
+      expect(screen.getByTestId('loading-overlay')).toHaveClass('fixed', 'inset-0');
     });
   });
 
@@ -250,8 +254,8 @@ describe('Skeleton Components', () => {
     });
 
     it('includes spinner', () => {
-      const { container } = render(<LoadingInline />);
-      expect(container.querySelector('.animate-spin')).toBeInTheDocument();
+      render(<LoadingInline />);
+      expect(screen.getByRole('status', { name: /loading/i })).toBeInTheDocument();
     });
   });
 });

@@ -32,7 +32,6 @@ import {
   CurrencyDollarIcon,
   UsersIcon,
   BuildingOfficeIcon,
-  QrCodeIcon,
   WrenchScrewdriverIcon as WrenchIcon2,
   DocumentMagnifyingGlassIcon,
   ChevronDownIcon,

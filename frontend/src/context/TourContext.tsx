@@ -59,6 +59,15 @@ export function TourProvider({ children }: { children: ReactNode }) {
     setCurrentStepIndex(0);
   }, []);
 
+  const markTourComplete = useCallback((tourId: string) => {
+    setCompletedTours(prev => {
+      if (prev.includes(tourId)) return prev;
+      const updated = [...prev, tourId];
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
+
   const nextStep = useCallback(() => {
     if (activeTour && currentStepIndex < activeTour.steps.length - 1) {
       setCurrentStepIndex(prev => prev + 1);
@@ -66,7 +75,7 @@ export function TourProvider({ children }: { children: ReactNode }) {
       markTourComplete(activeTour.id);
       endTour();
     }
-  }, [activeTour, currentStepIndex]);
+  }, [activeTour, currentStepIndex, endTour, markTourComplete]);
 
   const prevStep = useCallback(() => {
     if (currentStepIndex > 0) {
@@ -79,15 +88,6 @@ export function TourProvider({ children }: { children: ReactNode }) {
       setCurrentStepIndex(index);
     }
   }, [activeTour]);
-
-  const markTourComplete = useCallback((tourId: string) => {
-    setCompletedTours(prev => {
-      if (prev.includes(tourId)) return prev;
-      const updated = [...prev, tourId];
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
 
   const isTourComplete = useCallback((tourId: string) => {
     return completedTours.includes(tourId);

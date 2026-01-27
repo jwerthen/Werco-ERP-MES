@@ -225,7 +225,7 @@ function SectionErrorFallback({
  * Widget Error Fallback - Minimal inline error
  */
 function WidgetErrorFallback({
-  error,
+  error: _error,
   message,
   onReset
 }: {

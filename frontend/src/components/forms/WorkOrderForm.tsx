@@ -4,7 +4,6 @@ import { FormWithValidation } from '../ui/FormWithValidation';
 import {
   WorkOrderFormData,
   workOrderSchema,
-  WorkOrderStatus,
   WorkOrderOperationFormData,
   workOrderOperationSchema,
 } from '../../validation/schemas';

@@ -272,7 +272,7 @@ export default function WorkOrderDetail() {
               <tbody className="bg-white divide-y divide-gray-200">
                 {(() => {
                   let lastGroup = '';
-                  return workOrder.operations.map((op, index) => {
+                  return workOrder.operations.map((op) => {
                     const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
                     if (op.operation_group) lastGroup = op.operation_group;
                     

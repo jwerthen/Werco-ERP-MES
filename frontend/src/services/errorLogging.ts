@@ -111,20 +111,6 @@ class ErrorLoggingService {
       this.queue = this.queue.slice(-this.maxQueueSize);
     }
 
-    // Log to console in development
-    if (process.env.NODE_ENV === 'development') {
-      console.group(`🔴 Error: ${entry.message}`);
-      console.error(payload.error);
-      if (entry.boundaryName) {
-        console.log('Boundary:', entry.boundaryName);
-      }
-      if (entry.componentStack) {
-        console.log('Component Stack:', entry.componentStack);
-      }
-      console.log('Error ID:', entry.id);
-      console.groupEnd();
-    }
-
     // Immediate flush for critical errors
     if (payload.boundaryLevel === 'global') {
       this.flush(true);
@@ -160,10 +146,6 @@ class ErrorLoggingService {
         this.queue = [...entries, ...this.queue].slice(-this.maxQueueSize);
       }
       
-      // Log to console as fallback
-      if (process.env.NODE_ENV === 'development') {
-        console.warn('Failed to send error logs:', e);
-      }
     } finally {
       this.isProcessing = false;
     }

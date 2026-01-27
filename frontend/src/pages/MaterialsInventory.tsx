@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import {
@@ -39,6 +39,10 @@ interface InventorySummary {
 
 type TabType = 'catalog' | 'summary' | 'details';
 type MaterialPartType = 'raw_material' | 'purchased' | 'hardware' | 'consumable';
+const MATERIAL_TYPES: MaterialPartType[] = ['raw_material', 'purchased', 'hardware', 'consumable'];
+const isMaterialPartType = (value: string): value is MaterialPartType => {
+  return MATERIAL_TYPES.includes(value as MaterialPartType);
+};
 
 export default function MaterialsInventoryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -84,10 +88,6 @@ export default function MaterialsInventoryPage() {
   });
 
   // Filter for raw materials, hardware, consumables, and purchased parts
-  const materialTypes: MaterialPartType[] = ['raw_material', 'purchased', 'hardware', 'consumable'];
-  const isMaterialPartType = (value: string): value is MaterialPartType => {
-    return materialTypes.includes(value as MaterialPartType);
-  };
   const partsById = useMemo(() => new Map(parts.map((p: any) => [p.id, p])), [parts]);
   const summaryByPartId = useMemo(() => new Map(summary.map((s) => [s.part_id, s])), [summary]);
   const lowStockPartIds = useMemo(
@@ -113,11 +113,7 @@ export default function MaterialsInventoryPage() {
     );
   }, [summary]);
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const [invRes, summaryRes, partsRes, locsRes, lowStockRes] = await Promise.all([
@@ -129,7 +125,7 @@ export default function MaterialsInventoryPage() {
       ]);
       
       // Filter for materials only (raw_material, purchased, hardware, consumable)
-      const materialParts = partsRes.filter((p: any) => materialTypes.includes(p.part_type));
+      const materialParts = partsRes.filter((p: any) => MATERIAL_TYPES.includes(p.part_type));
       const partsById = new Map(materialParts.map((p: any) => [p.id, p]));
       const materialPartIds = new Set(materialParts.map((p: any) => p.id));
       
@@ -146,7 +142,11 @@ export default function MaterialsInventoryPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const handleReceive = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -725,7 +725,7 @@ export default function MaterialsInventoryPage() {
                     value={createForm.part_number} 
                     onChange={(e) => {
                       // Only allow uppercase letters, numbers, and hyphens
-                      const cleaned = e.target.value.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
+                      const cleaned = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '');
                       setCreateForm({...createForm, part_number: cleaned});
                     }} 
                     className="input" 

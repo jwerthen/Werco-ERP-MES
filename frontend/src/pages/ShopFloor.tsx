@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { WorkCenter, QueueItem, ActiveJob } from '../types';
@@ -59,19 +59,7 @@ export default function ShopFloor() {
     };
   }, [location.search]);
 
-  useEffect(() => {
-    loadInitialData();
-    const interval = setInterval(checkActiveJob, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    if (selectedWorkCenter) {
-      loadQueue(selectedWorkCenter);
-    }
-  }, [selectedWorkCenter]);
-
-  const loadInitialData = async () => {
+  const loadInitialData = useCallback(async () => {
     try {
       const [wcResponse, activeResponse] = await Promise.all([
         api.getWorkCenters(),
@@ -100,25 +88,37 @@ export default function ShopFloor() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId]);
 
-  const checkActiveJob = async () => {
+  const checkActiveJob = useCallback(async () => {
     try {
       const response = await api.getMyActiveJob();
       setActiveJob(response.active_job);
     } catch (err) {
       console.error('Failed to check active job:', err);
     }
-  };
+  }, []);
 
-  const loadQueue = async (workCenterId: number) => {
+  const loadQueue = useCallback(async (workCenterId: number) => {
     try {
       const response = await api.getWorkCenterQueue(workCenterId);
       setQueue(response.queue);
     } catch (err) {
       console.error('Failed to load queue:', err);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadInitialData();
+    const interval = setInterval(checkActiveJob, 10000);
+    return () => clearInterval(interval);
+  }, [checkActiveJob, loadInitialData]);
+
+  useEffect(() => {
+    if (selectedWorkCenter) {
+      loadQueue(selectedWorkCenter);
+    }
+  }, [selectedWorkCenter, loadQueue]);
 
   const handleRefresh = async () => {
     setRefreshing(true);

@@ -138,7 +138,7 @@ export default function ShopFloorSimple() {
     }
   }, []);
 
-  const loadWorkCenters = async () => {
+  const loadWorkCenters = useCallback(async () => {
     try {
       const response = await api.getWorkCenters();
       setWorkCenters(response || []);
@@ -163,7 +163,7 @@ export default function ShopFloorSimple() {
     } catch (err) {
       console.error('Failed to load work centers:', err);
     }
-  };
+  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, workCenterId]);
 
   useEffect(() => {
     const init = async () => {
@@ -174,7 +174,7 @@ export default function ShopFloorSimple() {
       setLoading(false);
     };
     init();
-  }, [loadOperations, loadDashboardCounts]);
+  }, [loadDashboardCounts, loadOperations, loadWorkCenters]);
 
   useEffect(() => {
     if (!loading) {

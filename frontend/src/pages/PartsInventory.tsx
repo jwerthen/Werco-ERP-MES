@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import {
@@ -37,6 +37,7 @@ interface InventorySummary {
 }
 
 type TabType = 'summary' | 'details';
+const PART_TYPES = ['manufactured', 'assembly'];
 
 export default function PartsInventoryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -61,14 +62,7 @@ export default function PartsInventoryPage() {
     inventory_item_id: 0, quantity: 0, to_location_code: '', notes: ''
   });
 
-  // Filter for manufactured and assembly parts only
-  const partTypes = ['manufactured', 'assembly'];
-
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       const [invRes, summaryRes, partsRes, locsRes, lowStockRes] = await Promise.all([
         api.getInventory(),
@@ -79,13 +73,13 @@ export default function PartsInventoryPage() {
       ]);
       
       // Filter for parts only (manufactured and assembly)
-      const filteredParts = partsRes.filter((p: any) => partTypes.includes(p.part_type));
+      const filteredParts = partsRes.filter((p: any) => PART_TYPES.includes(p.part_type));
       const partIds = new Set(filteredParts.map((p: any) => p.id));
       
       setInventory(invRes.filter((i: InventoryItem) => partIds.has(i.part_id)));
       setSummary(summaryRes.filter((s: InventorySummary) => {
         const part = partsRes.find((p: any) => p.id === s.part_id);
-        return part && partTypes.includes(part.part_type);
+        return part && PART_TYPES.includes(part.part_type);
       }));
       setParts(filteredParts);
       setLocations(locsRes);
@@ -95,7 +89,11 @@ export default function PartsInventoryPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const handleReceive = async (e: React.FormEvent) => {
     e.preventDefault();

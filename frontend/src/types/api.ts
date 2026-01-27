@@ -4,8 +4,8 @@
  */
 
 import { 
-  User, UserRole, Part, PartType, WorkOrder, WorkOrderStatus, 
-  WorkCenter, WorkCenterType, WorkOrderOperation, OperationStatus 
+  User, UserRole, PartType, WorkOrderStatus, 
+  WorkCenter, WorkCenterType 
 } from './index';
 
 // ============ Generic Types ============

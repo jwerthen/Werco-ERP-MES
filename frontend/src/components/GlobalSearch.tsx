@@ -14,7 +14,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, Fragment } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Dialog, Transition, Combobox } from '@headlessui/react';
+import { Dialog, Transition } from '@headlessui/react';
 import {
   MagnifyingGlassIcon,
   CubeIcon,
@@ -38,13 +38,6 @@ interface SearchResult {
   subtitle?: string;
   url: string;
   icon: string;
-}
-
-interface SearchResponse {
-  query: string;
-  total: number;
-  results: SearchResult[];
-  categories: Record<string, number>;
 }
 
 // Icon mapping

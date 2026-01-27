@@ -1,11 +1,7 @@
-import React, { useState } from 'react';
-import { z } from 'zod';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
+import React from 'react';
 import { FormField } from '../ui/FormField';
 import { FormWithValidation } from '../ui/FormWithValidation';
 import { PartFormData, partSchema, PartType, UnitOfMeasure } from '../../validation/schemas';
-import { useFormErrorMapping, useAsyncValidation } from '../../hooks/useFormErrorHandling';
 
 interface PartFormProps {
   initialData?: Partial<PartFormData>;
@@ -52,8 +48,7 @@ export function PartForm({
       className="space-y-6"
     >
       {({ form, errors }) => {
-        const { register, watch, setValue } = form;
-        const partType = watch('part_type');
+        const { register } = form;
 
         return (
           <>

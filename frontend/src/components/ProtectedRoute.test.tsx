@@ -86,9 +86,7 @@ describe('ProtectedRoute', () => {
         </ProtectedRoute>
       );
 
-      // Should show loading spinner (by checking for animate-spin class)
-      const spinner = document.querySelector('.animate-spin');
-      expect(spinner).toBeInTheDocument();
+      expect(screen.getByRole('status', { name: /loading/i })).toBeInTheDocument();
       expect(screen.queryByText('Protected Content')).not.toBeInTheDocument();
     });
   });

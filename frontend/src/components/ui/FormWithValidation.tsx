@@ -2,7 +2,6 @@ import React from 'react';
 import { useForm, UseFormReturn, SubmitHandler, FieldValues } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { FormField } from './FormField';
 import { useFormErrorMapping } from '../../hooks/useFormErrorHandling';
 
 interface FormWithValidationProps<TData extends FieldValues, TSchema extends z.ZodSchema> {

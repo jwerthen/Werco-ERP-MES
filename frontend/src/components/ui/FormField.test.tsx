@@ -93,12 +93,12 @@ describe('FormField', () => {
   });
 
   it('applies custom className', () => {
-    const { container } = render(
+    render(
       <FormField label="Custom" name="custom" className="mt-4">
         <input type="text" />
       </FormField>
     );
-    expect(container.firstChild).toHaveClass('mt-4', 'mb-4');
+    expect(screen.getByTestId('form-field-custom')).toHaveClass('mt-4', 'mb-4');
   });
 
   it('associates label with input via htmlFor', () => {
@@ -112,13 +112,12 @@ describe('FormField', () => {
   });
 
   it('shows error icon when there is an error', () => {
-    const { container } = render(
+    render(
       <FormField label="Email" name="email" error="Error">
         <input type="email" />
       </FormField>
     );
-    // Check for the error icon (ExclamationCircleIcon)
-    expect(container.querySelector('svg')).toBeInTheDocument();
+    expect(screen.getByTestId('error-icon')).toBeInTheDocument();
   });
 
   it('renders multiple children', () => {
