@@ -541,7 +541,10 @@ def get_work_order(
     """Get a specific work order with all operations"""
     work_order = db.query(WorkOrder).options(
         joinedload(WorkOrder.part),
-        selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part)
+        selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.component_part),
+        selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.work_center)
     ).filter(WorkOrder.id == work_order_id).first()
     
     if not work_order:
@@ -564,6 +567,9 @@ def get_work_order(
         op.actual_run_hours = op.actual_run_hours or 0
         op.quantity_complete = op.quantity_complete or 0
         op.quantity_scrapped = op.quantity_scrapped or 0
+        op.estimated_hours = float(op.setup_time_hours) + float(op.run_time_hours)
+        op.actual_hours = float(op.actual_setup_hours) + float(op.actual_run_hours)
+        op.work_center_name = op.work_center.name if op.work_center else None
 
         if op.component_part_id:
             component = op.component_part

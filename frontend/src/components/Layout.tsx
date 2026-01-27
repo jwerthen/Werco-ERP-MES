@@ -8,6 +8,7 @@ import BottomNav from './ui/BottomNav';
 import SkipLink from './SkipLink';
 import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
 import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
+import { isKioskMode } from '../utils/kiosk';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
@@ -243,9 +244,12 @@ const SidebarPattern = () => (
 );
 
 export default function Layout({ children }: LayoutProps) {
-  const { user, logout } = useAuth();
+  const { user, logout, logoutWithEmployeeId } = useAuth();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [logoutModalOpen, setLogoutModalOpen] = useState(false);
+  const [logoutEmployeeId, setLogoutEmployeeId] = useState('');
+  const [logoutError, setLogoutError] = useState('');
   const globalSearch = useGlobalSearch();
   const keyboardShortcuts = useKeyboardShortcutsContext();
 
@@ -274,6 +278,22 @@ export default function Layout({ children }: LayoutProps) {
     }
     return 'Werco ERP';
   }, [location.pathname]);
+
+  const isShopFloorKiosk = useMemo(
+    () => location.pathname.startsWith('/shop-floor') && isKioskMode(location.search),
+    [location.pathname, location.search]
+  );
+
+  const handleLogoutConfirm = async () => {
+    setLogoutError('');
+    try {
+      await logoutWithEmployeeId(logoutEmployeeId);
+      setLogoutModalOpen(false);
+      setLogoutEmployeeId('');
+    } catch (err: any) {
+      setLogoutError(err?.message || 'Employee ID did not match. Please try again.');
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50">
@@ -356,7 +376,13 @@ export default function Layout({ children }: LayoutProps) {
               </p>
             </div>
             <button
-              onClick={logout}
+              onClick={() => {
+                if (isShopFloorKiosk) {
+                  setLogoutModalOpen(true);
+                } else {
+                  logout();
+                }
+              }}
               className="p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-all duration-200"
               title="Sign out"
             >
@@ -469,6 +495,64 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Session Warning Modal */}
       <SessionWarningModal />
+
+      {/* Employee ID Logout Modal */}
+      {logoutModalOpen && isShopFloorKiosk && (
+        <div className="modal-overlay" onClick={() => setLogoutModalOpen(false)}>
+          <div className="modal max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="text-lg font-semibold text-slate-900">Sign out</h3>
+              <button
+                onClick={() => setLogoutModalOpen(false)}
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <XMarkIcon className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="modal-body space-y-3">
+              <p className="text-sm text-slate-600">
+                Enter your 4-digit employee ID to sign out.
+              </p>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="\\d{4}"
+                maxLength={4}
+                value={logoutEmployeeId}
+                onChange={(e) => setLogoutEmployeeId(e.target.value.replace(/\\D/g, '').slice(0, 4))}
+                className="input text-center text-lg tracking-widest"
+                placeholder="0000"
+                autoFocus
+              />
+              {logoutError && (
+                <div className="text-sm text-red-600">{logoutError}</div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button
+                onClick={() => {
+                  setLogoutModalOpen(false);
+                  setLogoutEmployeeId('');
+                  setLogoutError('');
+                }}
+                className="btn-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleLogoutConfirm}
+                className="btn-primary"
+                disabled={logoutEmployeeId.length !== 4}
+              >
+                Sign Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

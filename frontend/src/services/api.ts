@@ -286,6 +286,16 @@ class ApiService {
     return response.data;
   }
 
+  async loginWithEmployeeId(employeeId: string): Promise<LoginResponse> {
+    const response = await this.api.post<LoginResponse>('/auth/employee-login', { employee_id: employeeId });
+    return response.data;
+  }
+
+  async logoutWithEmployeeId(employeeId: string) {
+    const response = await this.api.post('/auth/employee-logout', { employee_id: employeeId });
+    return response.data;
+  }
+
   async register(userData: UserCreate): Promise<User> {
     const response = await this.api.post<User>('/auth/register', userData);
     return response.data;

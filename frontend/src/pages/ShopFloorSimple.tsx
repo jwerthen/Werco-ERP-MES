@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { format } from 'date-fns';
 import {
@@ -16,6 +16,7 @@ import {
   CubeIcon,
 } from '@heroicons/react/24/solid';
 import { FunnelIcon } from '@heroicons/react/24/outline';
+import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 
 interface Operation {
   id: number;
@@ -64,6 +65,7 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> =
 
 export default function ShopFloorSimple() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [operations, setOperations] = useState<Operation[]>([]);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
@@ -87,6 +89,13 @@ export default function ShopFloorSimple() {
   // Toast notifications
   const [toasts, setToasts] = useState<Toast[]>([]);
   const operationsRef = useRef<HTMLDivElement | null>(null);
+  const kioskParams = useMemo(() => {
+    return {
+      dept: getKioskDept(location.search),
+      workCenterId: getKioskWorkCenterId(location.search),
+      workCenterCode: getKioskWorkCenterCode(location.search),
+    };
+  }, [location.search]);
 
   // Debounce search
   useEffect(() => {
@@ -115,6 +124,24 @@ export default function ShopFloorSimple() {
     try {
       const response = await api.getWorkCenters();
       setWorkCenters(response || []);
+      if (response && response.length > 0 && !workCenterId) {
+        const deptMatch = kioskParams.dept?.toLowerCase() || null;
+        const matched = response.find((wc: WorkCenter) => {
+          if (kioskParams.workCenterId && wc.id === kioskParams.workCenterId) return true;
+          if (kioskParams.workCenterCode && wc.code.toLowerCase() === kioskParams.workCenterCode.toLowerCase()) return true;
+          if (deptMatch) {
+            return (
+              wc.name.toLowerCase().includes(deptMatch) ||
+              wc.code.toLowerCase().includes(deptMatch)
+            );
+          }
+          return false;
+        });
+        if (matched) {
+          setWorkCenterId(matched.id);
+          setActionableOnly(true);
+        }
+      }
     } catch (err) {
       console.error('Failed to load work centers:', err);
     }

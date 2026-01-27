@@ -14,7 +14,9 @@ interface AuthContextType {
   isLoading: boolean;
   sessionWarning: boolean;
   login: (email: string, password: string) => Promise<void>;
+  loginWithEmployeeId: (employeeId: string) => Promise<void>;
   logout: () => void;
+  logoutWithEmployeeId: (employeeId: string) => Promise<void>;
   extendSession: () => void;
 }
 
@@ -135,10 +137,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const loginWithEmployeeId = async (employeeId: string) => {
+    const response = await api.loginWithEmployeeId(employeeId);
+    if (response.refresh_token && response.expires_in) {
+      api.setTokens(response.access_token, response.refresh_token, response.expires_in);
+    } else {
+      api.setToken(response.access_token);
+    }
+    setUser(response.user);
+    localStorage.setItem('user', JSON.stringify(response.user));
+
+    try {
+      const permData = await api.getRolePermissions();
+      if (permData?.role_permissions) {
+        setCustomPermissions(permData.role_permissions);
+      }
+    } catch (e) {
+      console.warn('Failed to load custom permissions, using defaults');
+    }
+  };
+
   const logout = () => {
     api.logout();
     setUser(null);
     localStorage.removeItem('user');
+  };
+
+  const logoutWithEmployeeId = async (employeeId: string) => {
+    if (!user) {
+      logout();
+      return;
+    }
+    const normalizedUserId = user.employee_id.replace(/\D/g, '').slice(-4).padStart(4, '0');
+    if (normalizedUserId !== employeeId) {
+      throw new Error('Employee ID does not match the active user');
+    }
+    try {
+      await api.logoutWithEmployeeId(employeeId);
+    } finally {
+      logout();
+    }
   };
 
   return (
@@ -148,7 +186,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isLoading,
       sessionWarning,
       login,
+      loginWithEmployeeId,
       logout,
+      logoutWithEmployeeId,
       extendSession
     }}>
       {children}

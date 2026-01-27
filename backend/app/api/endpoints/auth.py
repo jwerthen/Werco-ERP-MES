@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta
+from typing import Optional
+import re
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -9,7 +11,7 @@ from app.core.security import (
 )
 from app.core.config import settings
 from app.models.user import User, UserRole
-from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest
+from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest, EmployeeLoginRequest
 from app.api.deps import get_current_user, require_role
 from app.services.audit_service import AuditService
 
@@ -128,6 +130,108 @@ def login(
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=UserResponse.model_validate(user)
     )
+
+
+def _normalize_employee_id(value: str) -> Optional[str]:
+    """Normalize employee_id to a 4-digit numeric string."""
+    if not value:
+        return None
+    digits = re.sub(r"\D", "", value)
+    if not digits:
+        return None
+    if len(digits) < 4:
+        return digits.zfill(4)
+    return digits[-4:]
+
+
+def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
+    """Find user by normalized 4-digit employee_id."""
+    candidates = db.query(User).all()
+    matches = [
+        u for u in candidates
+        if _normalize_employee_id(u.employee_id) == employee_id
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Employee ID is not unique. Please contact an administrator."
+        )
+    return matches[0]
+
+
+@router.post("/employee-login", response_model=Token, summary="Employee ID login")
+def employee_login(
+    request: Request,
+    payload: EmployeeLoginRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Authenticate a user by 4-digit employee ID and receive JWT tokens.
+    Intended for shop floor job stations and kiosks.
+    """
+    user = _find_user_by_employee_id(db, payload.employee_id)
+
+    if not user:
+        log_auth_event(db, "EMPLOYEE_LOGIN_FAILED", email=None,
+                      success=False, request=request, error="Employee ID not found")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid employee ID"
+        )
+
+    if user.locked_until and user.locked_until > datetime.utcnow():
+        log_auth_event(db, "EMPLOYEE_LOGIN_BLOCKED", user=user, success=False,
+                      request=request, error="Account locked")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is locked. Please contact administrator."
+        )
+
+    if not user.is_active:
+        log_auth_event(db, "EMPLOYEE_LOGIN_FAILED", user=user, success=False,
+                      request=request, error="Account disabled")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is disabled"
+        )
+
+    # Reset failed attempts on successful login
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    db.commit()
+
+    access_token = create_access_token(subject=user.id)
+    refresh_token, _, _ = create_refresh_token(subject=user.id)
+
+    log_auth_event(db, "EMPLOYEE_LOGIN_SUCCESS", user=user, success=True, request=request)
+
+    return Token(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=UserResponse.model_validate(user)
+    )
+
+
+@router.post("/employee-logout", summary="Employee ID logout")
+def employee_logout(
+    request: Request,
+    payload: EmployeeLoginRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Log a logout event for the given employee ID.
+    Note: JWT invalidation is handled client-side.
+    """
+    user = _find_user_by_employee_id(db, payload.employee_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Employee ID not found")
+
+    log_auth_event(db, "EMPLOYEE_LOGOUT", user=user, success=True, request=request)
+    return {"message": "Logged out successfully"}
 
 
 @router.post("/refresh", response_model=TokenRefresh)

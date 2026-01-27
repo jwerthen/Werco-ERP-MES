@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect, useState, useMemo } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { WorkCenter, QueueItem, ActiveJob } from '../types';
 import { format } from 'date-fns';
@@ -15,6 +15,7 @@ import {
   ChevronRightIcon,
 } from '@heroicons/react/24/solid';
 import { QueueListIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
+import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 
 interface WorkOrderDetails {
   id: number;
@@ -39,6 +40,7 @@ interface WorkOrderDetails {
 
 export default function ShopFloor() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [selectedWorkCenter, setSelectedWorkCenter] = useState<number | null>(null);
   const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -49,6 +51,13 @@ export default function ShopFloor() {
   const [clockOutData, setClockOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
+  const kioskParams = useMemo(() => {
+    return {
+      dept: getKioskDept(location.search),
+      workCenterId: getKioskWorkCenterId(location.search),
+      workCenterCode: getKioskWorkCenterCode(location.search),
+    };
+  }, [location.search]);
 
   useEffect(() => {
     loadInitialData();
@@ -71,7 +80,20 @@ export default function ShopFloor() {
       setWorkCenters(wcResponse);
       setActiveJob(activeResponse.active_job);
       if (wcResponse.length > 0) {
-        setSelectedWorkCenter(wcResponse[0].id);
+        const deptMatch = kioskParams.dept?.toLowerCase() || null;
+        const matched = wcResponse.find((wc) => {
+          if (kioskParams.workCenterId && wc.id === kioskParams.workCenterId) return true;
+          if (kioskParams.workCenterCode && wc.code.toLowerCase() === kioskParams.workCenterCode.toLowerCase()) return true;
+          if (deptMatch) {
+            return (
+              wc.work_center_type?.toString().toLowerCase().includes(deptMatch) ||
+              wc.name.toLowerCase().includes(deptMatch) ||
+              wc.code.toLowerCase().includes(deptMatch)
+            );
+          }
+          return false;
+        });
+        setSelectedWorkCenter(matched?.id ?? wcResponse[0].id);
       }
     } catch (err) {
       console.error('Failed to load data:', err);

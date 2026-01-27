@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { ShieldCheckIcon, LockClosedIcon, EnvelopeIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
+import { isKioskMode } from '../utils/kiosk';
 
 // Animated particle component for background
 const AnimatedParticles = () => {
@@ -89,12 +90,22 @@ const PowerFlowLines = () => (
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [employeeId, setEmployeeId] = useState('');
+  const [loginMode, setLoginMode] = useState<'employee' | 'email'>('employee');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
-  const { login } = useAuth();
+  const { login, loginWithEmployeeId } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const kioskMode = useMemo(() => isKioskMode(location.search), [location.search]);
+
+  useEffect(() => {
+    if (kioskMode) {
+      setLoginMode('employee');
+    }
+  }, [kioskMode]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -102,7 +113,11 @@ export default function Login() {
     setLoading(true);
 
     try {
-      await login(email, password);
+      if (loginMode === 'employee') {
+        await loginWithEmployeeId(employeeId);
+      } else {
+        await login(email, password);
+      }
       navigate('/');
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Login failed. Please try again.');
@@ -278,6 +293,27 @@ export default function Login() {
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-6">
+              <div className={`flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-1 ${kioskMode ? 'opacity-70 pointer-events-none' : ''}`}>
+                <button
+                  type="button"
+                  onClick={() => setLoginMode('employee')}
+                  className={`flex-1 px-3 py-2 text-sm font-semibold rounded-lg transition-colors ${
+                    loginMode === 'employee' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  Employee ID
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLoginMode('email')}
+                  className={`flex-1 px-3 py-2 text-sm font-semibold rounded-lg transition-colors ${
+                    loginMode === 'email' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  Email Login
+                </button>
+              </div>
+
               {error && (
                 <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-center gap-2 animate-fade-in">
                   <svg className="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -287,78 +323,112 @@ export default function Login() {
                 </div>
               )}
 
-              {/* Email field */}
-              <div className="space-y-2">
-                <label htmlFor="email" className="block text-sm font-medium text-slate-700">
-                  Email Address
-                </label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    <EnvelopeIcon className={`h-5 w-5 transition-colors duration-200 ${
-                      focusedField === 'email' ? 'text-cyan-500' : 'text-slate-400'
-                    }`} />
+              {loginMode === 'employee' ? (
+                <div className="space-y-2">
+                  <label htmlFor="employeeId" className="block text-sm font-medium text-slate-700">
+                    Employee ID (4 digits)
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                      <LockClosedIcon className={`h-5 w-5 transition-colors duration-200 ${
+                        focusedField === 'employeeId' ? 'text-cyan-500' : 'text-slate-400'
+                      }`} />
+                    </div>
+                    <input
+                      id="employeeId"
+                      type="text"
+                      inputMode="numeric"
+                      pattern="\\d{4}"
+                      maxLength={4}
+                      required
+                      value={employeeId}
+                      onChange={(e) => setEmployeeId(e.target.value.replace(/\\D/g, '').slice(0, 4))}
+                      onFocus={() => setFocusedField('employeeId')}
+                      onBlur={() => setFocusedField(null)}
+                      className="input-glow w-full pl-12 pr-4 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200 tracking-widest text-center text-lg"
+                      placeholder="0000"
+                      autoComplete="off"
+                    />
                   </div>
-                  <input
-                    id="email"
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    onFocus={() => setFocusedField('email')}
-                    onBlur={() => setFocusedField(null)}
-                    className="input-glow w-full pl-12 pr-4 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200"
-                    placeholder="you@werco.com"
-                    autoComplete="email"
-                  />
+                  <p className="text-xs text-slate-500">Use your 4-digit badge ID.</p>
                 </div>
-              </div>
-
-              {/* Password field */}
-              <div className="space-y-2">
-                <label htmlFor="password" className="block text-sm font-medium text-slate-700">
-                  Password
-                </label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    <LockClosedIcon className={`h-5 w-5 transition-colors duration-200 ${
-                      focusedField === 'password' ? 'text-cyan-500' : 'text-slate-400'
-                    }`} />
+              ) : (
+                <>
+                  {/* Email field */}
+                  <div className="space-y-2">
+                    <label htmlFor="email" className="block text-sm font-medium text-slate-700">
+                      Email Address
+                    </label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        <EnvelopeIcon className={`h-5 w-5 transition-colors duration-200 ${
+                          focusedField === 'email' ? 'text-cyan-500' : 'text-slate-400'
+                        }`} />
+                      </div>
+                      <input
+                        id="email"
+                        type="email"
+                        required
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        onFocus={() => setFocusedField('email')}
+                        onBlur={() => setFocusedField(null)}
+                        className="input-glow w-full pl-12 pr-4 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200"
+                        placeholder="you@werco.com"
+                        autoComplete="email"
+                      />
+                    </div>
                   </div>
-                  <input
-                    id="password"
-                    type={showPassword ? 'text' : 'password'}
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    onFocus={() => setFocusedField('password')}
-                    onBlur={() => setFocusedField(null)}
-                    className="input-glow w-full pl-12 pr-12 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200"
-                    placeholder="Enter your password"
-                    autoComplete="current-password"
-                  />
+
+                  {/* Password field */}
+                  <div className="space-y-2">
+                    <label htmlFor="password" className="block text-sm font-medium text-slate-700">
+                      Password
+                    </label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        <LockClosedIcon className={`h-5 w-5 transition-colors duration-200 ${
+                          focusedField === 'password' ? 'text-cyan-500' : 'text-slate-400'
+                        }`} />
+                      </div>
+                      <input
+                        id="password"
+                        type={showPassword ? 'text' : 'password'}
+                        required
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        onFocus={() => setFocusedField('password')}
+                        onBlur={() => setFocusedField(null)}
+                        className="input-glow w-full pl-12 pr-12 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200"
+                        placeholder="Enter your password"
+                        autoComplete="current-password"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-600 transition-colors"
+                      >
+                        {showPassword ? (
+                          <EyeSlashIcon className="h-5 w-5" />
+                        ) : (
+                          <EyeIcon className="h-5 w-5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {loginMode === 'email' && (
+                <div className="flex justify-end">
                   <button
                     type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-600 transition-colors"
+                    className="text-sm text-cyan-600 hover:text-cyan-700 font-medium transition-colors"
                   >
-                    {showPassword ? (
-                      <EyeSlashIcon className="h-5 w-5" />
-                    ) : (
-                      <EyeIcon className="h-5 w-5" />
-                    )}
+                    Forgot password?
                   </button>
                 </div>
-              </div>
-
-              {/* Forgot password link */}
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  className="text-sm text-cyan-600 hover:text-cyan-700 font-medium transition-colors"
-                >
-                  Forgot password?
-                </button>
-              </div>
+              )}
 
               {/* Submit button */}
               <button

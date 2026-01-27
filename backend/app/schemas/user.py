@@ -80,6 +80,10 @@ class UserLogin(BaseModel):
     password: str = Field(..., min_length=1, description="Password")
 
 
+class EmployeeLoginRequest(BaseModel):
+    employee_id: str = Field(..., min_length=4, max_length=4, pattern=r'^\d{4}$', description="4-digit employee ID")
+
+
 class Token(BaseModel):
     access_token: str
     refresh_token: Optional[str] = None

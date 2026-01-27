@@ -96,11 +96,33 @@ def clock_in(
     
     if operation.work_order_id != clock_in_data.work_order_id:
         raise HTTPException(status_code=400, detail="Operation does not belong to this work order")
+
+    if operation.work_center_id != clock_in_data.work_center_id:
+        raise HTTPException(status_code=400, detail="Operation does not belong to this work center")
+
+    if operation.status not in [OperationStatus.READY, OperationStatus.IN_PROGRESS]:
+        raise HTTPException(status_code=400, detail="Operation is not ready to start")
+
+    # Prevent out-of-sequence starts
+    prev_ops = db.query(WorkOrderOperation).filter(
+        and_(
+            WorkOrderOperation.work_order_id == operation.work_order_id,
+            WorkOrderOperation.sequence < operation.sequence,
+            WorkOrderOperation.status != OperationStatus.COMPLETE
+        )
+    ).count()
+
+    if prev_ops > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Previous operations must be completed first"
+        )
     
     # Update operation status
     if operation.status == OperationStatus.READY:
         operation.status = OperationStatus.IN_PROGRESS
-        operation.actual_start = datetime.utcnow()
+        if not operation.actual_start:
+            operation.actual_start = datetime.utcnow()
         operation.started_by = current_user.id
     
     # Update work order status
@@ -484,19 +506,12 @@ def get_all_operations(
     if search:
         search_term = f"%{search}%"
         from app.models.part import Part
-        query = db.query(WorkOrderOperation).options(
-            joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
-            joinedload(WorkOrderOperation.work_center)
-        ).join(WorkOrder).join(Part, WorkOrder.part_id == Part.id).filter(
-            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+        query = query.join(Part, WorkOrder.part_id == Part.id).filter(
             or_(
                 WorkOrder.work_order_number.ilike(search_term),
                 Part.part_number.ilike(search_term)
             )
         )
-        if work_center_id:
-            query = query.filter(WorkOrderOperation.work_center_id == work_center_id)
 
     if due_today:
         query = query.filter(WorkOrder.due_date == date.today())

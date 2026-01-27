@@ -57,6 +57,9 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     quantity_scrapped: MoneySmall
     actual_setup_hours: MoneySmall
     actual_run_hours: Money
+    estimated_hours: Optional[float] = None
+    actual_hours: Optional[float] = None
+    work_center_name: Optional[str] = None
     scheduled_start: Optional[datetime]
     scheduled_end: Optional[datetime]
     actual_start: Optional[datetime]

@@ -105,6 +105,9 @@ export interface WorkOrderOperation {
   run_time_per_piece: number;
   actual_setup_hours: number;
   actual_run_hours: number;
+  estimated_hours?: number;
+  actual_hours?: number;
+  work_center_name?: string;
   status: OperationStatus;
   quantity_complete: number;
   quantity_scrapped: number;

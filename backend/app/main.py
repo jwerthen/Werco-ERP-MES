@@ -379,6 +379,7 @@ if settings.RATE_LIMIT_ENABLED:
             "/api/v1/auth/login": "5/minute",      # Prevent brute force
             "/api/v1/auth/register": "3/minute",   # Prevent mass registration
             "/api/v1/auth/refresh": "30/minute",   # Allow reasonable token refreshes
+            "/api/v1/auth/employee-login": "10/minute",  # Employee ID kiosk login
         }
         
         def get_rate_limit_for_path(request):

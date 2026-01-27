@@ -1,11 +1,12 @@
 import React, { Suspense, lazy } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TourProvider } from './context/TourContext';
 import { KeyboardShortcutsProvider } from './context/KeyboardShortcutsContext';
 import { TourHighlight } from './components/Tour';
 import Layout from './components/Layout';
 import { SkeletonDashboard, LoadingOverlay } from './components/ui/Skeleton';
+import { isKioskMode, syncKioskMode } from './utils/kiosk';
 
 // Eagerly loaded - critical path
 import Login from './pages/Login';
@@ -82,6 +83,30 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function KioskGuard({ children }: { children: React.ReactNode }) {
+  const { user, isAuthenticated, isLoading } = useAuth();
+  const location = useLocation();
+  const kioskMode = isKioskMode(location.search);
+
+  if (!kioskMode) {
+    return <>{children}</>;
+  }
+
+  if (isLoading) {
+    return <LoadingOverlay message="Authenticating..." />;
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login?kiosk=1" replace />;
+  }
+
+  if (user?.role !== 'operator') {
+    return <Navigate to="/unauthorized" replace />;
+  }
+
+  return <>{children}</>;
+}
+
 // Wrapper for lazy-loaded routes with Suspense
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -92,6 +117,11 @@ function LazyRoute({ children }: { children: React.ReactNode }) {
 }
 
 function AppRoutes() {
+  const location = useLocation();
+
+  // Sync kiosk mode based on URL query params
+  syncKioskMode(location.search);
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
@@ -132,16 +162,20 @@ function AppRoutes() {
       {/* Shop Floor */}
       <Route path="/shop-floor" element={
         <PrivateRoute>
-          <Layout>
-            <LazyRoute><ShopFloor /></LazyRoute>
-          </Layout>
+          <KioskGuard>
+            <Layout>
+              <LazyRoute><ShopFloor /></LazyRoute>
+            </Layout>
+          </KioskGuard>
         </PrivateRoute>
       } />
       <Route path="/shop-floor/operations" element={
         <PrivateRoute>
-          <Layout>
-            <LazyRoute><ShopFloorSimple /></LazyRoute>
-          </Layout>
+          <KioskGuard>
+            <Layout>
+              <LazyRoute><ShopFloorSimple /></LazyRoute>
+            </Layout>
+          </KioskGuard>
         </PrivateRoute>
       } />
       
