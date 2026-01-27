@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { format } from 'date-fns';
+import { UserRole } from '../types';
 import {
   Cog6ToothIcon,
   PlusIcon,
@@ -18,9 +19,10 @@ import {
   ClockIcon,
   DocumentTextIcon,
   ShieldCheckIcon,
+  UsersIcon,
 } from '@heroicons/react/24/outline';
 
-type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'services' | 'overhead' | 'roles' | 'audit';
+type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'services' | 'overhead' | 'employees' | 'roles' | 'audit';
 
 const MATERIAL_CATEGORIES = ['steel', 'stainless', 'aluminum', 'brass', 'copper', 'titanium', 'plastic', 'other'];
 const MACHINE_TYPES = ['cnc_mill_3axis', 'cnc_mill_4axis', 'cnc_mill_5axis', 'cnc_lathe', 'laser_fiber', 'laser_co2', 'plasma', 'waterjet', 'press_brake', 'punch_press'];
@@ -35,9 +37,39 @@ const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
   { key: 'workcenters', label: 'Work Center Rates', icon: BuildingOfficeIcon },
   { key: 'services', label: 'Outside Services', icon: TruckIcon },
   { key: 'overhead', label: 'Overhead/Markup', icon: Cog6ToothIcon },
+  { key: 'employees', label: 'Employees', icon: UsersIcon },
   { key: 'roles', label: 'Roles & Permissions', icon: ShieldCheckIcon },
   { key: 'audit', label: 'Audit Log', icon: ClockIcon },
 ];
+
+const EMPLOYEE_ID_PATTERN = /^\d{4}$/;
+
+const generateEmployeePassword = () => {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnpqrstuvwxyz';
+  const numbers = '23456789';
+  const specials = '!@#$%^&*-_+=';
+  const all = `${upper}${lower}${numbers}${specials}`;
+  const pick = (chars: string) => chars[Math.floor(Math.random() * chars.length)];
+  const base = [
+    pick(upper),
+    pick(lower),
+    pick(numbers),
+    pick(specials),
+  ];
+  while (base.length < 14) {
+    base.push(pick(all));
+  }
+  for (let i = base.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [base[i], base[j]] = [base[j], base[i]];
+  }
+  return base.join('');
+};
+
+const normalizeEmployeeId = (value: string) => value.replace(/\D/g, '').slice(0, 4);
+
+const buildEmployeeEmail = (employeeId: string) => `employee-${employeeId}@werco.local`;
 
 export default function AdminSettings() {
   const [activeTab, setActiveTab] = useState<TabKey>('materials');
@@ -52,6 +84,7 @@ export default function AdminSettings() {
   const [workCenterRates, setWorkCenterRates] = useState<any[]>([]);
   const [outsideServices, setOutsideServices] = useState<any[]>([]);
   const [overhead, setOverhead] = useState<Record<string, any>>({});
+  const [employees, setEmployees] = useState<EmployeeUser[]>([]);
   const [rolePermissions, setRolePermissions] = useState<{
     role_permissions: Record<string, string[]>;
     all_permissions: string[];
@@ -63,6 +96,8 @@ export default function AdminSettings() {
   // Modal states
   const [editModal, setEditModal] = useState<{ type: string; item: any } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: string; item: any } | null>(null);
+  const [employeeModalOpen, setEmployeeModalOpen] = useState(false);
+  const [editingEmployee, setEditingEmployee] = useState<EmployeeUser | null>(null);
 
   const loadTabData = useCallback(async (tab: TabKey) => {
     setLoading(true);
@@ -89,6 +124,12 @@ export default function AdminSettings() {
         case 'overhead':
           setOverhead(await api.getAdminOverhead());
           break;
+        case 'employees': {
+          const userList = await api.getUsers(showInactive);
+          const employeeUsers = (userList || []).filter((user: EmployeeUser) => EMPLOYEE_ID_PATTERN.test(user.employee_id));
+          setEmployees(employeeUsers);
+          break;
+        }
         case 'roles':
           setRolePermissions(await api.getRolePermissions());
           break;
@@ -172,6 +213,52 @@ export default function AdminSettings() {
     }
   };
 
+  const handleEmployeeSave = async (form: EmployeeFormValues, existing?: EmployeeUser | null) => {
+    try {
+      if (existing) {
+        await api.updateUser(existing.id, {
+          first_name: form.first_name,
+          last_name: form.last_name,
+          department: form.department || null,
+        });
+      } else {
+        const employeeId = normalizeEmployeeId(form.employee_id);
+        const password = generateEmployeePassword();
+        await api.createUser({
+          email: buildEmployeeEmail(employeeId),
+          employee_id: employeeId,
+          first_name: form.first_name,
+          last_name: form.last_name,
+          password,
+          role: UserRole.OPERATOR,
+          department: form.department || null,
+        });
+      }
+      setEmployeeModalOpen(false);
+      setEditingEmployee(null);
+      loadTabData('employees');
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to save employee');
+    }
+  };
+
+  const handleEmployeeToggleActive = async (employee: EmployeeUser) => {
+    try {
+      if (employee.is_active) {
+        await api.deactivateUser(employee.id);
+      } else {
+        await api.activateUser(employee.id);
+      }
+      loadTabData('employees');
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to update employee status');
+    }
+  };
+
+  const filteredEmployees = useMemo(() => {
+    return employees;
+  }, [employees]);
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -230,7 +317,16 @@ export default function AdminSettings() {
               />
               <span className="text-sm text-surface-600">Show inactive</span>
             </label>
-            {activeTab !== 'workcenters' && (
+            {activeTab === 'employees' && (
+              <button
+                onClick={() => { setEditingEmployee(null); setEmployeeModalOpen(true); }}
+                className="btn-primary btn-sm"
+              >
+                <PlusIcon className="h-4 w-4 mr-1" />
+                Add Employee
+              </button>
+            )}
+            {activeTab !== 'workcenters' && activeTab !== 'employees' && (
               <button
                 onClick={() => setEditModal({ type: activeTab.slice(0, -1), item: null })}
                 className="btn-primary btn-sm"
@@ -255,6 +351,13 @@ export default function AdminSettings() {
             {activeTab === 'workcenters' && <WorkCenterRatesTable data={workCenterRates} onEdit={(item) => setEditModal({ type: 'workcenter', item })} />}
             {activeTab === 'services' && <OutsideServicesTable data={outsideServices} onEdit={(item) => setEditModal({ type: 'service', item })} onDelete={(item) => setDeleteConfirm({ type: 'service', item })} />}
             {activeTab === 'overhead' && <OverheadSettings data={overhead} onUpdate={handleOverheadUpdate} />}
+            {activeTab === 'employees' && (
+              <EmployeesTable
+                data={filteredEmployees}
+                onEdit={(employee) => { setEditingEmployee(employee); setEmployeeModalOpen(true); }}
+                onToggleActive={handleEmployeeToggleActive}
+              />
+            )}
             {activeTab === 'roles' && rolePermissions && <RolePermissionsManager data={rolePermissions} onUpdate={() => loadTabData('roles')} />}
             {activeTab === 'audit' && <AuditLogTable data={auditLog} />}
           </>
@@ -293,6 +396,14 @@ export default function AdminSettings() {
             </div>
           </div>
         </div>
+      )}
+
+      {employeeModalOpen && (
+        <EmployeeModal
+          employee={editingEmployee}
+          onSave={(form) => handleEmployeeSave(form, editingEmployee)}
+          onClose={() => { setEmployeeModalOpen(false); setEditingEmployee(null); }}
+        />
       )}
     </div>
   );
@@ -617,6 +728,184 @@ function AuditLogTable({ data }: { data: any[] }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ============ EMPLOYEES ============
+
+interface EmployeeUser {
+  id: number;
+  employee_id: string;
+  first_name: string;
+  last_name: string;
+  role: UserRole;
+  department?: string;
+  email: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+interface EmployeeFormValues {
+  employee_id: string;
+  first_name: string;
+  last_name: string;
+  department?: string;
+}
+
+function EmployeesTable({
+  data,
+  onEdit,
+  onToggleActive,
+}: {
+  data: EmployeeUser[];
+  onEdit: (employee: EmployeeUser) => void;
+  onToggleActive: (employee: EmployeeUser) => void;
+}) {
+  if (data.length === 0) {
+    return <EmptyState message="No employees configured yet" icon={UsersIcon} />;
+  }
+
+  return (
+    <div className="table-container border-0">
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Employee</th>
+            <th>Employee ID</th>
+            <th>Department</th>
+            <th>Status</th>
+            <th className="w-24">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((employee) => (
+            <tr key={employee.id} className={!employee.is_active ? 'opacity-50' : ''}>
+              <td className="font-medium">{employee.first_name} {employee.last_name}</td>
+              <td className="font-mono text-sm">{employee.employee_id}</td>
+              <td className="text-sm text-surface-600">{employee.department || 'â€”'}</td>
+              <td><StatusBadge active={employee.is_active} /></td>
+              <td className="flex items-center gap-1">
+                <button
+                  onClick={() => onEdit(employee)}
+                  className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-50"
+                  title="Edit"
+                >
+                  <PencilIcon className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={() => onToggleActive(employee)}
+                  className={`p-2 rounded-lg ${employee.is_active ? 'text-surface-500 hover:text-red-600 hover:bg-red-50' : 'text-surface-500 hover:text-werco-600 hover:bg-werco-50'}`}
+                  title={employee.is_active ? 'Deactivate' : 'Activate'}
+                >
+                  {employee.is_active ? <TrashIcon className="h-4 w-4" /> : <CheckIcon className="h-4 w-4" />}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EmployeeModal({
+  employee,
+  onSave,
+  onClose,
+}: {
+  employee: EmployeeUser | null;
+  onSave: (form: EmployeeFormValues) => void;
+  onClose: () => void;
+}) {
+  const [form, setForm] = useState<EmployeeFormValues>({
+    employee_id: employee?.employee_id || '',
+    first_name: employee?.first_name || '',
+    last_name: employee?.last_name || '',
+    department: employee?.department || '',
+  });
+  const [error, setError] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const normalizedId = normalizeEmployeeId(form.employee_id);
+    if (!employee && !EMPLOYEE_ID_PATTERN.test(normalizedId)) {
+      setError('Employee ID must be exactly 4 digits.');
+      return;
+    }
+    setError('');
+    onSave({ ...form, employee_id: normalizedId });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 className="text-lg font-semibold">
+            {employee ? 'Edit Employee' : 'Add Employee'}
+          </h3>
+          <button onClick={onClose} className="p-2 rounded-lg hover:bg-surface-100">
+            <XMarkIcon className="h-5 w-5" />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit}>
+          <div className="modal-body space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="label">First Name</label>
+                <input
+                  className="input"
+                  value={form.first_name}
+                  onChange={(e) => setForm({ ...form, first_name: e.target.value })}
+                  required
+                />
+              </div>
+              <div>
+                <label className="label">Last Name</label>
+                <input
+                  className="input"
+                  value={form.last_name}
+                  onChange={(e) => setForm({ ...form, last_name: e.target.value })}
+                  required
+                />
+              </div>
+            </div>
+            <div>
+              <label className="label">Employee ID (4 digits)</label>
+              <input
+                className="input font-mono tracking-widest text-center"
+                value={form.employee_id}
+                onChange={(e) => setForm({ ...form, employee_id: normalizeEmployeeId(e.target.value) })}
+                placeholder="0000"
+                maxLength={4}
+                inputMode="numeric"
+                pattern="\\d{4}"
+                disabled={!!employee}
+                required
+              />
+            </div>
+            <div>
+              <label className="label">Department (optional)</label>
+              <input
+                className="input"
+                value={form.department || ''}
+                onChange={(e) => setForm({ ...form, department: e.target.value })}
+              />
+            </div>
+            {!employee && (
+              <div className="rounded-lg border border-surface-200 bg-surface-50 p-3 text-xs text-surface-600">
+                This creates an operator account tied to the 4-digit ID. Kiosk sign-ins will use this ID and show the
+                employee name.
+              </div>
+            )}
+            {error && <div className="text-sm text-red-600">{error}</div>}
+          </div>
+          <div className="modal-footer">
+            <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
+            <button type="submit" className="btn-primary">Save</button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
