@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { format } from 'date-fns';
-import { UserRole } from '../types';
+import type { UserRole } from '../types';
 import {
   Cog6ToothIcon,
   PlusIcon,
@@ -230,7 +230,7 @@ export default function AdminSettings() {
           first_name: form.first_name,
           last_name: form.last_name,
           password,
-          role: UserRole.OPERATOR,
+          role: 'operator',
           department: form.department || null,
         });
       }
