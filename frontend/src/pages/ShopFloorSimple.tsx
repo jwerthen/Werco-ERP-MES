@@ -150,12 +150,18 @@ export default function ShopFloorSimple() {
   useEffect(() => {
     const init = async () => {
       setLoading(true);
-      await Promise.all([loadOperations(), loadWorkCenters()]);
+      await loadWorkCenters();
+      await loadOperations();
       setLoading(false);
     };
     init();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadOperations]);
+
+  useEffect(() => {
+    if (!loading) {
+      loadOperations();
+    }
+  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly, loadOperations, loading]);
 
   // Auto-refresh every 30 seconds
   useEffect(() => {
