@@ -146,7 +146,7 @@ def _normalize_employee_id(value: str) -> Optional[str]:
 
 def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
     """Find user by normalized 4-digit employee_id."""
-    candidates = db.query(User).all()
+    candidates = db.query(User).filter(User.employee_id.like(f"%{employee_id}")).all()
     matches = [
         u for u in candidates
         if _normalize_employee_id(u.employee_id) == employee_id

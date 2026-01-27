@@ -187,6 +187,9 @@ def clock_out(
     ).first()
     
     if operation:
+        if work_order and (operation.quantity_complete + clock_out_data.quantity_produced) > work_order.quantity_ordered:
+            raise HTTPException(status_code=400, detail="Quantity produced exceeds quantity ordered")
+
         if time_entry.entry_type == TimeEntryType.SETUP:
             operation.actual_setup_hours += time_entry.duration_hours
         else:
