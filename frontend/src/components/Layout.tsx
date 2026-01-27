@@ -63,7 +63,6 @@ const navigation: NavItem[] = [
       { name: 'Operations', href: '/shop-floor/operations', icon: ClipboardDocumentListIcon },
     ]
   },
-  { name: 'Scanner', href: '/scanner', icon: QrCodeIcon },
   { name: 'Scheduling', href: '/scheduling', icon: CalendarDaysIcon },
   { name: 'Work Orders', href: '/work-orders', icon: ClipboardDocumentListIcon },
   { 

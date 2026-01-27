@@ -4,14 +4,12 @@ import {
   HomeIcon,
   ClipboardDocumentListIcon,
   CubeIcon,
-  QrCodeIcon,
   Bars3Icon,
 } from '@heroicons/react/24/outline';
 import {
   HomeIcon as HomeIconSolid,
   ClipboardDocumentListIcon as ClipboardDocumentListIconSolid,
   CubeIcon as CubeIconSolid,
-  QrCodeIcon as QrCodeIconSolid,
 } from '@heroicons/react/24/solid';
 
 interface NavItem {
@@ -33,12 +31,6 @@ const navItems: NavItem[] = [
     href: '/work-orders',
     icon: ClipboardDocumentListIcon,
     activeIcon: ClipboardDocumentListIconSolid,
-  },
-  {
-    name: 'Scanner',
-    href: '/scanner',
-    icon: QrCodeIcon,
-    activeIcon: QrCodeIconSolid,
   },
   {
     name: 'Parts',

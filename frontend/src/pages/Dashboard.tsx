@@ -15,7 +15,6 @@ import {
   ArrowTrendingUpIcon,
   ArrowTrendingDownIcon,
   ClockIcon,
-  QrCodeIcon,
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { 
@@ -219,10 +218,6 @@ export default function Dashboard() {
           >
             <ArrowPathIcon className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
-          <Link to="/scanner" className="btn-secondary">
-            <QrCodeIcon className="h-5 w-5 mr-2" />
-            Scanner
-          </Link>
           <Link to="/shop-floor" className="btn-primary">
             <WrenchScrewdriverIcon className="h-5 w-5 mr-2" />
             Shop Floor

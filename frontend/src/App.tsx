@@ -35,8 +35,6 @@ const Shipping = lazy(() => import('./pages/Shipping'));
 const Quotes = lazy(() => import('./pages/Quotes'));
 const Users = lazy(() => import('./pages/Users'));
 const Customers = lazy(() => import('./pages/Customers'));
-const Scanner = lazy(() => import('./pages/Scanner'));
-const ScannerMappings = lazy(() => import('./pages/ScannerMappings'));
 const Calibration = lazy(() => import('./pages/Calibration'));
 const PrintTraveler = lazy(() => import('./pages/PrintTraveler'));
 const Traceability = lazy(() => import('./pages/Traceability'));
@@ -357,21 +355,6 @@ function AppRoutes() {
         </PrivateRoute>
       } />
       
-      {/* Scanner */}
-      <Route path="/scanner" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Scanner /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/scanner/mappings" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><ScannerMappings /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
       
       {/* Calibration */}
       <Route path="/calibration" element={
