@@ -730,68 +730,98 @@ class AnalyticsService:
         granularity: DateGranularity = DateGranularity.DAY
     ) -> ProductionTrendsResponse:
         """Get production trend data."""
-        # Prefer time entries when available; fallback to completed operations for simplified workflows
-        time_entry_count = self.db.query(func.count(TimeEntry.id)).filter(
+        # Combine time entries and simplified operations without double-counting
+        time_entries_query = self.db.query(
+            func.date(TimeEntry.clock_in).label('date'),
+            func.sum(TimeEntry.quantity_produced).label('units_produced'),
+            func.sum(TimeEntry.quantity_scrapped).label('units_scrapped'),
+            func.sum(TimeEntry.duration_hours).label('total_hours')
+        ).filter(
             TimeEntry.clock_in >= datetime.combine(start_date, datetime.min.time()),
             TimeEntry.clock_in <= datetime.combine(end_date, datetime.max.time()),
             TimeEntry.entry_type == TimeEntryType.RUN
-        ).scalar() or 0
+        )
 
-        if time_entry_count > 0:
-            base_query = self.db.query(
-                func.date(TimeEntry.clock_in).label('date'),
-                func.sum(TimeEntry.quantity_produced).label('units_produced'),
-                func.sum(TimeEntry.quantity_scrapped).label('units_scrapped'),
-                func.sum(TimeEntry.duration_hours).label('total_hours')
-            ).filter(
-                TimeEntry.clock_in >= datetime.combine(start_date, datetime.min.time()),
-                TimeEntry.clock_in <= datetime.combine(end_date, datetime.max.time()),
+        if group_by == "work_center":
+            time_entries_query = time_entries_query.add_columns(
+                TimeEntry.work_center_id.label('group_key')
+            ).group_by(func.date(TimeEntry.clock_in), TimeEntry.work_center_id)
+        else:
+            time_entries_query = time_entries_query.group_by(func.date(TimeEntry.clock_in))
+
+        time_entry_results = time_entries_query.order_by(func.date(TimeEntry.clock_in)).all()
+
+        # Only include operations that have no time entries (simplified workflow)
+        ops_query = self.db.query(
+            func.date(WorkOrderOperation.actual_end).label('date'),
+            func.sum(WorkOrderOperation.quantity_complete).label('units_produced'),
+            func.sum(WorkOrderOperation.quantity_scrapped).label('units_scrapped'),
+            func.sum(
+                (WorkOrderOperation.actual_setup_hours + WorkOrderOperation.actual_run_hours)
+            ).label('total_hours')
+        ).outerjoin(
+            TimeEntry, and_(
+                TimeEntry.operation_id == WorkOrderOperation.id,
                 TimeEntry.entry_type == TimeEntryType.RUN
             )
+        ).filter(
+            WorkOrderOperation.actual_end.isnot(None),
+            WorkOrderOperation.actual_end >= datetime.combine(start_date, datetime.min.time()),
+            WorkOrderOperation.actual_end <= datetime.combine(end_date, datetime.max.time()),
+            WorkOrderOperation.status == OperationStatus.COMPLETE,
+            TimeEntry.id.is_(None)
+        )
 
-            if group_by == "work_center":
-                base_query = base_query.add_columns(
-                    TimeEntry.work_center_id.label('group_key')
-                ).group_by(func.date(TimeEntry.clock_in), TimeEntry.work_center_id)
-            else:
-                base_query = base_query.group_by(func.date(TimeEntry.clock_in))
-
-            results = base_query.order_by(func.date(TimeEntry.clock_in)).all()
+        if group_by == "work_center":
+            ops_query = ops_query.add_columns(
+                WorkOrderOperation.work_center_id.label('group_key')
+            ).group_by(func.date(WorkOrderOperation.actual_end), WorkOrderOperation.work_center_id)
         else:
-            base_query = self.db.query(
-                func.date(WorkOrderOperation.actual_end).label('date'),
-                func.sum(WorkOrderOperation.quantity_complete).label('units_produced'),
-                func.sum(WorkOrderOperation.quantity_scrapped).label('units_scrapped'),
-                func.sum(
-                    (WorkOrderOperation.actual_setup_hours + WorkOrderOperation.actual_run_hours)
-                ).label('total_hours')
-            ).filter(
-                WorkOrderOperation.actual_end.isnot(None),
-                WorkOrderOperation.actual_end >= datetime.combine(start_date, datetime.min.time()),
-                WorkOrderOperation.actual_end <= datetime.combine(end_date, datetime.max.time()),
-                WorkOrderOperation.status == OperationStatus.COMPLETE
-            )
+            ops_query = ops_query.group_by(func.date(WorkOrderOperation.actual_end))
 
-            if group_by == "work_center":
-                base_query = base_query.add_columns(
-                    WorkOrderOperation.work_center_id.label('group_key')
-                ).group_by(func.date(WorkOrderOperation.actual_end), WorkOrderOperation.work_center_id)
-            else:
-                base_query = base_query.group_by(func.date(WorkOrderOperation.actual_end))
+        ops_results = ops_query.order_by(func.date(WorkOrderOperation.actual_end)).all()
 
-            results = base_query.order_by(func.date(WorkOrderOperation.actual_end)).all()
+        # Merge results by date + optional group
+        combined: Dict[Tuple[date, Optional[str]], Dict[str, float]] = defaultdict(lambda: {
+            "units_produced": 0.0,
+            "units_scrapped": 0.0,
+            "total_hours": 0.0
+        })
+
+        for row in time_entry_results:
+            key = (row.date, str(row.group_key) if hasattr(row, 'group_key') else None)
+            combined[key]["units_produced"] += float(row.units_produced or 0)
+            combined[key]["units_scrapped"] += float(row.units_scrapped or 0)
+            combined[key]["total_hours"] += float(row.total_hours or 0)
+
+        for row in ops_results:
+            key = (row.date, str(row.group_key) if hasattr(row, 'group_key') else None)
+            combined[key]["units_produced"] += float(row.units_produced or 0)
+            combined[key]["units_scrapped"] += float(row.units_scrapped or 0)
+            combined[key]["total_hours"] += float(row.total_hours or 0)
+
+        results = [
+            {
+                "date": result_date,
+                "group_key": group_key,
+                "units_produced": values["units_produced"],
+                "units_scrapped": values["units_scrapped"],
+                "total_hours": values["total_hours"]
+            }
+            for (result_date, group_key), values in sorted(combined.items(), key=lambda x: x[0][0])
+        ]
         
         # Build time series
         time_series = []
         for row in results:
             time_series.append(ProductionDataPoint(
-                date=row.date,
-                group_key=str(row.group_key) if hasattr(row, 'group_key') else None,
-                units_produced=int(row.units_produced or 0),
-                units_scrapped=int(row.units_scrapped or 0),
+                date=row["date"],
+                group_key=str(row["group_key"]) if row["group_key"] is not None else None,
+                units_produced=int(row["units_produced"] or 0),
+                units_scrapped=int(row["units_scrapped"] or 0),
                 work_orders_completed=0,  # Would need separate query
                 work_orders_started=0,
-                total_hours=float(row.total_hours or 0)
+                total_hours=float(row["total_hours"] or 0)
             ))
         
         # Calculate totals

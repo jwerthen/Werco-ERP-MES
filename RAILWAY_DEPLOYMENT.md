@@ -93,6 +93,23 @@ Default login (from seed data):
 - Email: admin@werco.com
 - Password: admin123
 
+## Kiosk Mode (Shop Floor)
+
+Use kiosk mode for tablets on the shop floor:
+
+```
+/shop-floor/operations?kiosk=1
+/shop-floor/operations?kiosk=1&dept=cnc
+/shop-floor/operations?kiosk=1&work_center_id=12
+/shop-floor/operations?kiosk=1&work_center_code=CNC-01
+```
+
+Exit kiosk mode on a device:
+
+```
+/shop-floor/operations?kiosk=0
+```
+
 ## Environment Variables Reference
 
 ### Backend (werco-api)

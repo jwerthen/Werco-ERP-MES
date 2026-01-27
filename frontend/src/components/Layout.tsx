@@ -251,6 +251,7 @@ export default function Layout({ children }: LayoutProps) {
   const [logoutError, setLogoutError] = useState('');
   const globalSearch = useGlobalSearch();
   const keyboardShortcuts = useKeyboardShortcutsContext();
+  const isKiosk = isKioskMode(location.search);
 
   // Global keyboard shortcuts for layout
   useKeyboardShortcuts([
@@ -282,6 +283,20 @@ export default function Layout({ children }: LayoutProps) {
     () => location.pathname.startsWith('/shop-floor') && isKioskMode(location.search),
     [location.pathname, location.search]
   );
+
+  const visibleNavigation = useMemo(() => {
+    if (isKiosk) {
+      return navigation.filter((item) => item.name === 'Shop Floor');
+    }
+
+    return navigation.map((item) => {
+      if (item.name !== 'Shop Floor' || !item.children) return item;
+      return {
+        ...item,
+        children: item.children.filter((child) => child.href !== '/shop-floor/operations'),
+      };
+    });
+  }, [isKiosk]);
 
   const handleLogoutConfirm = async () => {
     setLogoutError('');
@@ -347,7 +362,7 @@ export default function Layout({ children }: LayoutProps) {
           data-tour="sidebar"
           aria-label="Main navigation"
         >
-          {navigation.map((item) => (
+          {visibleNavigation.map((item) => (
             <NavGroup 
               key={item.name} 
               item={item} 
@@ -487,7 +502,7 @@ export default function Layout({ children }: LayoutProps) {
       </div>
 
       {/* Bottom Navigation - Mobile only */}
-      <BottomNav onMenuClick={() => setSidebarOpen(true)} />
+      {!isKiosk && <BottomNav onMenuClick={() => setSidebarOpen(true)} />}
 
       {/* Global Search Modal */}
       <GlobalSearch isOpen={globalSearch.isOpen} onClose={globalSearch.close} />
