@@ -290,6 +290,12 @@ jobs:
           sleep 30
           curl -f ${{ vars.PRODUCTION_API_URL }}/health || exit 1
 
+      - name: Verify Production Config
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway run --service werco-api --environment production python -m scripts.verify_launch
+
       - name: Create GitHub Release
         if: success()
         uses: actions/create-release@v1

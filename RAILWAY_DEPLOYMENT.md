@@ -39,6 +39,9 @@ railway variables set DEBUG=false
 # Deploy
 railway up
 
+# Verify production config sanity
+railway run --service werco-api python -m scripts.verify_launch
+
 # Get the backend URL
 railway domain
 # Note: https://werco-api-production-xxxx.up.railway.app

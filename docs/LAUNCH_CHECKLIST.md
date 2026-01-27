@@ -29,3 +29,5 @@
 - [ ] Kiosk sign-in → start/complete operation (simplified view)
 - [ ] Analytics: Production Trends chart loads
 - [ ] Export at least one report (CSV)
+- [ ] Run launch verification: `railway run --service werco-api python -m scripts.verify_launch`
+- [ ] Run smoke test script: `docs/SMOKE_TESTS.md`

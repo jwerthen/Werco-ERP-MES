@@ -111,6 +111,9 @@ cd backend
 # Deploy to Railway
 railway up --service werco-api . --path-as-root
 
+# Verify launch readiness (config sanity checks)
+railway run --service werco-api python -m scripts.verify_launch
+
 # Wait for deployment (usually 2-5 minutes)
 # Monitor build logs in Railway dashboard or:
 railway logs --service werco-api
