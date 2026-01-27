@@ -85,8 +85,9 @@ function KioskGuard({ children }: { children: React.ReactNode }) {
   const { user, isAuthenticated, isLoading } = useAuth();
   const location = useLocation();
   const kioskMode = isKioskMode(location.pathname, location.search);
+  const enforceKiosk = kioskMode && user?.role === 'operator';
 
-  if (!kioskMode) {
+  if (!enforceKiosk) {
     return <>{children}</>;
   }
 
@@ -96,10 +97,6 @@ function KioskGuard({ children }: { children: React.ReactNode }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/login?kiosk=1" replace />;
-  }
-
-  if (user?.role !== 'operator') {
-    return <Navigate to="/unauthorized" replace />;
   }
 
   return <>{children}</>;

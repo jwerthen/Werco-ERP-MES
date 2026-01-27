@@ -250,7 +250,7 @@ export default function Layout({ children }: LayoutProps) {
   const [logoutError, setLogoutError] = useState('');
   const globalSearch = useGlobalSearch();
   const keyboardShortcuts = useKeyboardShortcutsContext();
-  const isKiosk = isKioskMode(location.pathname, location.search);
+  const isKiosk = isKioskMode(location.pathname, location.search) && user?.role === 'operator';
 
   // Global keyboard shortcuts for layout
   useKeyboardShortcuts([
@@ -279,8 +279,11 @@ export default function Layout({ children }: LayoutProps) {
   }, [location.pathname]);
 
   const isShopFloorKiosk = useMemo(
-    () => location.pathname.startsWith('/shop-floor') && isKioskMode(location.pathname, location.search),
-    [location.pathname, location.search]
+    () =>
+      location.pathname.startsWith('/shop-floor') &&
+      isKioskMode(location.pathname, location.search) &&
+      user?.role === 'operator',
+    [location.pathname, location.search, user?.role]
   );
 
   const visibleNavigation = useMemo(() => {
