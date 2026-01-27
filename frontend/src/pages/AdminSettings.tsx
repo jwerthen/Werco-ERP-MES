@@ -67,8 +67,10 @@ const generateEmployeePassword = () => {
   return base.join('');
 };
 
-const normalizeEmployeeId = (value: string) => {
-  const digits = value.replace(/\D/g, '').slice(0, 4);
+const normalizeEmployeeId = (value: string) => value.replace(/\D/g, '').slice(0, 4);
+
+const padEmployeeId = (value: string) => {
+  const digits = normalizeEmployeeId(value);
   if (digits.length === 0) return '';
   return digits.padStart(4, '0');
 };
@@ -832,7 +834,7 @@ function EmployeeModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const normalizedId = normalizeEmployeeId(form.employee_id);
+    const normalizedId = padEmployeeId(form.employee_id);
     if (!employee && !EMPLOYEE_ID_PATTERN.test(normalizedId)) {
       setError('Employee ID must be exactly 4 digits.');
       return;
@@ -880,6 +882,7 @@ function EmployeeModal({
                 className="input font-mono tracking-widest text-center"
                 value={form.employee_id}
                 onChange={(e) => setForm({ ...form, employee_id: normalizeEmployeeId(e.target.value) })}
+                onBlur={() => setForm({ ...form, employee_id: padEmployeeId(form.employee_id) })}
                 placeholder="0000"
                 maxLength={4}
                 inputMode="numeric"
