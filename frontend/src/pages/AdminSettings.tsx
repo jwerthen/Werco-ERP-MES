@@ -67,7 +67,11 @@ const generateEmployeePassword = () => {
   return base.join('');
 };
 
-const normalizeEmployeeId = (value: string) => value.replace(/\D/g, '').slice(0, 4);
+const normalizeEmployeeId = (value: string) => {
+  const digits = value.replace(/\D/g, '').slice(0, 4);
+  if (digits.length === 0) return '';
+  return digits.padStart(4, '0');
+};
 
 const buildEmployeeEmail = (employeeId: string) => `employee-${employeeId}@werco.local`;
 
@@ -895,7 +899,7 @@ function EmployeeModal({
             {!employee && (
               <div className="rounded-lg border border-surface-200 bg-surface-50 p-3 text-xs text-surface-600">
                 This creates an operator account tied to the 4-digit ID. Kiosk sign-ins will use this ID and show the
-                employee name.
+                employee name. Short IDs are left-padded with zeros (e.g., 7 â†’ 0007).
               </div>
             )}
             {error && <div className="text-sm text-red-600">{error}</div>}
