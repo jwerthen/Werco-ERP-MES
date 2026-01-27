@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from typing import List, Optional
 import os
 
@@ -79,6 +79,18 @@ class Settings(BaseSettings):
                 "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_production_settings(self) -> "Settings":
+        """Harden production settings."""
+        if self.ENVIRONMENT == "production":
+            if self.DEBUG:
+                raise ValueError("DEBUG must be false in production.")
+            if not self.CORS_ORIGINS:
+                raise ValueError("CORS_ORIGINS must be set in production.")
+            if "localhost" in self.CORS_ORIGINS:
+                raise ValueError("CORS_ORIGINS must not include localhost in production.")
+        return self
     
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
