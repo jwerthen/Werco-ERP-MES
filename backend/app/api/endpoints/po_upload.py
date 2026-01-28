@@ -209,8 +209,12 @@ async def _upload_and_extract_document(
             description = item.get("description") or ""
             uom = item.get("unit_of_measure") or ""
             suggested_type = suggest_part_type(description, uom)
+            raw_part_number = item.get("part_number")
+            if raw_part_number and description:
+                if normalize_description(raw_part_number) == normalize_description(description):
+                    raw_part_number = None
             suggested_number = None
-            if not item.get("part_number") and suggested_type in ["raw_material", "hardware"]:
+            if not raw_part_number and suggested_type in ["raw_material", "hardware"]:
                 suggested_number = _find_existing_part_number_by_description(db, description, suggested_type)
                 if not suggested_number:
                     suggested_number = generate_werco_part_number(description, suggested_type)
@@ -218,7 +222,7 @@ async def _upload_and_extract_document(
             line_items_payload.append(
                 LineItemExtracted(
                     line_number=item.get("line_number", i + 1),
-                    part_number=item.get("part_number"),
+                    part_number=raw_part_number,
                     description=description,
                     qty_ordered=item.get("qty_ordered", 0),
                     unit_of_measure=item.get("unit_of_measure", "EA"),

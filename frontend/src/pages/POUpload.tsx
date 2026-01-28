@@ -187,12 +187,19 @@ export default function POUpload() {
       });
       
       // Initialize line items with match info
-      setLineItems(result.line_items.map((item: any) => ({
-        ...item,
-        selected_part_id: item.matched_part_id,
-        create_new_part: false,
-        new_part_type: (item.suggested_part_type || 'purchased') as LineItem['new_part_type'],
-      })));
+      setLineItems(result.line_items.map((item: any) => {
+        const desc = (item.description || '').trim().toLowerCase();
+        const pn = (item.part_number || '').trim().toLowerCase();
+        const suggested = item.suggested_part_number || '';
+        const shouldUseSuggested = Boolean(suggested) && (!pn || (desc && pn === desc));
+        return {
+          ...item,
+          part_number: shouldUseSuggested ? suggested : item.part_number,
+          selected_part_id: item.matched_part_id,
+          create_new_part: false,
+          new_part_type: (item.suggested_part_type || 'purchased') as LineItem['new_part_type'],
+        };
+      }));
       
       setStep('review');
     } catch (err: any) {
