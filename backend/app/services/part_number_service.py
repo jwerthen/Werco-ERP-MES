@@ -168,23 +168,23 @@ def generate_werco_part_number(description: str, part_type: str, max_length: int
         shape = _find_raw_shape(desc)
         grade = _find_grade(desc)
         thk, w, l, dia = _extract_dims(desc)
-        parts = ["RM", shape]
+        parts = [shape]
         if grade:
             parts.append(grade)
-        dim_str = ""
+        dim_parts = []
         if dia and ("ROD" in desc or "ROUND" in desc):
-            dim_str += f"D{_format_dim(dia)}"
+            dim_parts.append(f"D{_format_dim(dia)}")
         if thk is not None:
-            dim_str += f"T{_format_dim(thk)}"
+            dim_parts.append(f"T{_format_dim(thk)}")
         if w is not None:
-            dim_str += f"W{_format_dim(w)}"
+            dim_parts.append(f"W{_format_dim(w)}")
         if l is not None:
-            dim_str += f"L{_format_dim(l)}"
-        if dim_str:
-            parts.append(dim_str)
+            dim_parts.append(f"L{_format_dim(l)}")
+        if dim_parts:
+            parts.extend(dim_parts)
         if unit:
             parts.append(unit)
-        base = "".join(parts)
+        base = "-".join([p for p in parts if p])
     else:
         hw_type = _find_hardware_type(desc)
         grade = _find_grade(desc)
@@ -214,7 +214,7 @@ def generate_werco_part_number(description: str, part_type: str, max_length: int
             parts.append(grade)
         if finish:
             parts.append(finish)
-        base = "".join(parts)
+        base = "-".join([p for p in parts if p])
 
     base = base.replace(" ", "")
     if len(base) <= max_length:
