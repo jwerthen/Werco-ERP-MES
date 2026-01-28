@@ -433,7 +433,7 @@ def create_po_from_upload(
     po = PurchaseOrder(
         po_number=data.po_number,
         vendor_id=vendor_id,
-        status=POStatus.DRAFT,
+        status=POStatus.SENT,
         order_date=data.order_date,
         required_date=data.required_date,
         expected_date=data.expected_date,
