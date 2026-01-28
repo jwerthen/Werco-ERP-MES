@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 # Extraction schema for LLM
 EXTRACTION_SCHEMA = """
 {
+  "document_type": "string - 'po' or 'invoice'",
   "po_number": "string - the purchase order number",
+  "invoice_number": "string - the invoice number (if document is an invoice)",
   "vendor": {
     "name": "string - vendor/supplier company name",
     "address": "string - full address if available"
@@ -45,7 +47,7 @@ EXTRACTION_SCHEMA = """
 }
 """
 
-SYSTEM_PROMPT = """You are a purchase order data extraction assistant specialized in manufacturing and fabrication industry documents. Your task is to extract structured data from purchase order text.
+SYSTEM_PROMPT = """You are a purchasing document extraction assistant specialized in manufacturing and fabrication industry documents. Your task is to extract structured data from purchase orders and invoices.
 
 Key guidelines:
 1. Extract all fields according to the schema provided
@@ -55,14 +57,15 @@ Key guidelines:
 5. If a field is unclear or ambiguous, set confidence to "low"
 6. If a field is not found, set to null
 7. Pay attention to quantity, unit price, and line totals - verify they make sense
-8. Look for common PO formats: header info, line items table, totals section
+8. Look for common PO/invoice formats: header info, line items table, totals section
+9. Set document_type to "invoice" when the document is an invoice, otherwise "po"
 
 Return ONLY valid JSON matching the schema. No explanations or markdown."""
 
 
-def extract_po_data_with_llm(pdf_text: str, is_ocr: bool = False) -> Dict[str, Any]:
+def extract_po_data_with_llm(pdf_text: str, is_ocr: bool = False, document_type: str = "po") -> Dict[str, Any]:
     """
-    Use Claude API to extract structured PO data from text.
+    Use Claude API to extract structured PO/invoice data from text.
     """
     try:
         import anthropic
@@ -78,7 +81,7 @@ def extract_po_data_with_llm(pdf_text: str, is_ocr: bool = False) -> Dict[str, A
     # Prepare the extraction prompt
     ocr_note = "\n\nNote: This text was extracted via OCR and may contain errors. Be extra careful with numbers and part numbers." if is_ocr else ""
     
-    user_prompt = f"""Extract purchase order data from the following text. Return JSON matching this schema exactly:
+    user_prompt = f"""Extract purchasing document data from the following text. Return JSON matching this schema exactly:
 
 {EXTRACTION_SCHEMA}
 
@@ -87,6 +90,8 @@ Important:
 - Part numbers must be exact as shown
 - Verify quantities and prices make logical sense
 - Flag any uncertain extractions with low confidence
+- If the document is an invoice, set document_type to "invoice" and populate invoice_number
+- If the document is a PO, set document_type to "po" and populate po_number
 {ocr_note}
 
 Purchase Order Text:
@@ -144,7 +149,9 @@ Return ONLY the JSON object, no other text."""
 def _create_empty_result(error_message: str) -> Dict[str, Any]:
     """Create an empty result with error message."""
     return {
+        "document_type": None,
         "po_number": None,
+        "invoice_number": None,
         "vendor": {"name": None, "address": None},
         "order_date": None,
         "expected_delivery_date": None,
@@ -173,10 +180,15 @@ def validate_extracted_data(data: Dict[str, Any]) -> List[Dict[str, str]]:
     Validate extracted PO data and return list of issues.
     """
     issues = []
+    document_type = (data.get("document_type") or "po").lower()
     
     # Check PO number
-    if not data.get("po_number"):
-        issues.append({"field": "po_number", "severity": "error", "message": "PO number is required"})
+    if document_type == "invoice":
+        if not data.get("po_number") and not data.get("invoice_number"):
+            issues.append({"field": "invoice_number", "severity": "error", "message": "Invoice number is required"})
+    else:
+        if not data.get("po_number"):
+            issues.append({"field": "po_number", "severity": "error", "message": "PO number is required"})
     
     # Check vendor
     if not data.get("vendor", {}).get("name"):
@@ -188,8 +200,8 @@ def validate_extracted_data(data: Dict[str, Any]) -> List[Dict[str, str]]:
         issues.append({"field": "line_items", "severity": "error", "message": "No line items found"})
     else:
         for i, item in enumerate(line_items):
-            if not item.get("part_number"):
-                issues.append({"field": f"line_items[{i}].part_number", "severity": "error", "message": f"Line {i+1}: Part number required"})
+            if not item.get("part_number") and not item.get("description"):
+                issues.append({"field": f"line_items[{i}].part_number", "severity": "error", "message": f"Line {i+1}: Part number or description required"})
             if not item.get("qty_ordered") or item.get("qty_ordered", 0) <= 0:
                 issues.append({"field": f"line_items[{i}].qty_ordered", "severity": "error", "message": f"Line {i+1}: Quantity must be > 0"})
             if item.get("confidence") == "low":

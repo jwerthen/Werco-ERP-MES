@@ -1485,6 +1485,16 @@ class ApiService {
     return response.data;
   }
 
+  async uploadInvoicePdf(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post('/po-upload/upload-invoice', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000
+    });
+    return response.data;
+  }
+
   async createPOFromUpload(data: {
     po_number: string;
     vendor_id: number;

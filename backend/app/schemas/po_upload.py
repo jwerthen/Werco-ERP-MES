@@ -20,6 +20,7 @@ class LineItemExtracted(BaseModel):
     unit_price: float = 0
     line_total: float = 0
     confidence: str = "medium"
+    suggested_part_type: Optional[str] = None
     # Matching info
     part_match: Optional[Dict[str, Any]] = None
     matched_part_id: Optional[int] = None
@@ -28,7 +29,9 @@ class LineItemExtracted(BaseModel):
 class POExtractionResult(BaseModel):
     """Response from PDF extraction"""
     # Extracted PO data
+    document_type: Optional[str] = None
     po_number: Optional[str] = None
+    invoice_number: Optional[str] = None
     vendor: VendorExtracted = Field(default_factory=VendorExtracted)
     vendor_match: Optional[Dict[str, Any]] = None
     matched_vendor_id: Optional[int] = None

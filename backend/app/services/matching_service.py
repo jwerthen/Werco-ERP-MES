@@ -242,6 +242,70 @@ def match_part(part_number: str, db: Session, threshold: int = 80) -> MatchResul
     )
 
 
+def match_part_by_description(description: str, db: Session, threshold: int = 75) -> MatchResult:
+    """
+    Match line item description to existing parts by name/description.
+    """
+    from app.models.part import Part
+
+    if not description:
+        return MatchResult(matched=False)
+
+    desc = re.sub(r"\s+", " ", description.strip().upper())
+
+    parts = db.query(Part).filter(Part.is_active == True).limit(1000).all()
+    if not parts:
+        return MatchResult(matched=False)
+
+    if FUZZY_LIB is None:
+        for p in parts:
+            haystack = f"{p.part_number} {p.name} {p.description or ''}".upper()
+            if desc in haystack or haystack in desc:
+                return MatchResult(
+                    matched=True,
+                    match_id=p.id,
+                    match_name=p.part_number,
+                    confidence=80.0
+                )
+        return MatchResult(matched=False, suggestions=[
+            {"id": p.id, "part_number": p.part_number, "name": p.name, "score": 0}
+            for p in parts[:5]
+        ])
+
+    part_choices = {p.id: f"{p.part_number} {p.name} {p.description or ''}" for p in parts}
+    matches = process.extract(
+        desc,
+        part_choices,
+        scorer=fuzz.token_set_ratio,
+        limit=5
+    )
+
+    suggestions = []
+    for match in matches:
+        part_id = match[2]
+        part = next((p for p in parts if p.id == part_id), None)
+        if part:
+            suggestions.append({
+                "id": part.id,
+                "part_number": part.part_number,
+                "name": part.name,
+                "score": match[1]
+            })
+
+    if matches and matches[0][1] >= threshold:
+        best_id = matches[0][2]
+        best_part = next((p for p in parts if p.id == best_id), None)
+        return MatchResult(
+            matched=True,
+            match_id=best_id,
+            match_name=best_part.part_number if best_part else "",
+            confidence=matches[0][1],
+            suggestions=suggestions
+        )
+
+    return MatchResult(matched=False, suggestions=suggestions)
+
+
 def match_po_line_items(
     line_items: List[Dict[str, Any]], 
     db: Session
@@ -254,7 +318,10 @@ def match_po_line_items(
     
     for item in line_items:
         part_number = item.get("part_number", "")
+        description = item.get("description", "")
         match_result = match_part(part_number, db)
+        if not match_result.matched and description:
+            match_result = match_part_by_description(description, db)
         
         enhanced_item = {
             **item,
@@ -264,6 +331,39 @@ def match_po_line_items(
         enhanced_items.append(enhanced_item)
     
     return enhanced_items
+
+
+def suggest_part_type(description: str, uom: str = "") -> str:
+    """
+    Heuristic classification of line items into part types.
+    Returns: purchased, raw_material, hardware, consumable.
+    """
+    text = f"{description or ''} {uom or ''}".upper()
+
+    hardware_keywords = [
+        "BOLT", "SCREW", "NUT", "WASHER", "FASTENER", "RIVET", "PIN", "CLIP",
+        "HINGE", "SPRING", "BRACKET", "STUD", "ANCHOR", "INSERT"
+    ]
+    if any(k in text for k in hardware_keywords):
+        return "hardware"
+
+    raw_material_keywords = [
+        "SHEET", "PLATE", "BAR", "ROD", "TUBE", "PIPE", "ANGLE", "CHANNEL", "BEAM",
+        "FLAT", "ROUND", "A36", "1018", "4140", "6061", "ALUMINUM", "STEEL",
+        "STAINLESS", "BRASS", "COPPER", "THK", "GA", "GAUGE", "FT", "IN", "LB/FT"
+    ]
+    if any(k in text for k in raw_material_keywords):
+        return "raw_material"
+
+    consumable_keywords = [
+        "TAPE", "GLUE", "ADHESIVE", "SEALANT", "SILICONE", "LOCTITE", "OIL",
+        "GREASE", "COOLANT", "ABRASIVE", "SANDPAPER", "DISC", "WHEEL", "WIRE",
+        "GAS", "PAINT", "PRIMER", "SOLVENT", "CLEANER", "RAGS", "WIPES"
+    ]
+    if any(k in text for k in consumable_keywords):
+        return "consumable"
+
+    return "purchased"
 
 
 def check_po_number_exists(po_number: str, db: Session) -> bool:

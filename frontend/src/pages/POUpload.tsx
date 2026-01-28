@@ -36,16 +36,19 @@ interface LineItem {
   unit_price: number;
   line_total: number;
   confidence: string;
+  suggested_part_type: 'purchased' | 'raw_material' | 'hardware' | 'consumable';
   part_match: PartMatch | null;
   matched_part_id: number | null;
   // Form state
   selected_part_id: number | null;
   create_new_part: boolean;
-  new_part_type: 'purchased' | 'raw_material';
+  new_part_type: 'purchased' | 'raw_material' | 'hardware' | 'consumable';
 }
 
 interface ExtractionResult {
+  document_type: 'po' | 'invoice';
   po_number: string;
+  invoice_number: string | null;
   vendor: { name: string; address: string };
   vendor_match: VendorMatch | null;
   matched_vendor_id: number | null;
@@ -75,6 +78,7 @@ export default function POUpload() {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>('upload');
   const [file, setFile] = useState<File | null>(null);
+  const [documentType, setDocumentType] = useState<'po' | 'invoice'>('po');
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState('');
   const [extractionResult, setExtractionResult] = useState<ExtractionResult | null>(null);
@@ -160,7 +164,9 @@ export default function POUpload() {
     setError('');
     
     try {
-      const result = await api.uploadPOPdf(file);
+      const result = documentType === 'invoice'
+        ? await api.uploadInvoicePdf(file)
+        : await api.uploadPOPdf(file);
       setExtractionResult(result);
       
       // Initialize form data from extraction
@@ -184,7 +190,7 @@ export default function POUpload() {
         ...item,
         selected_part_id: item.matched_part_id,
         create_new_part: false,
-        new_part_type: 'purchased' as const,
+        new_part_type: (item.suggested_part_type || 'purchased') as LineItem['new_part_type'],
       })));
       
       setStep('review');
@@ -240,12 +246,12 @@ export default function POUpload() {
   const toggleCreatePart = (lineIndex: number) => {
     setLineItems(prev => prev.map((item, idx) => 
       idx === lineIndex 
-        ? { ...item, create_new_part: !item.create_new_part, selected_part_id: null, new_part_type: 'purchased' }
+        ? { ...item, create_new_part: !item.create_new_part, selected_part_id: null, new_part_type: item.suggested_part_type || 'purchased' }
         : item
     ));
   };
 
-  const setPartType = (lineIndex: number, partType: 'purchased' | 'raw_material') => {
+  const setPartType = (lineIndex: number, partType: LineItem['new_part_type']) => {
     setLineItems(prev => prev.map((item, idx) => 
       idx === lineIndex 
         ? { ...item, new_part_type: partType }
@@ -271,6 +277,12 @@ export default function POUpload() {
     const unmatchedLines = lineItems.filter(item => !item.selected_part_id && !item.create_new_part);
     if (unmatchedLines.length > 0) {
       setError(`${unmatchedLines.length} line(s) need part assignment`);
+      return;
+    }
+
+    const missingNewPartNumbers = lineItems.filter(item => item.create_new_part && !item.part_number);
+    if (missingNewPartNumbers.length > 0) {
+      setError('All new parts must have a part number.');
       return;
     }
     
@@ -333,8 +345,8 @@ export default function POUpload() {
     return (
       <div className="space-y-6">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Upload Purchase Order</h1>
-          <p className="text-gray-500 mt-1">Upload a PDF or Word document to automatically extract data</p>
+          <h1 className="text-3xl font-bold text-gray-900">Upload Purchasing Document</h1>
+          <p className="text-gray-500 mt-1">Upload a PO or Invoice (PDF/DOCX) to extract line items</p>
         </div>
 
         {error && (
@@ -345,6 +357,26 @@ export default function POUpload() {
         )}
 
         <div className="card">
+          <div className="mb-6 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setDocumentType('po')}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold ${
+                documentType === 'po' ? 'bg-werco-primary text-white' : 'bg-gray-100 text-gray-600'
+              }`}
+            >
+              Purchase Order
+            </button>
+            <button
+              type="button"
+              onClick={() => setDocumentType('invoice')}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold ${
+                documentType === 'invoice' ? 'bg-werco-primary text-white' : 'bg-gray-100 text-gray-600'
+              }`}
+            >
+              Vendor Invoice
+            </button>
+          </div>
           <div
             className={`border-2 border-dashed rounded-xl p-12 text-center transition-colors ${
               dragActive 
@@ -376,7 +408,7 @@ export default function POUpload() {
               <>
                 <CloudArrowUpIcon className="h-16 w-16 text-gray-400 mx-auto mb-4" />
                 <p className="text-lg font-medium text-gray-900">
-                  Drag and drop your PO document here
+                  Drag and drop your {documentType === 'invoice' ? 'invoice' : 'PO'} document here
                 </p>
                 <p className="text-sm text-gray-500 mt-1">or</p>
                 <label className="mt-4 inline-block">
@@ -405,7 +437,7 @@ export default function POUpload() {
         <div className="card bg-blue-50 border-blue-200">
           <h3 className="font-semibold text-blue-800 mb-2">How it works</h3>
           <ol className="list-decimal list-inside space-y-1 text-sm text-blue-700">
-            <li>Upload your purchase order (PDF or Word document)</li>
+            <li>Upload your PO or vendor invoice (PDF or Word document)</li>
             <li>AI extracts vendor, line items, and order details</li>
             <li>Review and verify the extracted data</li>
             <li>Match parts to your inventory or create new ones</li>
@@ -489,7 +521,7 @@ export default function POUpload() {
           <ul className="space-y-1">
             {extractionResult.validation_issues.map((issue, idx) => (
               <li key={idx} className={`text-sm ${issue.severity === 'error' ? 'text-red-700' : 'text-amber-700'}`}>
-                • {issue.message}
+                - {issue.message}
               </li>
             ))}
           </ul>
@@ -539,6 +571,9 @@ export default function POUpload() {
                 />
                 {extractionResult?.po_number_exists && (
                   <p className="text-xs text-red-600 mt-1">This PO number already exists</p>
+                )}
+                {extractionResult?.document_type === 'invoice' && extractionResult?.invoice_number && (
+                  <p className="text-xs text-gray-500 mt-1">Invoice #: {extractionResult.invoice_number}</p>
                 )}
               </div>
               <div>
@@ -699,7 +734,7 @@ export default function POUpload() {
             
             {formData.vendor_id && !formData.create_vendor && (
               <div className="mt-3 text-sm text-green-600">
-                ✓ Vendor selected (ID: {formData.vendor_id})
+                Vendor selected (ID: {formData.vendor_id})
               </div>
             )}
           </div>
@@ -725,7 +760,7 @@ export default function POUpload() {
                     <div className="text-right">
                       <p className="font-semibold">${item.line_total?.toFixed(2) || '0.00'}</p>
                       <p className="text-xs text-gray-500">
-                        {item.qty_ordered} × ${item.unit_price?.toFixed(2) || '0.00'}
+                        {item.qty_ordered} x ${item.unit_price?.toFixed(2) || '0.00'}
                       </p>
                     </div>
                   </div>
@@ -784,7 +819,7 @@ export default function POUpload() {
                     {item.selected_part_id ? (
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-green-600">
-                          ✓ Matched to part ID: {item.selected_part_id}
+                          Matched to part ID: {item.selected_part_id}
                         </span>
                         <button
                           onClick={() => setLineItems(prev => prev.map((it, i) => 
@@ -829,6 +864,26 @@ export default function POUpload() {
                               className="text-cyan-600"
                             />
                             <span className="text-sm">Raw Material</span>
+                          </label>
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`part-type-${idx}`}
+                              checked={item.new_part_type === 'hardware'}
+                              onChange={() => setPartType(idx, 'hardware')}
+                              className="text-cyan-600"
+                            />
+                            <span className="text-sm">Hardware</span>
+                          </label>
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="radio"
+                              name={`part-type-${idx}`}
+                              checked={item.new_part_type === 'consumable'}
+                              onChange={() => setPartType(idx, 'consumable')}
+                              className="text-cyan-600"
+                            />
+                            <span className="text-sm">Consumable</span>
                           </label>
                         </div>
                       </div>
@@ -902,7 +957,7 @@ export default function POUpload() {
                   {extractionResult?.tax && (
                     <div className="flex justify-between text-sm">
                       <span>Tax:</span>
-                      <span>${extractionResult.tax.toFixed(2)}</span>
+                  <span>${extractionResult?.tax?.toFixed(2)}</span>
                     </div>
                   )}
                   <div className="flex justify-between font-semibold">

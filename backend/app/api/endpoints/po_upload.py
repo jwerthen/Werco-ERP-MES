@@ -24,7 +24,7 @@ from app.services.pdf_service import (
     SUPPORTED_EXTENSIONS
 )
 from app.services.llm_service import extract_po_data_with_llm, validate_extracted_data
-from app.services.matching_service import match_vendor, match_po_line_items, check_po_number_exists
+from app.services.matching_service import match_vendor, match_po_line_items, check_po_number_exists, suggest_part_type
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -54,16 +54,28 @@ def log_audit(
     )
 
 
-@router.post("/upload-po", response_model=POExtractionResult)
-async def upload_and_extract_po(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def _generate_invoice_po_number(db: Session) -> str:
+    today = datetime.now().strftime("%Y%m%d")
+    prefix = f"INV-{today}-"
+    last_po = db.query(PurchaseOrder).filter(
+        PurchaseOrder.po_number.like(f"{prefix}%")
+    ).order_by(PurchaseOrder.po_number.desc()).first()
+    if last_po:
+        last_num = int(last_po.po_number.split("-")[-1])
+        new_num = last_num + 1
+    else:
+        new_num = 1
+    return f"{prefix}{new_num:03d}"
+
+
+async def _upload_and_extract_document(
+    document_type: str,
+    file: UploadFile,
+    db: Session,
+    current_user: User
+) -> POExtractionResult:
     """
-    Upload a purchase order PDF or Word document and extract data using AI.
-    Supports: .pdf, .doc, .docx
-    Returns extracted data for user review before committing.
+    Upload a PO/Invoice PDF or Word document and extract data using AI.
     """
     # Validate file type by extension
     filename_lower = file.filename.lower()
@@ -117,7 +129,8 @@ async def upload_and_extract_po(
         # Extract structured data using LLM
         llm_result = extract_po_data_with_llm(
             extraction_result.text, 
-            is_ocr=extraction_result.is_ocr
+            is_ocr=extraction_result.is_ocr,
+            document_type=document_type
         )
         
         # Check for LLM errors
@@ -133,6 +146,18 @@ async def upload_and_extract_po(
                     "message": llm_result["_error"]
                 }]
             )
+        
+        # Normalize document type
+        if not llm_result.get("document_type"):
+            llm_result["document_type"] = document_type
+
+        # If invoice and PO number missing, use invoice number or generate
+        if llm_result.get("document_type") == "invoice" and not llm_result.get("po_number"):
+            invoice_number = llm_result.get("invoice_number")
+            if invoice_number:
+                llm_result["po_number"] = f"INV-{invoice_number}"
+            else:
+                llm_result["po_number"] = _generate_invoice_po_number(db)
         
         # Match vendor
         vendor_name = llm_result.get("vendor", {}).get("name", "")
@@ -161,7 +186,9 @@ async def upload_and_extract_po(
         vendor_data = llm_result.get("vendor", {})
         
         result = POExtractionResult(
+            document_type=llm_result.get("document_type"),
             po_number=po_number,
+            invoice_number=llm_result.get("invoice_number"),
             vendor=VendorExtracted(
                 name=vendor_data.get("name"),
                 address=vendor_data.get("address")
@@ -184,6 +211,10 @@ async def upload_and_extract_po(
                     unit_price=item.get("unit_price", 0),
                     line_total=item.get("line_total", 0),
                     confidence=item.get("confidence", "medium"),
+                    suggested_part_type=suggest_part_type(
+                        item.get("description") or "",
+                        item.get("unit_of_measure") or ""
+                    ),
                     part_match=item.get("part_match"),
                     matched_part_id=item.get("matched_part_id")
                 )
@@ -205,7 +236,7 @@ async def upload_and_extract_po(
         # Audit log
         log_audit(
             db, current_user, "PO_DOC_UPLOAD", "purchase_order", 0,
-            f"Uploaded PO document: {file.filename}, extracted {len(matched_items)} line items"
+            f"Uploaded {document_type.upper()} document: {file.filename}, extracted {len(matched_items)} line items"
         )
         db.commit()
         
@@ -214,6 +245,33 @@ async def upload_and_extract_po(
     except Exception as e:
         logger.error(f"PO extraction failed: {e}")
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
+
+
+@router.post("/upload-po", response_model=POExtractionResult)
+async def upload_and_extract_po(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload a purchase order PDF or Word document and extract data using AI.
+    Supports: .pdf, .doc, .docx
+    Returns extracted data for user review before committing.
+    """
+    return await _upload_and_extract_document("po", file, db, current_user)
+
+
+@router.post("/upload-invoice", response_model=POExtractionResult)
+async def upload_and_extract_invoice(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload an invoice PDF or Word document and extract data to create a PO.
+    Supports: .pdf, .doc, .docx
+    """
+    return await _upload_and_extract_document("invoice", file, db, current_user)
 
 
 @router.post("/create-from-upload", response_model=POUploadResponse)
@@ -271,6 +329,10 @@ def create_po_from_upload(
         part_type_str = part_data.get("part_type", "purchased").lower()
         if part_type_str == "raw_material":
             part_type = PartType.RAW_MATERIAL
+        elif part_type_str == "hardware":
+            part_type = PartType.HARDWARE
+        elif part_type_str == "consumable":
+            part_type = PartType.CONSUMABLE
         else:
             part_type = PartType.PURCHASED
         
