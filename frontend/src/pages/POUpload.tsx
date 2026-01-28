@@ -302,7 +302,10 @@ export default function POUpload() {
           part_number: item.part_number || item.suggested_part_number,
           description: item.description,
           part_type: item.new_part_type
-        }));
+        }))
+        .filter((item): item is { part_number: string; description: string; part_type: LineItem['new_part_type'] } =>
+          Boolean(item.part_number)
+        );
       
       const result = await api.createPOFromUpload({
         po_number: formData.po_number,
