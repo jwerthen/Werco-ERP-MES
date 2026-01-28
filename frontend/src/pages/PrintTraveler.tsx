@@ -40,6 +40,7 @@ export default function PrintTraveler() {
   const [part, setPart] = useState<Part | null>(null);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
+  const [autoPrintStarted, setAutoPrintStarted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -77,10 +78,22 @@ export default function PrintTraveler() {
   }, [loadWorkOrder]);
 
   useEffect(() => {
-    if (workOrder && !loading && shouldAutoPrint) {
-      setTimeout(() => window.print(), 500);
+    if (!workOrder || loading || !shouldAutoPrint || autoPrintStarted) return;
+    if (!qrDataUrl) {
+      const fallback = setTimeout(() => {
+        if (!autoPrintStarted) {
+          setAutoPrintStarted(true);
+          window.print();
+        }
+      }, 1500);
+      return () => clearTimeout(fallback);
     }
-  }, [workOrder, loading, shouldAutoPrint]);
+    const timer = setTimeout(() => {
+      setAutoPrintStarted(true);
+      window.print();
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [workOrder, loading, shouldAutoPrint, qrDataUrl, autoPrintStarted]);
 
   useEffect(() => {
     const generateQr = async () => {
