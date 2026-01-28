@@ -21,6 +21,59 @@ from app.schemas.work_order import (
 router = APIRouter()
 
 
+def _is_grouped_assembly(work_order: WorkOrder) -> bool:
+    return bool(work_order.part and work_order.part.part_type == PartType.ASSEMBLY)
+
+
+def _get_active_group(operations: List[WorkOrderOperation]) -> Optional[str]:
+    remaining = [op for op in operations if op.status != OperationStatus.COMPLETE]
+    if not remaining:
+        return None
+    first_op = min(remaining, key=lambda op: op.sequence)
+    return first_op.operation_group
+
+
+def _release_first_group(work_order: WorkOrder) -> None:
+    if _is_grouped_assembly(work_order) and work_order.operations:
+        active_group = _get_active_group(work_order.operations)
+        if active_group:
+            for op in work_order.operations:
+                if op.operation_group == active_group:
+                    op.status = OperationStatus.READY
+            return
+    # Fallback to sequential behavior
+    if work_order.operations:
+        work_order.operations[0].status = OperationStatus.READY
+
+
+def _release_next_group(work_order: WorkOrder, completed_op: WorkOrderOperation) -> None:
+    if not _is_grouped_assembly(work_order) or not completed_op.operation_group:
+        next_ops = [op for op in work_order.operations if op.sequence > completed_op.sequence]
+        if next_ops:
+            next_op = min(next_ops, key=lambda x: x.sequence)
+            next_op.status = OperationStatus.READY
+        return
+
+    # If any ops remain in the same group, do not release next group
+    same_group_remaining = any(
+        op.status != OperationStatus.COMPLETE and op.operation_group == completed_op.operation_group
+        for op in work_order.operations
+    )
+    if same_group_remaining:
+        return
+
+    remaining = [op for op in work_order.operations if op.status != OperationStatus.COMPLETE]
+    if not remaining:
+        return
+
+    next_group = _get_active_group(remaining)
+    if not next_group:
+        return
+
+    for op in work_order.operations:
+        if op.status == OperationStatus.PENDING and op.operation_group == next_group:
+            op.status = OperationStatus.READY
+
 def generate_work_order_number(db: Session) -> str:
     """Generate next work order number (WO-YYYYMMDD-XXX)"""
     today = datetime.now().strftime("%Y%m%d")
@@ -718,7 +771,7 @@ def release_work_order(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
     """Release a work order to production"""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    work_order = db.query(WorkOrder).options(joinedload(WorkOrder.part)).filter(WorkOrder.id == work_order_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
@@ -734,9 +787,8 @@ def release_work_order(
     work_order.released_by = current_user.id
     work_order.released_at = datetime.utcnow()
     
-    # Set first operation to ready
-    if work_order.operations:
-        work_order.operations[0].status = OperationStatus.READY
+    # Set first group to ready for assembly work orders
+    _release_first_group(work_order)
     
     db.commit()
 
@@ -928,16 +980,26 @@ def start_operation(
     current_user: User = Depends(get_current_user)
 ):
     """Start an operation"""
-    operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
+    operation = db.query(WorkOrderOperation).options(
+        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
+    ).filter(WorkOrderOperation.id == operation_id).first()
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
+
+    work_order = operation.work_order
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+    if _is_grouped_assembly(work_order) and operation.operation_group:
+        active_group = _get_active_group(work_order.operations)
+        if active_group and operation.operation_group != active_group:
+            raise HTTPException(status_code=400, detail="Operations in this group are not released yet")
     
     operation.status = OperationStatus.IN_PROGRESS
     operation.actual_start = datetime.utcnow()
     operation.started_by = current_user.id
     
     # Also update work order status if needed
-    work_order = operation.work_order
     if work_order.status == WorkOrderStatus.RELEASED:
         work_order.status = WorkOrderStatus.IN_PROGRESS
         work_order.actual_start = datetime.utcnow()
@@ -955,7 +1017,9 @@ def complete_operation(
     current_user: User = Depends(get_current_user)
 ):
     """Complete an operation"""
-    operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
+    operation = db.query(WorkOrderOperation).options(
+        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
+    ).filter(WorkOrderOperation.id == operation_id).first()
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
     
@@ -965,30 +1029,16 @@ def complete_operation(
     operation.actual_end = datetime.utcnow()
     operation.completed_by = current_user.id
     
-    # Check if next operation should be set to ready
+    # Check if next operation/group should be set to ready
     work_order = operation.work_order
-    next_ops = [op for op in work_order.operations if op.sequence > operation.sequence]
     affected_work_centers = {operation.work_center_id}
-    if next_ops:
-        next_op = min(next_ops, key=lambda x: x.sequence)
-        next_op.status = OperationStatus.READY
-        affected_work_centers.add(next_op.work_center_id)
+    if work_order:
+        _release_next_group(work_order, operation)
+        newly_ready_wcs = {op.work_center_id for op in work_order.operations if op.status == OperationStatus.READY}
+        affected_work_centers |= {wc_id for wc_id in newly_ready_wcs if wc_id}
 
         scheduling_service = SchedulingService(db)
-        if not next_op.scheduled_start:
-            scheduling_service.run_scheduling(
-                work_center_ids=list(affected_work_centers),
-                horizon_days=90,
-                optimize_setup=False,
-                work_order_ids=[work_order.id]
-            )
-        else:
-            scheduling_service.update_availability_rates(
-                work_center_ids=list(affected_work_centers),
-                horizon_days=90
-            )
-    else:
-        SchedulingService(db).update_availability_rates(
+        scheduling_service.update_availability_rates(
             work_center_ids=list(affected_work_centers),
             horizon_days=90
         )

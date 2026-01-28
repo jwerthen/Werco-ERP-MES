@@ -44,10 +44,11 @@ export default function ShopFloor() {
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [selectedWorkCenter, setSelectedWorkCenter] = useState<number | null>(null);
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
+  const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [clockOutModal, setClockOutModal] = useState(false);
+  const [clockOutJob, setClockOutJob] = useState<ActiveJob | null>(null);
   const [clockOutData, setClockOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
@@ -66,7 +67,7 @@ export default function ShopFloor() {
         api.getMyActiveJob()
       ]);
       setWorkCenters(wcResponse);
-      setActiveJob(activeResponse.active_job);
+      setActiveJobs(activeResponse.active_jobs || (activeResponse.active_job ? [activeResponse.active_job] : []));
       if (wcResponse.length > 0) {
         const deptMatch = kioskParams.dept?.toLowerCase() || null;
         const matched = wcResponse.find((wc) => {
@@ -93,7 +94,7 @@ export default function ShopFloor() {
   const checkActiveJob = useCallback(async () => {
     try {
       const response = await api.getMyActiveJob();
-      setActiveJob(response.active_job);
+      setActiveJobs(response.active_jobs || (response.active_job ? [response.active_job] : []));
     } catch (err) {
       console.error('Failed to check active job:', err);
     }
@@ -152,11 +153,6 @@ export default function ShopFloor() {
   };
 
   const handleClockIn = async (item: QueueItem) => {
-    if (activeJob) {
-      alert('You are already clocked in to a job. Please clock out first.');
-      return;
-    }
-
     try {
       await api.clockIn({
         work_order_id: item.work_order_id,
@@ -172,15 +168,16 @@ export default function ShopFloor() {
   };
 
   const handleClockOut = async () => {
-    if (!activeJob) return;
+    if (!clockOutJob) return;
 
     try {
-      await api.clockOut(activeJob.time_entry_id, {
+      await api.clockOut(clockOutJob.time_entry_id, {
         quantity_produced: clockOutData.quantity_produced,
         quantity_scrapped: clockOutData.quantity_scrapped,
         notes: clockOutData.notes
       });
-      setActiveJob(null);
+      await checkActiveJob();
+      setClockOutJob(null);
       setClockOutModal(false);
       setClockOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
       if (selectedWorkCenter) {
@@ -203,6 +200,12 @@ export default function ShopFloor() {
   const formatClockInTime = (clockIn: string) => {
     const date = new Date(clockIn);
     return format(date, 'h:mm a');
+  };
+
+  const closeClockOutModal = () => {
+    setClockOutModal(false);
+    setClockOutJob(null);
+    setClockOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   };
 
   if (loading) {
@@ -240,52 +243,63 @@ export default function ShopFloor() {
       </div>
 
       {/* Active Job Banner */}
-      {activeJob && (
-        <div className="relative overflow-hidden bg-gradient-to-r from-emerald-500 to-emerald-600 rounded-2xl p-6 text-white shadow-lg">
-          {/* Animated background pattern */}
-          <div className="absolute inset-0 opacity-10">
-            <div className="absolute inset-0" style={{
-              backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,0.1) 10px, rgba(255,255,255,0.1) 20px)'
-            }} />
-          </div>
-          
-          <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-            <div className="flex items-start gap-4">
-              <div className="p-3 bg-white/20 rounded-xl">
-                <div className="h-4 w-4 rounded-full bg-white animate-pulse"></div>
+      {activeJobs.length > 0 && (
+        <div className="space-y-4">
+          {activeJobs.map((job) => (
+            <div
+              key={job.time_entry_id}
+              className="relative overflow-hidden bg-gradient-to-r from-emerald-500 to-emerald-600 rounded-2xl p-6 text-white shadow-lg"
+            >
+              {/* Animated background pattern */}
+              <div className="absolute inset-0 opacity-10">
+                <div className="absolute inset-0" style={{
+                  backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,0.1) 10px, rgba(255,255,255,0.1) 20px)'
+                }} />
               </div>
-              <div>
-                <p className="text-emerald-100 text-sm font-medium uppercase tracking-wide mb-1">
-                  Currently Working On
-                </p>
-                <h2 className="text-2xl font-bold mb-1">
-                  {activeJob.work_order_number} — {activeJob.operation_name}
-                </h2>
-                <p className="text-emerald-100">
-                  {activeJob.part_number} • {activeJob.part_name}
-                </p>
-              </div>
-            </div>
-            
-            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-              <div className="text-center sm:text-right">
-                <p className="text-emerald-100 text-sm mb-1">
-                  Started at {formatClockInTime(activeJob.clock_in)}
-                </p>
-                <div className="flex items-center gap-2 text-3xl font-bold font-mono">
-                  <ClockIcon className="h-7 w-7" />
-                  {getElapsedTime(activeJob.clock_in)}
+              
+              <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                <div className="flex items-start gap-4">
+                  <div className="p-3 bg-white/20 rounded-xl">
+                    <div className="h-4 w-4 rounded-full bg-white animate-pulse"></div>
+                  </div>
+                  <div>
+                    <p className="text-emerald-100 text-sm font-medium uppercase tracking-wide mb-1">
+                      Currently Working On
+                    </p>
+                    <h2 className="text-2xl font-bold mb-1">
+                      {job.work_order_number} - {job.operation_name}
+                    </h2>
+                    <p className="text-emerald-100">
+                      {job.part_number} - {job.part_name}
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+                  <div className="text-center sm:text-right">
+                    <p className="text-emerald-100 text-sm mb-1">
+                      Started at {formatClockInTime(job.clock_in)}
+                    </p>
+                    <div className="flex items-center gap-2 text-3xl font-bold font-mono">
+                      <ClockIcon className="h-7 w-7" />
+                      {getElapsedTime(job.clock_in)}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setClockOutJob(job);
+                      setClockOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
+                      setClockOutModal(true);
+                    }}
+                    className="btn bg-white text-emerald-700 hover:bg-emerald-50 shadow-lg"
+                  >
+                    <StopIcon className="h-5 w-5 mr-2" />
+                    Clock Out
+                  </button>
                 </div>
               </div>
-              <button
-                onClick={() => setClockOutModal(true)}
-                className="btn bg-white text-emerald-700 hover:bg-emerald-50 shadow-lg"
-              >
-                <StopIcon className="h-5 w-5 mr-2" />
-                Clock Out
-              </button>
             </div>
-          </div>
+          ))}
         </div>
       )}
 
@@ -445,8 +459,7 @@ export default function ShopFloor() {
                           ) : (
                             <button
                               onClick={() => handleClockIn(item)}
-                              disabled={!!activeJob}
-                              className="btn-success btn-sm w-full disabled:opacity-50"
+                              className="btn-success btn-sm w-full"
                             >
                               <PlayIcon className="h-4 w-4 mr-1.5" />
                               Start
@@ -581,12 +594,12 @@ export default function ShopFloor() {
 
       {/* Clock Out Modal */}
       {clockOutModal && (
-        <div className="modal-overlay" onClick={() => setClockOutModal(false)}>
+        <div className="modal-overlay" onClick={closeClockOutModal}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="text-lg font-semibold text-surface-900">Clock Out</h3>
               <button 
-                onClick={() => setClockOutModal(false)}
+                onClick={closeClockOutModal}
                 className="p-2 rounded-lg text-surface-400 hover:text-surface-600 hover:bg-surface-100"
               >
                 <XMarkIcon className="h-5 w-5" />
@@ -597,7 +610,7 @@ export default function ShopFloor() {
               <div className="bg-surface-50 rounded-xl p-4 mb-4">
                 <p className="text-sm text-surface-500 mb-1">Completing work on</p>
                 <p className="font-semibold text-surface-900">
-                  {activeJob?.work_order_number} — {activeJob?.operation_name}
+                  {clockOutJob?.work_order_number} — {clockOutJob?.operation_name}
                 </p>
               </div>
               
@@ -639,7 +652,7 @@ export default function ShopFloor() {
             
             <div className="modal-footer">
               <button
-                onClick={() => setClockOutModal(false)}
+                onClick={closeClockOutModal}
                 className="btn-secondary"
               >
                 Cancel
