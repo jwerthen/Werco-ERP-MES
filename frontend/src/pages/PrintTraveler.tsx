@@ -59,6 +59,10 @@ export default function PrintTraveler() {
   }
 
   const operations = workOrder.operations ?? [];
+  const formatHours = (value?: number | string | null) => {
+    const parsed = typeof value === 'string' ? Number(value) : value;
+    return Number.isFinite(parsed) ? Number(parsed).toFixed(2) : '0.00';
+  };
 
   return (
     <div className="p-8 max-w-4xl mx-auto print:p-4">
@@ -158,8 +162,8 @@ export default function PrintTraveler() {
               <td className="border p-2 font-mono">{op.operation_number || op.sequence}</td>
               <td className="border p-2">{op.name}</td>
               <td className="border p-2">{op.work_center_name || op.work_center_id}</td>
-              <td className="border p-2 text-center">{op.setup_time_hours.toFixed(2)}</td>
-              <td className="border p-2 text-center">{op.run_time_hours.toFixed(2)}</td>
+              <td className="border p-2 text-center">{formatHours(op.setup_time_hours)}</td>
+              <td className="border p-2 text-center">{formatHours(op.run_time_hours)}</td>
               <td className="border p-2 text-center h-8"></td>
               <td className="border p-2 text-center h-8"></td>
               <td className="border p-2 text-center h-8"></td>
