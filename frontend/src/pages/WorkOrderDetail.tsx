@@ -180,7 +180,7 @@ export default function WorkOrderDetail() {
             </button>
           )}
           <button 
-            onClick={() => window.open(`/print/traveler/${workOrder.id}`, '_blank')}
+            onClick={() => window.open(`/print/traveler/${workOrder.id}?autoprint=1`, '_blank')}
             className="btn-secondary flex items-center"
           >
             <PrinterIcon className="h-5 w-5 mr-2" />

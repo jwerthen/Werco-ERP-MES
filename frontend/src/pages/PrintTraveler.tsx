@@ -1,20 +1,29 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import { useParams, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrder } from '../types';
 import { format } from 'date-fns';
 
 export default function PrintTraveler() {
   const { id } = useParams();
+  const location = useLocation();
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const shouldAutoPrint = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return params.get('autoprint') === '1' || params.get('print') === '1';
+  }, [location.search]);
 
   const loadWorkOrder = useCallback(async () => {
     try {
+      setError('');
       const response = await api.getWorkOrder(parseInt(id!));
       setWorkOrder(response);
     } catch (err) {
       console.error('Failed to load work order:', err);
+      setError('Unable to load traveler. Please verify the work order ID and try again.');
     } finally {
       setLoading(false);
     }
@@ -25,14 +34,31 @@ export default function PrintTraveler() {
   }, [loadWorkOrder]);
 
   useEffect(() => {
-    if (workOrder && !loading) {
+    if (workOrder && !loading && shouldAutoPrint) {
       setTimeout(() => window.print(), 500);
     }
-  }, [workOrder, loading]);
+  }, [workOrder, loading, shouldAutoPrint]);
 
-  if (loading || !workOrder) {
+  if (loading) {
     return <div className="p-8">Loading...</div>;
   }
+
+  if (!workOrder || error) {
+    return (
+      <div className="p-8 max-w-3xl mx-auto">
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
+          {error || 'Work order not found.'}
+        </div>
+        <div className="mt-6">
+          <button onClick={() => window.close()} className="btn-secondary">
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const operations = workOrder.operations ?? [];
 
   return (
     <div className="p-8 max-w-4xl mx-auto print:p-4">
@@ -127,11 +153,11 @@ export default function PrintTraveler() {
           </tr>
         </thead>
         <tbody>
-          {workOrder.operations.map((op) => (
+          {operations.map((op) => (
             <tr key={op.id}>
               <td className="border p-2 font-mono">{op.operation_number || op.sequence}</td>
               <td className="border p-2">{op.name}</td>
-              <td className="border p-2">{op.work_center_id}</td>
+              <td className="border p-2">{op.work_center_name || op.work_center_id}</td>
               <td className="border p-2 text-center">{op.setup_time_hours.toFixed(2)}</td>
               <td className="border p-2 text-center">{op.run_time_hours.toFixed(2)}</td>
               <td className="border p-2 text-center h-8"></td>
