@@ -17,7 +17,7 @@ class VendorBase(BaseModel):
     city: Optional[str] = Field(None, max_length=100)
     state: Optional[str] = Field(None, max_length=2, pattern=r'^[A-Z]{2}$', description="2-letter state code")
     postal_code: Optional[str] = Field(None, max_length=20)
-    country: str = Field(default="USA", max_length=2, pattern=r'^[A-Z]{2}$')
+    country: str = Field(default="US", max_length=3, pattern=r'^[A-Z]{2,3}$')
     payment_terms: Optional[str] = Field(None, max_length=100)
     lead_time_days: int = Field(default=14, ge=0, le=365, description="Default lead time in days")
     is_approved: bool = False
@@ -30,6 +30,16 @@ class VendorBase(BaseModel):
     def uppercase_code(cls, v: str) -> str:
         """Ensure vendor code is uppercase"""
         return v.upper().strip() if isinstance(v, str) else v
+
+    @field_validator('country', mode='before')
+    @classmethod
+    def normalize_country(cls, v: str) -> str:
+        if not isinstance(v, str):
+            return v
+        value = v.strip().upper()
+        if value == "USA":
+            return "US"
+        return value
 
 
 class VendorCreate(VendorBase):
@@ -47,7 +57,7 @@ class VendorUpdate(BaseModel):
     city: Optional[str] = Field(None, max_length=100)
     state: Optional[str] = Field(None, max_length=2, pattern=r'^[A-Z]{2}$')
     postal_code: Optional[str] = Field(None, max_length=20)
-    country: Optional[str] = Field(None, max_length=2, pattern=r'^[A-Z]{2}$')
+    country: Optional[str] = Field(None, max_length=3, pattern=r'^[A-Z]{2,3}$')
     payment_terms: Optional[str] = Field(None, max_length=100)
     lead_time_days: Optional[int] = Field(None, ge=0, le=365)
     is_approved: Optional[bool] = None
