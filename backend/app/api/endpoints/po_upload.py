@@ -5,6 +5,7 @@ import os
 import logging
 from typing import Optional
 from datetime import datetime, date
+from sqlalchemy import func
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -13,7 +14,7 @@ from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POStatus
-from app.models.part import Part
+from app.models.part import Part, PartType
 from app.services.audit_service import AuditService
 from app.schemas.po_upload import (
     POExtractionResult, POCreateFromUpload, POUploadResponse,
@@ -25,6 +26,7 @@ from app.services.pdf_service import (
 )
 from app.services.llm_service import extract_po_data_with_llm, validate_extracted_data
 from app.services.matching_service import match_vendor, match_po_line_items, check_po_number_exists, suggest_part_type
+from app.services.part_number_service import generate_werco_part_number, normalize_description
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -66,6 +68,23 @@ def _generate_quote_po_number(db: Session) -> str:
     else:
         new_num = 1
     return f"{prefix}{new_num:03d}"
+
+
+def _find_existing_part_number_by_description(db: Session, description: str, part_type: str) -> Optional[str]:
+    if not description or not part_type:
+        return None
+    normalized = " ".join(normalize_description(description).lower().split())
+    try:
+        part_type_enum = PartType(part_type)
+    except Exception:
+        return None
+    part = db.query(Part).filter(
+        Part.part_type == part_type_enum,
+        func.lower(func.trim(Part.description)) == normalized
+    ).first()
+    if part:
+        return part.part_number
+    return None
 
 
 async def _upload_and_extract_document(
@@ -185,6 +204,34 @@ async def _upload_and_extract_document(
         # Build response
         vendor_data = llm_result.get("vendor", {})
         
+        line_items_payload = []
+        for i, item in enumerate(matched_items):
+            description = item.get("description") or ""
+            uom = item.get("unit_of_measure") or ""
+            suggested_type = suggest_part_type(description, uom)
+            suggested_number = None
+            if not item.get("part_number") and suggested_type in ["raw_material", "hardware"]:
+                suggested_number = _find_existing_part_number_by_description(db, description, suggested_type)
+                if not suggested_number:
+                    suggested_number = generate_werco_part_number(description, suggested_type)
+
+            line_items_payload.append(
+                LineItemExtracted(
+                    line_number=item.get("line_number", i + 1),
+                    part_number=item.get("part_number"),
+                    description=description,
+                    qty_ordered=item.get("qty_ordered", 0),
+                    unit_of_measure=item.get("unit_of_measure", "EA"),
+                    unit_price=item.get("unit_price", 0),
+                    line_total=item.get("line_total", 0),
+                    confidence=item.get("confidence", "medium"),
+                    suggested_part_type=suggested_type,
+                    suggested_part_number=suggested_number,
+                    part_match=item.get("part_match"),
+                    matched_part_id=item.get("matched_part_id")
+                )
+            )
+
         result = POExtractionResult(
             document_type=llm_result.get("document_type"),
             po_number=po_number,
@@ -201,25 +248,7 @@ async def _upload_and_extract_document(
             payment_terms=llm_result.get("payment_terms"),
             shipping_method=llm_result.get("shipping_method"),
             ship_to=llm_result.get("ship_to"),
-            line_items=[
-                LineItemExtracted(
-                    line_number=item.get("line_number", i+1),
-                    part_number=item.get("part_number"),
-                    description=item.get("description"),
-                    qty_ordered=item.get("qty_ordered", 0),
-                    unit_of_measure=item.get("unit_of_measure", "EA"),
-                    unit_price=item.get("unit_price", 0),
-                    line_total=item.get("line_total", 0),
-                    confidence=item.get("confidence", "medium"),
-                    suggested_part_type=suggest_part_type(
-                        item.get("description") or "",
-                        item.get("unit_of_measure") or ""
-                    ),
-                    part_match=item.get("part_match"),
-                    matched_part_id=item.get("matched_part_id")
-                )
-                for i, item in enumerate(matched_items)
-            ],
+            line_items=line_items_payload,
             subtotal=llm_result.get("subtotal"),
             tax=llm_result.get("tax"),
             shipping_cost=llm_result.get("shipping_cost"),
@@ -337,8 +366,23 @@ def create_po_from_upload(
     from app.models.part import PartType
     part_id_map = {}  # Maps part_number to part_id for new parts
     for part_data in data.create_parts:
-        # Determine part type - default to PURCHASED, but allow RAW_MATERIAL
-        part_type_str = part_data.get("part_type", "purchased").lower()
+        part_type_str = (part_data.get("part_type") or "purchased").lower()
+        part_description = part_data.get("description") or ""
+        part_number = part_data.get("part_number")
+
+        if not part_number and part_type_str in ["raw_material", "hardware"] and part_description:
+            part_number = _find_existing_part_number_by_description(db, part_description, part_type_str)
+            if not part_number:
+                part_number = generate_werco_part_number(part_description, part_type_str)
+            part_data["part_number"] = part_number
+
+        if not part_number:
+            raise HTTPException(status_code=400, detail="Part number is required for new parts")
+
+        if db.query(Part).filter(Part.part_number == part_number).first():
+            part_id_map[part_number] = db.query(Part).filter(Part.part_number == part_number).first().id
+            continue
+
         if part_type_str == "raw_material":
             part_type = PartType.RAW_MATERIAL
         elif part_type_str == "hardware":
@@ -349,8 +393,8 @@ def create_po_from_upload(
             part_type = PartType.PURCHASED
         
         new_part = Part(
-            part_number=part_data.get("part_number"),
-            name=part_data.get("description", part_data.get("part_number")),
+            part_number=part_number,
+            name=part_description or part_number,
             description=part_data.get("description"),
             part_type=part_type,
             is_active=True,
@@ -358,7 +402,7 @@ def create_po_from_upload(
         )
         db.add(new_part)
         db.flush()
-        part_id_map[part_data.get("part_number")] = new_part.id
+        part_id_map[part_number] = new_part.id
         parts_created += 1
     
     # Validate all line items have valid part_ids

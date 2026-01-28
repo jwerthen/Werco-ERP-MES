@@ -37,6 +37,7 @@ interface LineItem {
   line_total: number;
   confidence: string;
   suggested_part_type: 'purchased' | 'raw_material' | 'hardware' | 'consumable';
+  suggested_part_number?: string | null;
   part_match: PartMatch | null;
   matched_part_id: number | null;
   // Form state
@@ -246,7 +247,13 @@ export default function POUpload() {
   const toggleCreatePart = (lineIndex: number) => {
     setLineItems(prev => prev.map((item, idx) => 
       idx === lineIndex 
-        ? { ...item, create_new_part: !item.create_new_part, selected_part_id: null, new_part_type: item.suggested_part_type || 'purchased' }
+        ? { 
+            ...item,
+            create_new_part: !item.create_new_part,
+            selected_part_id: null,
+            new_part_type: item.suggested_part_type || 'purchased',
+            part_number: item.part_number || item.suggested_part_number || item.part_number
+          }
         : item
     ));
   };
@@ -280,9 +287,11 @@ export default function POUpload() {
       return;
     }
 
-    const missingNewPartNumbers = lineItems.filter(item => item.create_new_part && !item.part_number);
+    const missingNewPartNumbers = lineItems.filter(
+      item => item.create_new_part && !item.part_number && !item.suggested_part_number
+    );
     if (missingNewPartNumbers.length > 0) {
-      setError('All new parts must have a part number.');
+      setError('All new parts must have a part number or a suggested Werco number.');
       return;
     }
     
@@ -290,7 +299,7 @@ export default function POUpload() {
       const partsToCreate = lineItems
         .filter(item => item.create_new_part)
         .map(item => ({
-          part_number: item.part_number,
+          part_number: item.part_number || item.suggested_part_number,
           description: item.description,
           part_type: item.new_part_type
         }));
@@ -843,6 +852,20 @@ export default function POUpload() {
                             Cancel
                           </button>
                         </div>
+                        {item.suggested_part_number && item.part_number !== item.suggested_part_number && (
+                          <div className="flex items-center justify-between text-xs text-gray-600">
+                            <span>Suggested Werco #:</span>
+                            <button
+                              type="button"
+                              onClick={() => setLineItems(prev => prev.map((it, i) => 
+                                i === idx ? { ...it, part_number: item.suggested_part_number || it.part_number } : it
+                              ))}
+                              className="text-werco-primary hover:underline"
+                            >
+                              {item.suggested_part_number}
+                            </button>
+                          </div>
+                        )}
                         <div className="flex items-center gap-4">
                           <span className="text-xs text-gray-500">Part Type:</span>
                           <label className="flex items-center gap-1.5 cursor-pointer">

@@ -21,6 +21,7 @@ class LineItemExtracted(BaseModel):
     line_total: float = 0
     confidence: str = "medium"
     suggested_part_type: Optional[str] = None
+    suggested_part_number: Optional[str] = None
     # Matching info
     part_match: Optional[Dict[str, Any]] = None
     matched_part_id: Optional[int] = None
