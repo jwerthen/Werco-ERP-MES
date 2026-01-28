@@ -850,6 +850,11 @@ class ApiService {
     return response.data;
   }
 
+  async getPurchaseOrderPrintData(poId: number) {
+    const response = await this.api.get(`/print/purchase-orders/${poId}/print-data`);
+    return response.data;
+  }
+
   // Scheduling
   async getScheduledJobs(params?: { start_date?: string; end_date?: string; work_center_id?: number }) {
     const response = await this.api.get('/scheduling/jobs', { params });

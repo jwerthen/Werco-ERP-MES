@@ -253,6 +253,8 @@ class PurchaseOrderPrintData(BaseModel):
     vendor_email: Optional[str] = None
     vendor_phone: Optional[str] = None
     vendor_address: Optional[str] = None
+    buyer_name: Optional[str] = None
+    buyer_email: Optional[str] = None
     order_date: Optional[str] = None
     required_date: Optional[str] = None
     expected_date: Optional[str] = None
@@ -311,6 +313,10 @@ def get_purchase_order_print_data(
             required_date=format_date(line.required_date)
         ))
     
+    buyer = None
+    if po.created_by:
+        buyer = db.query(User).filter(User.id == po.created_by).first()
+
     return PurchaseOrderPrintData(
         po_number=po.po_number,
         status=po.status.value if hasattr(po.status, 'value') else po.status,
@@ -320,6 +326,8 @@ def get_purchase_order_print_data(
         vendor_email=po.vendor.email if po.vendor else None,
         vendor_phone=po.vendor.phone if po.vendor else None,
         vendor_address="\n".join(vendor_address_parts) if vendor_address_parts else None,
+        buyer_name=buyer.full_name if buyer else None,
+        buyer_email=buyer.email if buyer else None,
         order_date=format_date(po.order_date),
         required_date=format_date(po.required_date),
         expected_date=format_date(po.expected_date),

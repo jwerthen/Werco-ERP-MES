@@ -87,7 +87,7 @@ const statusColors: Record<string, string> = {
 };
 
 export default function Purchasing() {
-  const [activeTab, setActiveTab] = useState<TabType>('receiving');
+  const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [receivingQueue, setReceivingQueue] = useState<ReceivingQueueItem[]>([]);
@@ -95,6 +95,7 @@ export default function Purchasing() {
   const [parts, setParts] = useState<Part[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
+  const [poSearch, setPoSearch] = useState('');
 
   const [showPOModal, setShowPOModal] = useState(false);
   const [showVendorModal, setShowVendorModal] = useState(false);
@@ -199,6 +200,10 @@ export default function Purchasing() {
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to send PO');
     }
+  };
+
+  const handlePrintPO = (poId: number) => {
+    window.open(`/print/purchase-order/${poId}?autoprint=1`, '_blank');
   };
 
   const handleCreateVendor = async (e: React.FormEvent) => {
@@ -522,7 +527,16 @@ export default function Purchasing() {
       {/* Purchase Orders Tab */}
       {activeTab === 'orders' && (
         <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Purchase Orders</h2>
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
+            <h2 className="text-lg font-semibold">Purchase Orders</h2>
+            <input
+              type="text"
+              value={poSearch}
+              onChange={(e) => setPoSearch(e.target.value)}
+              className="input max-w-sm"
+              placeholder="Search by PO # or vendor..."
+            />
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
@@ -538,7 +552,16 @@ export default function Purchasing() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {purchaseOrders.map((po) => (
+                  {purchaseOrders
+                    .filter((po) => {
+                      const term = poSearch.trim().toLowerCase();
+                      if (!term) return true;
+                      return (
+                        po.po_number.toLowerCase().includes(term) ||
+                        (po.vendor_name || '').toLowerCase().includes(term)
+                      );
+                    })
+                    .map((po) => (
                   <tr key={po.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-werco-primary">{po.po_number}</td>
                     <td className="px-4 py-3">{po.vendor_name}</td>
@@ -556,14 +579,22 @@ export default function Purchasing() {
                     <td className="px-4 py-3 text-right font-medium">${po.total.toFixed(2)}</td>
                     <td className="px-4 py-3 text-center">{po.line_count}</td>
                     <td className="px-4 py-3 text-center">
-                      {po.status === 'draft' && (
+                      <div className="flex items-center justify-center gap-3">
                         <button
-                          onClick={() => handleSendPO(po.id)}
-                          className="text-werco-primary hover:underline text-sm"
+                          onClick={() => handlePrintPO(po.id)}
+                          className="text-surface-600 hover:text-werco-primary text-sm"
                         >
-                          Send
+                          Print
                         </button>
-                      )}
+                        {po.status === 'draft' && (
+                          <button
+                            onClick={() => handleSendPO(po.id)}
+                            className="text-werco-primary hover:underline text-sm"
+                          >
+                            Send
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

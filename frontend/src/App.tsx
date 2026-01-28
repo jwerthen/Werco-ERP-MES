@@ -37,6 +37,7 @@ const Users = lazy(() => import('./pages/Users'));
 const Customers = lazy(() => import('./pages/Customers'));
 const Calibration = lazy(() => import('./pages/Calibration'));
 const PrintTraveler = lazy(() => import('./pages/PrintTraveler'));
+const PrintPurchaseOrder = lazy(() => import('./pages/PrintPurchaseOrder'));
 const Traceability = lazy(() => import('./pages/Traceability'));
 const PrintPackingSlip = lazy(() => import('./pages/PrintPackingSlip'));
 const AuditLog = lazy(() => import('./pages/AuditLog'));
@@ -366,6 +367,11 @@ function AppRoutes() {
       <Route path="/print/traveler/:id" element={
         <PrivateRoute>
           <LazyRoute><PrintTraveler /></LazyRoute>
+        </PrivateRoute>
+      } />
+      <Route path="/print/purchase-order/:id" element={
+        <PrivateRoute>
+          <LazyRoute><PrintPurchaseOrder /></LazyRoute>
         </PrivateRoute>
       } />
       <Route path="/print/packing-slip/:id" element={
