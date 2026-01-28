@@ -178,7 +178,7 @@ def _extract_dims(desc: str) -> Tuple[Optional[float], Optional[float], Optional
     return thk, w, l, dia
 
 
-def generate_werco_part_number(description: str, part_type: str, max_length: int = 20) -> Optional[str]:
+def generate_werco_part_number(description: str, part_type: str, max_length: int = 30) -> Optional[str]:
     if not description or not part_type:
         return None
     desc = normalize_description(description)
