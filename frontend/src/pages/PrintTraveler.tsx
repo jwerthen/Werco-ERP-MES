@@ -3,6 +3,7 @@ import { useParams, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { Part, WorkOrder } from '../types';
 import { format } from 'date-fns';
+import QRCode from 'qrcode';
 
 interface MaterialRequirement {
   bom_item_id: number;
@@ -38,6 +39,7 @@ export default function PrintTraveler() {
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [part, setPart] = useState<Part | null>(null);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
+  const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -79,6 +81,21 @@ export default function PrintTraveler() {
       setTimeout(() => window.print(), 500);
     }
   }, [workOrder, loading, shouldAutoPrint]);
+
+  useEffect(() => {
+    const generateQr = async () => {
+      if (!workOrder) return;
+      const baseUrl = window.location.origin;
+      const workOrderUrl = `${baseUrl}/work-orders/${workOrder.id}`;
+      try {
+        const dataUrl = await QRCode.toDataURL(workOrderUrl, { width: 160, margin: 1 });
+        setQrDataUrl(dataUrl);
+      } catch (err) {
+        console.error('Failed to generate QR code:', err);
+      }
+    };
+    generateQr();
+  }, [workOrder]);
 
   if (loading) {
     return <div className="p-8">Loading...</div>;
@@ -129,6 +146,11 @@ export default function PrintTraveler() {
         <div className="text-right">
           <img src="/Werco_Logo-PNG.png" alt="Werco" className="h-12 mb-2" />
           <p className="text-sm">AS9100D / ISO 9001 Certified</p>
+          {qrDataUrl && (
+            <div className="mt-2 flex justify-end">
+              <img src={qrDataUrl} alt="Work Order QR" className="h-20 w-20 print-qrcode" />
+            </div>
+          )}
         </div>
       </div>
 
