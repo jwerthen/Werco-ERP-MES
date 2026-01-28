@@ -576,7 +576,9 @@ export default function Purchasing() {
                     <td className="px-4 py-3 text-sm">
                       {po.required_date ? format(new Date(po.required_date), 'MMM d, yyyy') : '-'}
                     </td>
-                    <td className="px-4 py-3 text-right font-medium">${po.total.toFixed(2)}</td>
+                    <td className="px-4 py-3 text-right font-medium">
+                      ${Number(po.total || 0).toFixed(2)}
+                    </td>
                     <td className="px-4 py-3 text-center">{po.line_count}</td>
                     <td className="px-4 py-3 text-center">
                       <div className="flex items-center justify-center gap-3">
