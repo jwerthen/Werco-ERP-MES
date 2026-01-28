@@ -61,6 +61,8 @@ export default function MaterialsInventoryPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+  const [suggestedPartNumber, setSuggestedPartNumber] = useState<string | null>(null);
+  const [autoPartNumber, setAutoPartNumber] = useState(true);
 
   const [receiveForm, setReceiveForm] = useState({
     part_id: 0, quantity: 0, location_code: '', lot_number: '', 
@@ -148,6 +150,31 @@ export default function MaterialsInventoryPage() {
     loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    if (!showCreateModal) return;
+    if (!['raw_material', 'hardware'].includes(createForm.part_type)) {
+      setSuggestedPartNumber(null);
+      return;
+    }
+    if (!createForm.description || createForm.description.trim().length < 3) {
+      setSuggestedPartNumber(null);
+      return;
+    }
+    const timeout = setTimeout(async () => {
+      try {
+        const result = await api.getSuggestedPartNumber(createForm.description, createForm.part_type);
+        const nextSuggestion = result.suggested_part_number || null;
+        setSuggestedPartNumber(nextSuggestion);
+        if (autoPartNumber && (!createForm.part_number || createForm.part_number === suggestedPartNumber)) {
+          setCreateForm(prev => ({ ...prev, part_number: nextSuggestion || '' }));
+        }
+      } catch (err) {
+        console.error('Failed to suggest part number:', err);
+      }
+    }, 350);
+    return () => clearTimeout(timeout);
+  }, [showCreateModal, createForm.description, createForm.part_type, autoPartNumber, createForm.part_number, suggestedPartNumber]);
+
   const handleReceive = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -193,6 +220,8 @@ export default function MaterialsInventoryPage() {
         unit_of_measure: 'each',
         standard_cost: 0,
       });
+      setSuggestedPartNumber(null);
+      setAutoPartNumber(true);
       loadData();
     } catch (err: any) {
       const errorMsg = err.response?.data?.detail;
@@ -726,12 +755,25 @@ export default function MaterialsInventoryPage() {
                     onChange={(e) => {
                       // Only allow uppercase letters, numbers, and hyphens
                       const cleaned = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '');
+                      setAutoPartNumber(false);
                       setCreateForm({...createForm, part_number: cleaned});
                     }} 
                     className="input" 
                     placeholder="e.g., STEEL-1018-05"
                     required 
                   />
+                  {suggestedPartNumber && createForm.part_number !== suggestedPartNumber && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAutoPartNumber(true);
+                        setCreateForm({ ...createForm, part_number: suggestedPartNumber });
+                      }}
+                      className="mt-2 text-xs text-werco-primary hover:underline"
+                    >
+                      Use suggested Werco #: {suggestedPartNumber}
+                    </button>
+                  )}
                 </div>
                 <div>
                   <label className="label">Unit of Measure *</label>

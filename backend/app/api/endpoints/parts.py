@@ -1,13 +1,14 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.part import Part, PartType, UnitOfMeasure
 from app.schemas.part import PartCreate, PartUpdate, PartResponse
 from app.services.audit_service import AuditService
+from app.services.part_number_service import generate_werco_part_number, normalize_description
 
 router = APIRouter()
 
@@ -339,3 +340,23 @@ def restore_part(
                     action="restore")
     
     return {"message": "Part restored successfully", "part_id": part.id}
+@router.get("/generate-number", summary="Generate Werco part number for raw material or hardware")
+def generate_part_number(
+    description: str = Query(..., min_length=3, description="Part description"),
+    part_type: PartType = Query(..., description="Part type"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if part_type not in [PartType.RAW_MATERIAL, PartType.HARDWARE]:
+        return {"suggested_part_number": None, "existing": False}
+
+    normalized = " ".join(normalize_description(description).lower().split())
+    existing = db.query(Part).filter(
+        Part.part_type == part_type,
+        func.lower(func.trim(Part.description)) == normalized
+    ).first()
+    if existing:
+        return {"suggested_part_number": existing.part_number, "existing": True}
+
+    suggested = generate_werco_part_number(description, part_type.value)
+    return {"suggested_part_number": suggested, "existing": False}

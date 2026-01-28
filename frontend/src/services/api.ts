@@ -321,6 +321,13 @@ class ApiService {
     return response.data;
   }
 
+  async getSuggestedPartNumber(description: string, partType: string): Promise<{ suggested_part_number: string | null; existing: boolean }> {
+    const response = await this.api.get('/parts/generate-number', {
+      params: { description, part_type: partType }
+    });
+    return response.data;
+  }
+
   async updatePart(id: number, data: PartUpdate): Promise<Part> {
     const response = await this.api.put<Part>(`/parts/${id}`, data);
     return response.data;
