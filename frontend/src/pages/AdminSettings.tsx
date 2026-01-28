@@ -75,7 +75,7 @@ const padEmployeeId = (value: string) => {
   return digits.padStart(4, '0');
 };
 
-const buildEmployeeEmail = (employeeId: string) => `employee-${employeeId}@werco.local`;
+const buildEmployeeEmail = (employeeId: string) => `employee-${employeeId}@werco.com`;
 
 export default function AdminSettings() {
   const [activeTab, setActiveTab] = useState<TabKey>('materials');
