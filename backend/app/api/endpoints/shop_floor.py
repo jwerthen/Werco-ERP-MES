@@ -657,15 +657,6 @@ def start_operation(
         if active_group and operation.operation_group != active_group:
             raise HTTPException(status_code=400, detail="Operations in this group are not released yet")
     else:
-    work_order = operation.work_order
-    if not work_order:
-        raise HTTPException(status_code=404, detail="Work order not found")
-
-    if _is_grouped_assembly(work_order) and operation.operation_group:
-        active_group = _get_active_group(work_order.operations)
-        if active_group and operation.operation_group != active_group:
-            raise HTTPException(status_code=400, detail="Operations in this group are not released yet")
-    else:
         # Check if previous operations are complete (if not first operation)
         prev_ops = db.query(WorkOrderOperation).filter(
             and_(
