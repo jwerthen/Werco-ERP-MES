@@ -210,8 +210,16 @@ async def _upload_and_extract_document(
             uom = item.get("unit_of_measure") or ""
             suggested_type = suggest_part_type(description, uom)
             raw_part_number = item.get("part_number")
-            if raw_part_number and description:
-                if normalize_description(raw_part_number) == normalize_description(description):
+            if raw_part_number:
+                normalized_pn = normalize_description(raw_part_number)
+                normalized_desc = normalize_description(description) if description else ""
+                looks_like_description = (
+                    normalized_pn == normalized_desc
+                    or (" " in normalized_pn and "-" not in raw_part_number)
+                    or " GA " in normalized_pn
+                    or " X " in normalized_pn
+                )
+                if looks_like_description:
                     raw_part_number = None
             suggested_number = None
             if not raw_part_number and suggested_type in ["raw_material", "hardware", "consumable"]:

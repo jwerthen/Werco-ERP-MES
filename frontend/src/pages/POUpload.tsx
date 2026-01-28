@@ -189,9 +189,11 @@ export default function POUpload() {
       // Initialize line items with match info
       setLineItems(result.line_items.map((item: any) => {
         const desc = (item.description || '').trim().toLowerCase();
-        const pn = (item.part_number || '').trim().toLowerCase();
+        const pnRaw = item.part_number || '';
+        const pn = pnRaw.trim().toLowerCase();
         const suggested = item.suggested_part_number || '';
-        const shouldUseSuggested = Boolean(suggested) && (!pn || (desc && pn === desc));
+        const looksLikeDescription = pnRaw && (pn.includes(' ') && !pnRaw.includes('-')) || pn.includes('ga') || pn.includes(' x ');
+        const shouldUseSuggested = Boolean(suggested) && (!pn || (desc && pn === desc) || looksLikeDescription);
         return {
           ...item,
           part_number: shouldUseSuggested ? suggested : item.part_number,
