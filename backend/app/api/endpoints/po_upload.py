@@ -214,7 +214,7 @@ async def _upload_and_extract_document(
                 if normalize_description(raw_part_number) == normalize_description(description):
                     raw_part_number = None
             suggested_number = None
-            if not raw_part_number and suggested_type in ["raw_material", "hardware"]:
+            if not raw_part_number and suggested_type in ["raw_material", "hardware", "consumable"]:
                 suggested_number = _find_existing_part_number_by_description(db, description, suggested_type)
                 if not suggested_number:
                     suggested_number = generate_werco_part_number(description, suggested_type)

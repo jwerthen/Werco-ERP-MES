@@ -152,7 +152,7 @@ export default function MaterialsInventoryPage() {
 
   useEffect(() => {
     if (!showCreateModal) return;
-    if (!['raw_material', 'hardware'].includes(createForm.part_type)) {
+    if (!['raw_material', 'hardware', 'consumable'].includes(createForm.part_type)) {
       setSuggestedPartNumber(null);
       return;
     }

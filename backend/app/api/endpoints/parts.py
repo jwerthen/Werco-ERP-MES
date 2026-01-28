@@ -347,7 +347,7 @@ def generate_part_number(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if part_type not in [PartType.RAW_MATERIAL, PartType.HARDWARE]:
+    if part_type not in [PartType.RAW_MATERIAL, PartType.HARDWARE, PartType.CONSUMABLE]:
         return {"suggested_part_number": None, "existing": False}
 
     normalized = " ".join(normalize_description(description).lower().split())

@@ -39,11 +39,7 @@ def _parse_fraction(token: str) -> Optional[float]:
 def _format_dim(value: Optional[float]) -> str:
     if value is None:
         return ""
-    s = f"{value:.3f}".rstrip("0").rstrip(".")
-    s = s.replace(".", "p")
-    if s.startswith("0p"):
-        s = s[1:]
-    return s
+    return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
 def _hash_suffix(text: str, length: int = 3) -> str:
@@ -70,7 +66,14 @@ def _detect_unit(desc: str) -> str:
 
 
 def _find_grade(desc: str) -> str:
-    grade_map = ["A36", "1018", "4140", "304", "316", "6061", "5052", "7075", "AR400", "AR500", "G2", "G5", "G8", "A2", "A4"]
+    if "6061-T6" in desc or "6061 T6" in desc:
+        return "6061T6"
+    if "5052-H32" in desc or "5052 H32" in desc:
+        return "5052H32"
+    er_match = re.search(r"\bER\s*([0-9A-Z\-]+)\b", desc)
+    if er_match:
+        return f"ER{er_match.group(1)}".replace(" ", "")
+    grade_map = ["A36", "1018", "4140", "304", "304L", "316", "316L", "6061", "5052", "7075", "17-4PH", "AR400", "AR500", "G2", "G5", "G8", "A2", "A4"]
     for g in grade_map:
         if g in desc:
             return g
@@ -83,45 +86,65 @@ def _find_grade(desc: str) -> str:
     return ""
 
 
-def _find_raw_shape(desc: str) -> str:
-    if "PLATE" in desc:
-        return "PLT"
-    if "SHEET" in desc:
-        return "SHT"
+def _is_sheet_or_plate(desc: str) -> bool:
+    return "SHEET" in desc or "PLATE" in desc
+
+
+def _find_raw_category(desc: str) -> str:
+    if _is_sheet_or_plate(desc):
+        return "SM"
+    if "FLAT" in desc and "BAR" in desc:
+        return "FB"
+    if "BAR" in desc:
+        return "FB"
+    if "ROUND" in desc or "ROD" in desc:
+        return "RB"
     if "TUBE" in desc:
-        return "TUB"
+        return "TB"
     if "ANGLE" in desc:
         return "ANG"
     if "CHANNEL" in desc:
         return "CHN"
-    if "FLAT" in desc:
-        return "FLT"
-    if "BAR" in desc:
-        return "BAR"
-    if "ROUND" in desc or "ROD" in desc:
-        return "ROD"
-    return "RM"
+    return "MAT"
+
+
+def _find_hardware_class(desc: str) -> str:
+    if any(k in desc for k in ["BOLT", "SCREW", "NUT", "WASHER", "PIN", "RIVET", "FASTENER"]):
+        return "FST"
+    return "HDW"
 
 
 def _find_hardware_type(desc: str) -> str:
+    if "SOCKET HEAD CAP" in desc:
+        return "SHCS"
+    if "HEX HEAD" in desc:
+        return "HHCS"
+    if "BUTTON HEAD" in desc:
+        return "BHCS"
     if "BOLT" in desc:
-        return "BL"
+        return "BOLT"
     if "SCREW" in desc:
-        return "SC"
+        return "SCREW"
     if "NUT" in desc:
-        return "NT"
+        return "NUT"
     if "WASHER" in desc:
-        return "WS"
-    return "HW"
+        return "WSHR"
+    if "PIN" in desc:
+        return "PIN"
+    if "RIVET" in desc:
+        return "RIV"
+    return "HDW"
 
 
 def _find_finish(desc: str) -> str:
+    if "BLACK OX" in desc or "BLACKOX" in desc or "BLACK OXIDE" in desc:
+        return "BLACKOX"
     if "ZINC" in desc or "ZN" in desc:
-        return "ZN"
+        return "ZINC"
     if "GALV" in desc:
-        return "GZ"
-    if "BLACK" in desc or "BLK" in desc:
-        return "BK"
+        return "GALV"
+    if "PHOS" in desc:
+        return "PHOS"
     return ""
 
 
@@ -161,59 +184,106 @@ def generate_werco_part_number(description: str, part_type: str, max_length: int
     desc = normalize_description(description)
     unit = _detect_unit(desc)
 
-    if part_type not in ["raw_material", "hardware"]:
+    if part_type not in ["raw_material", "hardware", "consumable"]:
         return None
 
     if part_type == "raw_material":
-        shape = _find_raw_shape(desc)
+        category = _find_raw_category(desc)
         grade = _find_grade(desc)
         thk, w, l, dia = _extract_dims(desc)
-        parts = [shape]
-        if grade:
-            parts.append(grade)
-        dim_parts = []
-        if dia and ("ROD" in desc or "ROUND" in desc):
-            dim_parts.append(f"D{_format_dim(dia)}")
-        if thk is not None:
-            dim_parts.append(f"T{_format_dim(thk)}")
-        if w is not None:
-            dim_parts.append(f"W{_format_dim(w)}")
-        if l is not None:
-            dim_parts.append(f"L{_format_dim(l)}")
-        if dim_parts:
-            parts.extend(dim_parts)
-        if unit:
-            parts.append(unit)
-        base = "-".join([p for p in parts if p])
-    else:
-        hw_type = _find_hardware_type(desc)
-        grade = _find_grade(desc)
-        finish = _find_finish(desc)
-        size = pitch = length = None
-        m = re.search(r"\bM(\d+(?:\.\d+)?)\s*[Xx]\s*(\d+(?:\.\d+)?)\b", desc)
-        if m:
-            size = f"M{_format_dim(float(m.group(1)))}"
-            pitch = f"P{_format_dim(float(m.group(2)))}"
+        parts = []
+
+        if category == "SM":
+            if thk is None or w is None:
+                return None
+            form = "SHT" if thk <= 0.250 else "PL"
+            size = f"{_format_dim(thk)}x{_format_dim(w)}"
+            if l is not None:
+                size = f"{size}x{_format_dim(l)}"
+            parts = ["SM", grade, form, size]
+        elif category == "FB":
+            if thk is None or w is None:
+                return None
+            size = f"{_format_dim(thk)}x{_format_dim(w)}"
+            if l is not None:
+                size = f"{size}x{_format_dim(l)}"
+            parts = ["FB", grade, size]
+        elif category == "RB":
+            if dia is None and w is not None:
+                dia = w
+            if dia is None:
+                return None
+            size = _format_dim(dia)
+            if l is not None:
+                size = f"{size}x{_format_dim(l)}"
+            parts = ["RB", grade, size]
+        elif category == "TB":
+            # OD x WALL from first two dims
+            od = w
+            wall = thk if thk is not None else l
+            if od is None or wall is None:
+                return None
+            size = f"{_format_dim(od)}x{_format_dim(wall)}"
+            parts = ["TB", grade, size]
+        elif category in ["ANG", "CHN"]:
+            if w is None or l is None:
+                return None
+            size = f"{_format_dim(w)}x{_format_dim(l)}"
+            parts = [category, grade, size]
         else:
-            m = re.search(r"([0-9./-]+)\s*[- ]\s*(\d+)\b", desc)
+            if thk is None or w is None:
+                return None
+            size = f"{_format_dim(thk)}x{_format_dim(w)}"
+            parts = [category, grade, size]
+
+        if unit == "MM":
+            parts.append("MM")
+        base = "-".join([p for p in parts if p])
+    elif part_type == "hardware":
+        hw_class = _find_hardware_class(desc)
+        hw_type = _find_hardware_type(desc)
+        material = _find_grade(desc)
+        finish = _find_finish(desc)
+        size_str = None
+
+        m = re.search(r"\bM(\d+(?:\.\d+)?)\s*[Xx]\s*(\d+(?:\.\d+)?)\s*(?:[Xx]\s*(\d+(?:\.\d+)?))?\b", desc)
+        if m:
+            size = _format_dim(float(m.group(1)))
+            pitch = _format_dim(float(m.group(2)))
+            length = _format_dim(float(m.group(3))) if m.group(3) else None
+            size_str = f"M{size}x{pitch}"
+            if length:
+                size_str = f"{size_str}x{length}"
+        else:
+            m = re.search(r"([0-9./-]+)\s*-\s*(\d+)\s*(?:[Xx]\s*([0-9./-]+))?", desc)
             if m:
                 size_val = _parse_fraction(m.group(1))
-                size = f"{_format_dim(size_val)}"
-                pitch = f"T{m.group(2)}"
-        m = re.search(r"(?:\bL\b|\bLEN\b|\bLENGTH\b)\s*([0-9./-]+)", desc)
-        if m:
-            length = _format_dim(_parse_fraction(m.group(1)))
-        parts = ["HW", hw_type]
-        if size:
-            parts.append(size)
-        if pitch:
-            parts.append(pitch)
-        if length:
-            parts.append(f"L{length}")
-        if grade:
-            parts.append(grade)
-        if finish:
-            parts.append(finish)
+                size = _format_dim(size_val)
+                pitch = m.group(2)
+                length = _format_dim(_parse_fraction(m.group(3))) if m.group(3) else None
+                size_str = f"{size}-{pitch}"
+                if length:
+                    size_str = f"{size_str}x{length}"
+
+        parts = [hw_class, hw_type, size_str, material, finish]
+        base = "-".join([p for p in parts if p])
+    else:
+        # consumable
+        material = _find_grade(desc)
+        finish = _find_finish(desc)
+        c_type = "CNS"
+        if "WIRE" in desc and ("WELD" in desc or "FILLER" in desc or "ER" in desc):
+            c_type = "WLD"
+        elif "ADH" in desc or "EPOXY" in desc or "LOCTITE" in desc:
+            c_type = "ADH"
+        elif "PAINT" in desc or "COAT" in desc:
+            c_type = "PAINT"
+        elif "LUBE" in desc or "OIL" in desc or "GREASE" in desc:
+            c_type = "LUBE"
+
+        thk, w, l, dia = _extract_dims(desc)
+        size = _format_dim(dia) if dia else ""
+        parts = [c_type, material, size, finish]
         base = "-".join([p for p in parts if p])
 
     base = base.replace(" ", "")
