@@ -117,7 +117,12 @@ export default function Login() {
 
     try {
       if (loginMode === 'employee') {
-        await loginWithEmployeeId(employeeId);
+        const normalizedId = employeeId.replace(/\D/g, '').slice(0, 4);
+        if (normalizedId.length === 0) {
+          throw new Error('Employee ID required');
+        }
+        const paddedId = normalizedId.padStart(4, '0');
+        await loginWithEmployeeId(paddedId);
       } else {
         await login(email, password);
       }
@@ -341,7 +346,6 @@ export default function Login() {
                       id="employeeId"
                       type="text"
                       inputMode="numeric"
-                      pattern="\\d{4}"
                       maxLength={4}
                       required
                       value={employeeId}
