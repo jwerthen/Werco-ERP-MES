@@ -148,6 +148,20 @@ def _find_finish(desc: str) -> str:
     return ""
 
 
+def _find_raw_finish(desc: str) -> str:
+    if "2B" in desc:
+        return "2B"
+    if "#4" in desc or "NO.4" in desc or "NO 4" in desc:
+        return "NO4"
+    if "P&O" in desc or "PICKLED" in desc:
+        return "P&O"
+    if "HR" in desc or "HOT ROLLED" in desc:
+        return "HR"
+    if "CR" in desc or "COLD ROLLED" in desc:
+        return "CR"
+    return ""
+
+
 def _extract_dims(desc: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     # thickness, width, length, diameter
     thk = None
@@ -178,6 +192,29 @@ def _extract_dims(desc: str) -> Tuple[Optional[float], Optional[float], Optional
     return thk, w, l, dia
 
 
+def _gauge_to_thickness_in(gauge: str) -> Optional[float]:
+    gauge_map = {
+        "7": 0.1793,
+        "8": 0.1644,
+        "9": 0.1495,
+        "10": 0.1345,
+        "11": 0.1196,
+        "12": 0.1046,
+        "13": 0.0897,
+        "14": 0.0747,
+        "15": 0.0673,
+        "16": 0.0598,
+        "18": 0.0478,
+        "20": 0.0359,
+        "22": 0.0299,
+        "24": 0.0239,
+        "26": 0.0179,
+        "28": 0.0149,
+        "30": 0.0120,
+    }
+    return gauge_map.get(gauge)
+
+
 def generate_werco_part_number(description: str, part_type: str, max_length: int = 30) -> Optional[str]:
     if not description or not part_type:
         return None
@@ -191,6 +228,11 @@ def generate_werco_part_number(description: str, part_type: str, max_length: int
         category = _find_raw_category(desc)
         grade = _find_grade(desc)
         thk, w, l, dia = _extract_dims(desc)
+        if thk is None:
+            ga = re.search(r"\b(\d+(?:\.\d+)?)\s*GA\b", desc)
+            if ga:
+                thk = _gauge_to_thickness_in(ga.group(1))
+        raw_finish = _find_raw_finish(desc)
         parts = []
 
         if category == "SM":
@@ -200,14 +242,14 @@ def generate_werco_part_number(description: str, part_type: str, max_length: int
             size = f"{_format_dim(thk)}x{_format_dim(w)}"
             if l is not None:
                 size = f"{size}x{_format_dim(l)}"
-            parts = ["SM", grade, form, size]
+            parts = ["SM", grade, form, size, raw_finish]
         elif category == "FB":
             if thk is None or w is None:
                 return None
             size = f"{_format_dim(thk)}x{_format_dim(w)}"
             if l is not None:
                 size = f"{size}x{_format_dim(l)}"
-            parts = ["FB", grade, size]
+            parts = ["FB", grade, size, raw_finish]
         elif category == "RB":
             if dia is None and w is not None:
                 dia = w
@@ -216,7 +258,7 @@ def generate_werco_part_number(description: str, part_type: str, max_length: int
             size = _format_dim(dia)
             if l is not None:
                 size = f"{size}x{_format_dim(l)}"
-            parts = ["RB", grade, size]
+            parts = ["RB", grade, size, raw_finish]
         elif category == "TB":
             # OD x WALL from first two dims
             od = w
@@ -224,17 +266,17 @@ def generate_werco_part_number(description: str, part_type: str, max_length: int
             if od is None or wall is None:
                 return None
             size = f"{_format_dim(od)}x{_format_dim(wall)}"
-            parts = ["TB", grade, size]
+            parts = ["TB", grade, size, raw_finish]
         elif category in ["ANG", "CHN"]:
             if w is None or l is None:
                 return None
             size = f"{_format_dim(w)}x{_format_dim(l)}"
-            parts = [category, grade, size]
+            parts = [category, grade, size, raw_finish]
         else:
             if thk is None or w is None:
                 return None
             size = f"{_format_dim(thk)}x{_format_dim(w)}"
-            parts = [category, grade, size]
+            parts = [category, grade, size, raw_finish]
 
         if unit == "MM":
             parts.append("MM")
