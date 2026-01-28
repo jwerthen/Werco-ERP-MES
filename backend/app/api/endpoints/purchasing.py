@@ -405,8 +405,9 @@ def receive_material(
     )
     db.add(receipt)
     
+    qty_received = float(receipt_in.quantity_received)
     # Update PO line quantity received
-    po_line.quantity_received += receipt_in.quantity_received
+    po_line.quantity_received += qty_received
     if po_line.quantity_received >= po_line.quantity_ordered:
         po_line.is_closed = True
     
