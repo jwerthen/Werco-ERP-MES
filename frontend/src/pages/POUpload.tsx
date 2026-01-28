@@ -46,9 +46,9 @@ interface LineItem {
 }
 
 interface ExtractionResult {
-  document_type: 'po' | 'invoice';
+  document_type: 'po' | 'quote';
   po_number: string;
-  invoice_number: string | null;
+  quote_number: string | null;
   vendor: { name: string; address: string };
   vendor_match: VendorMatch | null;
   matched_vendor_id: number | null;
@@ -78,7 +78,7 @@ export default function POUpload() {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>('upload');
   const [file, setFile] = useState<File | null>(null);
-  const [documentType, setDocumentType] = useState<'po' | 'invoice'>('po');
+  const [documentType, setDocumentType] = useState<'po' | 'quote'>('po');
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState('');
   const [extractionResult, setExtractionResult] = useState<ExtractionResult | null>(null);
@@ -164,8 +164,8 @@ export default function POUpload() {
     setError('');
     
     try {
-      const result = documentType === 'invoice'
-        ? await api.uploadInvoicePdf(file)
+      const result = documentType === 'quote'
+        ? await api.uploadQuotePdf(file)
         : await api.uploadPOPdf(file);
       setExtractionResult(result);
       
@@ -346,7 +346,7 @@ export default function POUpload() {
       <div className="space-y-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Upload Purchasing Document</h1>
-          <p className="text-gray-500 mt-1">Upload a PO or Invoice (PDF/DOCX) to extract line items</p>
+          <p className="text-gray-500 mt-1">Upload a PO or Quote (PDF/DOCX) to extract line items</p>
         </div>
 
         {error && (
@@ -369,12 +369,12 @@ export default function POUpload() {
             </button>
             <button
               type="button"
-              onClick={() => setDocumentType('invoice')}
+              onClick={() => setDocumentType('quote')}
               className={`px-4 py-2 rounded-lg text-sm font-semibold ${
-                documentType === 'invoice' ? 'bg-werco-primary text-white' : 'bg-gray-100 text-gray-600'
+                documentType === 'quote' ? 'bg-werco-primary text-white' : 'bg-gray-100 text-gray-600'
               }`}
             >
-              Vendor Invoice
+              Vendor Quote
             </button>
           </div>
           <div
@@ -408,7 +408,7 @@ export default function POUpload() {
               <>
                 <CloudArrowUpIcon className="h-16 w-16 text-gray-400 mx-auto mb-4" />
                 <p className="text-lg font-medium text-gray-900">
-                  Drag and drop your {documentType === 'invoice' ? 'invoice' : 'PO'} document here
+                  Drag and drop your {documentType === 'quote' ? 'quote' : 'PO'} document here
                 </p>
                 <p className="text-sm text-gray-500 mt-1">or</p>
                 <label className="mt-4 inline-block">
@@ -437,7 +437,7 @@ export default function POUpload() {
         <div className="card bg-blue-50 border-blue-200">
           <h3 className="font-semibold text-blue-800 mb-2">How it works</h3>
           <ol className="list-decimal list-inside space-y-1 text-sm text-blue-700">
-            <li>Upload your PO or vendor invoice (PDF or Word document)</li>
+            <li>Upload your PO or vendor quote (PDF or Word document)</li>
             <li>AI extracts vendor, line items, and order details</li>
             <li>Review and verify the extracted data</li>
             <li>Match parts to your inventory or create new ones</li>
@@ -572,8 +572,8 @@ export default function POUpload() {
                 {extractionResult?.po_number_exists && (
                   <p className="text-xs text-red-600 mt-1">This PO number already exists</p>
                 )}
-                {extractionResult?.document_type === 'invoice' && extractionResult?.invoice_number && (
-                  <p className="text-xs text-gray-500 mt-1">Invoice #: {extractionResult.invoice_number}</p>
+                {extractionResult?.document_type === 'quote' && extractionResult?.quote_number && (
+                  <p className="text-xs text-gray-500 mt-1">Quote #: {extractionResult.quote_number}</p>
                 )}
               </div>
               <div>

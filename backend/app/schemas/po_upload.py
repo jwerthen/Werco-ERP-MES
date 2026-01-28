@@ -31,7 +31,7 @@ class POExtractionResult(BaseModel):
     # Extracted PO data
     document_type: Optional[str] = None
     po_number: Optional[str] = None
-    invoice_number: Optional[str] = None
+    quote_number: Optional[str] = None
     vendor: VendorExtracted = Field(default_factory=VendorExtracted)
     vendor_match: Optional[Dict[str, Any]] = None
     matched_vendor_id: Optional[int] = None

@@ -54,9 +54,9 @@ def log_audit(
     )
 
 
-def _generate_invoice_po_number(db: Session) -> str:
+def _generate_quote_po_number(db: Session) -> str:
     today = datetime.now().strftime("%Y%m%d")
-    prefix = f"INV-{today}-"
+    prefix = f"QTE-{today}-"
     last_po = db.query(PurchaseOrder).filter(
         PurchaseOrder.po_number.like(f"{prefix}%")
     ).order_by(PurchaseOrder.po_number.desc()).first()
@@ -75,7 +75,7 @@ async def _upload_and_extract_document(
     current_user: User
 ) -> POExtractionResult:
     """
-    Upload a PO/Invoice PDF or Word document and extract data using AI.
+    Upload a PO/Quote PDF or Word document and extract data using AI.
     """
     # Validate file type by extension
     filename_lower = file.filename.lower()
@@ -151,13 +151,13 @@ async def _upload_and_extract_document(
         if not llm_result.get("document_type"):
             llm_result["document_type"] = document_type
 
-        # If invoice and PO number missing, use invoice number or generate
-        if llm_result.get("document_type") == "invoice" and not llm_result.get("po_number"):
-            invoice_number = llm_result.get("invoice_number")
-            if invoice_number:
-                llm_result["po_number"] = f"INV-{invoice_number}"
+        # If quote and PO number missing, use quote number or generate
+        if llm_result.get("document_type") == "quote" and not llm_result.get("po_number"):
+            quote_number = llm_result.get("quote_number")
+            if quote_number:
+                llm_result["po_number"] = f"QTE-{quote_number}"
             else:
-                llm_result["po_number"] = _generate_invoice_po_number(db)
+                llm_result["po_number"] = _generate_quote_po_number(db)
         
         # Match vendor
         vendor_name = llm_result.get("vendor", {}).get("name", "")
@@ -188,7 +188,7 @@ async def _upload_and_extract_document(
         result = POExtractionResult(
             document_type=llm_result.get("document_type"),
             po_number=po_number,
-            invoice_number=llm_result.get("invoice_number"),
+            quote_number=llm_result.get("quote_number"),
             vendor=VendorExtracted(
                 name=vendor_data.get("name"),
                 address=vendor_data.get("address")
@@ -261,6 +261,19 @@ async def upload_and_extract_po(
     return await _upload_and_extract_document("po", file, db, current_user)
 
 
+@router.post("/upload-quote", response_model=POExtractionResult)
+async def upload_and_extract_quote(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload a vendor quote PDF or Word document and extract data to create a PO.
+    Supports: .pdf, .doc, .docx
+    """
+    return await _upload_and_extract_document("quote", file, db, current_user)
+
+
 @router.post("/upload-invoice", response_model=POExtractionResult)
 async def upload_and_extract_invoice(
     file: UploadFile = File(...),
@@ -268,10 +281,9 @@ async def upload_and_extract_invoice(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Upload an invoice PDF or Word document and extract data to create a PO.
-    Supports: .pdf, .doc, .docx
+    Legacy endpoint. Uploads vendor quotes for PO creation.
     """
-    return await _upload_and_extract_document("invoice", file, db, current_user)
+    return await _upload_and_extract_document("quote", file, db, current_user)
 
 
 @router.post("/create-from-upload", response_model=POUploadResponse)

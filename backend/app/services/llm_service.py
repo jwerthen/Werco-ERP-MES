@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 # Extraction schema for LLM
 EXTRACTION_SCHEMA = """
 {
-  "document_type": "string - 'po' or 'invoice'",
+  "document_type": "string - 'po' or 'quote'",
   "po_number": "string - the purchase order number",
-  "invoice_number": "string - the invoice number (if document is an invoice)",
+  "quote_number": "string - the quote number (if document is a quote)",
   "vendor": {
     "name": "string - vendor/supplier company name",
     "address": "string - full address if available"
@@ -47,7 +47,7 @@ EXTRACTION_SCHEMA = """
 }
 """
 
-SYSTEM_PROMPT = """You are a purchasing document extraction assistant specialized in manufacturing and fabrication industry documents. Your task is to extract structured data from purchase orders and invoices.
+SYSTEM_PROMPT = """You are a purchasing document extraction assistant specialized in manufacturing and fabrication industry documents. Your task is to extract structured data from purchase orders and vendor quotes.
 
 Key guidelines:
 1. Extract all fields according to the schema provided
@@ -57,15 +57,15 @@ Key guidelines:
 5. If a field is unclear or ambiguous, set confidence to "low"
 6. If a field is not found, set to null
 7. Pay attention to quantity, unit price, and line totals - verify they make sense
-8. Look for common PO/invoice formats: header info, line items table, totals section
-9. Set document_type to "invoice" when the document is an invoice, otherwise "po"
+8. Look for common PO/quote formats: header info, line items table, totals section
+9. Set document_type to "quote" when the document is a vendor quote, otherwise "po"
 
 Return ONLY valid JSON matching the schema. No explanations or markdown."""
 
 
 def extract_po_data_with_llm(pdf_text: str, is_ocr: bool = False, document_type: str = "po") -> Dict[str, Any]:
     """
-    Use Claude API to extract structured PO/invoice data from text.
+    Use Claude API to extract structured PO/quote data from text.
     """
     try:
         import anthropic
@@ -90,7 +90,7 @@ Important:
 - Part numbers must be exact as shown
 - Verify quantities and prices make logical sense
 - Flag any uncertain extractions with low confidence
-- If the document is an invoice, set document_type to "invoice" and populate invoice_number
+- If the document is a quote, set document_type to "quote" and populate quote_number
 - If the document is a PO, set document_type to "po" and populate po_number
 {ocr_note}
 
@@ -151,7 +151,7 @@ def _create_empty_result(error_message: str) -> Dict[str, Any]:
     return {
         "document_type": None,
         "po_number": None,
-        "invoice_number": None,
+        "quote_number": None,
         "vendor": {"name": None, "address": None},
         "order_date": None,
         "expected_delivery_date": None,
@@ -183,9 +183,9 @@ def validate_extracted_data(data: Dict[str, Any]) -> List[Dict[str, str]]:
     document_type = (data.get("document_type") or "po").lower()
     
     # Check PO number
-    if document_type == "invoice":
-        if not data.get("po_number") and not data.get("invoice_number"):
-            issues.append({"field": "invoice_number", "severity": "error", "message": "Invoice number is required"})
+    if document_type == "quote":
+        if not data.get("po_number") and not data.get("quote_number"):
+            issues.append({"field": "quote_number", "severity": "error", "message": "Quote number is required"})
     else:
         if not data.get("po_number"):
             issues.append({"field": "po_number", "severity": "error", "message": "PO number is required"})
