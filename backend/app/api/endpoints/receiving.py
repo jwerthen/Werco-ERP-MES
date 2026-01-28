@@ -217,13 +217,14 @@ def receive_material(
     if not receipt_in.lot_number or not receipt_in.lot_number.strip():
         raise HTTPException(status_code=400, detail="Lot number is required for traceability (AS9100D)")
     
+    qty_received = float(receipt_in.quantity_received)
     # Check for over-receiving
     remaining = po_line.quantity_ordered - po_line.quantity_received
-    if receipt_in.quantity_received > remaining:
+    if qty_received > remaining:
         if not receipt_in.over_receive_approved:
             raise HTTPException(
                 status_code=400, 
-                detail=f"Quantity received ({receipt_in.quantity_received}) exceeds remaining quantity ({remaining}). Set over_receive_approved=true to override."
+                detail=f"Quantity received ({qty_received}) exceeds remaining quantity ({remaining}). Set over_receive_approved=true to override."
             )
     
     # Validate location if provided
@@ -238,7 +239,7 @@ def receive_material(
     receipt = POReceipt(
         receipt_number=receipt_number,
         po_line_id=po_line.id,
-        quantity_received=receipt_in.quantity_received,
+        quantity_received=qty_received,
         lot_number=receipt_in.lot_number.strip(),
         serial_numbers=receipt_in.serial_numbers,
         heat_number=receipt_in.heat_number,
@@ -260,7 +261,7 @@ def receive_material(
     db.flush()
     
     # Update PO line quantity received
-    po_line.quantity_received += receipt_in.quantity_received
+    po_line.quantity_received += qty_received
     if po_line.quantity_received >= po_line.quantity_ordered:
         po_line.is_closed = True
     
@@ -276,7 +277,7 @@ def receive_material(
     
     # If not requiring inspection, auto-accept and add to inventory
     if not receipt_in.requires_inspection:
-        receipt.quantity_accepted = receipt_in.quantity_received
+        receipt.quantity_accepted = qty_received
         receipt.inspection_status = InspectionStatus.PASSED
         receipt.inspection_method = InspectionMethod.VISUAL
         receipt.inspected_by = current_user.id
@@ -284,7 +285,7 @@ def receive_material(
         
         location_code = location.code if location else "RECV-01"
         _add_to_inventory(
-            db, po_line.part_id, receipt_in.quantity_received,
+            db, po_line.part_id, qty_received,
             location_code, receipt_in.lot_number.strip(), 
             po_line.unit_price, current_user.id, receipt_number,
             po.vendor.name if po.vendor else None
@@ -293,7 +294,7 @@ def receive_material(
     # Audit log
     log_audit(
         db, current_user, "RECEIVE_MATERIAL", "po_receipt", receipt.id,
-        f"Received {receipt_in.quantity_received} of part {po_line.part.part_number if po_line.part else 'N/A'} on PO {po.po_number}, Lot: {receipt_in.lot_number}"
+        f"Received {qty_received} of part {po_line.part.part_number if po_line.part else 'N/A'} on PO {po.po_number}, Lot: {receipt_in.lot_number}"
     )
     
     db.commit()
