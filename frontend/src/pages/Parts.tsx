@@ -83,7 +83,7 @@ export default function Parts() {
   const [expandedParts, setExpandedParts] = useState<Set<number>>(new Set());
   const [bomData, setBomData] = useState<Record<number, BOMItem[]>>({});
   const [loadingBom, setLoadingBom] = useState<number | null>(null);
-  const [showComponentsOnly, setShowComponentsOnly] = useState(false);
+  const [showComponentsOnly, setShowComponentsOnly] = useState(true);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showImportPreviewModal, setShowImportPreviewModal] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
