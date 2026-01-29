@@ -98,20 +98,54 @@ def extract_text_from_excel(excel_path: str) -> DocumentExtractionResult:
 
     try:
         import pandas as pd
-    except ImportError as e:
-        logger.error(f"[EXCEL] pandas not installed: {e}")
-        return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
-
-    try:
         sheets = pd.read_excel(excel_path, sheet_name=None, dtype=str)
         all_text = []
         for sheet_name, df in sheets.items():
             all_text.append(f"--- Sheet: {sheet_name} ---")
             df = df.fillna("")
-            # Convert to pipe-delimited rows to preserve structure
             all_text.extend(
-                df.astype(str).apply(lambda row: " | ".join([cell.strip() for cell in row.tolist() if cell.strip()]), axis=1).tolist()
+                df.astype(str)
+                  .apply(lambda row: " | ".join([cell.strip() for cell in row.tolist() if cell.strip()]), axis=1)
+                  .tolist()
             )
+        text = "\n".join([line for line in all_text if line.strip()])
+        return DocumentExtractionResult(text=text, confidence="medium", file_type=ext.strip('.'))
+    except ImportError as e:
+        logger.warning(f"[EXCEL] pandas not installed: {e}. Falling back to direct reader.")
+    except Exception as e:
+        logger.warning(f"[EXCEL] pandas extraction failed: {e}. Falling back to direct reader.")
+
+    # Fallback: use openpyxl for xlsx, xlrd for xls
+    try:
+        all_text = []
+        if ext == ".xlsx":
+            try:
+                from openpyxl import load_workbook
+            except ImportError as e:
+                logger.error(f"[EXCEL] openpyxl not installed: {e}")
+                return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
+            wb = load_workbook(excel_path, data_only=True)
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                all_text.append(f"--- Sheet: {sheet_name} ---")
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
+                    if cells:
+                        all_text.append(" | ".join(cells))
+        elif ext == ".xls":
+            try:
+                import xlrd
+            except ImportError as e:
+                logger.error(f"[EXCEL] xlrd not installed: {e}")
+                return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
+            wb = xlrd.open_workbook(excel_path)
+            for sheet in wb.sheets():
+                all_text.append(f"--- Sheet: {sheet.name} ---")
+                for r in range(sheet.nrows):
+                    row = [str(sheet.cell_value(r, c)).strip() for c in range(sheet.ncols)]
+                    row = [cell for cell in row if cell]
+                    if row:
+                        all_text.append(" | ".join(row))
         text = "\n".join([line for line in all_text if line.strip()])
         return DocumentExtractionResult(text=text, confidence="medium", file_type=ext.strip('.'))
     except Exception as e:
