@@ -163,6 +163,8 @@ def _infer_part_type(line_type: str, item_type: str, description: str) -> str:
         return PartType.CONSUMABLE.value
     if line_type == BOMLineType.REFERENCE.value:
         return PartType.PURCHASED.value
+    if line_type == BOMLineType.COMPONENT.value:
+        return PartType.MANUFACTURED.value
     text = (description or "").lower()
     if item_type == BOMItemType.MAKE.value:
         if "assembly" in text or "assy" in text:

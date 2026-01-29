@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { Part } from '../types';
+import { useNavigate } from 'react-router-dom';
 import { 
   PlusIcon, 
   ChevronRightIcon, 
@@ -127,6 +128,7 @@ const partTypeBadge: Record<string, string> = {
 };
 
 export default function BOMPage() {
+  const navigate = useNavigate();
   const [boms, setBoms] = useState<BOM[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
@@ -690,6 +692,9 @@ export default function BOMPage() {
                       {viewMode === 'single' && selectedBOM.status === 'draft' && (
                         <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
                       )}
+                      {viewMode === 'single' && (
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Routing</th>
+                      )}
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
@@ -731,6 +736,17 @@ export default function BOMPage() {
                               </button>
                             </td>
                           )}
+                          <td className="px-4 py-3 text-right">
+                            {item.component_part?.id && (
+                              <button
+                                type="button"
+                                onClick={() => navigate(`/routing?part_id=${item.component_part.id}`)}
+                                className="text-werco-primary hover:underline text-sm"
+                              >
+                                Create Routing
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       ))
                     ) : (

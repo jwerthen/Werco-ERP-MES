@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
+import { useSearchParams } from 'react-router-dom';
 import {
   PlusIcon,
   PencilIcon,
@@ -64,6 +65,7 @@ interface Part {
 export default function RoutingPage() {
   const [routings, setRoutings] = useState<Routing[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
+  const [componentPartIds, setComponentPartIds] = useState<Set<number>>(new Set());
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedRouting, setSelectedRouting] = useState<Routing | null>(null);
@@ -90,6 +92,7 @@ export default function RoutingPage() {
     move: 'min',
     queue: 'min'
   });
+  const [searchParams, setSearchParams] = useSearchParams();
 
   useEffect(() => {
     loadData();
@@ -97,14 +100,33 @@ export default function RoutingPage() {
 
   const loadData = async () => {
     try {
-      const [routingsRes, partsRes, wcRes] = await Promise.all([
+      const [routingsRes, partsRes, wcRes, bomsRes] = await Promise.all([
         api.getRoutings(),
         api.getParts({ active_only: true }),
-        api.getWorkCenters()
+        api.getWorkCenters(),
+        api.getBOMs({ active_only: true })
       ]);
       setRoutings(routingsRes);
       setParts(partsRes);
       setWorkCenters(wcRes);
+      const componentIds = new Set<number>();
+      bomsRes.forEach((bom: any) => {
+        (bom.items || []).forEach((item: any) => {
+          if (item.component_part_id) {
+            componentIds.add(item.component_part_id);
+          }
+        });
+      });
+      setComponentPartIds(componentIds);
+
+      const partIdParam = searchParams.get('part_id');
+      if (partIdParam) {
+        const partId = parseInt(partIdParam);
+        if (!Number.isNaN(partId)) {
+          setNewRouting({ part_id: partId, revision: 'A', description: '' });
+          setShowCreateModal(true);
+        }
+      }
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
@@ -129,6 +151,9 @@ export default function RoutingPage() {
       setSelectedRouting(created);
       setShowCreateModal(false);
       setNewRouting({ part_id: 0, revision: 'A', description: '' });
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete('part_id');
+      setSearchParams(nextParams);
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to create routing');
     }
@@ -443,6 +468,9 @@ export default function RoutingPage() {
                 >
                   <option value={0}>Select a part...</option>
                   {parts.map(part => (
+                  {parts
+                    .filter(p => ['assembly', 'manufactured'].includes(p.part_type) || componentPartIds.has(p.id))
+                    .map(part => (
                       <option key={part.id} value={part.id}>
                         {part.part_number} - {part.name}
                       </option>
