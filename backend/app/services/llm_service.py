@@ -63,6 +63,137 @@ Key guidelines:
 Return ONLY valid JSON matching the schema. No explanations or markdown."""
 
 
+BOM_EXTRACTION_SCHEMA = """
+{
+  "document_type": "string - 'bom' or 'part'",
+  "assembly": {
+    "part_number": "string or null",
+    "name": "string or null",
+    "revision": "string or null",
+    "description": "string or null",
+    "drawing_number": "string or null",
+    "part_type": "string - manufactured, assembly, purchased, raw_material, hardware, consumable"
+  },
+  "items": [
+    {
+      "line_number": "integer",
+      "part_number": "string or null",
+      "description": "string",
+      "quantity": "number",
+      "unit_of_measure": "string - EA, LB, FT, IN, etc.",
+      "item_type": "string - make, buy, phantom",
+      "line_type": "string - component, hardware, consumable, reference",
+      "reference_designator": "string or null",
+      "find_number": "string or null",
+      "notes": "string or null",
+      "confidence": "high, medium, or low"
+    }
+  ],
+  "extraction_confidence": "high, medium, or low - overall confidence"
+}
+"""
+
+
+def extract_bom_data_with_llm(pdf_text: str, is_ocr: bool = False) -> Dict[str, Any]:
+    """
+    Use Claude API to extract structured BOM/part data from text.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        logger.error("anthropic package not installed")
+        return _create_empty_bom_result("LLM library not available")
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.error("ANTHROPIC_API_KEY not set")
+        return _create_empty_bom_result("API key not configured")
+
+    ocr_note = "\n\nNote: This text was extracted via OCR and may contain errors. Be extra careful with quantities and part numbers." if is_ocr else ""
+
+    user_prompt = f"""Extract BOM or drawing data from the following text. Return JSON matching this schema exactly:
+
+{BOM_EXTRACTION_SCHEMA}
+
+Important:
+- Detect whether this is a BOM/assembly list or a single-part drawing
+- If it's a BOM, populate assembly info and all line items
+- Classify line_type as hardware or consumable when appropriate (bolts, nuts, washers, adhesives, paint, oil, etc.)
+- If a field is not found, set to null
+- Preserve part numbers as-is
+{ocr_note}
+
+Document Text:
+---
+{pdf_text}
+---
+
+Return ONLY the JSON object, no other text."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            messages=[
+                {"role": "user", "content": user_prompt}
+            ],
+            system=SYSTEM_PROMPT
+        )
+
+        response_text = message.content[0].text.strip()
+
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+
+        result = json.loads(response_text.strip())
+        result["_extraction_metadata"] = {
+            "extracted_at": datetime.utcnow().isoformat(),
+            "source_was_ocr": is_ocr,
+            "model": "claude-sonnet-4-20250514"
+        }
+
+        logger.info(f"LLM BOM extraction successful: {len(result.get('items', []))} items")
+        return result
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse LLM response as JSON: {e}")
+        return _create_empty_bom_result(f"Invalid JSON response: {str(e)}")
+    except anthropic.APIError as e:
+        logger.error(f"Anthropic API error: {e}")
+        return _create_empty_bom_result(f"API error: {str(e)}")
+    except Exception as e:
+        logger.error(f"LLM extraction failed: {e}")
+        return _create_empty_bom_result(f"Extraction failed: {str(e)}")
+
+
+def _create_empty_bom_result(error_message: str) -> Dict[str, Any]:
+    """Create an empty BOM result with error message."""
+    return {
+        "document_type": None,
+        "assembly": {
+            "part_number": None,
+            "name": None,
+            "revision": None,
+            "description": None,
+            "drawing_number": None,
+            "part_type": None
+        },
+        "items": [],
+        "extraction_confidence": "low",
+        "_error": error_message,
+        "_extraction_metadata": {
+            "extracted_at": datetime.utcnow().isoformat(),
+            "source_was_ocr": False,
+            "model": None
+        }
+    }
+
+
 def extract_po_data_with_llm(pdf_text: str, is_ocr: bool = False, document_type: str = "po") -> Dict[str, Any]:
     """
     Use Claude API to extract structured PO/quote data from text.

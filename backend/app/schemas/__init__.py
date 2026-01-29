@@ -6,6 +6,7 @@ from .bom import (
     BOMItemCreate, BOMItemUpdate, BOMItemResponse,
     BOMExploded, BOMItemWithChildren, BOMFlattened, BOMFlatItem
 )
+from .bom_import import BOMImportResponse
 from .work_order import (
     WorkOrderCreate, WorkOrderUpdate, WorkOrderResponse,
     WorkOrderOperationCreate, WorkOrderOperationUpdate, WorkOrderOperationResponse
@@ -19,6 +20,7 @@ __all__ = [
     "BOMCreate", "BOMUpdate", "BOMResponse", 
     "BOMItemCreate", "BOMItemUpdate", "BOMItemResponse",
     "BOMExploded", "BOMItemWithChildren", "BOMFlattened", "BOMFlatItem",
+    "BOMImportResponse",
     "WorkOrderCreate", "WorkOrderUpdate", "WorkOrderResponse",
     "WorkOrderOperationCreate", "WorkOrderOperationUpdate", "WorkOrderOperationResponse",
     "TimeEntryCreate", "TimeEntryUpdate", "TimeEntryResponse", "ClockIn", "ClockOut",

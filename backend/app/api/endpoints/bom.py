@@ -1,19 +1,23 @@
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Dict, Any, Tuple
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import and_
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
-from app.models.part import Part
+from app.models.part import Part, PartType, UnitOfMeasure
 from app.schemas.bom import (
     BOMCreate, BOMUpdate, BOMResponse,
     BOMItemCreate, BOMItemUpdate, BOMItemResponse,
     BOMExploded, BOMItemWithChildren, BOMFlattened, BOMFlatItem,
     ComponentPartInfo, PartInfo
 )
+from app.schemas.bom_import import BOMImportResponse
+from app.services.pdf_service import extract_text_from_document, save_uploaded_document, SUPPORTED_EXTENSIONS
+from app.services.llm_service import extract_bom_data_with_llm
+from app.services.part_number_service import generate_werco_part_number
 
 router = APIRouter()
 
@@ -79,6 +83,309 @@ def build_bom_item_response(
         component_part=component_info,
         created_at=item.created_at,
         updated_at=item.updated_at
+    )
+
+
+def _normalize_uom(value: Optional[str]) -> str:
+    if not value:
+        return UnitOfMeasure.EACH.value
+    val = value.strip().lower()
+    mapping = {
+        "ea": "each",
+        "each": "each",
+        "pcs": "each",
+        "pc": "each",
+        "lb": "pounds",
+        "lbs": "pounds",
+        "pound": "pounds",
+        "ft": "feet",
+        "feet": "feet",
+        "in": "inches",
+        "inch": "inches",
+        "inches": "inches",
+        "gal": "gallons",
+        "gallon": "gallons",
+        "l": "liters",
+        "liter": "liters"
+    }
+    return mapping.get(val, val)
+
+
+def _coerce_item_type(value: Optional[str]) -> str:
+    if not value:
+        return BOMItemType.BUY.value
+    val = value.strip().lower()
+    if val in {BOMItemType.MAKE.value, BOMItemType.BUY.value, BOMItemType.PHANTOM.value}:
+        return val
+    return BOMItemType.BUY.value
+
+
+def _coerce_line_type(value: Optional[str]) -> str:
+    if not value:
+        return BOMLineType.COMPONENT.value
+    val = value.strip().lower()
+    if val in {
+        BOMLineType.COMPONENT.value,
+        BOMLineType.HARDWARE.value,
+        BOMLineType.CONSUMABLE.value,
+        BOMLineType.REFERENCE.value
+    }:
+        return val
+    return BOMLineType.COMPONENT.value
+
+
+def _classify_line_type(description: str, explicit: Optional[str]) -> str:
+    if explicit:
+        return _coerce_line_type(explicit)
+    text = (description or "").lower()
+    hardware_keywords = ["bolt", "screw", "washer", "nut", "fastener", "pin", "rivet", "clip", "stud", "standoff", "spacer"]
+    consumable_keywords = ["adhesive", "loctite", "glue", "epoxy", "tape", "oil", "grease", "lubricant", "paint", "primer", "sealant"]
+    reference_keywords = ["reference", "ref only", "for reference", "ref."]
+    if any(k in text for k in hardware_keywords):
+        return BOMLineType.HARDWARE.value
+    if any(k in text for k in consumable_keywords):
+        return BOMLineType.CONSUMABLE.value
+    if any(k in text for k in reference_keywords):
+        return BOMLineType.REFERENCE.value
+    return BOMLineType.COMPONENT.value
+
+
+def _infer_part_type(line_type: str, item_type: str, description: str) -> str:
+    if line_type == BOMLineType.HARDWARE.value:
+        return PartType.HARDWARE.value
+    if line_type == BOMLineType.CONSUMABLE.value:
+        return PartType.CONSUMABLE.value
+    if line_type == BOMLineType.REFERENCE.value:
+        return PartType.PURCHASED.value
+    text = (description or "").lower()
+    if item_type == BOMItemType.MAKE.value:
+        if "assembly" in text or "assy" in text:
+            return PartType.ASSEMBLY.value
+        return PartType.MANUFACTURED.value
+    if item_type == BOMItemType.PHANTOM.value:
+        return PartType.ASSEMBLY.value
+    return PartType.PURCHASED.value
+
+
+def _safe_part_number(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    return value.strip()
+
+
+def _generate_fallback_part_number(prefix: str, index: int) -> str:
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    return f"{prefix}-{timestamp}-{index:03d}"
+
+
+def _ensure_part(
+    db: Session,
+    part_number: Optional[str],
+    name: str,
+    description: str,
+    part_type: str,
+    drawing_number: Optional[str],
+    unit_of_measure: Optional[str],
+    create_missing: bool,
+    fallback_index: int
+) -> Tuple[Optional[Part], Optional[str], bool]:
+    if part_number:
+        existing = db.query(Part).filter(Part.part_number == part_number).first()
+        if existing:
+            return existing, None, False
+    if not create_missing:
+        return None, part_number or name, False
+
+    normalized_type = part_type if part_type in {p.value for p in PartType} else PartType.PURCHASED.value
+    candidate_number = part_number
+    if not candidate_number:
+        if normalized_type in {PartType.RAW_MATERIAL.value, PartType.HARDWARE.value, PartType.CONSUMABLE.value}:
+            candidate_number = generate_werco_part_number(description or name, normalized_type)
+        if not candidate_number:
+            candidate_number = _generate_fallback_part_number("AUTO", fallback_index)
+
+    part = Part(
+        part_number=candidate_number,
+        revision="A",
+        name=name or candidate_number,
+        description=description,
+        part_type=normalized_type,
+        unit_of_measure=_normalize_uom(unit_of_measure),
+        drawing_number=drawing_number
+    )
+    db.add(part)
+    db.flush()
+    return part, None, True
+
+
+@router.post("/import", response_model=BOMImportResponse, status_code=status.HTTP_201_CREATED)
+async def import_bom_or_part(
+    file: UploadFile = File(...),
+    create_missing_parts: bool = Form(True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+):
+    """
+    Upload a BOM or single-part drawing (PDF/DOC/DOCX) and create parts/BOM items.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File name is required")
+
+    ext = f".{file.filename.split('.')[-1]}".lower() if "." in file.filename else ""
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF or Word documents.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    doc_path = save_uploaded_document(content, file.filename)
+    extraction_result = extract_text_from_document(doc_path)
+    if not extraction_result.text or len(extraction_result.text.strip()) < 50:
+        raise HTTPException(status_code=400, detail="Could not extract text from document")
+
+    extracted = extract_bom_data_with_llm(extraction_result.text, is_ocr=extraction_result.is_ocr)
+    if extracted.get("_error"):
+        raise HTTPException(status_code=400, detail=extracted.get("_error"))
+
+    items = extracted.get("items", []) or []
+    assembly = extracted.get("assembly", {}) or {}
+    doc_type = (extracted.get("document_type") or ("bom" if items else "part")).lower()
+    if items and doc_type != "bom":
+        doc_type = "bom"
+
+    warnings: List[str] = []
+    missing_parts: List[str] = []
+
+    assembly_number = _safe_part_number(assembly.get("part_number")) or _safe_part_number(assembly.get("drawing_number"))
+    if not assembly_number:
+        assembly_number = _generate_fallback_part_number("ASSY", 1) if doc_type == "bom" else _generate_fallback_part_number("PART", 1)
+        warnings.append("Assembly/part number not found; generated a temporary number.")
+
+    assembly_name = (assembly.get("name") or assembly.get("description") or assembly_number).strip()
+    assembly_description = (assembly.get("description") or assembly.get("name") or "").strip()
+    assembly_revision = (assembly.get("revision") or "A").strip()
+    assembly_drawing = _safe_part_number(assembly.get("drawing_number"))
+    assembly_part_type = (assembly.get("part_type") or ("assembly" if doc_type == "bom" else "manufactured")).strip().lower()
+    if assembly_part_type not in {p.value for p in PartType}:
+        assembly_part_type = PartType.ASSEMBLY.value if doc_type == "bom" else PartType.MANUFACTURED.value
+
+    # Get or create assembly part
+    existing_part = db.query(Part).filter(Part.part_number == assembly_number).first()
+    if existing_part:
+        assembly_part = existing_part
+    else:
+        assembly_part = Part(
+            part_number=assembly_number,
+            revision=assembly_revision,
+            name=assembly_name,
+            description=assembly_description,
+            part_type=assembly_part_type,
+            unit_of_measure=UnitOfMeasure.EACH.value,
+            drawing_number=assembly_drawing,
+            created_by=current_user.id
+        )
+        db.add(assembly_part)
+        db.flush()
+
+    created_parts = 0 if existing_part else 1
+    created_bom_items = 0
+    bom_id: Optional[int] = None
+
+    if doc_type == "part" and not items:
+        db.commit()
+        return BOMImportResponse(
+            document_type="part",
+            assembly_part_id=assembly_part.id,
+            assembly_part_number=assembly_part.part_number,
+            bom_id=None,
+            created_parts=created_parts,
+            created_bom_items=0,
+            extraction_confidence=extracted.get("extraction_confidence", "low"),
+            warnings=warnings
+        )
+
+    # If BOM already exists for assembly part, block import
+    existing_bom = db.query(BOM).filter(BOM.part_id == assembly_part.id, BOM.is_active == True).first()
+    if existing_bom:
+        raise HTTPException(status_code=400, detail="A BOM already exists for this assembly part")
+
+    bom = BOM(
+        part_id=assembly_part.id,
+        revision=assembly_revision or "A",
+        description=assembly_description,
+        status="draft",
+        bom_type="standard",
+        created_by=current_user.id
+    )
+    db.add(bom)
+    db.flush()
+    bom_id = bom.id
+
+    next_line = 10
+    for idx, item in enumerate(items, start=1):
+        item_number = int(item.get("line_number") or next_line)
+        next_line = item_number + 10
+        description = (item.get("description") or "").strip()
+        item_part_number = _safe_part_number(item.get("part_number"))
+        line_type = _classify_line_type(description, item.get("line_type"))
+        item_type = _coerce_item_type(item.get("item_type"))
+        part_type = _infer_part_type(line_type, item_type, description)
+        uom = item.get("unit_of_measure")
+
+        part_name = description or item_part_number or f"Item {item_number}"
+        if not item_part_number:
+            warnings.append(f"Line {item_number}: missing part number; generated automatically.")
+
+        component_part, missing, was_created = _ensure_part(
+            db,
+            item_part_number,
+            part_name,
+            description,
+            part_type,
+            None,
+            uom,
+            create_missing_parts,
+            idx
+        )
+        if missing:
+            missing_parts.append(missing)
+            continue
+
+        if was_created:
+            created_parts += 1
+
+        quantity = float(item.get("quantity") or 1)
+        bom_item = BOMItem(
+            bom_id=bom.id,
+            component_part_id=component_part.id,
+            item_number=item_number,
+            quantity=quantity if quantity > 0 else 1.0,
+            item_type=item_type,
+            line_type=line_type,
+            unit_of_measure=_normalize_uom(uom),
+            reference_designator=item.get("reference_designator"),
+            find_number=item.get("find_number"),
+            notes=item.get("notes")
+        )
+        db.add(bom_item)
+        created_bom_items += 1
+
+    if missing_parts:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Missing parts: {', '.join(missing_parts)}")
+
+    db.commit()
+
+    return BOMImportResponse(
+        document_type="bom",
+        assembly_part_id=assembly_part.id,
+        assembly_part_number=assembly_part.part_number,
+        bom_id=bom_id,
+        created_parts=created_parts,
+        created_bom_items=created_bom_items,
+        extraction_confidence=extracted.get("extraction_confidence", "low"),
+        warnings=warnings
     )
 
 

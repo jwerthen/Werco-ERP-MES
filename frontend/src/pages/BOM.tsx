@@ -100,6 +100,11 @@ export default function BOMPage() {
   const [explodedView, setExplodedView] = useState<BOMItem[]>([]);
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set());
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importCreateMissingParts, setImportCreateMissingParts] = useState(true);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const [showAddItemModal, setShowAddItemModal] = useState(false);
   const [showNewPartModal, setShowNewPartModal] = useState(false);
   const [viewMode, setViewMode] = useState<'single' | 'exploded'>('single');
@@ -229,6 +234,40 @@ export default function BOMPage() {
       setNewBOM({ part_id: 0, revision: 'A', description: '', bom_type: 'standard' });
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to create BOM');
+    }
+  };
+
+  const handleImport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importFile) {
+      alert('Please select a file to import.');
+      return;
+    }
+    setImportLoading(true);
+    setImportWarnings([]);
+    try {
+      const formData = new FormData();
+      formData.append('file', importFile);
+      formData.append('create_missing_parts', importCreateMissingParts ? 'true' : 'false');
+      const result = await api.importBOMDocument(formData);
+      await loadData();
+      if (result.bom_id) {
+        const createdBOM = await api.getBOM(result.bom_id);
+        setSelectedBOM(createdBOM);
+        setViewMode('single');
+      } else {
+        alert(`Part created: ${result.assembly_part_number}`);
+      }
+      if (result.warnings?.length) {
+        setImportWarnings(result.warnings);
+        alert(`Import completed with warnings:\n- ${result.warnings.join('\n- ')}`);
+      }
+      setShowImportModal(false);
+      setImportFile(null);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to import BOM');
+    } finally {
+      setImportLoading(false);
     }
   };
 
@@ -407,10 +446,16 @@ export default function BOMPage() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Bill of Materials</h1>
-        <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center">
-          <PlusIcon className="h-5 w-5 mr-2" />
-          Create BOM
-        </button>
+        <div className="flex gap-2">
+          <button onClick={() => setShowImportModal(true)} className="btn-secondary flex items-center">
+            <DocumentDuplicateIcon className="h-5 w-5 mr-2" />
+            Import BOM/Drawing
+          </button>
+          <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center">
+            <PlusIcon className="h-5 w-5 mr-2" />
+            Create BOM
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6" data-tour="eng-bom">
@@ -648,6 +693,56 @@ export default function BOMPage() {
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary">Create</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Import BOM / Drawing Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Import BOM or Drawing</h3>
+              <button onClick={() => setShowImportModal(false)}>
+                <XMarkIcon className="h-5 w-5 text-gray-500" />
+              </button>
+            </div>
+            <form onSubmit={handleImport} className="space-y-4">
+              <div>
+                <label className="label">PDF or Word Document</label>
+                <input
+                  type="file"
+                  accept=".pdf,.doc,.docx"
+                  onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                  className="input"
+                  required
+                />
+              </div>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={importCreateMissingParts}
+                  onChange={(e) => setImportCreateMissingParts(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                <span className="text-sm">Create missing parts automatically</span>
+              </label>
+              {importWarnings.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-md p-3 text-sm text-amber-800">
+                  {importWarnings.map((w, idx) => (
+                    <div key={idx}>{w}</div>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-end gap-3 pt-4 border-t">
+                <button type="button" onClick={() => setShowImportModal(false)} className="btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary" disabled={importLoading}>
+                  {importLoading ? 'Importing...' : 'Import'}
+                </button>
               </div>
             </form>
           </div>
