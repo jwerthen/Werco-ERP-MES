@@ -224,7 +224,7 @@ export default function RoutingPage() {
     const missing = uniqueIds.filter((id) => routingByPartId[id] === undefined);
     if (missing.length === 0) return;
 
-    setRoutingLoadingIds((prev) => new Set([...prev, ...missing]));
+    setRoutingLoadingIds((prev) => new Set(Array.from(prev).concat(missing)));
 
     const results: Array<[number, Routing | null]> = [];
     const batchSize = 10;
