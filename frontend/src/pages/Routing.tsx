@@ -233,6 +233,15 @@ export default function RoutingPage() {
     return null;
   };
 
+  const handleViewRouting = async (routing: Routing) => {
+    setSelectedRouting(routing);
+    setRoutings((prev) => (prev.some((r) => r.id === routing.id) ? prev : [routing, ...prev]));
+    const refreshed = await loadRouting(routing.id);
+    if (refreshed) {
+      setSelectedRouting(refreshed);
+    }
+  };
+
   const ensureRoutingStatuses = async (partIds: number[]) => {
     const uniqueIds = Array.from(new Set(partIds.filter(Boolean)));
     const missing = uniqueIds.filter((id) => routingByPartId[id] === undefined);
@@ -726,7 +735,7 @@ export default function RoutingPage() {
                         {isRoutable && routing && (
                           <button
                             type="button"
-                            onClick={() => loadRouting(routing.id)}
+                            onClick={() => handleViewRouting(routing)}
                             className="text-werco-primary hover:underline text-sm"
                           >
                             View
