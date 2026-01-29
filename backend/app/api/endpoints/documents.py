@@ -27,6 +27,7 @@ class DocumentResponse(BaseModel):
     description: Optional[str] = None
     part_id: Optional[int] = None
     work_order_id: Optional[int] = None
+    vendor_id: Optional[int] = None
     file_name: Optional[str] = None
     file_size: Optional[int] = None
     mime_type: Optional[str] = None
@@ -59,6 +60,7 @@ def generate_document_number(db: Session, doc_type: str) -> str:
 def list_documents(
     part_id: Optional[int] = None,
     work_order_id: Optional[int] = None,
+    vendor_id: Optional[int] = None,
     document_type: Optional[str] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
@@ -70,6 +72,8 @@ def list_documents(
         query = query.filter(Document.part_id == part_id)
     if work_order_id:
         query = query.filter(Document.work_order_id == work_order_id)
+    if vendor_id:
+        query = query.filter(Document.vendor_id == vendor_id)
     if document_type:
         query = query.filter(Document.document_type == document_type)
     if search:
@@ -93,6 +97,7 @@ async def upload_document(
     description: str = Form(None),
     part_id: int = Form(None),
     work_order_id: int = Form(None),
+    vendor_id: int = Form(None),
     revision: str = Form("A"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -119,6 +124,7 @@ async def upload_document(
         description=description,
         part_id=part_id if part_id and part_id > 0 else None,
         work_order_id=work_order_id if work_order_id and work_order_id > 0 else None,
+        vendor_id=vendor_id if vendor_id and vendor_id > 0 else None,
         file_name=file.filename,
         file_path=file_path,
         file_size=len(content),

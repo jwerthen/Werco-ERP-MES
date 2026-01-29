@@ -39,6 +39,7 @@ class Document(Base):
     # Associated records
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=True)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
     
     # File storage
     file_name = Column(String(255))
@@ -71,3 +72,4 @@ class Document(Base):
     
     # Relationships
     part = relationship("Part", back_populates="documents")
+    vendor = relationship("Vendor", back_populates="documents")

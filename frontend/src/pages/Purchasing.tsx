@@ -16,10 +16,19 @@ interface Vendor {
   contact_name?: string;
   email?: string;
   phone?: string;
+  address_line1?: string;
+  address_line2?: string;
+  city?: string;
+  state?: string;
+  postal_code?: string;
+  country?: string;
+  payment_terms?: string;
   is_approved: boolean;
   is_as9100_certified: boolean;
   is_iso9001_certified: boolean;
-  lead_time_days: number;
+  is_active?: boolean;
+  notes?: string;
+  version?: number;
 }
 
 interface PurchaseOrder {
@@ -73,6 +82,24 @@ interface Location {
   name: string;
 }
 
+interface VendorDocument {
+  id: number;
+  document_number: string;
+  revision: string;
+  title: string;
+  document_type: string;
+  description?: string;
+  file_name?: string;
+  file_size?: number;
+  mime_type?: string;
+  created_at: string;
+}
+
+interface DocumentType {
+  value: string;
+  label: string;
+}
+
 type TabType = 'receiving' | 'orders' | 'vendors' | 'inspection';
 
 const statusColors: Record<string, string> = {
@@ -99,12 +126,17 @@ export default function Purchasing() {
 
   const [showPOModal, setShowPOModal] = useState(false);
   const [showVendorModal, setShowVendorModal] = useState(false);
+  const [showEditVendorModal, setShowEditVendorModal] = useState(false);
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showInspectModal, setShowInspectModal] = useState(false);
   const [showAddPartModal, setShowAddPartModal] = useState(false);
   const [addPartForLineIndex, setAddPartForLineIndex] = useState<number | null>(null);
   const [selectedReceiveItem, setSelectedReceiveItem] = useState<ReceivingQueueItem | null>(null);
   const [selectedInspectItem, setSelectedInspectItem] = useState<PendingInspection | null>(null);
+  const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
+  const [vendorDocuments, setVendorDocuments] = useState<VendorDocument[]>([]);
+  const [documentTypes, setDocumentTypes] = useState<DocumentType[]>([]);
+  const [vendorDocsLoading, setVendorDocsLoading] = useState(false);
 
   const [newPO, setNewPO] = useState({
     vendor_id: 0,
@@ -120,7 +152,26 @@ export default function Purchasing() {
     email: '',
     phone: '',
     is_approved: false,
-    lead_time_days: 14
+    payment_terms: ''
+  });
+
+  const [editVendorForm, setEditVendorForm] = useState({
+    name: '',
+    contact_name: '',
+    email: '',
+    phone: '',
+    address_line1: '',
+    address_line2: '',
+    city: '',
+    state: '',
+    postal_code: '',
+    country: 'US',
+    payment_terms: '',
+    is_approved: false,
+    is_as9100_certified: false,
+    is_iso9001_certified: false,
+    is_active: true,
+    notes: ''
   });
 
   const [receiveForm, setReceiveForm] = useState({
@@ -147,6 +198,14 @@ export default function Purchasing() {
     quantity_rejected: 0,
     status: 'accepted',
     inspection_notes: ''
+  });
+
+  const [vendorDocForm, setVendorDocForm] = useState({
+    title: '',
+    document_type: 'certificate',
+    description: '',
+    revision: 'A',
+    file: null as File | null
   });
 
   const isPartialReceivingItem = (item: ReceivingQueueItem) => (
@@ -178,6 +237,132 @@ export default function Purchasing() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const loadVendorDocuments = async (vendorId: number) => {
+    setVendorDocsLoading(true);
+    try {
+      const [docsRes, typesRes] = await Promise.all([
+        api.getDocuments({ vendor_id: vendorId }),
+        api.getDocumentTypes()
+      ]);
+      setVendorDocuments(docsRes);
+      setDocumentTypes(typesRes);
+    } catch (err) {
+      console.error('Failed to load vendor documents:', err);
+    } finally {
+      setVendorDocsLoading(false);
+    }
+  };
+
+  const openEditVendorModal = (vendor: Vendor) => {
+    setSelectedVendor(vendor);
+    setEditVendorForm({
+      name: vendor.name || '',
+      contact_name: vendor.contact_name || '',
+      email: vendor.email || '',
+      phone: vendor.phone || '',
+      address_line1: vendor.address_line1 || '',
+      address_line2: vendor.address_line2 || '',
+      city: vendor.city || '',
+      state: vendor.state || '',
+      postal_code: vendor.postal_code || '',
+      country: vendor.country || 'US',
+      payment_terms: vendor.payment_terms || '',
+      is_approved: vendor.is_approved,
+      is_as9100_certified: vendor.is_as9100_certified,
+      is_iso9001_certified: vendor.is_iso9001_certified,
+      is_active: vendor.is_active ?? true,
+      notes: vendor.notes || ''
+    });
+    setVendorDocForm({
+      title: '',
+      document_type: 'certificate',
+      description: '',
+      revision: 'A',
+      file: null
+    });
+    setShowEditVendorModal(true);
+    loadVendorDocuments(vendor.id);
+  };
+
+  const handleUpdateVendor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedVendor) return;
+    try {
+      await api.updateVendor(selectedVendor.id, {
+        version: selectedVendor.version ?? 0,
+        ...editVendorForm
+      });
+      setShowEditVendorModal(false);
+      setSelectedVendor(null);
+      loadData();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to update vendor');
+    }
+  };
+
+  const handleVendorDocUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedVendor || !vendorDocForm.file) {
+      alert('Please select a file');
+      return;
+    }
+    const formData = new FormData();
+    formData.append('file', vendorDocForm.file);
+    formData.append('title', vendorDocForm.title || vendorDocForm.file.name);
+    formData.append('document_type', vendorDocForm.document_type);
+    formData.append('description', vendorDocForm.description || '');
+    formData.append('revision', vendorDocForm.revision || 'A');
+    formData.append('vendor_id', selectedVendor.id.toString());
+
+    try {
+      await api.uploadDocument(formData);
+      setVendorDocForm({
+        title: '',
+        document_type: vendorDocForm.document_type,
+        description: '',
+        revision: 'A',
+        file: null
+      });
+      loadVendorDocuments(selectedVendor.id);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to upload document');
+    }
+  };
+
+  const handleVendorDocDownload = async (doc: VendorDocument) => {
+    try {
+      const response = await api.downloadDocument(doc.id);
+      const url = window.URL.createObjectURL(new Blob([response]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', doc.file_name || 'document');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      alert('Failed to download document');
+    }
+  };
+
+  const handleVendorDocDelete = async (docId: number) => {
+    if (!window.confirm('Delete this document?')) return;
+    try {
+      await api.deleteDocument(docId);
+      if (selectedVendor) {
+        loadVendorDocuments(selectedVendor.id);
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to delete document');
+    }
+  };
+
+  const formatFileSize = (bytes?: number) => {
+    if (!bytes) return '-';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   const handleCreatePO = async (e: React.FormEvent) => {
@@ -215,7 +400,7 @@ export default function Purchasing() {
     try {
       await api.createVendor(newVendor);
       setShowVendorModal(false);
-      setNewVendor({ code: '', name: '', contact_name: '', email: '', phone: '', is_approved: false, lead_time_days: 14 });
+      setNewVendor({ code: '', name: '', contact_name: '', email: '', phone: '', is_approved: false, payment_terms: '' });
       loadData();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to create vendor');
@@ -658,7 +843,8 @@ export default function Purchasing() {
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Approved</th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">AS9100</th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">ISO9001</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Lead Time</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Payment Terms</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
@@ -691,7 +877,15 @@ export default function Purchasing() {
                         <span className="text-gray-400">-</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right">{vendor.lead_time_days} days</td>
+                    <td className="px-4 py-3 text-sm">{vendor.payment_terms || '-'}</td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => openEditVendorModal(vendor)}
+                        className="text-werco-primary hover:underline text-sm"
+                      >
+                        Edit
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -838,13 +1032,13 @@ export default function Purchasing() {
                   />
                 </div>
                 <div>
-                  <label className="label">Lead Time (days)</label>
+                  <label className="label">Payment Terms</label>
                   <input
-                    type="number"
-                    value={newVendor.lead_time_days}
-                    onChange={(e) => setNewVendor({ ...newVendor, lead_time_days: parseInt(e.target.value) })}
+                    type="text"
+                    value={newVendor.payment_terms}
+                    onChange={(e) => setNewVendor({ ...newVendor, payment_terms: e.target.value })}
                     className="input"
-                    min={1}
+                    placeholder="e.g., NET 30"
                   />
                 </div>
               </div>
@@ -903,6 +1097,303 @@ export default function Purchasing() {
                 <button type="submit" className="btn-primary">Create Vendor</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Vendor Modal */}
+      {showEditVendorModal && selectedVendor && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-5xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-semibold">Edit Vendor</h3>
+                <p className="text-sm text-gray-500">{selectedVendor.code}</p>
+              </div>
+              <button onClick={() => setShowEditVendorModal(false)} className="text-gray-500 hover:text-gray-700">
+                <span className="text-xl">×</span>
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateVendor} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Vendor Name *</label>
+                  <input
+                    type="text"
+                    value={editVendorForm.name}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, name: e.target.value })}
+                    className="input"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="label">Payment Terms</label>
+                  <input
+                    type="text"
+                    value={editVendorForm.payment_terms}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, payment_terms: e.target.value })}
+                    className="input"
+                    placeholder="e.g., NET 30"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Contact Name</label>
+                  <input
+                    type="text"
+                    value={editVendorForm.contact_name}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, contact_name: e.target.value })}
+                    className="input"
+                  />
+                </div>
+                <div>
+                  <label className="label">Email</label>
+                  <input
+                    type="email"
+                    value={editVendorForm.email}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, email: e.target.value })}
+                    className="input"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Phone</label>
+                  <input
+                    type="text"
+                    value={editVendorForm.phone}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, phone: e.target.value })}
+                    className="input"
+                  />
+                </div>
+                <div>
+                  <label className="label">Country</label>
+                  <input
+                    type="text"
+                    value={editVendorForm.country}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, country: e.target.value.toUpperCase() })}
+                    className="input"
+                    maxLength={3}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="label">Address Line 1</label>
+                <input
+                  type="text"
+                  value={editVendorForm.address_line1}
+                  onChange={(e) => setEditVendorForm({ ...editVendorForm, address_line1: e.target.value })}
+                  className="input"
+                />
+              </div>
+              <div>
+                <label className="label">Address Line 2</label>
+                <input
+                  type="text"
+                  value={editVendorForm.address_line2}
+                  onChange={(e) => setEditVendorForm({ ...editVendorForm, address_line2: e.target.value })}
+                  className="input"
+                />
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="label">City</label>
+                  <input
+                    type="text"
+                    value={editVendorForm.city}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, city: e.target.value })}
+                    className="input"
+                  />
+                </div>
+                <div>
+                  <label className="label">State</label>
+                  <input
+                    type="text"
+                    value={editVendorForm.state}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, state: e.target.value.toUpperCase() })}
+                    className="input"
+                    maxLength={2}
+                  />
+                </div>
+                <div>
+                  <label className="label">Postal Code</label>
+                  <input
+                    type="text"
+                    value={editVendorForm.postal_code}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, postal_code: e.target.value })}
+                    className="input"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={editVendorForm.is_approved}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, is_approved: e.target.checked })}
+                    className="rounded border-gray-300"
+                  />
+                  <span>Approved Vendor</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={editVendorForm.is_active}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, is_active: e.target.checked })}
+                    className="rounded border-gray-300"
+                  />
+                  <span>Active</span>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={editVendorForm.is_as9100_certified}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, is_as9100_certified: e.target.checked })}
+                    className="rounded border-gray-300"
+                  />
+                  <span>AS9100D Certified</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={editVendorForm.is_iso9001_certified}
+                    onChange={(e) => setEditVendorForm({ ...editVendorForm, is_iso9001_certified: e.target.checked })}
+                    className="rounded border-gray-300"
+                  />
+                  <span>ISO 9001 Certified</span>
+                </label>
+              </div>
+
+              <div>
+                <label className="label">Notes</label>
+                <textarea
+                  value={editVendorForm.notes}
+                  onChange={(e) => setEditVendorForm({ ...editVendorForm, notes: e.target.value })}
+                  className="input"
+                  rows={3}
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t">
+                <button type="button" onClick={() => setShowEditVendorModal(false)} className="btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary">Save Vendor</button>
+              </div>
+            </form>
+
+            <div className="mt-6 pt-4 border-t">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="font-semibold">Documents</h4>
+              </div>
+
+              <form onSubmit={handleVendorDocUpload} className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">
+                <input
+                  type="text"
+                  value={vendorDocForm.title}
+                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, title: e.target.value })}
+                  className="input md:col-span-2"
+                  placeholder="Title"
+                />
+                <select
+                  value={vendorDocForm.document_type}
+                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, document_type: e.target.value })}
+                  className="input md:col-span-1"
+                >
+                  {documentTypes.length > 0 ? (
+                    documentTypes.map((t) => (
+                      <option key={t.value} value={t.value}>{t.label}</option>
+                    ))
+                  ) : (
+                    <option value="certificate">Certificate</option>
+                  )}
+                </select>
+                <input
+                  type="text"
+                  value={vendorDocForm.revision}
+                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, revision: e.target.value })}
+                  className="input md:col-span-1"
+                  placeholder="Rev"
+                />
+                <input
+                  type="file"
+                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, file: e.target.files?.[0] || null })}
+                  className="input md:col-span-1"
+                />
+                <button type="submit" className="btn-primary md:col-span-1">Upload</button>
+                <input
+                  type="text"
+                  value={vendorDocForm.description}
+                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, description: e.target.value })}
+                  className="input md:col-span-6"
+                  placeholder="Description (optional)"
+                />
+              </form>
+
+              {vendorDocsLoading ? (
+                <div className="text-sm text-gray-500">Loading documents...</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">File</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Uploaded</th>
+                        <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {vendorDocuments.map((doc) => (
+                        <tr key={doc.id} className="hover:bg-gray-50">
+                          <td className="px-3 py-2 text-sm">
+                            <div className="font-medium">{doc.title}</div>
+                            <div className="text-xs text-gray-500">{doc.document_number} Rev {doc.revision}</div>
+                          </td>
+                          <td className="px-3 py-2 text-sm capitalize">{doc.document_type.replace('_', ' ')}</td>
+                          <td className="px-3 py-2 text-sm">
+                            <div>{doc.file_name || '-'}</div>
+                            <div className="text-xs text-gray-500">{formatFileSize(doc.file_size)}</div>
+                          </td>
+                          <td className="px-3 py-2 text-sm">{format(new Date(doc.created_at), 'MMM d, yyyy')}</td>
+                          <td className="px-3 py-2 text-right">
+                            <div className="flex justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleVendorDocDownload(doc)}
+                                className="text-werco-primary hover:text-blue-700 text-sm"
+                              >
+                                Download
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleVendorDocDelete(doc.id)}
+                                className="text-red-600 hover:text-red-800 text-sm"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {vendorDocuments.length === 0 && (
+                    <p className="text-sm text-gray-500 py-3">No documents for this vendor.</p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

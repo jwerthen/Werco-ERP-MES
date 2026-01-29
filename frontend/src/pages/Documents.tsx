@@ -17,6 +17,7 @@ interface Document {
   description?: string;
   part_id?: number;
   work_order_id?: number;
+  vendor_id?: number;
   file_name?: string;
   file_size?: number;
   mime_type?: string;

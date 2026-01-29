@@ -21,7 +21,6 @@ export function VendorForm({
 }: VendorFormProps) {
   const defaultValues: Partial<VendorFormData> = {
     country: 'USA',
-    lead_time_days: 14,
     is_approved: false,
     is_as9100_certified: false,
     is_iso9001_certified: false,
@@ -150,7 +149,7 @@ export function VendorForm({
 
             {/* Vendor Terms */}
             <div>
-              <h4 className="text-sm font-medium text-gray-700 mb-3">Terms & Lead Time</h4>
+              <h4 className="text-sm font-medium text-gray-700 mb-3">Terms</h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <FormField label="Payment Terms" name="payment_terms">
                   <input
@@ -159,19 +158,6 @@ export function VendorForm({
                     placeholder="e.g., NET 30, NET 60"
                     maxLength={100}
                   />
-                </FormField>
-
-                <FormField label="Default Lead Time (Days)" name="lead_time_days">
-                  <div className="relative">
-                    <input
-                      {...register('lead_time_days', { valueAsNumber: true })}
-                      type="number"
-                      min="0"
-                      max="365"
-                      className="input"
-                    />
-                    <span className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-500 text-sm">days</span>
-                  </div>
                 </FormField>
               </div>
             </div>

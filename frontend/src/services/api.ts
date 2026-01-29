@@ -899,7 +899,7 @@ class ApiService {
   }
 
   // Documents
-  async getDocuments(params?: { part_id?: number; work_order_id?: number; document_type?: string; search?: string }) {
+  async getDocuments(params?: { part_id?: number; work_order_id?: number; vendor_id?: number; document_type?: string; search?: string }) {
     const response = await this.api.get('/documents/', { params });
     return response.data;
   }

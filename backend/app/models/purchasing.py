@@ -85,6 +85,7 @@ class Vendor(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     purchase_orders = relationship("PurchaseOrder", back_populates="vendor")
+    documents = relationship("Document", back_populates="vendor")
 
 
 class PurchaseOrder(Base):
