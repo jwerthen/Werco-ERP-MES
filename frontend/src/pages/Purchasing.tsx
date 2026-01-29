@@ -290,9 +290,23 @@ export default function Purchasing() {
     e.preventDefault();
     if (!selectedVendor) return;
     try {
+      const cleanedForm = {
+        ...editVendorForm,
+        contact_name: editVendorForm.contact_name.trim() || undefined,
+        email: editVendorForm.email.trim() || undefined,
+        phone: editVendorForm.phone.trim() || undefined,
+        address_line1: editVendorForm.address_line1.trim() || undefined,
+        address_line2: editVendorForm.address_line2.trim() || undefined,
+        city: editVendorForm.city.trim() || undefined,
+        state: editVendorForm.state.trim().toUpperCase() || undefined,
+        postal_code: editVendorForm.postal_code.trim() || undefined,
+        country: editVendorForm.country.trim().toUpperCase() || undefined,
+        payment_terms: editVendorForm.payment_terms.trim() || undefined,
+        notes: editVendorForm.notes.trim() || undefined,
+      };
       await api.updateVendor(selectedVendor.id, {
         version: selectedVendor.version ?? 0,
-        ...editVendorForm
+        ...cleanedForm
       });
       setShowEditVendorModal(false);
       setSelectedVendor(null);
