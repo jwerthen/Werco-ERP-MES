@@ -433,6 +433,11 @@ async def import_bom_preview(
     doc_path = save_uploaded_document(content, file.filename)
     extraction_result = extract_text_from_document(doc_path)
     if not extraction_result.text or len(extraction_result.text.strip()) < 50:
+        if ext in [".xlsx", ".xls"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract text from Excel. Ensure pandas/openpyxl (for .xlsx) or xlrd (for .xls) is installed."
+            )
         raise HTTPException(status_code=400, detail="Could not extract text from document")
 
     extracted = extract_bom_data_with_llm(extraction_result.text, is_ocr=extraction_result.is_ocr)
