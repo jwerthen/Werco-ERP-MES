@@ -149,6 +149,10 @@ export default function Purchasing() {
     inspection_notes: ''
   });
 
+  const isPartialReceivingItem = (item: ReceivingQueueItem) => (
+    item.quantity_received > 0 && item.quantity_remaining > 0
+  );
+
   useEffect(() => {
     loadData();
   }, []);
@@ -270,12 +274,29 @@ export default function Purchasing() {
   const handleReceive = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedReceiveItem) return;
+    const receivedQty = receiveForm.quantity_received;
+    const selectedLineId = selectedReceiveItem.po_line_id;
     try {
       await api.receiveMaterial({
         po_line_id: selectedReceiveItem.po_line_id,
         ...receiveForm,
         location_id: receiveForm.location_id || null
       });
+      setReceivingQueue((prev) => prev
+        .map((item) => {
+          if (item.po_line_id !== selectedLineId) {
+            return item;
+          }
+          const newReceived = item.quantity_received + receivedQty;
+          const newRemaining = Math.max(item.quantity_remaining - receivedQty, 0);
+          return {
+            ...item,
+            quantity_received: newReceived,
+            quantity_remaining: newRemaining,
+          };
+        })
+        .filter((item) => item.quantity_remaining > 0)
+      );
       setShowReceiveModal(false);
       loadData();
     } catch (err: any) {
@@ -440,7 +461,14 @@ export default function Purchasing() {
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {receivingQueue.map((item) => (
-                  <tr key={item.po_line_id} className="hover:bg-gray-50">
+                  <tr
+                    key={item.po_line_id}
+                    className={`${
+                      isPartialReceivingItem(item)
+                        ? 'bg-amber-50 hover:bg-amber-100'
+                        : 'hover:bg-gray-50'
+                    }`}
+                  >
                     <td className="px-4 py-3 font-medium text-werco-primary">{item.po_number}</td>
                     <td className="px-4 py-3">{item.vendor_name}</td>
                     <td className="px-4 py-3">

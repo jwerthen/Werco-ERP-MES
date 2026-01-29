@@ -127,6 +127,39 @@ export default function ReceivingPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
+  const isPartialLine = (line: POLine) => (
+    !line.is_closed && line.quantity_received > 0 && line.quantity_remaining > 0
+  );
+
+  const applyReceiptToPO = (po: PurchaseOrder, lineId: number, qtyReceived: number): PurchaseOrder => {
+    const updatedLines = po.lines.map((line) => {
+      if (line.line_id !== lineId) {
+        return line;
+      }
+      const newReceived = line.quantity_received + qtyReceived;
+      const newRemaining = line.quantity_ordered - newReceived;
+      return {
+        ...line,
+        quantity_received: newReceived,
+        quantity_remaining: newRemaining,
+        is_closed: line.is_closed || newRemaining <= 0,
+      };
+    });
+    return {
+      ...po,
+      lines: updatedLines,
+    };
+  };
+
+  const refreshSelectedPO = async (poId: number) => {
+    try {
+      const fullPO = await api.getPOForReceiving(poId);
+      setSelectedPO(fullPO);
+    } catch (err) {
+      console.error('Failed to refresh PO details:', err);
+    }
+  };
+
   useEffect(() => {
     loadData();
   }, []);
@@ -211,15 +244,26 @@ export default function ReceivingPage() {
       return;
     }
 
+    const receivedQty = formData.quantity_received;
+    const selectedLineId = selectedLine?.line_id;
+    const selectedPOId = selectedPO?.po_id;
+
     try {
       await api.receiveNewMaterial({
         ...formData,
         location_id: formData.location_id || undefined,
       });
       setSuccess('Material received successfully');
+      if (selectedPO && selectedLine && selectedLineId !== undefined) {
+        setSelectedPO((prev) => (prev ? applyReceiptToPO(prev, selectedLineId, receivedQty) : prev));
+      }
       setShowReceiveModal(false);
       setSelectedLine(null);
       loadData();
+
+      if (selectedPOId !== undefined) {
+        refreshSelectedPO(selectedPOId);
+      }
       
       if (formData.requires_inspection) {
         loadInspectionQueue();
@@ -544,7 +588,16 @@ export default function ReceivingPage() {
                         </thead>
                         <tbody className="divide-y divide-gray-200">
                           {selectedPO.lines?.map((line: any) => (
-                            <tr key={line.line_id} className={`${line.is_closed ? 'bg-gray-50 text-gray-400' : 'hover:bg-gray-50'}`}>
+                            <tr
+                              key={line.line_id}
+                              className={`${
+                                line.is_closed
+                                  ? 'bg-gray-50 text-gray-400'
+                                  : isPartialLine(line)
+                                    ? 'bg-amber-50 hover:bg-amber-100'
+                                    : 'hover:bg-gray-50'
+                              }`}
+                            >
                               <td className="px-4 py-3 text-sm font-medium text-center">{line.line_number}</td>
                               <td className="px-4 py-3">
                                 <span className="font-mono font-semibold text-sm">{line.part_number}</span>
@@ -651,7 +704,11 @@ export default function ReceivingPage() {
                   {selectedPO.lines?.filter((l: any) => l.quantity_remaining > 0 && !l.is_closed).map((line: any) => (
                     <div
                       key={line.line_id}
-                      className="p-4 rounded-xl border-2 border-gray-200 hover:border-werco-primary hover:bg-werco-50 transition-all"
+                      className={`p-4 rounded-xl border-2 transition-all ${
+                        isPartialLine(line)
+                          ? 'border-amber-300 bg-amber-50 hover:border-amber-400'
+                          : 'border-gray-200 hover:border-werco-primary hover:bg-werco-50'
+                      }`}
                     >
                       <div className="flex justify-between items-start mb-3">
                         <div>
