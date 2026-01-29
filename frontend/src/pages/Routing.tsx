@@ -62,6 +62,12 @@ interface Part {
   part_type: string;
 }
 
+interface RoutingPartOption {
+  id: number;
+  part_number: string;
+  name: string;
+}
+
 type BOMLineType = 'component' | 'hardware' | 'consumable' | 'reference';
 type BOMItemType = 'make' | 'buy' | 'phantom';
 
@@ -155,6 +161,7 @@ export default function RoutingPage() {
   const [includeNonComponentLines, setIncludeNonComponentLines] = useState(false);
   const [routingByPartId, setRoutingByPartId] = useState<Record<number, Routing | null>>({});
   const [routingLoadingIds, setRoutingLoadingIds] = useState<Set<number>>(new Set());
+  const [forcedRoutingPart, setForcedRoutingPart] = useState<RoutingPartOption | null>(null);
 
   useEffect(() => {
     loadData();
@@ -167,9 +174,17 @@ export default function RoutingPage() {
     if (Number.isNaN(partId)) return;
 
     const existing = parts.find(p => p.id === partId);
-    if (existing) {
+    if (newRouting.part_id !== partId) {
       setNewRouting({ part_id: partId, revision: 'A', description: '' });
       setShowCreateModal(true);
+      setForcedRoutingPart({
+        id: partId,
+        part_number: existing?.part_number || `Part #${partId}`,
+        name: existing?.name || 'Loading...'
+      });
+    }
+    if (existing) {
+      setForcedRoutingPart({ id: existing.id, part_number: existing.part_number, name: existing.name });
       return;
     }
 
@@ -181,14 +196,13 @@ export default function RoutingPage() {
             if (prev.some(p => p.id === partId)) return prev;
             return [...prev, part];
           });
-          setNewRouting({ part_id: partId, revision: 'A', description: '' });
-          setShowCreateModal(true);
+          setForcedRoutingPart({ id: part.id, part_number: part.part_number, name: part.name });
         }
       } catch (err) {
         console.error('Failed to load part from routing param:', err);
       }
     })();
-  }, [searchParams, parts]);
+  }, [searchParams, parts, newRouting.part_id]);
 
   const loadData = async () => {
     try {
@@ -284,21 +298,29 @@ export default function RoutingPage() {
     }
   };
 
-  const openCreateRoutingForPart = async (partId: number, partLabel?: string) => {
+  const openCreateRoutingForPart = async (partId: number, partNumber?: string, partName?: string) => {
+    const descriptionLabel = partNumber || partName;
+    setNewRouting({
+      part_id: partId,
+      revision: 'A',
+      description: descriptionLabel ? `Routing for ${descriptionLabel}` : ''
+    });
+    setForcedRoutingPart({
+      id: partId,
+      part_number: partNumber || `Part #${partId}`,
+      name: partName || (partNumber ? '' : 'Loading...')
+    });
+    setShowCreateModal(true);
+
     if (!parts.some((p) => p.id === partId)) {
       try {
         const part = await api.getPart(partId);
         setParts((prev) => (prev.some((p) => p.id === partId) ? prev : [...prev, part]));
+        setForcedRoutingPart({ id: part.id, part_number: part.part_number, name: part.name });
       } catch (err) {
         console.error('Failed to load part for routing:', err);
       }
     }
-    setNewRouting({
-      part_id: partId,
-      revision: 'A',
-      description: partLabel ? `Routing for ${partLabel}` : ''
-    });
-    setShowCreateModal(true);
   };
 
   const handleAssemblySelect = (value: string) => {
@@ -322,6 +344,7 @@ export default function RoutingPage() {
       setRoutingByPartId((prev) => ({ ...prev, [created.part_id]: created }));
       setShowCreateModal(false);
       setNewRouting({ part_id: 0, revision: 'A', description: '' });
+      setForcedRoutingPart(null);
       const nextParams = new URLSearchParams(searchParams);
       nextParams.delete('part_id');
       setSearchParams(nextParams);
@@ -473,6 +496,22 @@ export default function RoutingPage() {
     return ids;
   }, [assemblyBOM]);
 
+  const routingPartOptions = useMemo(() => {
+    const base = parts.filter(
+      (part) =>
+        ['assembly', 'manufactured'].includes(part.part_type) ||
+        routablePartIds.has(part.id) ||
+        part.id === newRouting.part_id
+    );
+    if (forcedRoutingPart && !base.some((part) => part.id === forcedRoutingPart.id)) {
+      return [
+        { ...forcedRoutingPart, part_type: 'manufactured' } as Part,
+        ...base
+      ];
+    }
+    return base;
+  }, [parts, routablePartIds, forcedRoutingPart, newRouting.part_id]);
+
   const assemblyItems = useMemo(() => {
     if (!assemblyBOM) return [];
     const items = assemblyBOM.items || [];
@@ -514,7 +553,14 @@ export default function RoutingPage() {
     <div className="space-y-6" data-tour="eng-routing">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Operations Routing</h1>
-        <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center">
+        <button
+          onClick={() => {
+            setNewRouting({ part_id: 0, revision: 'A', description: '' });
+            setForcedRoutingPart(null);
+            setShowCreateModal(true);
+          }}
+          className="btn-primary flex items-center"
+        >
           <PlusIcon className="h-5 w-5 mr-2" />
           New Routing
         </button>
@@ -689,7 +735,7 @@ export default function RoutingPage() {
                         {isRoutable && routing === null && (
                           <button
                             type="button"
-                            onClick={() => openCreateRoutingForPart(item.component_part_id, part?.part_number || part?.name)}
+                            onClick={() => openCreateRoutingForPart(item.component_part_id, part?.part_number, part?.name)}
                             className="text-werco-primary hover:underline text-sm"
                           >
                             Create
@@ -893,18 +939,22 @@ export default function RoutingPage() {
                 <label className="label">Part</label>
                 <select
                   value={newRouting.part_id}
-                  onChange={(e) => setNewRouting({ ...newRouting, part_id: parseInt(e.target.value) })}
+                  onChange={(e) => {
+                    const nextId = parseInt(e.target.value);
+                    setNewRouting({ ...newRouting, part_id: nextId });
+                    if (!forcedRoutingPart || forcedRoutingPart.id !== nextId) {
+                      setForcedRoutingPart(null);
+                    }
+                  }}
                   className="input"
                   required
                 >
                   <option value={0}>Select a part...</option>
-                  {parts
-                    .filter(p => ['assembly', 'manufactured'].includes(p.part_type) || routablePartIds.has(p.id) || p.id === newRouting.part_id)
-                    .map(part => (
-                      <option key={part.id} value={part.id}>
-                        {part.part_number} - {part.name}
-                      </option>
-                    ))}
+                  {routingPartOptions.map(part => (
+                    <option key={part.id} value={part.id}>
+                      {part.part_number} - {part.name}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -927,7 +977,18 @@ export default function RoutingPage() {
                 />
               </div>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCreateModal(false);
+                    setForcedRoutingPart(null);
+                    setNewRouting({ part_id: 0, revision: 'A', description: '' });
+                    const nextParams = new URLSearchParams(searchParams);
+                    nextParams.delete('part_id');
+                    setSearchParams(nextParams);
+                  }}
+                  className="btn-secondary"
+                >
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary">Create</button>
