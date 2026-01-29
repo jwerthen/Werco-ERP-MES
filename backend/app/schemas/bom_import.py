@@ -30,6 +30,10 @@ class BOMImportPreviewResponse(BaseModel):
     items: List[BOMImportItem] = Field(default_factory=list)
     extraction_confidence: str = "low"
     warnings: List[str] = Field(default_factory=list)
+    raw_columns: List[str] = Field(default_factory=list)
+    raw_rows: List[List[str]] = Field(default_factory=list)
+    suggested_mapping: Optional[dict] = None
+    source_format: Optional[str] = None
 
 
 class BOMImportCommitRequest(BaseModel):

@@ -267,6 +267,129 @@ def _build_preview(extracted: Dict[str, Any]) -> Tuple[BOMImportAssembly, List[B
     return assembly, items, warnings, extraction_confidence
 
 
+def _normalize_header(value: str) -> str:
+    return "".join(ch for ch in value.strip().lower() if ch.isalnum() or ch.isspace()).replace(" ", "")
+
+
+def _extract_excel_table(file_path: str, ext: str) -> Tuple[List[str], List[List[str]]]:
+    columns: List[str] = []
+    rows: List[List[str]] = []
+    try:
+        import pandas as pd
+        sheets = pd.read_excel(file_path, sheet_name=None, dtype=str, header=None)
+        for _, df in sheets.items():
+            df = df.fillna("")
+            raw_rows = df.astype(str).values.tolist()
+            for row in raw_rows:
+                clean = [str(cell).strip() for cell in row if str(cell).strip()]
+                if clean and not columns:
+                    columns = [str(cell).strip() for cell in row]
+                    continue
+                if any(str(cell).strip() for cell in row):
+                    rows.append([str(cell).strip() for cell in row])
+        if columns:
+            return columns, rows
+    except Exception:
+        pass
+
+    if ext == ".xlsx":
+        from openpyxl import load_workbook
+        wb = load_workbook(file_path, data_only=True)
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            for row in ws.iter_rows(values_only=True):
+                row_vals = ["" if cell is None else str(cell).strip() for cell in row]
+                if not columns and any(val for val in row_vals):
+                    columns = row_vals
+                    continue
+                if any(val for val in row_vals):
+                    rows.append(row_vals)
+    else:
+        import xlrd
+        wb = xlrd.open_workbook(file_path)
+        for sheet in wb.sheets():
+            for r in range(sheet.nrows):
+                row_vals = [str(sheet.cell_value(r, c)).strip() for c in range(sheet.ncols)]
+                if not columns and any(val for val in row_vals):
+                    columns = row_vals
+                    continue
+                if any(val for val in row_vals):
+                    rows.append(row_vals)
+
+    if not columns and rows:
+        max_cols = max(len(r) for r in rows)
+        columns = [f"col{idx+1}" for idx in range(max_cols)]
+    return columns, rows
+
+
+def _suggest_mapping(columns: List[str]) -> Dict[str, Optional[int]]:
+    synonyms = {
+        "line_number": ["itemno", "itemnumber", "item", "lineno", "linenumber", "line", "item#", "itemno."],
+        "part_number": ["part#", "partnumber", "partno", "pn", "p/n", "part"],
+        "description": ["description", "desc", "partname", "name", "itemdescription", "material", "sheet"],
+        "quantity": ["qty", "quantity", "quantityrequired", "reqqty", "q'ty"],
+        "unit_of_measure": ["uom", "unit", "unitofmeasure", "units"],
+        "item_type": ["itemtype", "makebuy", "make/buy", "mb"],
+        "line_type": ["linetype", "type", "componenttype", "category"],
+    }
+    normalized = [_normalize_header(c) for c in columns]
+    mapping: Dict[str, Optional[int]] = {k: None for k in synonyms.keys()}
+    for field, keys in synonyms.items():
+        for idx, name in enumerate(normalized):
+            if any(key.replace("/", "") in name for key in keys):
+                mapping[field] = idx
+                break
+    return mapping
+
+
+def _items_from_table(
+    columns: List[str],
+    rows: List[List[str]],
+    mapping: Dict[str, Optional[int]]
+) -> List[BOMImportItem]:
+    items: List[BOMImportItem] = []
+    next_line = 10
+    for row in rows:
+        if not any(cell.strip() for cell in row):
+            continue
+        def get_val(field: str) -> str:
+            idx = mapping.get(field)
+            if idx is None or idx >= len(row):
+                return ""
+            return str(row[idx]).strip()
+
+        line_val = get_val("line_number")
+        try:
+            line_number = int(float(line_val)) if line_val else next_line
+        except Exception:
+            line_number = next_line
+        next_line = line_number + 10
+
+        description = get_val("description")
+        part_number = get_val("part_number")
+        qty_val = get_val("quantity")
+        try:
+            quantity = float(qty_val) if qty_val else 1.0
+        except Exception:
+            quantity = 1.0
+        uom = get_val("unit_of_measure")
+        item_type = get_val("item_type")
+        line_type = get_val("line_type")
+        line_type = _classify_line_type(description, line_type)
+        item_type = _coerce_item_type(item_type)
+
+        items.append(BOMImportItem(
+            line_number=line_number,
+            part_number=part_number or None,
+            description=description or None,
+            quantity=quantity if quantity > 0 else 1.0,
+            unit_of_measure=_normalize_uom(uom),
+            item_type=item_type,
+            line_type=line_type,
+        ))
+    return items
+
+
 def _create_from_import_payload(
     payload: BOMImportCommitRequest,
     db: Session,
@@ -432,12 +555,34 @@ async def import_bom_preview(
 
     doc_path = save_uploaded_document(content, file.filename)
     extraction_result = extract_text_from_document(doc_path)
-    if not extraction_result.text or len(extraction_result.text.strip()) < 50:
-        if ext in [".xlsx", ".xls"]:
+    if ext in [".xlsx", ".xls"]:
+        columns, rows = _extract_excel_table(doc_path, ext)
+        if not rows:
             raise HTTPException(
                 status_code=400,
-                detail="Could not extract text from Excel. Ensure pandas/openpyxl (for .xlsx) or xlrd (for .xls) is installed."
+                detail="No data rows found in Excel file."
             )
+        mapping = _suggest_mapping(columns)
+        items = _items_from_table(columns, rows, mapping)
+        warnings = []
+        if not mapping.get("part_number"):
+            warnings.append("Part number column not detected. Map it in the preview.")
+        if not mapping.get("quantity"):
+            warnings.append("Quantity column not detected. Map it in the preview.")
+        assembly = BOMImportAssembly()
+        return BOMImportPreviewResponse(
+            document_type="bom",
+            assembly=assembly,
+            items=items,
+            extraction_confidence="medium",
+            warnings=warnings,
+            raw_columns=columns,
+            raw_rows=rows,
+            suggested_mapping=mapping,
+            source_format="excel"
+        )
+
+    if not extraction_result.text or len(extraction_result.text.strip()) < 50:
         raise HTTPException(status_code=400, detail="Could not extract text from document")
 
     extracted = extract_bom_data_with_llm(extraction_result.text, is_ocr=extraction_result.is_ocr)

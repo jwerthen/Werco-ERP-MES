@@ -50,6 +50,10 @@ interface ImportPreview {
   items: ImportItem[];
   extraction_confidence?: string;
   warnings?: string[];
+  raw_columns?: string[];
+  raw_rows?: string[][];
+  suggested_mapping?: Record<string, number | null>;
+  source_format?: string;
 }
 
 export default function Parts() {
@@ -87,6 +91,8 @@ export default function Parts() {
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const [importLoading, setImportLoading] = useState(false);
+  const [importColumnMap, setImportColumnMap] = useState<Record<string, number | null>>({});
+  const [importDerivedItems, setImportDerivedItems] = useState<ImportItem[]>([]);
 
   // Get unique customers from existing parts
   const existingCustomers = useMemo(() => {
@@ -304,6 +310,21 @@ export default function Parts() {
       const preview = await api.previewBOMImport(formData);
       setImportPreview(preview);
       setImportWarnings(preview.warnings || []);
+      if (preview.raw_columns && preview.raw_columns.length > 0 && preview.raw_rows) {
+        const mapping = preview.suggested_mapping || {
+          line_number: null,
+          part_number: null,
+          description: null,
+          quantity: null,
+          unit_of_measure: null,
+          item_type: null,
+          line_type: null,
+        };
+        setImportColumnMap(mapping);
+        setImportDerivedItems(buildItemsFromRaw(preview.raw_columns, preview.raw_rows, mapping));
+      } else {
+        setImportDerivedItems(preview.items || []);
+      }
       setShowImportModal(false);
       setShowImportPreviewModal(true);
     } catch (err: any) {
@@ -331,14 +352,50 @@ export default function Parts() {
     setImportPreview({ ...importPreview, items });
   };
 
+  const buildItemsFromRaw = (rawColumns: string[], rawRows: string[][], mapping: Record<string, number | null>) => {
+    const items: ImportItem[] = [];
+    let nextLine = 10;
+    rawRows.forEach((row) => {
+      const hasData = row.some((cell) => (cell || '').toString().trim() !== '');
+      if (!hasData) return;
+
+      const getVal = (field: string) => {
+        const idx = mapping[field];
+        if (idx === null || idx === undefined || idx >= row.length) return '';
+        return (row[idx] || '').toString().trim();
+      };
+
+      const lineVal = getVal('line_number');
+      const lineNumber = lineVal ? parseInt(lineVal) : nextLine;
+      nextLine = (isNaN(lineNumber) ? nextLine : lineNumber) + 10;
+
+      const quantityVal = getVal('quantity');
+      const quantity = quantityVal ? parseFloat(quantityVal) : 1;
+
+      items.push({
+        line_number: isNaN(lineNumber) ? nextLine : lineNumber,
+        part_number: getVal('part_number') || undefined,
+        description: getVal('description') || undefined,
+        quantity: isNaN(quantity) ? 1 : quantity,
+        unit_of_measure: getVal('unit_of_measure') || undefined,
+        item_type: getVal('item_type') || undefined,
+        line_type: (getVal('line_type') as any) || undefined,
+      });
+    });
+    return items;
+  };
+
   const handleCommitImport = async () => {
     if (!importPreview) return;
     setImportLoading(true);
     try {
+      const commitItems = (importPreview.raw_columns && importPreview.raw_columns.length > 0)
+        ? importDerivedItems
+        : importPreview.items;
       const result = await api.commitBOMImport({
         document_type: importPreview.document_type,
         assembly: importPreview.assembly,
-        items: importPreview.items,
+        items: commitItems,
         create_missing_parts: importCreateMissingParts
       });
       await loadParts();
@@ -753,6 +810,48 @@ export default function Parts() {
             </div>
 
             {importPreview.document_type === 'bom' && (
+              <div className="mb-4">
+                {importPreview.raw_columns && importPreview.raw_columns.length > 0 && (
+                  <div className="mb-4">
+                    <p className="text-sm text-gray-600 mb-2">Map your Excel columns:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                      {[
+                        { key: 'line_number', label: 'Line #' },
+                        { key: 'part_number', label: 'Part #' },
+                        { key: 'description', label: 'Description' },
+                        { key: 'quantity', label: 'Qty' },
+                        { key: 'unit_of_measure', label: 'UOM' },
+                        { key: 'item_type', label: 'Item Type' },
+                        { key: 'line_type', label: 'Line Type' },
+                      ].map((field) => (
+                        <div key={field.key}>
+                          <label className="label">{field.label}</label>
+                          <select
+                            className="input"
+                            value={importColumnMap[field.key] ?? ''}
+                            onChange={(e) => {
+                              const idx = e.target.value === '' ? null : parseInt(e.target.value);
+                              const nextMap = { ...importColumnMap, [field.key]: idx };
+                              setImportColumnMap(nextMap);
+                              if (importPreview.raw_columns && importPreview.raw_rows) {
+                                setImportDerivedItems(buildItemsFromRaw(importPreview.raw_columns, importPreview.raw_rows, nextMap));
+                              }
+                            }}
+                          >
+                            <option value="">Not mapped</option>
+                            {importPreview.raw_columns.map((col, idx) => (
+                              <option key={col + idx} value={idx}>{col || `Column ${idx + 1}`}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {importPreview.document_type === 'bom' && (
               <div className="overflow-x-auto mb-6">
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
@@ -767,28 +866,55 @@ export default function Parts() {
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {importPreview.items.map((item, index) => (
+                    {(importPreview.raw_columns && importPreview.raw_columns.length > 0 ? importDerivedItems : importPreview.items).map((item, index) => (
                       <tr key={index}>
                         <td className="px-3 py-2 text-sm">
                           <input
                             className="input w-20"
                             type="number"
                             value={item.line_number || (index + 1) * 10}
-                            onChange={(e) => updatePreviewItem(index, 'line_number', parseInt(e.target.value))}
+                            onChange={(e) => {
+                              const value = parseInt(e.target.value);
+                              if (importPreview.raw_columns && importPreview.raw_columns.length > 0) {
+                                const next = [...importDerivedItems];
+                                next[index] = { ...next[index], line_number: value };
+                                setImportDerivedItems(next);
+                              } else {
+                                updatePreviewItem(index, 'line_number', value);
+                              }
+                            }}
                           />
                         </td>
                         <td className="px-3 py-2 text-sm">
                           <input
                             className="input"
                             value={item.part_number || ''}
-                            onChange={(e) => updatePreviewItem(index, 'part_number', e.target.value)}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              if (importPreview.raw_columns && importPreview.raw_columns.length > 0) {
+                                const next = [...importDerivedItems];
+                                next[index] = { ...next[index], part_number: value };
+                                setImportDerivedItems(next);
+                              } else {
+                                updatePreviewItem(index, 'part_number', value);
+                              }
+                            }}
                           />
                         </td>
                         <td className="px-3 py-2 text-sm">
                           <input
                             className="input"
                             value={item.description || ''}
-                            onChange={(e) => updatePreviewItem(index, 'description', e.target.value)}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              if (importPreview.raw_columns && importPreview.raw_columns.length > 0) {
+                                const next = [...importDerivedItems];
+                                next[index] = { ...next[index], description: value };
+                                setImportDerivedItems(next);
+                              } else {
+                                updatePreviewItem(index, 'description', value);
+                              }
+                            }}
                           />
                         </td>
                         <td className="px-3 py-2 text-sm">
@@ -797,21 +923,48 @@ export default function Parts() {
                             type="number"
                             step="0.001"
                             value={item.quantity ?? 1}
-                            onChange={(e) => updatePreviewItem(index, 'quantity', parseFloat(e.target.value))}
+                            onChange={(e) => {
+                              const value = parseFloat(e.target.value);
+                              if (importPreview.raw_columns && importPreview.raw_columns.length > 0) {
+                                const next = [...importDerivedItems];
+                                next[index] = { ...next[index], quantity: value };
+                                setImportDerivedItems(next);
+                              } else {
+                                updatePreviewItem(index, 'quantity', value);
+                              }
+                            }}
                           />
                         </td>
                         <td className="px-3 py-2 text-sm">
                           <input
                             className="input w-24"
                             value={item.unit_of_measure || ''}
-                            onChange={(e) => updatePreviewItem(index, 'unit_of_measure', e.target.value)}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              if (importPreview.raw_columns && importPreview.raw_columns.length > 0) {
+                                const next = [...importDerivedItems];
+                                next[index] = { ...next[index], unit_of_measure: value };
+                                setImportDerivedItems(next);
+                              } else {
+                                updatePreviewItem(index, 'unit_of_measure', value);
+                              }
+                            }}
                           />
                         </td>
                         <td className="px-3 py-2 text-sm">
                           <select
                             className="input"
                             value={item.item_type || 'buy'}
-                            onChange={(e) => updatePreviewItem(index, 'item_type', e.target.value)}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              if (importPreview.raw_columns && importPreview.raw_columns.length > 0) {
+                                const next = [...importDerivedItems];
+                                next[index] = { ...next[index], item_type: value };
+                                setImportDerivedItems(next);
+                              } else {
+                                updatePreviewItem(index, 'item_type', value);
+                              }
+                            }}
                           >
                             <option value="make">Make</option>
                             <option value="buy">Buy</option>
@@ -822,7 +975,16 @@ export default function Parts() {
                           <select
                             className="input"
                             value={item.line_type || 'component'}
-                            onChange={(e) => updatePreviewItem(index, 'line_type', e.target.value)}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              if (importPreview.raw_columns && importPreview.raw_columns.length > 0) {
+                                const next = [...importDerivedItems];
+                                next[index] = { ...next[index], line_type: value as any };
+                                setImportDerivedItems(next);
+                              } else {
+                                updatePreviewItem(index, 'line_type', value);
+                              }
+                            }}
                           >
                             <option value="component">Component</option>
                             <option value="hardware">Hardware</option>
