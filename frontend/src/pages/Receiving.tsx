@@ -712,7 +712,14 @@ export default function ReceivingPage() {
                     >
                       <div className="flex justify-between items-start mb-3">
                         <div>
-                          <p className="font-mono font-bold text-lg">{line.part_number}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="font-mono font-bold text-lg">{line.part_number}</p>
+                            {isPartialLine(line) && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-200 text-amber-800">
+                                Partial
+                              </span>
+                            )}
+                          </div>
                           <p className="text-sm text-gray-600">{line.part_name}</p>
                         </div>
                         <button

@@ -472,7 +472,14 @@ export default function Purchasing() {
                     <td className="px-4 py-3 font-medium text-werco-primary">{item.po_number}</td>
                     <td className="px-4 py-3">{item.vendor_name}</td>
                     <td className="px-4 py-3">
-                      <div className="font-medium">{item.part_number}</div>
+                      <div className="flex items-center gap-2">
+                        <div className="font-medium">{item.part_number}</div>
+                        {isPartialReceivingItem(item) && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-200 text-amber-800">
+                            Partial
+                          </span>
+                        )}
+                      </div>
                       <div className="text-sm text-gray-500">{item.part_name}</div>
                     </td>
                     <td className="px-4 py-3 text-right">{item.quantity_ordered}</td>
