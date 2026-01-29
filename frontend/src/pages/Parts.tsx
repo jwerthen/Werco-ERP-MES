@@ -889,6 +889,7 @@ export default function Parts() {
                           <input
                             className="input"
                             value={item.part_number || ''}
+                            title={item.part_number || ''}
                             onChange={(e) => {
                               const value = e.target.value;
                               if (importPreview.raw_columns && importPreview.raw_columns.length > 0) {
@@ -902,8 +903,9 @@ export default function Parts() {
                           />
                         </td>
                         <td className="px-3 py-2 text-sm">
-                          <input
-                            className="input"
+                          <textarea
+                            className="input min-h-[44px] h-auto leading-snug"
+                            rows={2}
                             value={item.description || ''}
                             onChange={(e) => {
                               const value = e.target.value;
