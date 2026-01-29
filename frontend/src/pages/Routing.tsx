@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -62,10 +62,63 @@ interface Part {
   part_type: string;
 }
 
+type BOMLineType = 'component' | 'hardware' | 'consumable' | 'reference';
+type BOMItemType = 'make' | 'buy' | 'phantom';
+
+interface BOMItem {
+  id: number;
+  component_part_id: number;
+  item_number: number;
+  quantity: number;
+  item_type?: BOMItemType;
+  line_type?: BOMLineType;
+  component_part?: {
+    id: number;
+    part_number: string;
+    name: string;
+    revision: string;
+    part_type: string;
+  };
+}
+
+interface BOM {
+  id: number;
+  part_id: number;
+  revision: string;
+  status: string;
+  description?: string;
+  part?: {
+    id: number;
+    part_number: string;
+    name: string;
+    part_type: string;
+  };
+  items: BOMItem[];
+}
+
+const lineTypeLabels: Record<string, string> = {
+  component: 'Component',
+  hardware: 'Hardware',
+  consumable: 'Consumable',
+  reference: 'Reference',
+};
+
+const lineTypeBadge: Record<string, string> = {
+  component: 'bg-cyan-100 text-cyan-800',
+  hardware: 'bg-amber-100 text-amber-800',
+  consumable: 'bg-orange-100 text-orange-800',
+  reference: 'bg-gray-100 text-gray-600',
+};
+
+const itemTypeBadge: Record<string, string> = {
+  make: 'bg-blue-100 text-blue-800',
+  buy: 'bg-gray-100 text-gray-700',
+  phantom: 'bg-purple-100 text-purple-800',
+};
+
 export default function RoutingPage() {
   const [routings, setRoutings] = useState<Routing[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
-  const [componentPartIds, setComponentPartIds] = useState<Set<number>>(new Set());
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedRouting, setSelectedRouting] = useState<Routing | null>(null);
@@ -93,6 +146,15 @@ export default function RoutingPage() {
     queue: 'min'
   });
   const [searchParams, setSearchParams] = useSearchParams();
+  const [assemblySearch, setAssemblySearch] = useState('');
+  const [selectedAssemblyId, setSelectedAssemblyId] = useState<number | null>(null);
+  const [assemblyBOM, setAssemblyBOM] = useState<BOM | null>(null);
+  const [assemblyLoading, setAssemblyLoading] = useState(false);
+  const [assemblyError, setAssemblyError] = useState<string | null>(null);
+  const [showMissingOnly, setShowMissingOnly] = useState(false);
+  const [includeNonComponentLines, setIncludeNonComponentLines] = useState(false);
+  const [routingByPartId, setRoutingByPartId] = useState<Record<number, Routing | null>>({});
+  const [routingLoadingIds, setRoutingLoadingIds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     loadData();
@@ -130,24 +192,14 @@ export default function RoutingPage() {
 
   const loadData = async () => {
     try {
-      const [routingsRes, partsRes, wcRes, bomsRes] = await Promise.all([
+      const [routingsRes, partsRes, wcRes] = await Promise.all([
         api.getRoutings(),
         api.getParts({ active_only: true }),
-        api.getWorkCenters(),
-        api.getBOMs({ active_only: true })
+        api.getWorkCenters()
       ]);
       setRoutings(routingsRes);
       setParts(partsRes);
       setWorkCenters(wcRes);
-      const componentIds = new Set<number>();
-      bomsRes.forEach((bom: any) => {
-        (bom.items || []).forEach((item: any) => {
-          if (item.component_part_id) {
-            componentIds.add(item.component_part_id);
-          }
-        });
-      });
-      setComponentPartIds(componentIds);
 
     } catch (err) {
       console.error('Failed to load data:', err);
@@ -160,9 +212,105 @@ export default function RoutingPage() {
     try {
       const routing = await api.getRouting(id);
       setSelectedRouting(routing);
+      return routing;
     } catch (err) {
       console.error('Failed to load routing:', err);
     }
+    return null;
+  };
+
+  const ensureRoutingStatuses = async (partIds: number[]) => {
+    const uniqueIds = Array.from(new Set(partIds.filter(Boolean)));
+    const missing = uniqueIds.filter((id) => routingByPartId[id] === undefined);
+    if (missing.length === 0) return;
+
+    setRoutingLoadingIds((prev) => new Set([...prev, ...missing]));
+
+    const results: Array<[number, Routing | null]> = [];
+    const batchSize = 10;
+
+    for (let i = 0; i < missing.length; i += batchSize) {
+      const batch = missing.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map(async (id) => {
+          try {
+            const routing = await api.getRoutingByPart(id);
+            return [id, routing || null] as [number, Routing | null];
+          } catch (err) {
+            console.error('Failed to load routing by part:', err);
+            return [id, null] as [number, Routing | null];
+          }
+        })
+      );
+      results.push(...batchResults);
+    }
+
+    setRoutingByPartId((prev) => {
+      const next = { ...prev };
+      results.forEach(([id, routing]) => {
+        next[id] = routing;
+      });
+      return next;
+    });
+
+    setRoutingLoadingIds((prev) => {
+      const next = new Set(prev);
+      missing.forEach((id) => next.delete(id));
+      return next;
+    });
+  };
+
+  const loadAssemblyBOM = async (partId: number) => {
+    setAssemblyLoading(true);
+    setAssemblyError(null);
+    try {
+      const bom = await api.getBOMByPart(partId);
+      setAssemblyBOM(bom);
+      const routableIds = (bom.items || [])
+        .filter((item: BOMItem) => (item.line_type || 'component') === 'component')
+        .map((item: BOMItem) => item.component_part_id);
+      await ensureRoutingStatuses(routableIds);
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setAssemblyBOM(null);
+        setAssemblyError('No BOM found for this assembly.');
+      } else {
+        console.error('Failed to load BOM:', err);
+        setAssemblyBOM(null);
+        setAssemblyError('Failed to load BOM for this assembly.');
+      }
+    } finally {
+      setAssemblyLoading(false);
+    }
+  };
+
+  const openCreateRoutingForPart = async (partId: number, partLabel?: string) => {
+    if (!parts.some((p) => p.id === partId)) {
+      try {
+        const part = await api.getPart(partId);
+        setParts((prev) => (prev.some((p) => p.id === partId) ? prev : [...prev, part]));
+      } catch (err) {
+        console.error('Failed to load part for routing:', err);
+      }
+    }
+    setNewRouting({
+      part_id: partId,
+      revision: 'A',
+      description: partLabel ? `Routing for ${partLabel}` : ''
+    });
+    setShowCreateModal(true);
+  };
+
+  const handleAssemblySelect = (value: string) => {
+    const nextId = parseInt(value, 10);
+    if (!value || Number.isNaN(nextId)) {
+      setSelectedAssemblyId(null);
+      setAssemblyBOM(null);
+      setAssemblyError(null);
+      return;
+    }
+    setSelectedAssemblyId(nextId);
+    loadAssemblyBOM(nextId);
   };
 
   const handleCreateRouting = async (e: React.FormEvent) => {
@@ -171,6 +319,7 @@ export default function RoutingPage() {
       const created = await api.createRouting(newRouting);
       setRoutings([created, ...routings]);
       setSelectedRouting(created);
+      setRoutingByPartId((prev) => ({ ...prev, [created.part_id]: created }));
       setShowCreateModal(false);
       setNewRouting({ part_id: 0, revision: 'A', description: '' });
       const nextParams = new URLSearchParams(searchParams);
@@ -216,7 +365,10 @@ export default function RoutingPage() {
 
     try {
       await api.releaseRouting(selectedRouting.id);
-      await loadRouting(selectedRouting.id);
+      const updated = await loadRouting(selectedRouting.id);
+      if (updated) {
+        setRoutingByPartId((prev) => ({ ...prev, [updated.part_id]: updated }));
+      }
       loadData();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to release routing');
@@ -232,6 +384,13 @@ export default function RoutingPage() {
 
     try {
       await api.deleteRouting(routing.id);
+      setRoutingByPartId((prev) => {
+        const next = { ...prev };
+        if (routing.part_id) {
+          next[routing.part_id] = null;
+        }
+        return next;
+      });
       if (selectedRouting?.id === routing.id) {
         setSelectedRouting(null);
       }
@@ -289,6 +448,60 @@ export default function RoutingPage() {
     return `${hours.toFixed(2)} hr`;
   };
 
+  const filteredAssemblies = useMemo(() => {
+    const search = assemblySearch.trim().toLowerCase();
+    const base = parts.filter((part) => ['assembly', 'manufactured'].includes(part.part_type));
+    if (!search) {
+      return base.sort((a, b) => a.part_number.localeCompare(b.part_number));
+    }
+    return base
+      .filter((part) =>
+        part.part_number.toLowerCase().includes(search) ||
+        part.name.toLowerCase().includes(search)
+      )
+      .sort((a, b) => a.part_number.localeCompare(b.part_number));
+  }, [assemblySearch, parts]);
+
+  const routablePartIds = useMemo(() => {
+    if (!assemblyBOM) return new Set<number>();
+    const ids = new Set<number>();
+    (assemblyBOM.items || []).forEach((item) => {
+      if ((item.line_type || 'component') === 'component') {
+        ids.add(item.component_part_id);
+      }
+    });
+    return ids;
+  }, [assemblyBOM]);
+
+  const assemblyItems = useMemo(() => {
+    if (!assemblyBOM) return [];
+    const items = assemblyBOM.items || [];
+    let filtered = items;
+    if (!includeNonComponentLines) {
+      filtered = filtered.filter((item) => (item.line_type || 'component') === 'component');
+    }
+    if (showMissingOnly) {
+      filtered = filtered.filter((item) => {
+        if ((item.line_type || 'component') !== 'component') return false;
+        const status = routingByPartId[item.component_part_id];
+        return status === null;
+      });
+    }
+    return filtered;
+  }, [assemblyBOM, includeNonComponentLines, showMissingOnly, routingByPartId]);
+
+  const assemblySummary = useMemo(() => {
+    if (!assemblyBOM) return null;
+    const componentItems = (assemblyBOM.items || []).filter(
+      (item) => (item.line_type || 'component') === 'component'
+    );
+    const total = componentItems.length;
+    const withRouting = componentItems.filter((item) => routingByPartId[item.component_part_id]).length;
+    const missing = componentItems.filter((item) => routingByPartId[item.component_part_id] === null).length;
+    const checking = componentItems.filter((item) => routingByPartId[item.component_part_id] === undefined).length;
+    return { total, withRouting, missing, checking };
+  }, [assemblyBOM, routingByPartId]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -305,6 +518,202 @@ export default function RoutingPage() {
           <PlusIcon className="h-5 w-5 mr-2" />
           New Routing
         </button>
+      </div>
+
+      <div className="card">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-lg font-semibold">Assembly Components</h2>
+            <p className="text-sm text-gray-500">
+              Select an assembly to review component routings and create missing ones.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={showMissingOnly}
+                onChange={(e) => setShowMissingOnly(e.target.checked)}
+                className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+              />
+              Missing only
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={includeNonComponentLines}
+                onChange={(e) => setIncludeNonComponentLines(e.target.checked)}
+                className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+              />
+              Include hardware/consumables
+            </label>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+          <div className="lg:col-span-2 space-y-2">
+            <label className="label">Assembly</label>
+            <input
+              type="text"
+              value={assemblySearch}
+              onChange={(e) => setAssemblySearch(e.target.value)}
+              placeholder="Filter assemblies..."
+              className="input"
+            />
+            <select
+              value={selectedAssemblyId || 0}
+              onChange={(e) => handleAssemblySelect(e.target.value)}
+              className="input"
+            >
+              <option value={0}>Select an assembly...</option>
+              {filteredAssemblies.map((part) => (
+                <option key={part.id} value={part.id}>
+                  {part.part_number} - {part.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+            <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Summary</div>
+            {assemblySummary ? (
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <div className="text-gray-500">Components</div>
+                  <div className="font-semibold">{assemblySummary.total}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500">With Routing</div>
+                  <div className="font-semibold text-green-700">{assemblySummary.withRouting}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500">Missing</div>
+                  <div className="font-semibold text-amber-700">{assemblySummary.missing}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500">Checking</div>
+                  <div className="font-semibold text-gray-600">{assemblySummary.checking}</div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm text-gray-500">Select an assembly to view routing status.</div>
+            )}
+          </div>
+        </div>
+
+        {assemblyLoading && (
+          <div className="flex items-center gap-2 text-sm text-gray-500">
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-werco-primary"></div>
+            Loading BOM...
+          </div>
+        )}
+
+        {assemblyError && (
+          <div className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded-lg">
+            {assemblyError}
+          </div>
+        )}
+
+        {assemblyBOM && (
+          <div className="mt-4 overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item #</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Line Type</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Make/Buy</th>
+                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Routing</th>
+                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {assemblyItems.map((item) => {
+                  const part = item.component_part;
+                  const lineType = item.line_type || 'component';
+                  const itemType = item.item_type || 'buy';
+                  const isRoutable = lineType === 'component' && itemType !== 'buy';
+                  const routing = routingByPartId[item.component_part_id];
+                  const loadingRouting = routingLoadingIds.has(item.component_part_id);
+                  return (
+                    <tr key={item.id} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 text-sm font-medium">
+                        {item.item_number}
+                      </td>
+                      <td className="px-3 py-2 text-sm">
+                        <div className="font-medium text-werco-primary">
+                          {part?.part_number || `Part #${item.component_part_id}`}
+                        </div>
+                        <div className="text-xs text-gray-500">{part?.name || '-'}</div>
+                      </td>
+                      <td className="px-3 py-2 text-sm">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${lineTypeBadge[lineType] || 'bg-gray-100 text-gray-600'}`}>
+                          {lineTypeLabels[lineType] || lineType}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-sm">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${itemTypeBadge[itemType] || 'bg-gray-100 text-gray-600'}`}>
+                          {itemType}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-sm text-right">{item.quantity}</td>
+                      <td className="px-3 py-2 text-sm">
+                        {loadingRouting && isRoutable && (
+                          <span className="text-gray-400">Checking...</span>
+                        )}
+                        {!loadingRouting && isRoutable && routing && (
+                          <span className="text-green-700 text-sm font-medium">
+                            {routing.status} (Rev {routing.revision})
+                          </span>
+                        )}
+                        {!loadingRouting && isRoutable && routing === null && (
+                          <span className="text-amber-700 text-sm font-medium">Missing</span>
+                        )}
+                        {!loadingRouting && isRoutable && routing === undefined && (
+                          <span className="text-gray-400 text-sm">Pending</span>
+                        )}
+                        {!isRoutable && (
+                          <span className="text-gray-400 text-sm">Not routable</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {isRoutable && routing && (
+                          <button
+                            type="button"
+                            onClick={() => loadRouting(routing.id)}
+                            className="text-werco-primary hover:underline text-sm"
+                          >
+                            View
+                          </button>
+                        )}
+                        {isRoutable && routing === null && (
+                          <button
+                            type="button"
+                            onClick={() => openCreateRoutingForPart(item.component_part_id, part?.part_number || part?.name)}
+                            className="text-werco-primary hover:underline text-sm"
+                          >
+                            Create
+                          </button>
+                        )}
+                        {isRoutable && routing === undefined && (
+                          <span className="text-xs text-gray-400">Checking...</span>
+                        )}
+                        {!isRoutable && (
+                          <span className="text-xs text-gray-400">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {assemblyItems.length === 0 && (
+              <div className="text-sm text-gray-500 py-4 text-center">
+                No matching components to display.
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -490,7 +899,7 @@ export default function RoutingPage() {
                 >
                   <option value={0}>Select a part...</option>
                   {parts
-                    .filter(p => ['assembly', 'manufactured'].includes(p.part_type) || componentPartIds.has(p.id))
+                    .filter(p => ['assembly', 'manufactured'].includes(p.part_type) || routablePartIds.has(p.id) || p.id === newRouting.part_id)
                     .map(part => (
                       <option key={part.id} value={part.id}>
                         {part.part_number} - {part.name}
