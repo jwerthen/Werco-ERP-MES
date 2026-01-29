@@ -2,7 +2,7 @@ import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import { Part, PartType } from '../types';
 import { useNavigate } from 'react-router-dom';
-import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, TrashIcon, WrenchScrewdriverIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, TrashIcon, WrenchScrewdriverIcon, DocumentDuplicateIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 
 const typeColors: Record<PartType, string> = {
@@ -20,6 +20,36 @@ interface BOMItem {
   quantity: number;
   item_number: number;
   component_part?: Part;
+}
+
+interface ImportAssembly {
+  part_number?: string;
+  name?: string;
+  revision?: string;
+  description?: string;
+  drawing_number?: string;
+  part_type?: string;
+}
+
+interface ImportItem {
+  line_number?: number;
+  part_number?: string;
+  description?: string;
+  quantity?: number;
+  unit_of_measure?: string;
+  item_type?: string;
+  line_type?: 'component' | 'hardware' | 'consumable' | 'reference';
+  reference_designator?: string;
+  find_number?: string;
+  notes?: string;
+}
+
+interface ImportPreview {
+  document_type: 'bom' | 'part';
+  assembly: ImportAssembly;
+  items: ImportItem[];
+  extraction_confidence?: string;
+  warnings?: string[];
 }
 
 export default function Parts() {
@@ -50,6 +80,13 @@ export default function Parts() {
   const [bomData, setBomData] = useState<Record<number, BOMItem[]>>({});
   const [loadingBom, setLoadingBom] = useState<number | null>(null);
   const [showComponentsOnly, setShowComponentsOnly] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [showImportPreviewModal, setShowImportPreviewModal] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importCreateMissingParts, setImportCreateMissingParts] = useState(true);
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  const [importLoading, setImportLoading] = useState(false);
 
   // Get unique customers from existing parts
   const existingCustomers = useMemo(() => {
@@ -253,6 +290,76 @@ export default function Parts() {
     setShowCustomerDropdown(false);
   };
 
+  const handleImportPreview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importFile) {
+      alert('Please select a file to import.');
+      return;
+    }
+    setImportLoading(true);
+    setImportWarnings([]);
+    try {
+      const formData = new FormData();
+      formData.append('file', importFile);
+      const preview = await api.previewBOMImport(formData);
+      setImportPreview(preview);
+      setImportWarnings(preview.warnings || []);
+      setShowImportModal(false);
+      setShowImportPreviewModal(true);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to generate preview');
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const updatePreviewAssembly = (field: keyof ImportAssembly, value: string) => {
+    if (!importPreview) return;
+    setImportPreview({
+      ...importPreview,
+      assembly: {
+        ...importPreview.assembly,
+        [field]: value
+      }
+    });
+  };
+
+  const updatePreviewItem = (index: number, field: keyof ImportItem, value: string | number) => {
+    if (!importPreview) return;
+    const items = [...importPreview.items];
+    items[index] = { ...items[index], [field]: value };
+    setImportPreview({ ...importPreview, items });
+  };
+
+  const handleCommitImport = async () => {
+    if (!importPreview) return;
+    setImportLoading(true);
+    try {
+      const result = await api.commitBOMImport({
+        document_type: importPreview.document_type,
+        assembly: importPreview.assembly,
+        items: importPreview.items,
+        create_missing_parts: importCreateMissingParts
+      });
+      await loadParts();
+      if (result.bom_id) {
+        navigate(`/bom?id=${result.bom_id}`);
+      } else {
+        alert(`Part created: ${result.assembly_part_number}`);
+      }
+      if (result.warnings?.length) {
+        alert(`Import completed with warnings:\n- ${result.warnings.join('\n- ')}`);
+      }
+      setShowImportPreviewModal(false);
+      setImportPreview(null);
+      setImportFile(null);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to create from preview');
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -265,13 +372,22 @@ export default function Parts() {
     <div className="space-y-6" data-tour="eng-parts">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Parts</h1>
-        <button
-          onClick={() => { resetForm(); setShowModal(true); }}
-          className="btn-primary flex items-center"
-        >
-          <PlusIcon className="h-5 w-5 mr-2" />
-          Add Part
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="btn-secondary flex items-center"
+          >
+            <DocumentDuplicateIcon className="h-5 w-5 mr-2" />
+            Import
+          </button>
+          <button
+            onClick={() => { resetForm(); setShowModal(true); }}
+            className="btn-primary flex items-center"
+          >
+            <PlusIcon className="h-5 w-5 mr-2" />
+            Add Part
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -509,6 +625,232 @@ export default function Parts() {
           </div>
         )}
       </div>
+
+      {/* Import Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Import Part or BOM</h3>
+              <button onClick={() => setShowImportModal(false)}>
+                <XMarkIcon className="h-5 w-5 text-gray-500" />
+              </button>
+            </div>
+            <form onSubmit={handleImportPreview} className="space-y-4">
+              <div>
+                <label className="label">PDF, Word, or Excel Document</label>
+                <input
+                  type="file"
+                  accept=".pdf,.doc,.docx,.xlsx,.xls"
+                  onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                  className="input"
+                  required
+                />
+              </div>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={importCreateMissingParts}
+                  onChange={(e) => setImportCreateMissingParts(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                <span className="text-sm">Create missing parts automatically</span>
+              </label>
+              <div className="flex justify-end gap-3 pt-4 border-t">
+                <button type="button" onClick={() => setShowImportModal(false)} className="btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary" disabled={importLoading}>
+                  {importLoading ? 'Importing...' : 'Preview'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Import Preview Modal */}
+      {showImportPreviewModal && importPreview && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-6xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-semibold">Review Import</h3>
+                <p className="text-sm text-gray-500">
+                  {importPreview.document_type === 'bom' ? 'Assembly BOM' : 'Single Part'} • Confidence: {importPreview.extraction_confidence || 'low'}
+                </p>
+              </div>
+              <button onClick={() => setShowImportPreviewModal(false)}>
+                <XMarkIcon className="h-5 w-5 text-gray-500" />
+              </button>
+            </div>
+
+            {importWarnings.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-md p-3 text-sm text-amber-800 mb-4">
+                {importWarnings.map((w, idx) => (
+                  <div key={idx}>{w}</div>
+                ))}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+              <div>
+                <label className="label">Part Number</label>
+                <input
+                  className="input"
+                  value={importPreview.assembly.part_number || ''}
+                  onChange={(e) => updatePreviewAssembly('part_number', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="label">Revision</label>
+                <input
+                  className="input"
+                  value={importPreview.assembly.revision || ''}
+                  onChange={(e) => updatePreviewAssembly('revision', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="label">Part Type</label>
+                <select
+                  className="input"
+                  value={importPreview.assembly.part_type || (importPreview.document_type === 'bom' ? 'assembly' : 'manufactured')}
+                  onChange={(e) => updatePreviewAssembly('part_type', e.target.value)}
+                >
+                  <option value="manufactured">Manufactured</option>
+                  <option value="assembly">Assembly</option>
+                  <option value="purchased">Purchased</option>
+                  <option value="raw_material">Raw Material</option>
+                  <option value="hardware">Hardware</option>
+                  <option value="consumable">Consumable</option>
+                </select>
+              </div>
+              <div className="lg:col-span-2">
+                <label className="label">Name</label>
+                <input
+                  className="input"
+                  value={importPreview.assembly.name || ''}
+                  onChange={(e) => updatePreviewAssembly('name', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="label">Drawing #</label>
+                <input
+                  className="input"
+                  value={importPreview.assembly.drawing_number || ''}
+                  onChange={(e) => updatePreviewAssembly('drawing_number', e.target.value)}
+                />
+              </div>
+              <div className="lg:col-span-3">
+                <label className="label">Description</label>
+                <textarea
+                  className="input"
+                  rows={2}
+                  value={importPreview.assembly.description || ''}
+                  onChange={(e) => updatePreviewAssembly('description', e.target.value)}
+                />
+              </div>
+            </div>
+
+            {importPreview.document_type === 'bom' && (
+              <div className="overflow-x-auto mb-6">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Line</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Part #</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                      <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">UOM</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item Type</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Line Type</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {importPreview.items.map((item, index) => (
+                      <tr key={index}>
+                        <td className="px-3 py-2 text-sm">
+                          <input
+                            className="input w-20"
+                            type="number"
+                            value={item.line_number || (index + 1) * 10}
+                            onChange={(e) => updatePreviewItem(index, 'line_number', parseInt(e.target.value))}
+                          />
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          <input
+                            className="input"
+                            value={item.part_number || ''}
+                            onChange={(e) => updatePreviewItem(index, 'part_number', e.target.value)}
+                          />
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          <input
+                            className="input"
+                            value={item.description || ''}
+                            onChange={(e) => updatePreviewItem(index, 'description', e.target.value)}
+                          />
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          <input
+                            className="input w-24 text-right"
+                            type="number"
+                            step="0.001"
+                            value={item.quantity ?? 1}
+                            onChange={(e) => updatePreviewItem(index, 'quantity', parseFloat(e.target.value))}
+                          />
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          <input
+                            className="input w-24"
+                            value={item.unit_of_measure || ''}
+                            onChange={(e) => updatePreviewItem(index, 'unit_of_measure', e.target.value)}
+                          />
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          <select
+                            className="input"
+                            value={item.item_type || 'buy'}
+                            onChange={(e) => updatePreviewItem(index, 'item_type', e.target.value)}
+                          >
+                            <option value="make">Make</option>
+                            <option value="buy">Buy</option>
+                            <option value="phantom">Phantom</option>
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          <select
+                            className="input"
+                            value={item.line_type || 'component'}
+                            onChange={(e) => updatePreviewItem(index, 'line_type', e.target.value)}
+                          >
+                            <option value="component">Component</option>
+                            <option value="hardware">Hardware</option>
+                            <option value="consumable">Consumable</option>
+                            <option value="reference">Reference</option>
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {importPreview.items.length === 0 && (
+                  <p className="text-sm text-gray-500 py-3">No BOM items detected.</p>
+                )}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3 pt-4 border-t">
+              <button type="button" onClick={() => setShowImportPreviewModal(false)} className="btn-secondary">
+                Cancel
+              </button>
+              <button type="button" onClick={handleCommitImport} className="btn-primary" disabled={importLoading}>
+                {importLoading ? 'Creating...' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add/Edit Modal */}
       {showModal && (
