@@ -98,6 +98,36 @@ export default function RoutingPage() {
     loadData();
   }, []);
 
+  useEffect(() => {
+    const partIdParam = searchParams.get('part_id');
+    if (!partIdParam) return;
+    const partId = parseInt(partIdParam);
+    if (Number.isNaN(partId)) return;
+
+    const existing = parts.find(p => p.id === partId);
+    if (existing) {
+      setNewRouting({ part_id: partId, revision: 'A', description: '' });
+      setShowCreateModal(true);
+      return;
+    }
+
+    (async () => {
+      try {
+        const part = await api.getPart(partId);
+        if (part) {
+          setParts(prev => {
+            if (prev.some(p => p.id === partId)) return prev;
+            return [...prev, part];
+          });
+          setNewRouting({ part_id: partId, revision: 'A', description: '' });
+          setShowCreateModal(true);
+        }
+      } catch (err) {
+        console.error('Failed to load part from routing param:', err);
+      }
+    })();
+  }, [searchParams, parts]);
+
   const loadData = async () => {
     try {
       const [routingsRes, partsRes, wcRes, bomsRes] = await Promise.all([
@@ -119,14 +149,6 @@ export default function RoutingPage() {
       });
       setComponentPartIds(componentIds);
 
-      const partIdParam = searchParams.get('part_id');
-      if (partIdParam) {
-        const partId = parseInt(partIdParam);
-        if (!Number.isNaN(partId)) {
-          setNewRouting({ part_id: partId, revision: 'A', description: '' });
-          setShowCreateModal(true);
-        }
-      }
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
