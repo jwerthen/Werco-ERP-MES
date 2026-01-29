@@ -839,7 +839,7 @@ export default function Parts() {
                             }}
                           >
                             <option value="">Not mapped</option>
-                            {importPreview.raw_columns.map((col, idx) => (
+                            {(importPreview.raw_columns || []).map((col, idx) => (
                               <option key={col + idx} value={idx}>{col || `Column ${idx + 1}`}</option>
                             ))}
                           </select>
