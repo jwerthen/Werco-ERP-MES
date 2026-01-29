@@ -442,9 +442,7 @@ export default function RoutingPage() {
                   required
                 >
                   <option value={0}>Select a part...</option>
-                  {parts
-                    .filter(p => ['assembly', 'manufactured'].includes(p.part_type))
-                    .map(part => (
+                  {parts.map(part => (
                       <option key={part.id} value={part.id}>
                         {part.part_number} - {part.name}
                       </option>
