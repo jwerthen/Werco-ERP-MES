@@ -424,7 +424,7 @@ async def import_bom_preview(
 
     ext = f".{file.filename.split('.')[-1]}".lower() if "." in file.filename else ""
     if ext not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF or Word documents.")
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, Word, or Excel documents.")
 
     content = await file.read()
     if not content:
@@ -480,7 +480,7 @@ async def import_bom_or_part(
 
     ext = f".{file.filename.split('.')[-1]}".lower() if "." in file.filename else ""
     if ext not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF or Word documents.")
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, Word, or Excel documents.")
 
     content = await file.read()
     if not content:

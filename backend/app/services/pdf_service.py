@@ -10,7 +10,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = ['.pdf', '.doc', '.docx']
+SUPPORTED_EXTENSIONS = ['.pdf', '.doc', '.docx', '.xlsx', '.xls']
 
 
 class DocumentExtractionResult:
@@ -43,6 +43,9 @@ def extract_text_from_document(file_path: str) -> DocumentExtractionResult:
     elif ext in ['.docx', '.doc']:
         logger.info(f"[DOC_EXTRACT] Routing to Word extractor for {ext}")
         return extract_text_from_word(file_path)
+    elif ext in ['.xlsx', '.xls']:
+        logger.info(f"[DOC_EXTRACT] Routing to Excel extractor for {ext}")
+        return extract_text_from_excel(file_path)
     else:
         logger.warning(f"[DOC_EXTRACT] Unknown extension: {ext}")
         return DocumentExtractionResult(
@@ -71,6 +74,49 @@ def extract_text_from_word(doc_path: str) -> DocumentExtractionResult:
     else:
         logger.warning(f"[WORD] Unsupported Word extension: {ext}")
         return DocumentExtractionResult(text="", confidence="low", file_type="unknown")
+
+
+def extract_text_from_excel(excel_path: str) -> DocumentExtractionResult:
+    """
+    Extract text from Excel document (.xlsx or .xls).
+    """
+    path = Path(excel_path)
+    ext = path.suffix.lower()
+
+    logger.info(f"[EXCEL] extract_text_from_excel called with: {excel_path}")
+    logger.info(f"[EXCEL] Extension detected: '{ext}'")
+
+    if not os.path.exists(excel_path):
+        logger.error(f"[EXCEL] File does not exist: {excel_path}")
+        return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
+
+    file_size = os.path.getsize(excel_path)
+    logger.info(f"[EXCEL] File size: {file_size} bytes")
+    if file_size == 0:
+        logger.error("[EXCEL] File is empty (0 bytes)")
+        return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
+
+    try:
+        import pandas as pd
+    except ImportError as e:
+        logger.error(f"[EXCEL] pandas not installed: {e}")
+        return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
+
+    try:
+        sheets = pd.read_excel(excel_path, sheet_name=None, dtype=str)
+        all_text = []
+        for sheet_name, df in sheets.items():
+            all_text.append(f"--- Sheet: {sheet_name} ---")
+            df = df.fillna("")
+            # Convert to pipe-delimited rows to preserve structure
+            all_text.extend(
+                df.astype(str).apply(lambda row: " | ".join([cell.strip() for cell in row.tolist() if cell.strip()]), axis=1).tolist()
+            )
+        text = "\n".join([line for line in all_text if line.strip()])
+        return DocumentExtractionResult(text=text, confidence="medium", file_type=ext.strip('.'))
+    except Exception as e:
+        logger.error(f"[EXCEL] Extraction failed: {e}")
+        return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
 
 
 def _extract_docx_text(docx_path: str) -> DocumentExtractionResult:

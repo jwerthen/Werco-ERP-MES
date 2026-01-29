@@ -781,10 +781,10 @@ export default function BOMPage() {
             </div>
             <form onSubmit={handleImport} className="space-y-4">
               <div>
-                <label className="label">PDF or Word Document</label>
+                <label className="label">PDF, Word, or Excel Document</label>
                 <input
                   type="file"
-                  accept=".pdf,.doc,.docx"
+                  accept=".pdf,.doc,.docx,.xlsx,.xls"
                   onChange={(e) => setImportFile(e.target.files?.[0] || null)}
                   className="input"
                   required
