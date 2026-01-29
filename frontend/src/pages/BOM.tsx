@@ -740,7 +740,7 @@ export default function BOMPage() {
                             {item.component_part?.id && (
                               <button
                                 type="button"
-                                onClick={() => navigate(`/routing?part_id=${item.component_part.id}`)}
+                                onClick={() => navigate(`/routing?part_id=${item.component_part?.id}`)}
                                 className="text-werco-primary hover:underline text-sm"
                               >
                                 Create Routing
