@@ -401,6 +401,18 @@ class ApiService {
     return response.data;
   }
 
+  async previewBOMImport(formData: FormData) {
+    const response = await this.api.post('/bom/import/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  }
+
+  async commitBOMImport(data: any) {
+    const response = await this.api.post('/bom/import/commit', data);
+    return response.data;
+  }
+
   async explodeBOM(id: number, maxLevels = 10) {
     const response = await this.api.get(`/bom/${id}/explode`, { params: { max_levels: maxLevels } });
     return response.data;

@@ -14,7 +14,13 @@ from app.schemas.bom import (
     BOMExploded, BOMItemWithChildren, BOMFlattened, BOMFlatItem,
     ComponentPartInfo, PartInfo
 )
-from app.schemas.bom_import import BOMImportResponse
+from app.schemas.bom_import import (
+    BOMImportResponse,
+    BOMImportPreviewResponse,
+    BOMImportCommitRequest,
+    BOMImportAssembly,
+    BOMImportItem,
+)
 from app.services.pdf_service import extract_text_from_document, save_uploaded_document, SUPPORTED_EXTENSIONS
 from app.services.llm_service import extract_bom_data_with_llm
 from app.services.part_number_service import generate_werco_part_number
@@ -216,6 +222,247 @@ def _ensure_part(
     db.add(part)
     db.flush()
     return part, None, True
+
+
+def _build_preview(extracted: Dict[str, Any]) -> Tuple[BOMImportAssembly, List[BOMImportItem], List[str], str]:
+    warnings: List[str] = []
+    items: List[BOMImportItem] = []
+    assembly_data = extracted.get("assembly", {}) or {}
+    assembly = BOMImportAssembly(
+        part_number=_safe_part_number(assembly_data.get("part_number")) or _safe_part_number(assembly_data.get("drawing_number")),
+        name=assembly_data.get("name"),
+        revision=assembly_data.get("revision") or "A",
+        description=assembly_data.get("description"),
+        drawing_number=_safe_part_number(assembly_data.get("drawing_number")),
+        part_type=assembly_data.get("part_type"),
+    )
+
+    for idx, item in enumerate(extracted.get("items", []) or [], start=1):
+        line_number = int(item.get("line_number") or (idx * 10))
+        description = (item.get("description") or "").strip()
+        part_number = _safe_part_number(item.get("part_number"))
+        line_type = _classify_line_type(description, item.get("line_type"))
+        item_type = _coerce_item_type(item.get("item_type"))
+        if not part_number:
+            warnings.append(f"Line {line_number}: missing part number; will be generated if created.")
+        if not description:
+            warnings.append(f"Line {line_number}: missing description.")
+        quantity = item.get("quantity")
+        if quantity is None or float(quantity) <= 0:
+            warnings.append(f"Line {line_number}: quantity not found or invalid; defaulting to 1.")
+        items.append(BOMImportItem(
+            line_number=line_number,
+            part_number=part_number,
+            description=description,
+            quantity=float(quantity) if quantity and float(quantity) > 0 else 1.0,
+            unit_of_measure=_normalize_uom(item.get("unit_of_measure")),
+            item_type=item_type,
+            line_type=line_type,
+            reference_designator=item.get("reference_designator"),
+            find_number=item.get("find_number"),
+            notes=item.get("notes"),
+        ))
+
+    extraction_confidence = extracted.get("extraction_confidence", "low")
+    return assembly, items, warnings, extraction_confidence
+
+
+def _create_from_import_payload(
+    payload: BOMImportCommitRequest,
+    db: Session,
+    current_user: User
+) -> BOMImportResponse:
+    items = payload.items or []
+    doc_type = (payload.document_type or ("bom" if items else "part")).lower()
+    if items and doc_type != "bom":
+        doc_type = "bom"
+
+    warnings: List[str] = []
+    missing_parts: List[str] = []
+
+    assembly = payload.assembly
+    assembly_number = _safe_part_number(assembly.part_number) or _safe_part_number(assembly.drawing_number)
+    if not assembly_number:
+        assembly_number = _generate_fallback_part_number("ASSY", 1) if doc_type == "bom" else _generate_fallback_part_number("PART", 1)
+        warnings.append("Assembly/part number not found; generated a temporary number.")
+
+    assembly_name = (assembly.name or assembly.description or assembly_number).strip()
+    assembly_description = (assembly.description or assembly.name or "").strip()
+    assembly_revision = (assembly.revision or "A").strip()
+    assembly_drawing = _safe_part_number(assembly.drawing_number)
+    assembly_part_type = (assembly.part_type or ("assembly" if doc_type == "bom" else "manufactured")).strip().lower()
+    if assembly_part_type not in {p.value for p in PartType}:
+        assembly_part_type = PartType.ASSEMBLY.value if doc_type == "bom" else PartType.MANUFACTURED.value
+
+    existing_part = db.query(Part).filter(Part.part_number == assembly_number).first()
+    if existing_part:
+        assembly_part = existing_part
+    else:
+        assembly_part = Part(
+            part_number=assembly_number,
+            revision=assembly_revision,
+            name=assembly_name,
+            description=assembly_description,
+            part_type=assembly_part_type,
+            unit_of_measure=UnitOfMeasure.EACH.value,
+            drawing_number=assembly_drawing,
+            created_by=current_user.id
+        )
+        db.add(assembly_part)
+        db.flush()
+
+    created_parts = 0 if existing_part else 1
+    created_bom_items = 0
+    bom_id: Optional[int] = None
+
+    if doc_type == "part" and not items:
+        db.commit()
+        return BOMImportResponse(
+            document_type="part",
+            assembly_part_id=assembly_part.id,
+            assembly_part_number=assembly_part.part_number,
+            bom_id=None,
+            created_parts=created_parts,
+            created_bom_items=0,
+            extraction_confidence="medium",
+            warnings=warnings
+        )
+
+    existing_bom = db.query(BOM).filter(BOM.part_id == assembly_part.id, BOM.is_active == True).first()
+    if existing_bom:
+        raise HTTPException(status_code=400, detail="A BOM already exists for this assembly part")
+
+    bom = BOM(
+        part_id=assembly_part.id,
+        revision=assembly_revision or "A",
+        description=assembly_description,
+        status="draft",
+        bom_type="standard",
+        created_by=current_user.id
+    )
+    db.add(bom)
+    db.flush()
+    bom_id = bom.id
+
+    next_line = 10
+    for idx, item in enumerate(items, start=1):
+        item_number = int(item.line_number or next_line)
+        next_line = item_number + 10
+        description = (item.description or "").strip()
+        item_part_number = _safe_part_number(item.part_number)
+        line_type = _classify_line_type(description, item.line_type)
+        item_type = _coerce_item_type(item.item_type)
+        part_type = _infer_part_type(line_type, item_type, description)
+        uom = item.unit_of_measure
+
+        part_name = description or item_part_number or f"Item {item_number}"
+        if not item_part_number:
+            warnings.append(f"Line {item_number}: missing part number; generated automatically.")
+
+        component_part, missing, was_created = _ensure_part(
+            db,
+            item_part_number,
+            part_name,
+            description,
+            part_type,
+            None,
+            uom,
+            payload.create_missing_parts,
+            idx
+        )
+        if missing:
+            missing_parts.append(missing)
+            continue
+        if was_created:
+            created_parts += 1
+
+        quantity = float(item.quantity or 1)
+        bom_item = BOMItem(
+            bom_id=bom.id,
+            component_part_id=component_part.id,
+            item_number=item_number,
+            quantity=quantity if quantity > 0 else 1.0,
+            item_type=item_type,
+            line_type=line_type,
+            unit_of_measure=_normalize_uom(uom),
+            reference_designator=item.reference_designator,
+            find_number=item.find_number,
+            notes=item.notes
+        )
+        db.add(bom_item)
+        created_bom_items += 1
+
+    if missing_parts:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Missing parts: {', '.join(missing_parts)}")
+
+    db.commit()
+
+    return BOMImportResponse(
+        document_type="bom",
+        assembly_part_id=assembly_part.id,
+        assembly_part_number=assembly_part.part_number,
+        bom_id=bom_id,
+        created_parts=created_parts,
+        created_bom_items=created_bom_items,
+        extraction_confidence="medium",
+        warnings=warnings
+    )
+
+
+@router.post("/import/preview", response_model=BOMImportPreviewResponse)
+async def import_bom_preview(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+):
+    """
+    Upload a BOM or single-part drawing (PDF/DOC/DOCX) and return a preview for review.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File name is required")
+
+    ext = f".{file.filename.split('.')[-1]}".lower() if "." in file.filename else ""
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF or Word documents.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    doc_path = save_uploaded_document(content, file.filename)
+    extraction_result = extract_text_from_document(doc_path)
+    if not extraction_result.text or len(extraction_result.text.strip()) < 50:
+        raise HTTPException(status_code=400, detail="Could not extract text from document")
+
+    extracted = extract_bom_data_with_llm(extraction_result.text, is_ocr=extraction_result.is_ocr)
+    if extracted.get("_error"):
+        raise HTTPException(status_code=400, detail=extracted.get("_error"))
+
+    assembly, items, warnings, confidence = _build_preview(extracted)
+    doc_type = (extracted.get("document_type") or ("bom" if items else "part")).lower()
+    if items and doc_type != "bom":
+        doc_type = "bom"
+
+    return BOMImportPreviewResponse(
+        document_type=doc_type,
+        assembly=assembly,
+        items=items,
+        extraction_confidence=confidence,
+        warnings=warnings
+    )
+
+
+@router.post("/import/commit", response_model=BOMImportResponse, status_code=status.HTTP_201_CREATED)
+def import_bom_commit(
+    payload: BOMImportCommitRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+):
+    """
+    Commit a reviewed BOM/part import payload.
+    """
+    return _create_from_import_payload(payload, db, current_user)
 
 
 @router.post("/import", response_model=BOMImportResponse, status_code=status.HTTP_201_CREATED)
