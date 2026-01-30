@@ -46,11 +46,7 @@ def get_work_center_types(db: Session, include_in_use: bool = True) -> List[str]
         types = DEFAULT_WORK_CENTER_TYPES.copy()
 
     if include_in_use:
-        in_use = [
-            normalize_work_center_type(row[0])
-            for row in db.query(WorkCenter.work_center_type).distinct().all()
-            if row and row[0]
-        ]
+        in_use = get_in_use_work_center_types(db)
         for wc_type in in_use:
             if wc_type and wc_type not in types:
                 types.append(wc_type)
@@ -64,6 +60,22 @@ def get_work_center_types(db: Session, include_in_use: bool = True) -> List[str]
             deduped.append(wc_type)
 
     return deduped
+
+
+def get_in_use_work_center_types(db: Session) -> List[str]:
+    in_use = [
+        normalize_work_center_type(row[0])
+        for row in db.query(WorkCenter.work_center_type).distinct().all()
+        if row and row[0]
+    ]
+    # De-duplicate while preserving order
+    seen = set()
+    result = []
+    for wc_type in in_use:
+        if wc_type and wc_type not in seen:
+            seen.add(wc_type)
+            result.append(wc_type)
+    return result
 
 
 def set_work_center_types(db: Session, types: List[str]) -> List[str]:

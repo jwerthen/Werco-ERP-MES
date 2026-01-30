@@ -90,6 +90,7 @@ export default function AdminSettings() {
   const [laborRates, setLaborRates] = useState<any[]>([]);
   const [workCenterRates, setWorkCenterRates] = useState<any[]>([]);
   const [workCenterTypes, setWorkCenterTypes] = useState<string[]>([]);
+  const [workCenterTypesInUse, setWorkCenterTypesInUse] = useState<string[]>([]);
   const [outsideServices, setOutsideServices] = useState<any[]>([]);
   const [overhead, setOverhead] = useState<Record<string, any>>({});
   const [employees, setEmployees] = useState<EmployeeUser[]>([]);
@@ -130,6 +131,7 @@ export default function AdminSettings() {
         case 'workcentertypes': {
           const response = await api.getAdminWorkCenterTypes();
           setWorkCenterTypes(response?.types || []);
+          setWorkCenterTypesInUse(response?.in_use || []);
           break;
         }
         case 'services':
@@ -244,6 +246,7 @@ export default function AdminSettings() {
     try {
       const response = await api.updateAdminWorkCenterTypes(nextTypes);
       setWorkCenterTypes(response?.types || nextTypes);
+      setWorkCenterTypesInUse(response?.in_use || workCenterTypesInUse);
       setWorkCenterTypeInput('');
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to update work center types');
@@ -389,6 +392,7 @@ export default function AdminSettings() {
             {activeTab === 'workcentertypes' && (
               <WorkCenterTypesPanel
                 types={workCenterTypes}
+                inUse={workCenterTypesInUse}
                 inputValue={workCenterTypeInput}
                 onInputChange={setWorkCenterTypeInput}
                 onSave={saveWorkCenterTypes}
@@ -634,6 +638,7 @@ function WorkCenterRatesTable({ data, onEdit }: { data: any[]; onEdit: (item: an
 
 function WorkCenterTypesPanel({
   types,
+  inUse,
   inputValue,
   onInputChange,
   onSave,
@@ -641,6 +646,7 @@ function WorkCenterTypesPanel({
   formatLabel,
 }: {
   types: string[];
+  inUse: string[];
   inputValue: string;
   onInputChange: (value: string) => void;
   onSave: (types: string[]) => void;
@@ -649,6 +655,7 @@ function WorkCenterTypesPanel({
 }) {
   const normalizedInput = normalizeType(inputValue);
   const canAdd = normalizedInput.length > 0 && !types.includes(normalizedInput);
+  const lockedTypes = new Set(inUse || []);
 
   return (
     <div className="space-y-6">
@@ -702,12 +709,16 @@ function WorkCenterTypesPanel({
             <div>
               <div className="text-sm font-medium text-surface-900">{formatLabel(type)}</div>
               <div className="text-xs text-surface-500 font-mono">{type}</div>
+              {lockedTypes.has(type) && (
+                <div className="text-xs text-amber-600 mt-1">In use by existing work centers</div>
+              )}
             </div>
             <button
               type="button"
-              onClick={() => onSave(types.filter((t) => t !== type))}
-              className="text-surface-400 hover:text-red-600"
+              onClick={() => !lockedTypes.has(type) && onSave(types.filter((t) => t !== type))}
+              className={`text-surface-400 ${lockedTypes.has(type) ? 'cursor-not-allowed opacity-50' : 'hover:text-red-600'}`}
               title="Remove type"
+              disabled={lockedTypes.has(type)}
             >
               <TrashIcon className="h-4 w-4" />
             </button>

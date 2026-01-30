@@ -179,6 +179,7 @@ class WorkCenterTypesUpdate(BaseModel):
 
 class WorkCenterTypesResponse(BaseModel):
     types: List[str]
+    in_use: List[str] = []
 
 
 # ============ OUTSIDE SERVICES ============

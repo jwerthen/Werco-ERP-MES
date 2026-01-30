@@ -24,7 +24,7 @@ from app.schemas.admin_settings import (
     SettingUpdate, SettingResponse,
     AuditLogResponse, AuditLogWithUser
 )
-from app.services.work_center_type_service import get_work_center_types, set_work_center_types
+from app.services.work_center_type_service import get_work_center_types, set_work_center_types, get_in_use_work_center_types
 
 router = APIRouter()
 
@@ -443,7 +443,9 @@ def list_work_center_types_admin(
     current_user: User = Depends(admin_only)
 ):
     """List allowed work center types"""
-    return {"types": get_work_center_types(db)}
+    types = get_work_center_types(db, include_in_use=False)
+    in_use = get_in_use_work_center_types(db)
+    return {"types": types, "in_use": in_use}
 
 
 @router.put("/work-center-types", response_model=WorkCenterTypesResponse)
@@ -455,6 +457,13 @@ def update_work_center_types_admin(
 ):
     """Update allowed work center types"""
     old_types = get_work_center_types(db, include_in_use=False)
+    in_use = get_in_use_work_center_types(db)
+    missing_in_use = [t for t in in_use if t not in (data.types or [])]
+    if missing_in_use:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot remove types in use: {', '.join(missing_in_use)}"
+        )
     types = set_work_center_types(db, data.types)
     log_change(
         db,
@@ -469,7 +478,7 @@ def update_work_center_types_admin(
         get_client_ip(request)
     )
     db.commit()
-    return {"types": types}
+    return {"types": types, "in_use": in_use}
 
 
 # ============ OUTSIDE SERVICES ============

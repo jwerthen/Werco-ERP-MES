@@ -311,12 +311,12 @@ class ApiService {
   }
 
   // Admin Settings - Work Center Types
-  async getAdminWorkCenterTypes(): Promise<{ types: string[] }> {
+  async getAdminWorkCenterTypes(): Promise<{ types: string[]; in_use?: string[] }> {
     const response = await this.api.get('/admin/settings/work-center-types');
     return response.data;
   }
 
-  async updateAdminWorkCenterTypes(types: string[]): Promise<{ types: string[] }> {
+  async updateAdminWorkCenterTypes(types: string[]): Promise<{ types: string[]; in_use?: string[] }> {
     const response = await this.api.put('/admin/settings/work-center-types', { types });
     return response.data;
   }
