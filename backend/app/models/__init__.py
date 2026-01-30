@@ -1,5 +1,5 @@
 from .user import User, UserRole
-from .work_center import WorkCenter, WorkCenterType
+from .work_center import WorkCenter
 from .part import Part, PartType, UnitOfMeasure
 from .bom import BOM, BOMItem, BOMItemType
 from .routing import Routing, RoutingOperation
@@ -25,7 +25,7 @@ from .webhook import Webhook, WebhookDelivery
 
 __all__ = [
     "User", "UserRole",
-    "WorkCenter", "WorkCenterType",
+    "WorkCenter",
     "Part", "PartType", "UnitOfMeasure",
     "BOM", "BOMItem", "BOMItemType",
     "Routing", "RoutingOperation",

@@ -1,13 +1,10 @@
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
-from app.models.work_center import WorkCenterType
-
-
 class WorkCenterBase(BaseModel):
     code: str
     name: str
-    work_center_type: WorkCenterType
+    work_center_type: str
     description: Optional[str] = None
     hourly_rate: float = 0.0
     capacity_hours_per_day: float = 8.0

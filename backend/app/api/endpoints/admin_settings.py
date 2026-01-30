@@ -19,10 +19,12 @@ from app.schemas.admin_settings import (
     FinishCreate, FinishUpdate, FinishResponse,
     LaborRateCreate, LaborRateUpdate, LaborRateResponse,
     WorkCenterRateUpdate, WorkCenterRateResponse,
+    WorkCenterTypesUpdate, WorkCenterTypesResponse,
     OutsideServiceCreate, OutsideServiceUpdate, OutsideServiceResponse,
     SettingUpdate, SettingResponse,
     AuditLogResponse, AuditLogWithUser
 )
+from app.services.work_center_type_service import get_work_center_types, set_work_center_types
 
 router = APIRouter()
 
@@ -431,6 +433,43 @@ def update_work_center_rate(
     db.commit()
     db.refresh(wc)
     return wc
+
+
+# ============ WORK CENTER TYPES ============
+
+@router.get("/work-center-types", response_model=WorkCenterTypesResponse)
+def list_work_center_types_admin(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only)
+):
+    """List allowed work center types"""
+    return {"types": get_work_center_types(db)}
+
+
+@router.put("/work-center-types", response_model=WorkCenterTypesResponse)
+def update_work_center_types_admin(
+    data: WorkCenterTypesUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only)
+):
+    """Update allowed work center types"""
+    old_types = get_work_center_types(db, include_in_use=False)
+    types = set_work_center_types(db, data.types)
+    log_change(
+        db,
+        "work_center_types",
+        0,
+        "work_center_types",
+        "update",
+        current_user.id,
+        "types",
+        old_types,
+        types,
+        get_client_ip(request)
+    )
+    db.commit()
+    return {"types": types}
 
 
 # ============ OUTSIDE SERVICES ============

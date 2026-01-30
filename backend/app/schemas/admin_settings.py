@@ -171,6 +171,16 @@ class WorkCenterRateResponse(BaseModel):
         from_attributes = True
 
 
+# ============ WORK CENTER TYPES ============
+
+class WorkCenterTypesUpdate(BaseModel):
+    types: List[str]
+
+
+class WorkCenterTypesResponse(BaseModel):
+    types: List[str]
+
+
 # ============ OUTSIDE SERVICES ============
 
 class OutsideServiceBase(BaseModel):

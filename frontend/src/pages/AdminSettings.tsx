@@ -22,7 +22,7 @@ import {
   UsersIcon,
 } from '@heroicons/react/24/outline';
 
-type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'services' | 'overhead' | 'employees' | 'roles' | 'audit';
+type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'audit';
 
 const MATERIAL_CATEGORIES = ['steel', 'stainless', 'aluminum', 'brass', 'copper', 'titanium', 'plastic', 'other'];
 const MACHINE_TYPES = ['cnc_mill_3axis', 'cnc_mill_4axis', 'cnc_mill_5axis', 'cnc_lathe', 'laser_fiber', 'laser_co2', 'plasma', 'waterjet', 'press_brake', 'punch_press'];
@@ -35,6 +35,7 @@ const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
   { key: 'finishes', label: 'Finishes', icon: SparklesIcon },
   { key: 'labor', label: 'Labor Rates', icon: CurrencyDollarIcon },
   { key: 'workcenters', label: 'Work Center Rates', icon: BuildingOfficeIcon },
+  { key: 'workcentertypes', label: 'Work Center Types', icon: BuildingOfficeIcon },
   { key: 'services', label: 'Outside Services', icon: TruckIcon },
   { key: 'overhead', label: 'Overhead/Markup', icon: Cog6ToothIcon },
   { key: 'employees', label: 'Employees', icon: UsersIcon },
@@ -88,6 +89,7 @@ export default function AdminSettings() {
   const [finishes, setFinishes] = useState<any[]>([]);
   const [laborRates, setLaborRates] = useState<any[]>([]);
   const [workCenterRates, setWorkCenterRates] = useState<any[]>([]);
+  const [workCenterTypes, setWorkCenterTypes] = useState<string[]>([]);
   const [outsideServices, setOutsideServices] = useState<any[]>([]);
   const [overhead, setOverhead] = useState<Record<string, any>>({});
   const [employees, setEmployees] = useState<EmployeeUser[]>([]);
@@ -98,6 +100,7 @@ export default function AdminSettings() {
     roles: { value: string; label: string }[];
   } | null>(null);
   const [auditLog, setAuditLog] = useState<any[]>([]);
+  const [workCenterTypeInput, setWorkCenterTypeInput] = useState('');
 
   // Modal states
   const [editModal, setEditModal] = useState<{ type: string; item: any } | null>(null);
@@ -124,6 +127,11 @@ export default function AdminSettings() {
         case 'workcenters':
           setWorkCenterRates(await api.getAdminWorkCenterRates(showInactive));
           break;
+        case 'workcentertypes': {
+          const response = await api.getAdminWorkCenterTypes();
+          setWorkCenterTypes(response?.types || []);
+          break;
+        }
         case 'services':
           setOutsideServices(await api.getAdminOutsideServices(showInactive));
           break;
@@ -216,6 +224,29 @@ export default function AdminSettings() {
       loadTabData('overhead');
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to update setting');
+    }
+  };
+
+  const normalizeWorkCenterType = (value: string) => {
+    const trimmed = value.trim().toLowerCase();
+    return trimmed
+      .replace(/[^a-z0-9\s_-]/g, '')
+      .replace(/[\s-]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  };
+
+  const formatWorkCenterTypeLabel = (value: string) =>
+    value
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+
+  const saveWorkCenterTypes = async (nextTypes: string[]) => {
+    try {
+      const response = await api.updateAdminWorkCenterTypes(nextTypes);
+      setWorkCenterTypes(response?.types || nextTypes);
+      setWorkCenterTypeInput('');
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to update work center types');
     }
   };
 
@@ -312,7 +343,7 @@ export default function AdminSettings() {
       {/* Tab content */}
       <div className="card">
         {/* Show inactive toggle (not for audit/overhead) */}
-        {!['overhead', 'audit'].includes(activeTab) && (
+        {!['overhead', 'audit', 'workcentertypes'].includes(activeTab) && (
           <div className="flex items-center justify-between mb-4 pb-4 border-b border-surface-200">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -332,7 +363,7 @@ export default function AdminSettings() {
                 Add Employee
               </button>
             )}
-            {activeTab !== 'workcenters' && activeTab !== 'employees' && (
+            {activeTab !== 'workcenters' && activeTab !== 'workcentertypes' && activeTab !== 'employees' && (
               <button
                 onClick={() => setEditModal({ type: activeTab.slice(0, -1), item: null })}
                 className="btn-primary btn-sm"
@@ -355,6 +386,16 @@ export default function AdminSettings() {
             {activeTab === 'finishes' && <FinishesTable data={finishes} onEdit={(item) => setEditModal({ type: 'finish', item })} onDelete={(item) => setDeleteConfirm({ type: 'finish', item })} />}
             {activeTab === 'labor' && <LaborRatesTable data={laborRates} onEdit={(item) => setEditModal({ type: 'labor', item })} onDelete={(item) => setDeleteConfirm({ type: 'labor', item })} />}
             {activeTab === 'workcenters' && <WorkCenterRatesTable data={workCenterRates} onEdit={(item) => setEditModal({ type: 'workcenter', item })} />}
+            {activeTab === 'workcentertypes' && (
+              <WorkCenterTypesPanel
+                types={workCenterTypes}
+                inputValue={workCenterTypeInput}
+                onInputChange={setWorkCenterTypeInput}
+                onSave={saveWorkCenterTypes}
+                normalizeType={normalizeWorkCenterType}
+                formatLabel={formatWorkCenterTypeLabel}
+              />
+            )}
             {activeTab === 'services' && <OutsideServicesTable data={outsideServices} onEdit={(item) => setEditModal({ type: 'service', item })} onDelete={(item) => setDeleteConfirm({ type: 'service', item })} />}
             {activeTab === 'overhead' && <OverheadSettings data={overhead} onUpdate={handleOverheadUpdate} />}
             {activeTab === 'employees' && (
@@ -587,6 +628,92 @@ function WorkCenterRatesTable({ data, onEdit }: { data: any[]; onEdit: (item: an
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function WorkCenterTypesPanel({
+  types,
+  inputValue,
+  onInputChange,
+  onSave,
+  normalizeType,
+  formatLabel,
+}: {
+  types: string[];
+  inputValue: string;
+  onInputChange: (value: string) => void;
+  onSave: (types: string[]) => void;
+  normalizeType: (value: string) => string;
+  formatLabel: (value: string) => string;
+}) {
+  const normalizedInput = normalizeType(inputValue);
+  const canAdd = normalizedInput.length > 0 && !types.includes(normalizedInput);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-6">
+        <div>
+          <h3 className="text-lg font-semibold text-surface-900">Work Center Types</h3>
+          <p className="text-sm text-surface-600">
+            These types power the Work Center dropdowns and the grouping on the Work Centers page.
+          </p>
+        </div>
+        <div className="text-xs text-surface-500 bg-surface-100 px-3 py-2 rounded-lg">
+          Types are normalized (spaces → underscores, lowercase).
+        </div>
+      </div>
+
+      <div className="flex flex-col sm:flex-row gap-3">
+        <div className="flex-1">
+          <label className="label">Add type</label>
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => onInputChange(e.target.value)}
+            className="input"
+            placeholder="e.g., Blending or Final Assembly"
+          />
+          {inputValue && (
+            <p className="text-xs text-surface-500 mt-1">
+              Saved as: <span className="font-mono">{normalizedInput || '—'}</span>
+            </p>
+          )}
+        </div>
+        <div className="flex items-end">
+          <button
+            type="button"
+            onClick={() => canAdd && onSave([...types, normalizedInput])}
+            className="btn-primary"
+            disabled={!canAdd}
+          >
+            <PlusIcon className="h-4 w-4 mr-2" />
+            Add Type
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {types.length === 0 && (
+          <EmptyState message="No work center types configured yet" />
+        )}
+        {types.map((type) => (
+          <div key={type} className="flex items-center justify-between border border-surface-200 rounded-lg px-3 py-2 bg-white">
+            <div>
+              <div className="text-sm font-medium text-surface-900">{formatLabel(type)}</div>
+              <div className="text-xs text-surface-500 font-mono">{type}</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onSave(types.filter((t) => t !== type))}
+              className="text-surface-400 hover:text-red-600"
+              title="Remove type"
+            >
+              <TrashIcon className="h-4 w-4" />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

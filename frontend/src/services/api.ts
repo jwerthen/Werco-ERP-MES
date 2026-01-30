@@ -290,6 +290,11 @@ class ApiService {
     return response.data;
   }
 
+  async getWorkCenterTypes(): Promise<{ types: string[] }> {
+    const response = await this.api.get('/work-centers/types');
+    return response.data;
+  }
+
   async createWorkCenter(data: WorkCenterCreate): Promise<WorkCenter> {
     const response = await this.api.post<WorkCenter>('/work-centers/', data);
     return response.data;
@@ -302,6 +307,17 @@ class ApiService {
 
   async updateWorkCenterStatus(id: number, status: string): Promise<WorkCenter> {
     const response = await this.api.post<WorkCenter>(`/work-centers/${id}/status`, null, { params: { status } });
+    return response.data;
+  }
+
+  // Admin Settings - Work Center Types
+  async getAdminWorkCenterTypes(): Promise<{ types: string[] }> {
+    const response = await this.api.get('/admin/settings/work-center-types');
+    return response.data;
+  }
+
+  async updateAdminWorkCenterTypes(types: string[]): Promise<{ types: string[] }> {
+    const response = await this.api.put('/admin/settings/work-center-types', { types });
     return response.data;
   }
 

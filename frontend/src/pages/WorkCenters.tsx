@@ -3,7 +3,7 @@ import api from '../services/api';
 import { WorkCenter, WorkCenterType } from '../types';
 import { PlusIcon, PencilIcon } from '@heroicons/react/24/outline';
 
-const typeColors: Record<WorkCenterType, string> = {
+const typeColors: Record<string, string> = {
   fabrication: 'bg-blue-100 text-blue-800',
   cnc_machining: 'bg-purple-100 text-purple-800',
   laser: 'bg-cyan-100 text-cyan-800',
@@ -28,6 +28,7 @@ export default function WorkCenters() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editingWc, setEditingWc] = useState<WorkCenter | null>(null);
+  const [workCenterTypes, setWorkCenterTypes] = useState<string[]>([]);
   const [formData, setFormData] = useState({
     code: '',
     name: '',
@@ -47,8 +48,22 @@ export default function WorkCenters() {
 
   const loadWorkCenters = async () => {
     try {
-      const response = await api.getWorkCenters(false);
-      setWorkCenters(response);
+      const [wcResult, typesResult] = await Promise.allSettled([
+        api.getWorkCenters(false),
+        api.getWorkCenterTypes()
+      ]);
+
+      if (wcResult.status === 'fulfilled') {
+        setWorkCenters(wcResult.value);
+      } else {
+        console.error('Failed to load work centers:', wcResult.reason);
+      }
+
+      if (typesResult.status === 'fulfilled') {
+        setWorkCenterTypes(typesResult.value?.types || []);
+      } else {
+        console.error('Failed to load work center types:', typesResult.reason);
+      }
     } catch (err) {
       console.error('Failed to load work centers:', err);
     } finally {
@@ -135,31 +150,25 @@ export default function WorkCenters() {
     }
   };
 
-  const workCenterTypeOrder: WorkCenterType[] = [
-    'fabrication',
-    'laser',
-    'press_brake',
-    'cnc_machining',
-    'welding',
-    'assembly',
-    'paint',
-    'powder_coating',
-    'inspection',
-    'shipping'
-  ];
+  const workCenterTypeOrder = workCenterTypes.length
+    ? workCenterTypes
+    : [
+        'fabrication',
+        'laser',
+        'press_brake',
+        'cnc_machining',
+        'welding',
+        'assembly',
+        'paint',
+        'powder_coating',
+        'inspection',
+        'shipping'
+      ];
 
-  const typeLabels: Record<WorkCenterType, string> = {
-    fabrication: 'Fabrication',
-    cnc_machining: 'CNC Machining',
-    laser: 'Laser',
-    press_brake: 'Press Brake',
-    paint: 'Paint',
-    powder_coating: 'Powder Coating',
-    assembly: 'Assembly',
-    welding: 'Welding',
-    inspection: 'Inspection',
-    shipping: 'Shipping',
-  };
+  const formatTypeLabel = (value: string) =>
+    value
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase());
 
   const groupedWorkCenters = workCenterTypeOrder
     .map((type) => ({
@@ -167,6 +176,11 @@ export default function WorkCenters() {
       items: workCenters.filter((wc) => wc.work_center_type === type)
     }))
     .filter((group) => group.items.length > 0);
+
+  const ungrouped = workCenters.filter((wc) => !workCenterTypeOrder.includes(wc.work_center_type));
+  if (ungrouped.length) {
+    groupedWorkCenters.push({ type: 'other', items: ungrouped });
+  }
 
   if (loading) {
     return (
@@ -192,7 +206,7 @@ export default function WorkCenters() {
       {groupedWorkCenters.map((group) => (
         <div key={group.type} className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">{typeLabels[group.type]}</h2>
+            <h2 className="text-lg font-semibold text-gray-900">{formatTypeLabel(group.type)}</h2>
             <span className="text-sm text-gray-500">{group.items.length} center{group.items.length !== 1 ? 's' : ''}</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -213,8 +227,8 @@ export default function WorkCenters() {
                 
                 <h3 className="font-medium text-gray-900 mb-2">{wc.name}</h3>
                 
-                <span className={`inline-block px-2 py-1 rounded text-xs font-medium mb-3 ${typeColors[wc.work_center_type]}`}>
-                  {wc.work_center_type.replace('_', ' ')}
+                <span className={`inline-block px-2 py-1 rounded text-xs font-medium mb-3 ${typeColors[wc.work_center_type] || 'bg-gray-100 text-gray-800'}`}>
+                  {formatTypeLabel(wc.work_center_type)}
                 </span>
                 
                 {wc.description && (
@@ -288,16 +302,11 @@ export default function WorkCenters() {
                     className="input"
                     required
                   >
-                    <option value="fabrication">Fabrication</option>
-                    <option value="cnc_machining">CNC Machining</option>
-                    <option value="laser">Laser</option>
-                    <option value="press_brake">Press Brake</option>
-                    <option value="paint">Paint</option>
-                    <option value="powder_coating">Powder Coating</option>
-                    <option value="assembly">Assembly</option>
-                    <option value="welding">Welding</option>
-                    <option value="inspection">Inspection</option>
-                    <option value="shipping">Shipping</option>
+                    {workCenterTypeOrder.map((type) => (
+                      <option key={type} value={type}>
+                        {formatTypeLabel(type)}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>

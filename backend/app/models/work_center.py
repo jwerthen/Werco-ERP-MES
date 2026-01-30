@@ -1,21 +1,7 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
-import enum
 from app.db.database import Base
-
-
-class WorkCenterType(str, enum.Enum):
-    FABRICATION = "fabrication"
-    CNC_MACHINING = "cnc_machining"
-    LASER = "laser"
-    PRESS_BRAKE = "press_brake"
-    PAINT = "paint"
-    POWDER_COATING = "powder_coating"
-    ASSEMBLY = "assembly"
-    WELDING = "welding"
-    INSPECTION = "inspection"
-    SHIPPING = "shipping"
 
 
 class WorkCenter(Base):
@@ -24,7 +10,7 @@ class WorkCenter(Base):
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String(20), unique=True, index=True, nullable=False)
     name = Column(String(100), nullable=False)
-    work_center_type = Column(SQLEnum(WorkCenterType), nullable=False)
+    work_center_type = Column(String(50), nullable=False)
     description = Column(Text)
     
     # Capacity planning

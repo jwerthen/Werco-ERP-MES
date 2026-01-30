@@ -5,6 +5,7 @@ from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.services.work_center_type_service import get_work_center_types
 from app.schemas.work_center import WorkCenterCreate, WorkCenterUpdate, WorkCenterResponse
 from app.core.cache import (
     cache, CacheKeys, CacheTTL,
@@ -12,6 +13,15 @@ from app.core.cache import (
 )
 
 router = APIRouter()
+
+
+@router.get("/types")
+def list_work_center_types(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List available work center types"""
+    return {"types": get_work_center_types(db)}
 
 
 @router.get("/", response_model=List[WorkCenterResponse])
@@ -42,7 +52,7 @@ def list_work_centers(
                 "id": wc.id, 
                 "code": wc.code, 
                 "name": wc.name,
-                "work_center_type": wc.work_center_type.value if wc.work_center_type else "fabrication",
+                "work_center_type": wc.work_center_type or "fabrication",
                 "description": wc.description or "",
                 "hourly_rate": float(wc.hourly_rate) if wc.hourly_rate else 0.0,
                 "capacity_hours_per_day": float(wc.capacity_hours_per_day) if wc.capacity_hours_per_day else 8.0,
