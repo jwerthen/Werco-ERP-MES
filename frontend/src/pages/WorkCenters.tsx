@@ -35,8 +35,10 @@ export default function WorkCenters() {
     description: '',
     hourly_rate: 0,
     capacity_hours_per_day: 8,
+    efficiency_factor: 1,
     building: '',
-    area: ''
+    area: '',
+    version: 0
   });
 
   useEffect(() => {
@@ -58,9 +60,30 @@ export default function WorkCenters() {
     e.preventDefault();
     try {
       if (editingWc) {
-        await api.updateWorkCenter(editingWc.id, formData);
+        const updatePayload = {
+          name: formData.name,
+          description: formData.description,
+          hourly_rate: formData.hourly_rate,
+          capacity_hours_per_day: formData.capacity_hours_per_day,
+          efficiency_factor: formData.efficiency_factor,
+          building: formData.building,
+          area: formData.area,
+          version: editingWc.version ?? formData.version ?? 0
+        };
+        await api.updateWorkCenter(editingWc.id, updatePayload);
       } else {
-        await api.createWorkCenter(formData);
+        const createPayload = {
+          code: formData.code,
+          name: formData.name,
+          work_center_type: formData.work_center_type,
+          description: formData.description,
+          hourly_rate: formData.hourly_rate,
+          capacity_hours_per_day: formData.capacity_hours_per_day,
+          efficiency_factor: formData.efficiency_factor,
+          building: formData.building,
+          area: formData.area
+        };
+        await api.createWorkCenter(createPayload);
       }
       setShowModal(false);
       resetForm();
@@ -79,8 +102,10 @@ export default function WorkCenters() {
       description: wc.description || '',
       hourly_rate: wc.hourly_rate,
       capacity_hours_per_day: wc.capacity_hours_per_day,
+      efficiency_factor: wc.efficiency_factor ?? 1,
       building: wc.building || '',
-      area: wc.area || ''
+      area: wc.area || '',
+      version: wc.version ?? 0
     });
     setShowModal(true);
   };
@@ -94,8 +119,10 @@ export default function WorkCenters() {
       description: '',
       hourly_rate: 0,
       capacity_hours_per_day: 8,
+      efficiency_factor: 1,
       building: '',
-      area: ''
+      area: '',
+      version: 0
     });
   };
 
