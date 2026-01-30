@@ -135,6 +135,39 @@ export default function WorkCenters() {
     }
   };
 
+  const workCenterTypeOrder: WorkCenterType[] = [
+    'fabrication',
+    'laser',
+    'press_brake',
+    'cnc_machining',
+    'welding',
+    'assembly',
+    'paint',
+    'powder_coating',
+    'inspection',
+    'shipping'
+  ];
+
+  const typeLabels: Record<WorkCenterType, string> = {
+    fabrication: 'Fabrication',
+    cnc_machining: 'CNC Machining',
+    laser: 'Laser',
+    press_brake: 'Press Brake',
+    paint: 'Paint',
+    powder_coating: 'Powder Coating',
+    assembly: 'Assembly',
+    welding: 'Welding',
+    inspection: 'Inspection',
+    shipping: 'Shipping',
+  };
+
+  const groupedWorkCenters = workCenterTypeOrder
+    .map((type) => ({
+      type,
+      items: workCenters.filter((wc) => wc.work_center_type === type)
+    }))
+    .filter((group) => group.items.length > 0);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -156,68 +189,75 @@ export default function WorkCenters() {
         </button>
       </div>
 
-      {/* Work Centers Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {workCenters.map((wc) => (
-          <div key={wc.id} className={`card ${!wc.is_active ? 'opacity-60' : ''}`}>
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center">
-                <span className={`h-3 w-3 rounded-full mr-2 ${statusColors[wc.current_status]}`} />
-                <span className="font-bold text-lg">{wc.code}</span>
-              </div>
-              <button
-                onClick={() => handleEdit(wc)}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                <PencilIcon className="h-5 w-5" />
-              </button>
-            </div>
-            
-            <h3 className="font-medium text-gray-900 mb-2">{wc.name}</h3>
-            
-            <span className={`inline-block px-2 py-1 rounded text-xs font-medium mb-3 ${typeColors[wc.work_center_type]}`}>
-              {wc.work_center_type.replace('_', ' ')}
-            </span>
-            
-            {wc.description && (
-              <p className="text-sm text-gray-500 mb-3">{wc.description}</p>
-            )}
-            
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <div>
-                <span className="text-gray-500">Rate:</span>
-                <span className="ml-1 font-medium">${wc.hourly_rate}/hr</span>
-              </div>
-              <div>
-                <span className="text-gray-500">Capacity:</span>
-                <span className="ml-1 font-medium">{wc.capacity_hours_per_day}h/day</span>
-              </div>
-            </div>
-            
-            {(wc.building || wc.area) && (
-              <div className="mt-2 text-sm text-gray-500">
-                {wc.building && <span>Building: {wc.building}</span>}
-                {wc.building && wc.area && <span> | </span>}
-                {wc.area && <span>Area: {wc.area}</span>}
-              </div>
-            )}
-            
-            {/* Status dropdown */}
-            <div className="mt-4">
-              <select
-                value={wc.current_status}
-                onChange={(e) => handleStatusChange(wc.id, e.target.value)}
-                className="input text-sm"
-              >
-                <option value="available">Available</option>
-                <option value="in_use">In Use</option>
-                <option value="maintenance">Maintenance</option>
-                <option value="offline">Offline</option>
-              </select>
-            </div>
+      {groupedWorkCenters.map((group) => (
+        <div key={group.type} className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-900">{typeLabels[group.type]}</h2>
+            <span className="text-sm text-gray-500">{group.items.length} center{group.items.length !== 1 ? 's' : ''}</span>
           </div>
-        ))}
-      </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {group.items.map((wc) => (
+              <div key={wc.id} className={`card ${!wc.is_active ? 'opacity-60' : ''}`}>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center">
+                    <span className={`h-3 w-3 rounded-full mr-2 ${statusColors[wc.current_status]}`} />
+                    <span className="font-bold text-lg">{wc.code}</span>
+                  </div>
+                  <button
+                    onClick={() => handleEdit(wc)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <PencilIcon className="h-5 w-5" />
+                  </button>
+                </div>
+                
+                <h3 className="font-medium text-gray-900 mb-2">{wc.name}</h3>
+                
+                <span className={`inline-block px-2 py-1 rounded text-xs font-medium mb-3 ${typeColors[wc.work_center_type]}`}>
+                  {wc.work_center_type.replace('_', ' ')}
+                </span>
+                
+                {wc.description && (
+                  <p className="text-sm text-gray-500 mb-3">{wc.description}</p>
+                )}
+                
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  <div>
+                    <span className="text-gray-500">Rate:</span>
+                    <span className="ml-1 font-medium">${wc.hourly_rate}/hr</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Capacity:</span>
+                    <span className="ml-1 font-medium">{wc.capacity_hours_per_day}h/day</span>
+                  </div>
+                </div>
+                
+                {(wc.building || wc.area) && (
+                  <div className="mt-2 text-sm text-gray-500">
+                    {wc.building && <span>Building: {wc.building}</span>}
+                    {wc.building && wc.area && <span> | </span>}
+                    {wc.area && <span>Area: {wc.area}</span>}
+                  </div>
+                )}
+                
+                {/* Status dropdown */}
+                <div className="mt-4">
+                  <select
+                    value={wc.current_status}
+                    onChange={(e) => handleStatusChange(wc.id, e.target.value)}
+                    className="input text-sm"
+                  >
+                    <option value="available">Available</option>
+                    <option value="in_use">In Use</option>
+                    <option value="maintenance">Maintenance</option>
+                    <option value="offline">Offline</option>
+                  </select>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
 
       {/* Add/Edit Modal */}
       {showModal && (
