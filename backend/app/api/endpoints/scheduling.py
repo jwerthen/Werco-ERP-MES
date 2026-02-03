@@ -16,6 +16,12 @@ from app.schemas.scheduling import (
     LoadChartDataPoint
 )
 from app.core.queue import enqueue_job
+from app.core.realtime import safe_broadcast
+from app.core.websocket import (
+    broadcast_dashboard_update,
+    broadcast_shop_floor_update,
+    broadcast_work_order_update,
+)
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -237,6 +243,34 @@ def schedule_work_order(
             work_center_ids=work_center_ids,
             horizon_days=90
         )
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "work_order_scheduled",
+            "operation_id": first_op.id,
+            "work_center_id": first_op.work_center_id,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_scheduled",
+            "work_order_id": work_order.id,
+            "operation_id": first_op.id,
+            "work_center_id": first_op.work_center_id,
+        }
+    )
+    for wc_id in work_center_ids:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            wc_id,
+            {
+                "event": "work_order_scheduled",
+                "work_order_id": work_order.id,
+                "operation_id": first_op.id,
+            }
+        )
     
     return {
         "message": f"Work order {work_order.work_order_number} scheduled",
@@ -270,6 +304,35 @@ def schedule_operation(
         horizon_days=90
     )
 
+    safe_broadcast(
+        broadcast_work_order_update,
+        operation.work_order_id,
+        {
+            "event": "operation_scheduled",
+            "operation_id": operation.id,
+            "work_center_id": operation.work_center_id,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_scheduled",
+            "work_order_id": operation.work_order_id,
+            "operation_id": operation.id,
+            "work_center_id": operation.work_center_id,
+        }
+    )
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_scheduled",
+                "work_order_id": operation.work_order_id,
+                "operation_id": operation.id,
+            }
+        )
+
     return {"message": "Operation scheduled", "operation_id": operation_id}
 
 
@@ -302,6 +365,46 @@ def update_operation_work_center(
     SchedulingService(db).update_availability_rates(
         work_center_ids=list({old_wc_id, update.work_center_id}),
         horizon_days=90
+    )
+
+    safe_broadcast(
+        broadcast_work_order_update,
+        operation.work_order_id,
+        {
+            "event": "operation_moved",
+            "operation_id": operation.id,
+            "old_work_center_id": old_wc_id,
+            "new_work_center_id": update.work_center_id,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_moved",
+            "work_order_id": operation.work_order_id,
+            "operation_id": operation.id,
+            "old_work_center_id": old_wc_id,
+            "new_work_center_id": update.work_center_id,
+        }
+    )
+    if old_wc_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            old_wc_id,
+            {
+                "event": "operation_moved",
+                "work_order_id": operation.work_order_id,
+                "operation_id": operation.id,
+            }
+        )
+    safe_broadcast(
+        broadcast_shop_floor_update,
+        update.work_center_id,
+        {
+            "event": "operation_moved",
+            "work_order_id": operation.work_order_id,
+            "operation_id": operation.id,
+        }
     )
 
     return {
@@ -398,6 +501,15 @@ def run_scheduling(
         work_center_ids=request.work_center_ids,
         horizon_days=request.horizon_days,
         optimize_setup=request.optimize_setup
+    )
+
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "scheduling_run",
+            "work_center_ids": request.work_center_ids,
+            "horizon_days": request.horizon_days,
+        }
     )
 
     return results

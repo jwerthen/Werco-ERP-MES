@@ -1,8 +1,10 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { WorkCenter, QueueItem, ActiveJob } from '../types';
 import { format } from 'date-fns';
+import { useWebSocket } from '../hooks/useWebSocket';
+import { buildWsUrl, getAccessToken } from '../services/realtime';
 import {
   PlayIcon,
   StopIcon,
@@ -52,6 +54,7 @@ export default function ShopFloor() {
   const [clockOutData, setClockOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
+  const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const kioskParams = useMemo(() => {
     return {
       dept: getKioskDept(location.search),
@@ -59,6 +62,12 @@ export default function ShopFloor() {
       workCenterCode: getKioskWorkCenterCode(location.search),
     };
   }, [location.search]);
+  const realtimeUrl = useMemo(() => {
+    if (!selectedWorkCenter) return null;
+    const token = getAccessToken();
+    if (!token) return null;
+    return buildWsUrl(`/ws/shop-floor/${selectedWorkCenter}`, { token });
+  }, [selectedWorkCenter]);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -109,11 +118,44 @@ export default function ShopFloor() {
     }
   }, []);
 
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (realtimeRefreshRef.current) return;
+    realtimeRefreshRef.current = setTimeout(async () => {
+      realtimeRefreshRef.current = null;
+      await Promise.all([
+        checkActiveJob(),
+        selectedWorkCenter ? loadQueue(selectedWorkCenter) : Promise.resolve()
+      ]);
+    }, 500);
+  }, [checkActiveJob, loadQueue, selectedWorkCenter]);
+
+  useWebSocket({
+    url: realtimeUrl,
+    enabled: Boolean(realtimeUrl),
+    onMessage: (message) => {
+      if (message.type === 'connected' || message.type === 'ping') return;
+      if (!['shop_floor_update', 'work_order_update', 'dashboard_update'].includes(message.type)) return;
+
+      const messageWorkCenterId = message.data?.work_center_id;
+      if (messageWorkCenterId && selectedWorkCenter && messageWorkCenterId !== selectedWorkCenter) return;
+      scheduleRealtimeRefresh();
+    }
+  });
+
   useEffect(() => {
     loadInitialData();
     const interval = setInterval(checkActiveJob, 10000);
     return () => clearInterval(interval);
   }, [checkActiveJob, loadInitialData]);
+
+  useEffect(() => {
+    return () => {
+      if (realtimeRefreshRef.current) {
+        clearTimeout(realtimeRefreshRef.current);
+        realtimeRefreshRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedWorkCenter) {

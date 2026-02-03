@@ -1,8 +1,10 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { DashboardData, WorkCenterStatus } from '../types';
+import { useWebSocket } from '../hooks/useWebSocket';
+import { buildWsUrl, getAccessToken } from '../services/realtime';
 import {
   ClipboardDocumentListIcon,
   ExclamationTriangleIcon,
@@ -63,6 +65,11 @@ export default function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [dataChanged, setDataChanged] = useState(false);
   const _refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null); // eslint-disable-line @typescript-eslint/no-unused-vars
+  const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  const realtimeUrl = useMemo(() => {
+    const token = getAccessToken();
+    return buildWsUrl('/ws/updates', token ? { token } : undefined);
+  }, []);
 
   // Clear "data changed" indicator after 2 seconds
   useEffect(() => {
@@ -152,11 +159,39 @@ export default function Dashboard() {
     }
   }, []);
 
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (realtimeRefreshRef.current) return;
+    realtimeRefreshRef.current = setTimeout(() => {
+      realtimeRefreshRef.current = null;
+      loadDashboard(false);
+    }, 750);
+  }, [loadDashboard]);
+
+  useWebSocket({
+    url: realtimeUrl,
+    enabled: true,
+    onMessage: (message) => {
+      if (message.type === 'connected' || message.type === 'ping') return;
+      if (['dashboard_update', 'work_order_update', 'shop_floor_update', 'quality_alert', 'notification'].includes(message.type)) {
+        scheduleRealtimeRefresh();
+      }
+    }
+  });
+
   useEffect(() => {
     loadDashboard(true);
     const interval = setInterval(() => loadDashboard(false), 30000);
     return () => clearInterval(interval);
   }, [loadDashboard]);
+
+  useEffect(() => {
+    return () => {
+      if (realtimeRefreshRef.current) {
+        clearTimeout(realtimeRefreshRef.current);
+        realtimeRefreshRef.current = null;
+      }
+    };
+  }, []);
 
   // Manual refresh handler
   const handleManualRefresh = () => {

@@ -1,8 +1,10 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrder } from '../types';
 import { format } from 'date-fns';
+import { useWebSocket } from '../hooks/useWebSocket';
+import { buildWsUrl, getAccessToken } from '../services/realtime';
 import {
   ArrowLeftIcon,
   PlayIcon,
@@ -58,6 +60,14 @@ export default function WorkOrderDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
+  const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  const workOrderId = useMemo(() => (id ? parseInt(id, 10) : null), [id]);
+  const realtimeUrl = useMemo(() => {
+    if (!id) return null;
+    const token = getAccessToken();
+    if (!token) return null;
+    return buildWsUrl(`/ws/work-order/${id}`, { token });
+  }, [id]);
 
   const loadWorkOrder = useCallback(async () => {
     try {
@@ -78,9 +88,38 @@ export default function WorkOrderDetail() {
     }
   }, [id]);
 
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (realtimeRefreshRef.current) return;
+    realtimeRefreshRef.current = setTimeout(() => {
+      realtimeRefreshRef.current = null;
+      loadWorkOrder();
+    }, 500);
+  }, [loadWorkOrder]);
+
+  useWebSocket({
+    url: realtimeUrl,
+    enabled: Boolean(realtimeUrl),
+    onMessage: (message) => {
+      if (message.type === 'connected' || message.type === 'ping') return;
+      if (message.type !== 'work_order_update') return;
+      const messageWorkOrderId = message.data?.work_order_id;
+      if (workOrderId && messageWorkOrderId && messageWorkOrderId !== workOrderId) return;
+      scheduleRealtimeRefresh();
+    }
+  });
+
   useEffect(() => {
     loadWorkOrder();
   }, [loadWorkOrder]);
+
+  useEffect(() => {
+    return () => {
+      if (realtimeRefreshRef.current) {
+        clearTimeout(realtimeRefreshRef.current);
+        realtimeRefreshRef.current = null;
+      }
+    };
+  }, []);
 
   const handleRelease = async () => {
     try {

@@ -18,6 +18,12 @@ from app.models.audit_log import AuditLog
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
 from app.services.audit_service import AuditService
 from app.services.scheduling_service import SchedulingService
+from app.core.realtime import safe_broadcast
+from app.core.websocket import (
+    broadcast_dashboard_update,
+    broadcast_shop_floor_update,
+    broadcast_work_order_update,
+)
 
 
 class OperationCompleteRequest(BaseModel):
@@ -211,6 +217,34 @@ def clock_in(
     db.add(time_entry)
     db.commit()
     db.refresh(time_entry)
+
+    safe_broadcast(
+        broadcast_shop_floor_update,
+        clock_in_data.work_center_id,
+        {
+            "event": "clock_in",
+            "work_order_id": clock_in_data.work_order_id,
+            "operation_id": clock_in_data.operation_id,
+            "user_id": current_user.id,
+        }
+    )
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "clock_in",
+            "operation_id": clock_in_data.operation_id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "clock_in",
+            "work_order_id": work_order.id,
+            "operation_id": clock_in_data.operation_id,
+        }
+    )
     
     return time_entry
 
@@ -315,6 +349,36 @@ def clock_out(
     
     db.commit()
     db.refresh(time_entry)
+
+    if operation and operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "clock_out",
+                "work_order_id": time_entry.work_order_id,
+                "operation_id": operation.id,
+                "user_id": current_user.id,
+            }
+        )
+    if work_order:
+        safe_broadcast(
+            broadcast_work_order_update,
+            work_order.id,
+            {
+                "event": "clock_out",
+                "operation_id": operation.id if operation else None,
+                "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+            }
+        )
+        safe_broadcast(
+            broadcast_dashboard_update,
+            {
+                "event": "clock_out",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id if operation else None,
+            }
+        )
     
     return time_entry
 
@@ -694,6 +758,34 @@ def start_operation(
     
     db.commit()
     db.refresh(operation)
+
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_started",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+            }
+        )
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "operation_started",
+            "operation_id": operation.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_started",
+            "work_order_id": work_order.id,
+            "operation_id": operation.id,
+        }
+    )
     
     return {
         "message": "Operation started successfully",
@@ -826,6 +918,37 @@ def complete_operation(
     
     db.commit()
     db.refresh(operation)
+
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_completed",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+                "is_fully_complete": is_fully_complete,
+            }
+        )
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "operation_completed",
+            "operation_id": operation.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+            "is_fully_complete": is_fully_complete,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_completed",
+            "work_order_id": work_order.id,
+            "operation_id": operation.id,
+            "is_fully_complete": is_fully_complete,
+        }
+    )
     
     return {
         "message": "Operation completed" if is_fully_complete else "Progress updated",
@@ -971,6 +1094,36 @@ def put_operation_on_hold(
     )
     
     db.commit()
+
+    work_order = operation.work_order
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_hold",
+                "work_order_id": work_order.id if work_order else None,
+                "operation_id": operation.id,
+            }
+        )
+    if work_order:
+        safe_broadcast(
+            broadcast_work_order_update,
+            work_order.id,
+            {
+                "event": "operation_hold",
+                "operation_id": operation.id,
+                "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+            }
+        )
+        safe_broadcast(
+            broadcast_dashboard_update,
+            {
+                "event": "operation_hold",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+            }
+        )
     
     return {"message": "Operation placed on hold", "status": operation.status.value}
 
@@ -1005,5 +1158,35 @@ def resume_operation(
     )
     
     db.commit()
+
+    work_order = operation.work_order
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_resumed",
+                "work_order_id": work_order.id if work_order else None,
+                "operation_id": operation.id,
+            }
+        )
+    if work_order:
+        safe_broadcast(
+            broadcast_work_order_update,
+            work_order.id,
+            {
+                "event": "operation_resumed",
+                "operation_id": operation.id,
+                "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+            }
+        )
+        safe_broadcast(
+            broadcast_dashboard_update,
+            {
+                "event": "operation_resumed",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+            }
+        )
     
     return {"message": "Operation resumed", "status": operation.status.value}

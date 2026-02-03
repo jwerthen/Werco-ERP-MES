@@ -1,8 +1,10 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrderSummary, WorkOrderStatus } from '../types';
 import { format } from 'date-fns';
+import { useWebSocket } from '../hooks/useWebSocket';
+import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { 
   PlusIcon, 
   MagnifyingGlassIcon, 
@@ -45,6 +47,11 @@ export default function WorkOrders() {
   const [customerFilter, setCustomerFilter] = useState<string>('');
   const [hideCOTS, setHideCOTS] = useState(true);
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
+  const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  const realtimeUrl = useMemo(() => {
+    const token = getAccessToken();
+    return buildWsUrl('/ws/updates', token ? { token } : undefined);
+  }, []);
 
   const loadWorkOrders = useCallback(async () => {
     try {
@@ -59,9 +66,37 @@ export default function WorkOrders() {
     }
   }, [statusFilter]);
 
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (realtimeRefreshRef.current) return;
+    realtimeRefreshRef.current = setTimeout(() => {
+      realtimeRefreshRef.current = null;
+      loadWorkOrders();
+    }, 600);
+  }, [loadWorkOrders]);
+
+  useWebSocket({
+    url: realtimeUrl,
+    enabled: true,
+    onMessage: (message) => {
+      if (message.type === 'connected' || message.type === 'ping') return;
+      if (['work_order_update', 'dashboard_update', 'shop_floor_update'].includes(message.type)) {
+        scheduleRealtimeRefresh();
+      }
+    }
+  });
+
   useEffect(() => {
     loadWorkOrders();
   }, [loadWorkOrders]);
+
+  useEffect(() => {
+    return () => {
+      if (realtimeRefreshRef.current) {
+        clearTimeout(realtimeRefreshRef.current);
+        realtimeRefreshRef.current = null;
+      }
+    };
+  }, []);
 
   const handleDelete = async (wo: WorkOrderSummary) => {
     const canDelete = wo.status === 'draft' || wo.status === 'cancelled';

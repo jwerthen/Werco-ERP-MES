@@ -11,6 +11,8 @@ from app.core.cache import (
     cache, CacheKeys, CacheTTL,
     get_cached_work_centers_list, cache_work_centers_list, invalidate_work_centers_cache
 )
+from app.core.realtime import safe_broadcast
+from app.core.websocket import broadcast_dashboard_update, broadcast_shop_floor_update
 
 router = APIRouter()
 
@@ -177,4 +179,21 @@ def update_work_center_status(
     
     work_center.current_status = status
     db.commit()
+    safe_broadcast(
+        broadcast_shop_floor_update,
+        work_center_id,
+        {
+            "event": "work_center_status",
+            "work_center_id": work_center_id,
+            "status": status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_center_status",
+            "work_center_id": work_center_id,
+            "status": status,
+        }
+    )
     return {"message": f"Work center status updated to {status}"}

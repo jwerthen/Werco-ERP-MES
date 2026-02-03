@@ -1,6 +1,8 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import api from '../services/api';
 import { format, addDays, startOfWeek, parseISO, isBefore, isAfter, isSameDay } from 'date-fns';
+import { useWebSocket } from '../hooks/useWebSocket';
+import { buildWsUrl, getAccessToken } from '../services/realtime';
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -70,6 +72,11 @@ export default function Scheduling() {
   const [selectedJob, setSelectedJob] = useState<ScheduledJob | null>(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [scheduleForm, setScheduleForm] = useState({ scheduled_start: '', scheduled_end: '', work_center_id: 0 });
+  const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  const realtimeUrl = useMemo(() => {
+    const token = getAccessToken();
+    return buildWsUrl('/ws/updates', token ? { token } : undefined);
+  }, []);
   
   // Drag and drop state
   const [dragState, setDragState] = useState<DragState>({ job: null, isDragging: false });
@@ -97,9 +104,37 @@ export default function Scheduling() {
     }
   }, [weekStart, daysToShow]);
 
+  const scheduleRealtimeRefresh = useCallback(() => {
+    if (realtimeRefreshRef.current) return;
+    realtimeRefreshRef.current = setTimeout(() => {
+      realtimeRefreshRef.current = null;
+      loadData();
+    }, 800);
+  }, [loadData]);
+
+  useWebSocket({
+    url: realtimeUrl,
+    enabled: true,
+    onMessage: (message) => {
+      if (message.type === 'connected' || message.type === 'ping') return;
+      if (['work_order_update', 'shop_floor_update', 'dashboard_update'].includes(message.type)) {
+        scheduleRealtimeRefresh();
+      }
+    }
+  });
+
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    return () => {
+      if (realtimeRefreshRef.current) {
+        clearTimeout(realtimeRefreshRef.current);
+        realtimeRefreshRef.current = null;
+      }
+    };
+  }, []);
 
   // Get jobs that START on a specific day OR are continuing from a previous week
   const getJobsStartingOnDay = (wcId: number, day: Date, dayIdx: number): ScheduledJob[] => {

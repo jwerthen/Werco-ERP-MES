@@ -13,6 +13,12 @@ from app.models.routing import Routing, RoutingOperation
 from app.models.bom import BOM, BOMItem
 from app.models.work_center import WorkCenter
 from app.services.scheduling_service import SchedulingService
+from app.core.realtime import safe_broadcast
+from app.core.websocket import (
+    broadcast_dashboard_update,
+    broadcast_shop_floor_update,
+    broadcast_work_order_update,
+)
 from app.schemas.work_order import (
     WorkOrderCreate, WorkOrderUpdate, WorkOrderResponse, WorkOrderSummary,
     WorkOrderOperationCreate, WorkOrderOperationUpdate, WorkOrderOperationResponse
@@ -413,6 +419,15 @@ def create_work_order(
             "operation_count": len(work_order.operations)
         }
     )
+
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_created",
+            "work_order_id": work_order.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
     
     return work_order
 
@@ -681,6 +696,23 @@ def update_work_order(
         old_values=old_values,
         new_values=work_order
     )
+
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "work_order_updated",
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_updated",
+            "work_order_id": work_order.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
     
     return work_order
 
@@ -725,6 +757,22 @@ def delete_work_order(
         db.commit()
         
         audit.log_delete("work_order", wo_id, wo_number)
+        safe_broadcast(
+            broadcast_dashboard_update,
+            {
+                "event": "work_order_deleted",
+                "work_order_id": wo_id,
+                "status": "deleted",
+            }
+        )
+        safe_broadcast(
+            broadcast_work_order_update,
+            wo_id,
+            {
+                "event": "work_order_deleted",
+                "status": "deleted",
+            }
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     
     # Soft delete - allowed for any status
@@ -732,6 +780,22 @@ def delete_work_order(
     db.commit()
     
     audit.log_delete("work_order", wo_id, wo_number, soft_delete=True)
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_deleted",
+            "work_order_id": wo_id,
+            "status": "deleted",
+        }
+    )
+    safe_broadcast(
+        broadcast_work_order_update,
+        wo_id,
+        {
+            "event": "work_order_deleted",
+            "status": "deleted",
+        }
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -811,6 +875,31 @@ def release_work_order(
     )
 
     db.refresh(work_order)
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "work_order_released",
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_released",
+            "work_order_id": work_order.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    for wc_id in work_center_ids:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            wc_id,
+            {
+                "event": "work_order_released",
+                "work_order_id": work_order.id,
+            }
+        )
     return work_order
 
 
@@ -833,6 +922,22 @@ def start_work_order(
         work_order.actual_start = datetime.utcnow()
     
     db.commit()
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "work_order_started",
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_started",
+            "work_order_id": work_order.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
     return {"message": "Work order started"}
 
 
@@ -926,6 +1031,22 @@ def complete_work_order(
     work_order.actual_end = datetime.utcnow()
     
     db.commit()
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "work_order_completed",
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_completed",
+            "work_order_id": work_order.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
     return {"message": "Work order completed"}
 
 
@@ -1005,6 +1126,33 @@ def start_operation(
         work_order.actual_start = datetime.utcnow()
     
     db.commit()
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "operation_started",
+            "operation_id": operation.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_started",
+            "work_order_id": work_order.id,
+            "operation_id": operation.id,
+        }
+    )
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_started",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+            }
+        )
     return {"message": "Operation started"}
 
 
@@ -1044,4 +1192,31 @@ def complete_operation(
         )
     
     db.commit()
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "operation_completed",
+            "operation_id": operation.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_completed",
+            "work_order_id": work_order.id,
+            "operation_id": operation.id,
+        }
+    )
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_completed",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+            }
+        )
     return {"message": "Operation completed"}
