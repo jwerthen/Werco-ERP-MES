@@ -2,7 +2,10 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from app.models.bom import BOM, BOMItem
 from app.models.part import Part
+from app.models.routing import Routing, RoutingOperation
+from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder
 
 
@@ -155,6 +158,141 @@ class TestWorkOrdersAPI:
         operation = refreshed_work_order.json()["operations"][0]
         assert operation["started_by"] is not None
         assert operation["completed_by"] is not None
+
+    def test_assembly_work_order_uses_bom_and_routing_sequence_order(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        """Assembly auto-routing should follow BOM item and routing sequence order."""
+        assembly = Part(
+            part_number="ASM-ORDER-001",
+            name="Assembly Ordered",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+        )
+        component_one = Part(
+            part_number="CMP-ORDER-001",
+            name="Component One",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+        )
+        component_two = Part(
+            part_number="CMP-ORDER-002",
+            name="Component Two",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+        )
+        db_session.add_all([assembly, component_one, component_two])
+        db_session.flush()
+
+        laser_wc = WorkCenter(
+            code="WC-LASER-SEQ",
+            name="Laser Seq",
+            work_center_type="laser",
+            is_active=True,
+        )
+        bend_wc = WorkCenter(
+            code="WC-BEND-SEQ",
+            name="Bend Seq",
+            work_center_type="press",
+            is_active=True,
+        )
+        weld_wc = WorkCenter(
+            code="WC-WELD-SEQ",
+            name="Weld Seq",
+            work_center_type="weld",
+            is_active=True,
+        )
+        db_session.add_all([laser_wc, bend_wc, weld_wc])
+        db_session.flush()
+
+        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True)
+        db_session.add(bom)
+        db_session.flush()
+        db_session.add_all(
+            [
+                BOMItem(
+                    bom_id=bom.id,
+                    component_part_id=component_one.id,
+                    item_number=10,
+                    quantity=1,
+                    item_type="make",
+                    line_type="component",
+                    unit_of_measure="each",
+                ),
+                BOMItem(
+                    bom_id=bom.id,
+                    component_part_id=component_two.id,
+                    item_number=20,
+                    quantity=1,
+                    item_type="make",
+                    line_type="component",
+                    unit_of_measure="each",
+                ),
+            ]
+        )
+
+        routing_one = Routing(
+            part_id=component_one.id, revision="A", status="released", is_active=True
+        )
+        routing_two = Routing(
+            part_id=component_two.id, revision="A", status="released", is_active=True
+        )
+        db_session.add_all([routing_one, routing_two])
+        db_session.flush()
+
+        db_session.add_all(
+            [
+                RoutingOperation(
+                    routing_id=routing_one.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Bend One",
+                    work_center_id=bend_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.1,
+                    is_active=True,
+                ),
+                RoutingOperation(
+                    routing_id=routing_one.id,
+                    sequence=20,
+                    operation_number="Op 20",
+                    name="Weld One",
+                    work_center_id=weld_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.1,
+                    is_active=True,
+                ),
+                RoutingOperation(
+                    routing_id=routing_two.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Laser Two",
+                    work_center_id=laser_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.1,
+                    is_active=True,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/work-orders/",
+            headers=auth_headers,
+            json={"part_id": assembly.id, "quantity_ordered": 1, "priority": 5},
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        data = response.json()
+
+        operation_names = [op["name"] for op in data["operations"]]
+        assert operation_names == [
+            f"{component_one.part_number} - Bend One",
+            f"{component_one.part_number} - Weld One",
+            f"{component_two.part_number} - Laser Two",
+        ]
 
 
 @pytest.mark.api

@@ -194,7 +194,12 @@ def preview_work_order_operations(
             # Get BOM items with component parts preloaded
             items = db.query(BOMItem).options(
                 joinedload(BOMItem.component_part)
-            ).filter(BOMItem.bom_id == bom.id).all()
+            ).filter(
+                BOMItem.bom_id == bom.id
+            ).order_by(
+                BOMItem.item_number.asc(),
+                BOMItem.id.asc()
+            ).all()
             result["bom_items_count"] = len(items)
 
             component_ids = [item.component_part_id for item in items if item.component_part_id]
@@ -227,7 +232,7 @@ def preview_work_order_operations(
                 }
                 
                 if routing:
-                    for op in routing.operations:
+                    for op in sorted(routing.operations, key=lambda operation: operation.sequence):
                         if op.is_active:
                             work_center = op.work_center
                             comp_info["routing_operations"].append({
@@ -249,14 +254,6 @@ def preview_work_order_operations(
                             })
                 
                 result["component_routings"].append(comp_info)
-            
-            # Sort operations_preview by group order then work center
-            group_order = {'LASER': 1, 'MACHINE': 2, 'BEND': 3, 'WELD': 4, 'FINISH': 5, 'ASSEMBLY': 6, 'INSPECT': 7, 'OTHER': 8}
-            result["operations_preview"].sort(key=lambda x: (
-                group_order.get(x.get('operation_group', 'OTHER'), 99),
-                x.get('work_center_name', ''),
-                x.get('component_part_number', '')
-            ))
     
     return result
 
@@ -296,7 +293,7 @@ def create_work_order(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
 ):
     """Create a new work order. If auto_routing=True, operations are auto-generated from part routing.
-    For assembly parts with BOMs, component part routings are collected and grouped by work center type."""
+    For assembly parts with BOMs, component part routings follow BOM/routing sequence order."""
     
     # Initialize audit service
     audit = AuditService(db, current_user, request)
@@ -352,7 +349,7 @@ def create_work_order(
                 pass  # BOM found, will be used below
         
         if is_assembly and bom:
-            # Assembly with BOM: collect all component operations and group by work center
+            # Assembly with BOM: follow BOM item order and component routing sequence
             _create_grouped_assembly_operations(
                 db, work_order, bom, float(work_order_in.quantity_ordered)
             )
@@ -438,20 +435,16 @@ def _create_grouped_assembly_operations(
     bom: BOM, 
     wo_quantity: float
 ):
-    """Create work order operations from component BOM items, grouped by work center type.
-    
-    This creates an intuitive workflow where:
-    1. All similar operations (e.g., all laser cuts) are grouped together
-    2. Operators can run similar parts back-to-back
-    3. Each operation shows which part it's for and how many
-    """
-    
-    # Collect all operations from all component parts
-    all_operations = []  # List of (group, work_center_id, part, bom_item, routing_op)
-    
+    """Create assembly operations using BOM item order and component routing sequence order."""
+
     bom_items = db.query(BOMItem).options(
         joinedload(BOMItem.component_part)
-    ).filter(BOMItem.bom_id == bom.id).all()
+    ).filter(
+        BOMItem.bom_id == bom.id
+    ).order_by(
+        BOMItem.item_number.asc(),
+        BOMItem.id.asc()
+    ).all()
     component_ids = [item.component_part_id for item in bom_items if item.component_part_id]
 
     routing_by_part_id = {}
@@ -468,97 +461,56 @@ def _create_grouped_assembly_operations(
             if not existing or (existing.status != "released" and routing.status == "released"):
                 routing_by_part_id[routing.part_id] = routing
     
+    # Create work order operations with new sequences
+    sequence = 10
+
     for item in bom_items:
         component = item.component_part
         if not component:
             continue
-        
-            
+
         # Calculate quantity needed for this component
         component_qty = float(item.quantity) * wo_quantity
-        
+
         # Get routing for this component (prefer released, fall back to draft)
         routing = routing_by_part_id.get(component.id)
-        
+
         if not routing:
             continue
-        
-            
-        for rop in routing.operations:
+
+        for rop in sorted(routing.operations, key=lambda operation: operation.sequence):
             if not rop.is_active:
                 continue
-            work_center = rop.work_center
-            group = get_work_center_group(work_center)
-            
-            all_operations.append({
-                'group': group,
-                'work_center_id': rop.work_center_id,
-                'work_center_name': work_center.name if work_center else "Unknown",
-                'part': component,
-                'bom_item': item,
-                'routing_op': rop,
-                'component_qty': component_qty,
-                'original_sequence': rop.sequence
-            })
-    
-    # Define group order (typical manufacturing flow)
-    group_order = {
-        'LASER': 1,
-        'MACHINE': 2,
-        'BEND': 3,
-        'WELD': 4,
-        'FINISH': 5,
-        'ASSEMBLY': 6,
-        'INSPECT': 7,
-        'OTHER': 8
-    }
-    
-    # Sort operations: first by group order, then by work center, then by part number
-    all_operations.sort(key=lambda x: (
-        group_order.get(x['group'], 99),
-        x['work_center_name'],
-        x['part'].part_number,
-        x['original_sequence']
-    ))
-    
-    
-    # Create work order operations with new sequences
-    sequence = 10
-    current_group = None
-    
-    for op_data in all_operations:
-        rop = op_data['routing_op']
-        part = op_data['part']
-        group = op_data['group']
-        
-        # Create descriptive name showing part info
-        op_name = f"{part.part_number} - {rop.name}"
-        
-        # Create description with more context
-        description_parts = []
-        if rop.description:
-            description_parts.append(rop.description)
-        description_parts.append(f"Part: {part.name}")
-        description_parts.append(f"Qty: {op_data['component_qty']:.0f}")
-        description = " | ".join(description_parts)
-        
-        wo_op = WorkOrderOperation(
-            work_order_id=work_order.id,
-            sequence=sequence,
-            operation_number=f"Op {sequence}",
-            name=op_name,
-            description=description,
-            work_center_id=op_data['work_center_id'],
-            setup_time_hours=rop.setup_hours,
-            run_time_hours=float(rop.run_hours_per_unit or 0) * op_data['component_qty'],
-            status=OperationStatus.PENDING,
-            component_part_id=part.id,
-            component_quantity=op_data['component_qty'],
-            operation_group=group
-        )
-        db.add(wo_op)
-        
-        sequence += 10
+
+            # Create descriptive name showing part info
+            op_name = f"{component.part_number} - {rop.name}"
+
+            # Create description with more context
+            description_parts = []
+            if rop.description:
+                description_parts.append(rop.description)
+            description_parts.append(f"Part: {component.name}")
+            description_parts.append(f"Qty: {component_qty:.0f}")
+            description = " | ".join(description_parts)
+
+            wo_op = WorkOrderOperation(
+                work_order_id=work_order.id,
+                sequence=sequence,
+                operation_number=f"Op {sequence}",
+                name=op_name,
+                description=description,
+                work_center_id=rop.work_center_id,
+                setup_time_hours=rop.setup_hours,
+                run_time_hours=float(rop.run_hours_per_unit or 0) * component_qty,
+                status=OperationStatus.PENDING,
+                component_part_id=component.id,
+                component_quantity=component_qty,
+                # Disable grouped release behavior for assembly component operations.
+                operation_group=None
+            )
+            db.add(wo_op)
+
+            sequence += 10
     
     # Add final assembly operation if the assembly part itself has a routing
     assembly_routing = db.query(Routing).options(
@@ -583,7 +535,6 @@ def _create_grouped_assembly_operations(
         for rop in sorted(assembly_routing.operations, key=lambda x: x.sequence):
             if not rop.is_active:
                 continue
-            work_center = rop.work_center
             wo_op = WorkOrderOperation(
                 work_order_id=work_order.id,
                 sequence=sequence,
@@ -594,7 +545,7 @@ def _create_grouped_assembly_operations(
                 setup_time_hours=rop.setup_hours,
                 run_time_hours=float(rop.run_hours_per_unit or 0) * wo_quantity,
                 status=OperationStatus.PENDING,
-                operation_group=get_work_center_group(work_center) if work_center else "ASSEMBLY"
+                operation_group=None
             )
             db.add(wo_op)
             sequence += 10
