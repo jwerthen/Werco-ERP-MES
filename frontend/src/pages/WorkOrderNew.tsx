@@ -7,6 +7,7 @@ import {
   ExclamationTriangleIcon,
   PlusIcon,
   TrashIcon,
+  ChevronDownIcon,
 } from '@heroicons/react/24/outline';
 
 interface Part {
@@ -14,6 +15,7 @@ interface Part {
   part_number: string;
   name: string;
   part_type: string;
+  customer_name?: string;
 }
 
 interface WorkCenter {
@@ -54,6 +56,11 @@ interface OperationPreview {
   fromRouting: boolean;
 }
 
+interface CustomerOption {
+  id: number;
+  name: string;
+}
+
 export default function WorkOrderNew() {
   const navigate = useNavigate();
   const [parts, setParts] = useState<Part[]>([]);
@@ -64,6 +71,10 @@ export default function WorkOrderNew() {
   const [routing, setRouting] = useState<Routing | null>(null);
   const [operations, setOperations] = useState<OperationPreview[]>([]);
   const [showManualEntry, setShowManualEntry] = useState(false);
+  const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([]);
+  const [customerSearch, setCustomerSearch] = useState('');
+  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
+  const [creatingCustomer, setCreatingCustomer] = useState(false);
 
   const [form, setForm] = useState({
     part_id: 0,
@@ -83,10 +94,16 @@ export default function WorkOrderNew() {
     try {
       const [partsRes, wcRes] = await Promise.all([
         api.getParts({ active_only: true }),
-        api.getWorkCenters()
+        api.getWorkCenters(),
       ]);
       setParts(partsRes);
       setWorkCenters(wcRes);
+      try {
+        const customers = await api.getCustomerNames();
+        setCustomerOptions(customers);
+      } catch (customerErr) {
+        console.error('Failed to load customer names:', customerErr);
+      }
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
@@ -94,8 +111,50 @@ export default function WorkOrderNew() {
     }
   };
 
+  const filteredCustomers = customerOptions.filter((customer) =>
+    customer.name.toLowerCase().includes(customerSearch.toLowerCase())
+  );
+
+  const getCustomerByName = (nameRaw: string) => {
+    const name = nameRaw.trim().toLowerCase();
+    if (!name) return null;
+    return customerOptions.find((customer) => customer.name.trim().toLowerCase() === name) || null;
+  };
+
+  const createCustomerFromSearch = async () => {
+    const customerName = customerSearch.trim();
+    if (!customerName) return null;
+
+    const existing = getCustomerByName(customerName);
+    if (existing) return existing;
+
+    setCreatingCustomer(true);
+    try {
+      const created = await api.createCustomer({ name: customerName });
+      const createdOption = { id: created.id, name: created.name };
+      setCustomerOptions((prev) =>
+        [...prev, createdOption].sort((a, b) => a.name.localeCompare(b.name))
+      );
+      return createdOption;
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to create customer');
+      return null;
+    } finally {
+      setCreatingCustomer(false);
+    }
+  };
+
   const handlePartChange = async (partId: number) => {
-    setForm({ ...form, part_id: partId });
+    const selectedPart = parts.find(p => p.id === partId);
+    const partCustomerName = selectedPart?.customer_name || '';
+    setForm({
+      ...form,
+      part_id: partId,
+      customer_name: partCustomerName || form.customer_name
+    });
+    if (partCustomerName) {
+      setCustomerSearch(partCustomerName);
+    }
     setRouting(null);
     setOperations([]);
     setShowManualEntry(false);
@@ -103,7 +162,6 @@ export default function WorkOrderNew() {
     if (!partId) return;
 
     // Find the selected part to check if it's an assembly
-    const selectedPart = parts.find(p => p.id === partId);
     const isAssembly = selectedPart?.part_type === 'assembly';
 
     setLoadingRouting(true);
@@ -217,8 +275,24 @@ export default function WorkOrderNew() {
 
     setSubmitting(true);
     try {
+      const normalizedCustomerName = form.customer_name.trim();
+      let customerNameForPayload = normalizedCustomerName;
+
+      if (normalizedCustomerName) {
+        const existing = getCustomerByName(normalizedCustomerName);
+        if (existing) {
+          customerNameForPayload = existing.name;
+        } else {
+          const created = await createCustomerFromSearch();
+          if (!created) return;
+          customerNameForPayload = created.name;
+          setCustomerSearch(created.name);
+        }
+      }
+
       const payload: any = {
         ...form,
+        customer_name: customerNameForPayload,
         due_date: form.due_date || null,
       };
 
@@ -314,14 +388,68 @@ export default function WorkOrderNew() {
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div>
+              <div className="relative">
                 <label className="label">Customer Name</label>
-                <input
-                  type="text"
-                  value={form.customer_name}
-                  onChange={(e) => setForm({ ...form, customer_name: e.target.value })}
-                  className="input"
-                />
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={customerSearch}
+                    onChange={(e) => {
+                      const typedValue = e.target.value;
+                      setCustomerSearch(typedValue);
+                      setForm({ ...form, customer_name: typedValue });
+                      setShowCustomerDropdown(true);
+                    }}
+                    onFocus={() => setShowCustomerDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowCustomerDropdown(false), 200)}
+                    className="input pr-8"
+                    placeholder="Select or type customer"
+                  />
+                  <ChevronDownIcon
+                    className="h-5 w-5 absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 cursor-pointer"
+                    onClick={() => setShowCustomerDropdown(!showCustomerDropdown)}
+                  />
+                </div>
+                {showCustomerDropdown && (
+                  <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-y-auto">
+                    {filteredCustomers.length > 0 ? (
+                      filteredCustomers.map((customer) => (
+                        <button
+                          key={customer.id}
+                          type="button"
+                          className="w-full text-left px-3 py-2 hover:bg-gray-100 text-sm"
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            setCustomerSearch(customer.name);
+                            setForm({ ...form, customer_name: customer.name });
+                            setShowCustomerDropdown(false);
+                          }}
+                        >
+                          {customer.name}
+                        </button>
+                      ))
+                    ) : customerSearch.trim() ? (
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 hover:bg-blue-50 text-sm text-blue-600 disabled:text-gray-400"
+                        disabled={creatingCustomer}
+                        onMouseDown={async (event) => {
+                          event.preventDefault();
+                          const created = await createCustomerFromSearch();
+                          if (!created) return;
+                          setCustomerSearch(created.name);
+                          setForm({ ...form, customer_name: created.name });
+                          setShowCustomerDropdown(false);
+                        }}
+                      >
+                        <PlusIcon className="h-4 w-4 inline mr-1" />
+                        {creatingCustomer ? 'Creating customer...' : `Create "${customerSearch.trim()}"`}
+                      </button>
+                    ) : (
+                      <div className="px-3 py-2 text-sm text-gray-500">Type to search customer</div>
+                    )}
+                  </div>
+                )}
               </div>
               <div>
                 <label className="label">Customer PO #</label>
