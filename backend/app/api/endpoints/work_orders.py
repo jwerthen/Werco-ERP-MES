@@ -195,7 +195,8 @@ def preview_work_order_operations(
                     selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
                 ).filter(
                     Routing.part_id.in_(component_ids),
-                    Routing.is_active == True
+                    Routing.is_active == True,
+                    Routing.status == "released"
                 ).all()
                 routings_by_part_id = {r.part_id: r for r in routings}
 
@@ -248,15 +249,6 @@ def preview_work_order_operations(
                 Routing.is_active == True,
                 Routing.status == "released"
             ).first()
-
-            if not assembly_routing:
-                assembly_routing = db.query(Routing).options(
-                    selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
-                ).filter(
-                    Routing.part_id == part_id,
-                    Routing.is_active == True,
-                    Routing.status == "draft"
-                ).first()
 
             if assembly_routing:
                 active_assembly_ops = [
@@ -402,7 +394,7 @@ def create_work_order(
                 db, work_order, bom, float(work_order_in.quantity_ordered)
             )
         else:
-            # Simple part: use standard routing (prefer released, fall back to draft)
+            # Simple part: use released routing only
             routing = db.query(Routing).options(
                 selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
             ).filter(
@@ -410,16 +402,6 @@ def create_work_order(
                 Routing.is_active == True,
                 Routing.status == "released"
             ).first()
-            
-            # Fall back to draft routing if no released routing exists
-            if not routing:
-                routing = db.query(Routing).options(
-                    selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
-                ).filter(
-                    Routing.part_id == work_order_in.part_id,
-                    Routing.is_active == True,
-                    Routing.status == "draft"
-                ).first()
             
             if routing:
                 for rop in sorted(routing.operations, key=lambda x: x.sequence):
@@ -502,11 +484,11 @@ def _create_grouped_assembly_operations(
         ).filter(
             Routing.part_id.in_(component_ids),
             Routing.is_active == True,
-            Routing.status.in_(["released", "draft"])
+            Routing.status == "released"
         ).all()
         for routing in routings:
             existing = routing_by_part_id.get(routing.part_id)
-            if not existing or (existing.status != "released" and routing.status == "released"):
+            if not existing:
                 routing_by_part_id[routing.part_id] = routing
     
     # Create work order operations with new sequences
@@ -559,7 +541,7 @@ def _create_grouped_assembly_operations(
 
             sequence += 10
     
-    # Add final assembly operation if the assembly part itself has a routing
+    # Add final assembly operation if the assembly part itself has a released routing
     assembly_routing = db.query(Routing).options(
         selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
     ).filter(
@@ -567,16 +549,6 @@ def _create_grouped_assembly_operations(
         Routing.is_active == True,
         Routing.status == "released"
     ).first()
-    
-    # Fall back to draft routing
-    if not assembly_routing:
-        assembly_routing = db.query(Routing).options(
-            selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
-        ).filter(
-            Routing.part_id == work_order.part_id,
-            Routing.is_active == True,
-            Routing.status == "draft"
-        ).first()
     
     if assembly_routing:
         active_assembly_ops = [
