@@ -418,11 +418,67 @@ export interface CustomerCreate {
   email?: string;
   phone?: string;
   address?: string;
+  address_line1?: string;
+  address_line2?: string;
   city?: string;
   state?: string;
   zip?: string;
+  zip_code?: string;
   country?: string;
+  ship_to_name?: string;
+  ship_address_line1?: string;
+  ship_city?: string;
+  ship_state?: string;
+  ship_zip_code?: string;
+  payment_terms?: string;
+  requires_coc?: boolean;
+  requires_fai?: boolean;
+  special_requirements?: string;
   notes?: string;
+}
+
+export interface CustomerNameOption {
+  id: number;
+  name: string;
+}
+
+export interface CustomerLinkedPart {
+  id: number;
+  part_number: string;
+  name: string;
+  revision?: string;
+  part_type: string;
+  customer_part_number?: string;
+  is_active: boolean;
+}
+
+export interface CustomerLinkedWorkOrder {
+  id: number;
+  work_order_number: string;
+  status: string;
+  due_date?: string;
+  quantity_ordered: number;
+  created_at?: string;
+  part_id?: number;
+  part_number?: string;
+  part_name?: string;
+  customer_name?: string;
+  customer_po?: string;
+}
+
+export interface CustomerStatsResponse {
+  customer_id: number;
+  customer_name: string;
+  part_count: number;
+  work_order_counts: {
+    total: number;
+    by_status: Record<string, number>;
+  };
+  parts: CustomerLinkedPart[];
+  assemblies: CustomerLinkedPart[];
+  current_work_orders: CustomerLinkedWorkOrder[];
+  past_work_orders: CustomerLinkedWorkOrder[];
+  recent_work_orders: CustomerLinkedWorkOrder[];
 }
 
 // ============ Vendor Types ============

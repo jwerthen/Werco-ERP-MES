@@ -7,6 +7,9 @@ import {
   PartListParams,
   WorkCenterCreate,
   WorkCenterUpdate,
+  CustomerCreate,
+  CustomerNameOption,
+  CustomerStatsResponse,
 } from '../types/api';
 import { User, Part, WorkCenter } from '../types';
 
@@ -1083,12 +1086,12 @@ class ApiService {
     return response.data;
   }
 
-  async getCustomerNames() {
-    const response = await this.api.get('/customers/names');
+  async getCustomerNames(): Promise<CustomerNameOption[]> {
+    const response = await this.api.get<CustomerNameOption[]>('/customers/names');
     return response.data;
   }
 
-  async createCustomer(data: any) {
+  async createCustomer(data: CustomerCreate) {
     const response = await this.api.post('/customers/', data);
     return response.data;
   }
@@ -1098,8 +1101,8 @@ class ApiService {
     return response.data;
   }
 
-  async getCustomerStats(customerId: number) {
-    const response = await this.api.get(`/customers/${customerId}/stats`);
+  async getCustomerStats(customerId: number): Promise<CustomerStatsResponse> {
+    const response = await this.api.get<CustomerStatsResponse>(`/customers/${customerId}/stats`);
     return response.data;
   }
 

@@ -56,6 +56,42 @@ interface ImportPreview {
   source_format?: string;
 }
 
+interface CustomerOption {
+  id: number;
+  name: string;
+}
+
+interface CustomerPartSummary {
+  id: number;
+  part_number: string;
+  name: string;
+  revision?: string;
+  part_type: string;
+}
+
+interface CustomerWorkOrderSummary {
+  id: number;
+  work_order_number: string;
+  status: string;
+  due_date?: string;
+  quantity_ordered: number;
+  part_number?: string;
+}
+
+interface CustomerContext {
+  customer_id: number;
+  customer_name: string;
+  part_count: number;
+  work_order_counts: {
+    total: number;
+    by_status: Record<string, number>;
+  };
+  parts: CustomerPartSummary[];
+  assemblies: CustomerPartSummary[];
+  current_work_orders: CustomerWorkOrderSummary[];
+  past_work_orders: CustomerWorkOrderSummary[];
+}
+
 export default function Parts() {
   const navigate = useNavigate();
   const [parts, setParts] = useState<Part[]>([]);
@@ -93,14 +129,21 @@ export default function Parts() {
   const [importLoading, setImportLoading] = useState(false);
   const [importColumnMap, setImportColumnMap] = useState<Record<string, number | null>>({});
   const [importDerivedItems, setImportDerivedItems] = useState<ImportItem[]>([]);
+  const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([]);
+  const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null);
+  const [customerContext, setCustomerContext] = useState<CustomerContext | null>(null);
+  const [loadingCustomerContext, setLoadingCustomerContext] = useState(false);
+  const [creatingCustomer, setCreatingCustomer] = useState(false);
 
-  // Get unique customers from existing parts
+  // Customer list comes from customer master + any legacy values already on parts
   const existingCustomers = useMemo(() => {
-    const customers = parts
+    const fromParts = parts
       .map(p => p.customer_name)
       .filter((c): c is string => !!c && c.trim() !== '');
-    return Array.from(new Set(customers)).sort();
-  }, [parts]);
+    const fromCustomers = customerOptions.map(c => c.name);
+    return Array.from(new Set([...fromCustomers, ...fromParts]))
+      .sort((a, b) => a.localeCompare(b));
+  }, [customerOptions, parts]);
 
   // Filter customers based on search
   const filteredCustomers = useMemo(() => {
@@ -108,6 +151,9 @@ export default function Parts() {
     const search = customerSearch.toLowerCase();
     return existingCustomers.filter(c => c.toLowerCase().includes(search));
   }, [existingCustomers, customerSearch]);
+  const normalizedCustomerSearch = customerSearch.trim().toLowerCase();
+  const hasExactCustomerMatch = normalizedCustomerSearch.length > 0
+    && existingCustomers.some(c => c.trim().toLowerCase() === normalizedCustomerSearch);
 
   const [allComponentIds, setAllComponentIds] = useState<Set<number>>(new Set());
 
@@ -155,6 +201,119 @@ export default function Parts() {
   useEffect(() => {
     loadParts();
   }, [loadParts]);
+
+  const loadCustomerOptions = useCallback(async () => {
+    try {
+      const customers = await api.getCustomerNames();
+      setCustomerOptions(customers);
+    } catch (err) {
+      console.error('Failed to load customer names:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCustomerOptions();
+  }, [loadCustomerOptions]);
+
+  const getCustomerByName = useCallback((name: string) => {
+    const normalized = name.trim().toLowerCase();
+    if (!normalized) return null;
+    return customerOptions.find(customer => customer.name.trim().toLowerCase() === normalized) ?? null;
+  }, [customerOptions]);
+
+  const createCustomerFromName = useCallback(async (nameRaw: string) => {
+    const name = nameRaw.trim();
+    if (!name) return null;
+
+    const existing = getCustomerByName(name);
+    if (existing) return existing;
+
+    setCreatingCustomer(true);
+    try {
+      const created = await api.createCustomer({ name });
+      const createdOption: CustomerOption = { id: created.id, name: created.name };
+      setCustomerOptions(prev => {
+        const deduped = [...prev.filter(c => c.id !== createdOption.id), createdOption];
+        return deduped.sort((a, b) => a.name.localeCompare(b.name));
+      });
+      return createdOption;
+    } catch (err: any) {
+      const errorMessage = err.response?.data?.detail || 'Failed to create customer';
+      alert(errorMessage);
+      return null;
+    } finally {
+      setCreatingCustomer(false);
+    }
+  }, [getCustomerByName]);
+
+  const selectCustomerName = useCallback((name: string) => {
+    const matchedCustomer = getCustomerByName(name);
+    const resolvedName = matchedCustomer?.name || name;
+    setCustomerSearch(resolvedName);
+    setFormData(prev => ({ ...prev, customer_name: resolvedName }));
+    setSelectedCustomerId(matchedCustomer?.id ?? null);
+    setShowCustomerDropdown(false);
+  }, [getCustomerByName]);
+
+  const handleCreateCustomerSelection = useCallback(async () => {
+    const createdCustomer = await createCustomerFromName(
+      formData.customer_name || customerSearch
+    );
+    if (!createdCustomer) return;
+    setCustomerSearch(createdCustomer.name);
+    setFormData(prev => ({ ...prev, customer_name: createdCustomer.name }));
+    setSelectedCustomerId(createdCustomer.id);
+    setShowCustomerDropdown(false);
+  }, [createCustomerFromName, customerSearch, formData.customer_name]);
+
+  useEffect(() => {
+    if (!showModal) return;
+
+    const value = (formData.customer_name || customerSearch).trim();
+    if (!value) {
+      setSelectedCustomerId(null);
+      setCustomerContext(null);
+      return;
+    }
+
+    const matchedCustomer = getCustomerByName(value);
+    setSelectedCustomerId(matchedCustomer?.id ?? null);
+  }, [showModal, formData.customer_name, customerSearch, getCustomerByName]);
+
+  useEffect(() => {
+    if (!showModal || !selectedCustomerId) {
+      setCustomerContext(null);
+      setLoadingCustomerContext(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadCustomerContext = async () => {
+      setLoadingCustomerContext(true);
+      try {
+        const context = await api.getCustomerStats(selectedCustomerId);
+        if (!cancelled) {
+          setCustomerContext(context);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Failed to load customer context:', err);
+          setCustomerContext(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingCustomerContext(false);
+        }
+      }
+    };
+
+    loadCustomerContext();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showModal, selectedCustomerId]);
 
   // Filter parts - only show manufactured/assembly parts (materials go to Materials & Hardware)
   const filteredParts = useMemo(() => {
@@ -217,13 +376,33 @@ export default function Parts() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const normalizedCustomerName = formData.customer_name.trim();
+      const payload = {
+        ...formData,
+        customer_name: normalizedCustomerName
+      };
+
+      if (normalizedCustomerName) {
+        const existingCustomer = getCustomerByName(normalizedCustomerName);
+        if (existingCustomer) {
+          payload.customer_name = existingCustomer.name;
+        } else {
+          const createdCustomer = await createCustomerFromName(normalizedCustomerName);
+          if (!createdCustomer) return;
+          payload.customer_name = createdCustomer.name;
+          setCustomerSearch(createdCustomer.name);
+          setSelectedCustomerId(createdCustomer.id);
+        }
+      }
+
       if (editingPart) {
-        await api.updatePart(editingPart.id, formData);
+        await api.updatePart(editingPart.id, payload);
       } else {
-        await api.createPart(formData);
+        await api.createPart(payload);
       }
       setShowModal(false);
       resetForm();
+      loadCustomerOptions();
       loadParts();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to save part');
@@ -232,6 +411,8 @@ export default function Parts() {
 
   const handleEdit = (part: Part) => {
     setEditingPart(part);
+    const customerName = part.customer_name || '';
+    const matchedCustomer = customerName ? getCustomerByName(customerName) : null;
     setFormData({
       part_number: part.part_number,
       name: part.name,
@@ -246,7 +427,8 @@ export default function Parts() {
       drawing_number: part.drawing_number || '',
       version: part.version || 0
     });
-    setCustomerSearch(part.customer_name || '');
+    setCustomerSearch(customerName);
+    setSelectedCustomerId(matchedCustomer?.id ?? null);
     setShowModal(true);
   };
 
@@ -294,6 +476,9 @@ export default function Parts() {
     });
     setCustomerSearch('');
     setShowCustomerDropdown(false);
+    setSelectedCustomerId(null);
+    setCustomerContext(null);
+    setLoadingCustomerContext(false);
   };
 
   const handleImportPreview = async (e: React.FormEvent) => {
@@ -1107,8 +1292,9 @@ export default function Parts() {
                     type="text"
                     value={customerSearch}
                     onChange={(e) => {
-                      setCustomerSearch(e.target.value);
-                      setFormData({ ...formData, customer_name: e.target.value });
+                      const typedValue = e.target.value;
+                      setCustomerSearch(typedValue);
+                      setFormData(prev => ({ ...prev, customer_name: typedValue }));
                       setShowCustomerDropdown(true);
                     }}
                     onFocus={() => setShowCustomerDropdown(true)}
@@ -1126,50 +1312,190 @@ export default function Parts() {
                     {filteredCustomers.length > 0 ? (
                       <>
                         {filteredCustomers.map(customer => (
-                          <div
+                          <button
+                            type="button"
                             key={customer}
-                            className="px-3 py-2 hover:bg-gray-100 cursor-pointer text-sm"
-                            onMouseDown={() => {
-                              setCustomerSearch(customer);
-                              setFormData({ ...formData, customer_name: customer });
-                              setShowCustomerDropdown(false);
+                            className="w-full text-left px-3 py-2 hover:bg-gray-100 text-sm"
+                            onMouseDown={(event) => {
+                              event.preventDefault();
+                              selectCustomerName(customer);
                             }}
                           >
                             {customer}
-                          </div>
+                          </button>
                         ))}
                       </>
-                    ) : customerSearch ? (
-                      <div
-                        className="px-3 py-2 hover:bg-blue-50 cursor-pointer text-sm text-blue-600"
-                        onMouseDown={() => {
-                          setFormData({ ...formData, customer_name: customerSearch });
-                          setShowCustomerDropdown(false);
+                    ) : normalizedCustomerSearch ? (
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 hover:bg-blue-50 text-sm text-blue-600 disabled:text-gray-400"
+                        disabled={creatingCustomer}
+                        onMouseDown={async (event) => {
+                          event.preventDefault();
+                          await handleCreateCustomerSelection();
                         }}
                       >
                         <PlusIcon className="h-4 w-4 inline mr-1" />
-                        Create "{customerSearch}"
-                      </div>
+                        {creatingCustomer ? 'Creating customer...' : `Create and select "${customerSearch.trim()}"`}
+                      </button>
                     ) : (
                       <div className="px-3 py-2 text-sm text-gray-500">
                         Type to search or add new customer
                       </div>
                     )}
-                    {filteredCustomers.length > 0 && customerSearch && !filteredCustomers.includes(customerSearch) && (
-                      <div
-                        className="px-3 py-2 hover:bg-blue-50 cursor-pointer text-sm text-blue-600 border-t"
-                        onMouseDown={() => {
-                          setFormData({ ...formData, customer_name: customerSearch });
-                          setShowCustomerDropdown(false);
+                    {filteredCustomers.length > 0 && normalizedCustomerSearch && !hasExactCustomerMatch && (
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 hover:bg-blue-50 text-sm text-blue-600 border-t disabled:text-gray-400"
+                        disabled={creatingCustomer}
+                        onMouseDown={async (event) => {
+                          event.preventDefault();
+                          await handleCreateCustomerSelection();
                         }}
                       >
                         <PlusIcon className="h-4 w-4 inline mr-1" />
-                        Create "{customerSearch}"
-                      </div>
+                        {creatingCustomer ? 'Creating customer...' : `Create and select "${customerSearch.trim()}"`}
+                      </button>
                     )}
                   </div>
                 )}
+                {creatingCustomer && (
+                  <p className="mt-1 text-xs text-blue-600">Saving customer record...</p>
+                )}
               </div>
+
+              {formData.customer_name.trim() && (
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-medium text-gray-700">Customer Menu</h4>
+                    <span className={`text-xs px-2 py-0.5 rounded ${
+                      selectedCustomerId ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                    }`}>
+                      {selectedCustomerId ? 'Linked Customer' : 'Typed Name Only'}
+                    </span>
+                  </div>
+
+                  {loadingCustomerContext && (
+                    <p className="text-xs text-gray-500">Loading parts, assemblies, and work orders...</p>
+                  )}
+
+                  {!loadingCustomerContext && !selectedCustomerId && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-amber-700">
+                        Select an existing customer or create this name to view related parts and work orders.
+                      </p>
+                      <button
+                        type="button"
+                        className="btn-secondary btn-sm"
+                        disabled={creatingCustomer}
+                        onClick={handleCreateCustomerSelection}
+                      >
+                        {creatingCustomer ? 'Creating Customer...' : `Create Customer "${formData.customer_name.trim()}"`}
+                      </button>
+                    </div>
+                  )}
+
+                  {!loadingCustomerContext && selectedCustomerId && customerContext && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="rounded-md border border-gray-200 bg-white">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                          <span>Assemblies</span>
+                          <span>{customerContext.assemblies.length}</span>
+                        </div>
+                        <div className="max-h-32 overflow-y-auto divide-y divide-gray-100">
+                          {customerContext.assemblies.length > 0 ? customerContext.assemblies.map(item => (
+                            <div key={item.id} className="px-3 py-2 text-xs">
+                              <div className="font-mono text-gray-900">{item.part_number}</div>
+                              <div className="text-gray-600 truncate">{item.name}</div>
+                            </div>
+                          )) : (
+                            <div className="px-3 py-2 text-xs text-gray-500">No assemblies</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="rounded-md border border-gray-200 bg-white">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                          <span>Parts</span>
+                          <span>{customerContext.parts.length}</span>
+                        </div>
+                        <div className="max-h-32 overflow-y-auto divide-y divide-gray-100">
+                          {customerContext.parts.length > 0 ? customerContext.parts.map(item => (
+                            <div key={item.id} className="px-3 py-2 text-xs">
+                              <div className="font-mono text-gray-900">{item.part_number}</div>
+                              <div className="text-gray-600 truncate">{item.name}</div>
+                            </div>
+                          )) : (
+                            <div className="px-3 py-2 text-xs text-gray-500">No parts</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="rounded-md border border-gray-200 bg-white">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                          <span>Current Work Orders</span>
+                          <span>{customerContext.current_work_orders.length}</span>
+                        </div>
+                        <div className="max-h-36 overflow-y-auto divide-y divide-gray-100">
+                          {customerContext.current_work_orders.length > 0 ? customerContext.current_work_orders.map(wo => (
+                            <button
+                              type="button"
+                              key={wo.id}
+                              className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50"
+                              onClick={() => {
+                                setShowModal(false);
+                                resetForm();
+                                navigate(`/work-orders/${wo.id}`);
+                              }}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-gray-900">{wo.work_order_number}</span>
+                                <span className="text-gray-600">{wo.status.replace('_', ' ')}</span>
+                              </div>
+                              <div className="text-gray-500 truncate">
+                                {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
+                              </div>
+                            </button>
+                          )) : (
+                            <div className="px-3 py-2 text-xs text-gray-500">No current work orders</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="rounded-md border border-gray-200 bg-white">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                          <span>Past Work Orders</span>
+                          <span>{customerContext.past_work_orders.length}</span>
+                        </div>
+                        <div className="max-h-36 overflow-y-auto divide-y divide-gray-100">
+                          {customerContext.past_work_orders.length > 0 ? customerContext.past_work_orders.map(wo => (
+                            <button
+                              type="button"
+                              key={wo.id}
+                              className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50"
+                              onClick={() => {
+                                setShowModal(false);
+                                resetForm();
+                                navigate(`/work-orders/${wo.id}`);
+                              }}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-gray-900">{wo.work_order_number}</span>
+                                <span className="text-gray-600">{wo.status.replace('_', ' ')}</span>
+                              </div>
+                              <div className="text-gray-500 truncate">
+                                {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
+                              </div>
+                            </button>
+                          )) : (
+                            <div className="px-3 py-2 text-xs text-gray-500">No past work orders</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               
               <div className="grid grid-cols-2 gap-4">
                 <div>

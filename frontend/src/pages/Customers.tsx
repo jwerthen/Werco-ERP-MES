@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
+import { useNavigate } from 'react-router-dom';
 
 interface Customer {
   id: number;
@@ -29,13 +30,45 @@ interface CustomerStats {
     total: number;
     by_status: Record<string, number>;
   };
+  parts: Array<{
+    id: number;
+    part_number: string;
+    name: string;
+    part_type: string;
+    revision?: string;
+  }>;
+  assemblies: Array<{
+    id: number;
+    part_number: string;
+    name: string;
+    part_type: string;
+    revision?: string;
+  }>;
+  current_work_orders: Array<{
+    id: number;
+    work_order_number: string;
+    status: string;
+    due_date?: string;
+    quantity_ordered: number;
+    created_at?: string;
+    part_number?: string;
+  }>;
+  past_work_orders: Array<{
+    id: number;
+    work_order_number: string;
+    status: string;
+    due_date?: string;
+    quantity_ordered: number;
+    created_at?: string;
+    part_number?: string;
+  }>;
   recent_work_orders: Array<{
     id: number;
     work_order_number: string;
     status: string;
     due_date?: string;
     quantity_ordered: number;
-    created_at: string;
+    created_at?: string;
   }>;
 }
 
@@ -50,6 +83,7 @@ const statusColors: Record<string, string> = {
 };
 
 export default function Customers() {
+  const navigate = useNavigate();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -571,44 +605,115 @@ export default function Customers() {
                     </div>
                   </div>
 
-                  {/* Recent Work Orders */}
-                  {customerStats.recent_work_orders.length > 0 && (
-                    <div>
-                      <h3 className="text-sm font-medium text-gray-700 mb-2">Recent Work Orders</h3>
-                      <div className="border rounded-lg overflow-hidden">
-                        <table className="min-w-full divide-y divide-gray-200">
-                          <thead className="bg-gray-50">
-                            <tr>
-                              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">WO #</th>
-                              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Status</th>
-                              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Qty</th>
-                              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">Due Date</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-gray-200">
-                            {customerStats.recent_work_orders.map(wo => (
-                              <tr key={wo.id} className="hover:bg-gray-50">
-                                <td className="px-4 py-2 text-sm font-medium text-werco-primary">{wo.work_order_number}</td>
-                                <td className="px-4 py-2">
-                                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColors[wo.status] || 'bg-gray-100'}`}>
-                                    {wo.status.replace('_', ' ')}
-                                  </span>
-                                </td>
-                                <td className="px-4 py-2 text-sm">{wo.quantity_ordered}</td>
-                                <td className="px-4 py-2 text-sm text-gray-500">
-                                  {wo.due_date ? new Date(wo.due_date).toLocaleDateString() : '-'}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                  {/* Customer Menu */}
+                  <div>
+                    <h3 className="text-sm font-medium text-gray-700 mb-2">
+                      Customer Menu: Parts, Assemblies, Current and Past Work Orders
+                    </h3>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="border rounded-lg bg-white">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                          <span>Assemblies</span>
+                          <span>{customerStats.assemblies.length}</span>
+                        </div>
+                        <div className="max-h-40 overflow-y-auto divide-y divide-gray-100">
+                          {customerStats.assemblies.length > 0 ? customerStats.assemblies.map(item => (
+                            <div key={item.id} className="px-3 py-2 text-xs">
+                              <div className="font-mono text-gray-900">{item.part_number}</div>
+                              <div className="text-gray-600 truncate">{item.name}</div>
+                            </div>
+                          )) : (
+                            <div className="px-3 py-2 text-xs text-gray-500">No assemblies found</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="border rounded-lg bg-white">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                          <span>Parts</span>
+                          <span>{customerStats.parts.length}</span>
+                        </div>
+                        <div className="max-h-40 overflow-y-auto divide-y divide-gray-100">
+                          {customerStats.parts.length > 0 ? customerStats.parts.map(item => (
+                            <div key={item.id} className="px-3 py-2 text-xs">
+                              <div className="font-mono text-gray-900">{item.part_number}</div>
+                              <div className="text-gray-600 truncate">{item.name}</div>
+                            </div>
+                          )) : (
+                            <div className="px-3 py-2 text-xs text-gray-500">No parts found</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="border rounded-lg bg-white">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                          <span>Current Work Orders</span>
+                          <span>{customerStats.current_work_orders.length}</span>
+                        </div>
+                        <div className="max-h-44 overflow-y-auto divide-y divide-gray-100">
+                          {customerStats.current_work_orders.length > 0 ? customerStats.current_work_orders.map(wo => (
+                            <button
+                              type="button"
+                              key={wo.id}
+                              className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50"
+                              onClick={() => {
+                                closeDetails();
+                                navigate(`/work-orders/${wo.id}`);
+                              }}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-gray-900">{wo.work_order_number}</span>
+                                <span className={`px-2 py-0.5 rounded ${statusColors[wo.status] || 'bg-gray-100 text-gray-700'}`}>
+                                  {wo.status.replace('_', ' ')}
+                                </span>
+                              </div>
+                              <div className="text-gray-500 truncate">
+                                {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
+                              </div>
+                            </button>
+                          )) : (
+                            <div className="px-3 py-2 text-xs text-gray-500">No current work orders</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="border rounded-lg bg-white">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                          <span>Past Work Orders</span>
+                          <span>{customerStats.past_work_orders.length}</span>
+                        </div>
+                        <div className="max-h-44 overflow-y-auto divide-y divide-gray-100">
+                          {customerStats.past_work_orders.length > 0 ? customerStats.past_work_orders.map(wo => (
+                            <button
+                              type="button"
+                              key={wo.id}
+                              className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50"
+                              onClick={() => {
+                                closeDetails();
+                                navigate(`/work-orders/${wo.id}`);
+                              }}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-gray-900">{wo.work_order_number}</span>
+                                <span className={`px-2 py-0.5 rounded ${statusColors[wo.status] || 'bg-gray-100 text-gray-700'}`}>
+                                  {wo.status.replace('_', ' ')}
+                                </span>
+                              </div>
+                              <div className="text-gray-500 truncate">
+                                {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
+                              </div>
+                            </button>
+                          )) : (
+                            <div className="px-3 py-2 text-xs text-gray-500">No past work orders</div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  )}
+                  </div>
 
-                  {customerStats.recent_work_orders.length === 0 && customerStats.work_order_counts.total === 0 && (
-                    <div className="text-center text-gray-500 py-8">
-                      No work orders found for this customer
+                  {customerStats.work_order_counts.total === 0 && customerStats.part_count === 0 && (
+                    <div className="text-center text-gray-500 py-4">
+                      No parts, assemblies, or work orders found for this customer
                     </div>
                   )}
                 </div>
