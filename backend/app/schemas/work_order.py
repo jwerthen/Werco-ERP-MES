@@ -8,13 +8,19 @@ from app.core.validation import (
     NonNegativeInteger,
     MoneySmall,
     Money,
-    DescriptionLong
+    DescriptionLong,
 )
 
 
 class WorkOrderOperationBase(BaseModel):
     work_center_id: int = Field(..., gt=0, description="Work center ID")
-    sequence: int = Field(..., ge=10, le=990, multiple_of=10, description="Sequence (10-990, multiples of 10)")
+    sequence: int = Field(
+        ...,
+        ge=10,
+        le=990,
+        multiple_of=10,
+        description="Sequence (10-990, multiples of 10)",
+    )
     operation_number: Optional[str] = Field(None, max_length=50)
     name: str = Field(..., min_length=2, max_length=255, description="Operation name")
     description: Optional[DescriptionLong] = None
@@ -67,25 +73,33 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     inspection_complete: bool
     created_at: datetime
     updated_at: datetime
-    
+
     # Component tracking for assembly WOs
     component_part_id: Optional[int] = None
     component_part_number: Optional[str] = None
     component_part_name: Optional[str] = None
     component_quantity: Optional[float] = None
     operation_group: Optional[str] = None
-    
+    started_by: Optional[int] = None
+    completed_by: Optional[int] = None
+
     class Config:
         from_attributes = True
 
 
 class WorkOrderBase(BaseModel):
     part_id: int = Field(..., gt=0, description="Part ID")
-    quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), description="Quantity ordered")
-    priority: int = Field(default=5, ge=1, le=10, description="Priority (1=highest, 10=lowest)")
+    quantity_ordered: MoneySmall = Field(
+        ..., gt=Decimal("0"), description="Quantity ordered"
+    )
+    priority: int = Field(
+        default=5, ge=1, le=10, description="Priority (1=highest, 10=lowest)"
+    )
     due_date: Optional[date] = Field(None, description="Due date")
     customer_name: Optional[str] = Field(None, max_length=255)
-    customer_po: Optional[str] = Field(None, max_length=50, description="Customer PO number")
+    customer_po: Optional[str] = Field(
+        None, max_length=50, description="Customer PO number"
+    )
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
 
@@ -93,13 +107,13 @@ class WorkOrderBase(BaseModel):
 class WorkOrderCreate(WorkOrderBase):
     operations: List[WorkOrderOperationCreate] = Field(default_factory=list)
 
-    @model_validator(mode='after')
-    def validate_dates(self) -> 'WorkOrderCreate':
+    @model_validator(mode="after")
+    def validate_dates(self) -> "WorkOrderCreate":
         """Validate date relationships on input"""
         today = date.today()
 
         if self.due_date and self.due_date < today:
-            raise ValueError('Due date cannot be in the past')
+            raise ValueError("Due date cannot be in the past")
 
         return self
 
@@ -136,13 +150,14 @@ class WorkOrderResponse(WorkOrderBase):
     created_at: datetime
     updated_at: datetime
     operations: List[WorkOrderOperationResponse] = Field(default_factory=list)
-    
+
     class Config:
         from_attributes = True
 
 
 class WorkOrderSummary(BaseModel):
     """Lightweight work order for lists/dashboards"""
+
     id: int
     work_order_number: str
     part_id: int
@@ -156,6 +171,6 @@ class WorkOrderSummary(BaseModel):
     due_date: Optional[date]
     customer_name: Optional[str]
     current_operation: Optional[str] = None
-    
+
     class Config:
         from_attributes = True

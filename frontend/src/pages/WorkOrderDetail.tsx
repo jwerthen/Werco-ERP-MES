@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { WorkOrder } from '../types';
+import { User, WorkOrder } from '../types';
 import { format } from 'date-fns';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
+import { useAuth } from '../context/AuthContext';
 import {
   ArrowLeftIcon,
   PlayIcon,
@@ -53,13 +54,36 @@ interface MaterialRequirementsResponse {
   materials: MaterialRequirement[];
 }
 
+interface ActiveShopUser {
+  user_id: number;
+  user_name?: string;
+  work_order_number?: string;
+  operation?: string;
+  work_center?: string;
+  clock_in?: string;
+  entry_type?: string;
+}
+
+const formatDateTime = (value?: string) => {
+  if (!value) return '-';
+  try {
+    return format(new Date(value), 'MMM d, yyyy h:mm a');
+  } catch {
+    return value;
+  }
+};
+
 export default function WorkOrderDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isAdminView = user?.role === 'admin' || !!user?.is_superuser;
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
+  const [userNameById, setUserNameById] = useState<Record<number, string>>({});
+  const [activeUsersOnWorkOrder, setActiveUsersOnWorkOrder] = useState<ActiveShopUser[]>([]);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const workOrderId = useMemo(() => (id ? parseInt(id, 10) : null), [id]);
   const realtimeUrl = useMemo(() => {
@@ -120,6 +144,69 @@ export default function WorkOrderDetail() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!isAdminView) {
+      setUserNameById({});
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadUserDirectory = async () => {
+      try {
+        const users: User[] = await api.getUsers(true);
+        if (cancelled) return;
+        const lookup: Record<number, string> = {};
+        users.forEach((item) => {
+          const fullName = `${item.first_name || ''} ${item.last_name || ''}`.trim();
+          lookup[item.id] = fullName || item.email || `User #${item.id}`;
+        });
+        setUserNameById(lookup);
+      } catch (err) {
+        if (!cancelled) {
+          setUserNameById({});
+        }
+      }
+    };
+
+    loadUserDirectory();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdminView]);
+
+  useEffect(() => {
+    if (!isAdminView || !workOrder?.work_order_number) {
+      setActiveUsersOnWorkOrder([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadActiveUsers = async () => {
+      try {
+        const response = await api.getActiveUsers();
+        if (cancelled) return;
+        const activeUsers: ActiveShopUser[] = Array.isArray(response?.active_users)
+          ? response.active_users
+          : [];
+        setActiveUsersOnWorkOrder(
+          activeUsers.filter((entry) => entry.work_order_number === workOrder.work_order_number)
+        );
+      } catch (err) {
+        if (!cancelled) {
+          setActiveUsersOnWorkOrder([]);
+        }
+      }
+    };
+
+    loadActiveUsers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdminView, workOrder?.work_order_number, workOrder?.updated_at]);
 
   const handleRelease = async () => {
     try {
@@ -283,6 +370,49 @@ export default function WorkOrderDetail() {
         </div>
       </div>
 
+      {isAdminView && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900">Operator Activity (Admin)</h2>
+            <span className="text-xs text-gray-500">
+              Live: {activeUsersOnWorkOrder.length} clocked in
+            </span>
+          </div>
+          {activeUsersOnWorkOrder.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operator</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Entry Type</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Clocked In</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {activeUsersOnWorkOrder.map((entry, index) => (
+                    <tr key={`${entry.user_id}-${entry.operation || 'op'}-${index}`} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                        {entry.user_name || userNameById[entry.user_id] || `User #${entry.user_id}`}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-700">{entry.operation || '-'}</td>
+                      <td className="px-4 py-3 text-sm text-gray-700">{entry.work_center || '-'}</td>
+                      <td className="px-4 py-3 text-sm text-gray-700">
+                        {entry.entry_type ? entry.entry_type.toString().replace('_', ' ') : '-'}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-700">{formatDateTime(entry.clock_in)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">No one is currently clocked in on this work order.</p>
+          )}
+        </div>
+      )}
+
       {/* Operations */}
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Operations / Routing</h2>
@@ -300,6 +430,14 @@ export default function WorkOrderDetail() {
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Est. Hours</th>
+                  {isAdminView && (
+                    <>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started By</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started At</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Completed By</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Completed At</th>
+                    </>
+                  )}
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
                 </tr>
@@ -367,6 +505,22 @@ export default function WorkOrderDetail() {
                         <td className="px-4 py-3 text-sm">
                           {(Number(op.setup_time_hours || 0) + Number(op.run_time_hours || 0)).toFixed(2)}
                         </td>
+                        {isAdminView && (
+                          <>
+                            <td className="px-4 py-3 text-sm text-gray-700">
+                              {op.started_by ? (userNameById[op.started_by] || `User #${op.started_by}`) : '-'}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-700">
+                              {formatDateTime(op.actual_start)}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-700">
+                              {op.completed_by ? (userNameById[op.completed_by] || `User #${op.completed_by}`) : '-'}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-700">
+                              {formatDateTime(op.actual_end)}
+                            </td>
+                          </>
+                        )}
                         <td className="px-4 py-3">
                           <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[op.status]}`}>
                             {op.status.replace('_', ' ')}

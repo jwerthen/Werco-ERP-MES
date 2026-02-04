@@ -123,6 +123,8 @@ export interface WorkOrderOperation {
   component_part_name?: string;
   component_quantity?: number;
   operation_group?: string;
+  started_by?: number;
+  completed_by?: number;
 }
 
 export type OperationStatus = 'pending' | 'ready' | 'in_progress' | 'complete' | 'on_hold';

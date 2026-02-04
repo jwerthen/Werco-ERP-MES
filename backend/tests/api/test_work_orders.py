@@ -39,7 +39,10 @@ class TestWorkOrdersAPI:
         data = response.json()
         assert data["work_order_number"].startswith("WO-")
         assert data["customer_name"] == sample_work_order_data["customer_name"]
-        assert float(data["quantity_ordered"]) == sample_work_order_data["quantity_ordered"]
+        assert (
+            float(data["quantity_ordered"])
+            == sample_work_order_data["quantity_ordered"]
+        )
 
     def test_create_work_order_unauthorized(
         self, client: TestClient, sample_work_order_data: dict
@@ -60,9 +63,7 @@ class TestWorkOrdersAPI:
         assert data["id"] == test_work_order.id
         assert data["work_order_number"] == test_work_order.work_order_number
 
-    def test_get_work_order_not_found(
-        self, client: TestClient, auth_headers: dict
-    ):
+    def test_get_work_order_not_found(self, client: TestClient, auth_headers: dict):
         """Test retrieving a non-existent work order."""
         response = client.get("/api/v1/work-orders/99999", headers=auth_headers)
         assert response.status_code == status.HTTP_404_NOT_FOUND
@@ -124,6 +125,37 @@ class TestWorkOrdersAPI:
         assert len(data) >= 1
         assert test_work_order.customer_name in data[0]["customer_name"]
 
+    def test_get_work_order_includes_operator_tracking_fields(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
+    ):
+        """Started/completed operator IDs should be visible on work order operations."""
+        work_order_response = client.get(
+            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
+        )
+        assert work_order_response.status_code == status.HTTP_200_OK
+        operation_id = work_order_response.json()["operations"][0]["id"]
+
+        start_response = client.post(
+            f"/api/v1/work-orders/operations/{operation_id}/start",
+            headers=auth_headers,
+        )
+        assert start_response.status_code == status.HTTP_200_OK
+
+        complete_response = client.post(
+            f"/api/v1/work-orders/operations/{operation_id}/complete",
+            headers=auth_headers,
+            params={"quantity_complete": 1, "quantity_scrapped": 0},
+        )
+        assert complete_response.status_code == status.HTTP_200_OK
+
+        refreshed_work_order = client.get(
+            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
+        )
+        assert refreshed_work_order.status_code == status.HTTP_200_OK
+        operation = refreshed_work_order.json()["operations"][0]
+        assert operation["started_by"] is not None
+        assert operation["completed_by"] is not None
+
 
 @pytest.mark.api
 @pytest.mark.requires_db
@@ -135,7 +167,9 @@ class TestWorkOrdersValidation:
     ):
         """Test creating a work order with missing required fields."""
         invalid_data = {"customer_name": "Test Customer"}
-        response = client.post("/api/v1/work-orders/", headers=auth_headers, json=invalid_data)
+        response = client.post(
+            "/api/v1/work-orders/", headers=auth_headers, json=invalid_data
+        )
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
     def test_create_work_order_invalid_quantity(
@@ -147,7 +181,9 @@ class TestWorkOrdersValidation:
             "part_id": test_part.id,
             "quantity_ordered": -10,
         }
-        response = client.post("/api/v1/work-orders/", headers=auth_headers, json=invalid_data)
+        response = client.post(
+            "/api/v1/work-orders/", headers=auth_headers, json=invalid_data
+        )
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
     def test_create_work_order_generates_unique_numbers(
