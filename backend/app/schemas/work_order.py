@@ -84,10 +84,8 @@ class WorkOrderBase(BaseModel):
     quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), description="Quantity ordered")
     priority: int = Field(default=5, ge=1, le=10, description="Priority (1=highest, 10=lowest)")
     due_date: Optional[date] = Field(None, description="Due date")
-    must_ship_by: Optional[date] = Field(None, description="Must ship by date")
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_po: Optional[str] = Field(None, max_length=50, description="Customer PO number")
-    lot_number: Optional[str] = Field(None, max_length=50)
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
 
@@ -103,10 +101,6 @@ class WorkOrderCreate(WorkOrderBase):
         if self.due_date and self.due_date < today:
             raise ValueError('Due date cannot be in the past')
 
-        if self.must_ship_by and self.due_date:
-            if self.must_ship_by < self.due_date:
-                raise ValueError('Must ship by date must be after due date')
-
         return self
 
 
@@ -116,10 +110,8 @@ class WorkOrderUpdate(BaseModel):
     priority: Optional[int] = Field(None, ge=1, le=10)
     status: Optional[WorkOrderStatus] = None
     due_date: Optional[date] = None
-    must_ship_by: Optional[date] = None
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_po: Optional[str] = Field(None, max_length=50)
-    lot_number: Optional[str] = Field(None, max_length=50)
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
     quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"))

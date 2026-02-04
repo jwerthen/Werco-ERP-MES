@@ -74,10 +74,8 @@ export interface WorkOrder {
   actual_start?: string;
   actual_end?: string;
   due_date?: string;
-  must_ship_by?: string;
   customer_name?: string;
   customer_po?: string;
-  lot_number?: string;
   notes?: string;
   special_instructions?: string;
   estimated_hours: number;

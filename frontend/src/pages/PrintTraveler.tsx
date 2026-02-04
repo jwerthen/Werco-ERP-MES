@@ -136,7 +136,6 @@ export default function PrintTraveler() {
   };
   const printDate = format(new Date(), 'MM/dd/yyyy');
   const dueDate = workOrder.due_date ? format(new Date(workOrder.due_date), 'MM/dd/yyyy') : '-';
-  const mustShipBy = workOrder.must_ship_by ? format(new Date(workOrder.must_ship_by), 'MM/dd/yyyy') : '-';
 
   return (
     <div className="p-8 max-w-5xl mx-auto print:p-4">
@@ -223,16 +222,8 @@ export default function PrintTraveler() {
                 <td className="font-bold">{dueDate}</td>
               </tr>
               <tr>
-                <td className="font-medium pr-4">Must Ship By:</td>
-                <td>{mustShipBy}</td>
-              </tr>
-              <tr>
                 <td className="font-medium pr-4">Priority:</td>
                 <td>{workOrder.priority}</td>
-              </tr>
-              <tr>
-                <td className="font-medium pr-4">Lot Number:</td>
-                <td>{workOrder.lot_number || '-'}</td>
               </tr>
             </tbody>
           </table>

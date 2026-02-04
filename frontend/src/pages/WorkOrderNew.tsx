@@ -72,7 +72,6 @@ export default function WorkOrderNew() {
     customer_name: '',
     customer_po: '',
     due_date: '',
-    lot_number: '',
     notes: ''
   });
 
@@ -335,26 +334,14 @@ export default function WorkOrderNew() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="label">Due Date</label>
-                <input
-                  type="date"
-                  value={form.due_date}
-                  onChange={(e) => setForm({ ...form, due_date: e.target.value })}
-                  className="input"
-                />
-              </div>
-              <div>
-                <label className="label">Lot Number</label>
-                <input
-                  type="text"
-                  value={form.lot_number}
-                  onChange={(e) => setForm({ ...form, lot_number: e.target.value })}
-                  className="input"
-                  placeholder="Auto-generated if blank"
-                />
-              </div>
+            <div>
+              <label className="label">Due Date</label>
+              <input
+                type="date"
+                value={form.due_date}
+                onChange={(e) => setForm({ ...form, due_date: e.target.value })}
+                className="input"
+              />
             </div>
 
             <div>

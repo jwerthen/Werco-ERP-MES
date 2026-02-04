@@ -122,10 +122,8 @@ export interface WorkOrderCreate {
   scheduled_start?: string;
   scheduled_end?: string;
   due_date?: string;
-  must_ship_by?: string;
   customer_name?: string;
   customer_po?: string;
-  lot_number?: string;
   notes?: string;
   special_instructions?: string;
 }
@@ -136,10 +134,8 @@ export interface WorkOrderUpdate {
   scheduled_start?: string;
   scheduled_end?: string;
   due_date?: string;
-  must_ship_by?: string;
   customer_name?: string;
   customer_po?: string;
-  lot_number?: string;
   notes?: string;
   special_instructions?: string;
   version?: number; // For optimistic locking

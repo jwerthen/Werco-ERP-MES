@@ -63,7 +63,7 @@ def export_work_orders(
     default_columns = [
         "work_order_number", "part_number", "part_name", "status", "priority",
         "quantity_ordered", "quantity_complete", "quantity_scrapped",
-        "customer_name", "customer_po", "lot_number",
+        "customer_name", "customer_po",
         "due_date", "scheduled_start", "actual_start", "actual_end",
         "created_at"
     ]
@@ -83,7 +83,6 @@ def export_work_orders(
             "quantity_scrapped": float(wo.quantity_scrapped or 0),
             "customer_name": wo.customer_name or "",
             "customer_po": wo.customer_po or "",
-            "lot_number": wo.lot_number or "",
             "due_date": wo.due_date,
             "scheduled_start": wo.scheduled_start,
             "actual_start": wo.actual_start,

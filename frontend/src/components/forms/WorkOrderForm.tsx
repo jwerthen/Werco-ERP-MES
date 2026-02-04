@@ -48,7 +48,7 @@ export function WorkOrderForm({
                 Work Order Information
               </h4>
               <p className="text-xs text-blue-600">
-                All dates must be today or future. Must ship by date must be after due date.
+                All dates must be today or future.
               </p>
             </div>
 
@@ -109,24 +109,14 @@ export function WorkOrderForm({
               </div>
             </FormField>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <FormField label="Due Date" name="due_date" error={errors.due_date?.message}>
-                <input
-                  {...register('due_date')}
-                  type="date"
-                  className={`input ${errors.due_date ? 'input-error' : ''}`}
-                  min={new Date().toISOString().split('T')[0]}
-                />
-              </FormField>
-
-              <FormField label="Must Ship By" name="must_ship_by" error={errors.must_ship_by?.message}>
-                <input
-                  {...register('must_ship_by')}
-                  type="date"
-                  className={`input ${errors.must_ship_by ? 'input-error' : ''}`}
-                />
-              </FormField>
-            </div>
+            <FormField label="Due Date" name="due_date" error={errors.due_date?.message}>
+              <input
+                {...register('due_date')}
+                type="date"
+                className={`input ${errors.due_date ? 'input-error' : ''}`}
+                min={new Date().toISOString().split('T')[0]}
+              />
+            </FormField>
 
             <FormField label="Customer Name" name="customer_name">
               <input {...register('customer_name')} className="input" placeholder="Optional" maxLength={255} />
@@ -134,10 +124,6 @@ export function WorkOrderForm({
 
             <FormField label="Customer PO" name="customer_po">
               <input {...register('customer_po')} className="input" placeholder="Optional" maxLength={50} />
-            </FormField>
-
-            <FormField label="Lot Number" name="lot_number">
-              <input {...register('lot_number')} className="input" placeholder="Optional" maxLength={50} />
             </FormField>
 
             <FormField label="Notes" name="notes">

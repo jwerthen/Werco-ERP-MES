@@ -261,10 +261,6 @@ export default function WorkOrderDetail() {
               <dd className="text-lg font-medium">{workOrder.customer_po || '-'}</dd>
             </div>
             <div>
-              <dt className="text-sm text-gray-500">Lot Number</dt>
-              <dd className="text-lg font-medium">{workOrder.lot_number || '-'}</dd>
-            </div>
-            <div>
               <dt className="text-sm text-gray-500">Actual Hours</dt>
               <dd className="text-lg font-medium">{Number(workOrder.actual_hours || 0).toFixed(2)}</dd>
             </div>

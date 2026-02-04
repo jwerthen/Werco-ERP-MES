@@ -66,9 +66,7 @@ class WorkOrderPrintData(BaseModel):
     quantity_scrapped: str
     customer_name: Optional[str] = None
     customer_po: Optional[str] = None
-    lot_number: Optional[str] = None
     due_date: Optional[str] = None
-    must_ship_by: Optional[str] = None
     scheduled_start: Optional[str] = None
     scheduled_end: Optional[str] = None
     actual_start: Optional[str] = None
@@ -137,9 +135,7 @@ def get_work_order_print_data(
         quantity_scrapped=format_number(wo.quantity_scrapped, 0),
         customer_name=wo.customer_name,
         customer_po=wo.customer_po,
-        lot_number=wo.lot_number,
         due_date=format_date(wo.due_date),
-        must_ship_by=format_date(wo.must_ship_by),
         scheduled_start=format_date(wo.scheduled_start),
         scheduled_end=format_date(wo.scheduled_end),
         actual_start=format_date(wo.actual_start),
