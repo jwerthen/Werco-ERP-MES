@@ -125,6 +125,7 @@ function LazyRoute({ children }: { children: React.ReactNode }) {
 
 function AppRoutes() {
   const location = useLocation();
+  const { user } = useAuth();
 
   // Sync kiosk mode based on URL query params
   syncKioskMode(location.pathname, location.search);
@@ -137,9 +138,13 @@ function AppRoutes() {
       {/* Dashboard - eagerly loaded */}
       <Route path="/" element={
         <PrivateRoute>
-          <Layout>
-            <Dashboard />
-          </Layout>
+          {user?.role === 'operator' ? (
+            <Navigate to="/shop-floor/operations?kiosk=1" replace />
+          ) : (
+            <Layout>
+              <Dashboard />
+            </Layout>
+          )}
         </PrivateRoute>
       } />
       

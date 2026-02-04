@@ -123,10 +123,20 @@ export default function Login() {
         }
         const paddedId = normalizedId.padStart(4, '0');
         await loginWithEmployeeId(paddedId);
+        try {
+          const storedUser = localStorage.getItem('user');
+          const signedInUser = storedUser ? JSON.parse(storedUser) : null;
+          if (signedInUser?.role === 'operator') {
+            navigate('/shop-floor/operations?kiosk=1', { replace: true });
+            return;
+          }
+        } catch {
+          // Ignore parsing issues and fall back to default route below.
+        }
       } else {
         await login(email, password);
       }
-      navigate('/');
+      navigate('/', { replace: true });
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Login failed. Please try again.');
     } finally {
