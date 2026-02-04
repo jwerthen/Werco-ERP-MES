@@ -16,6 +16,7 @@ from app.models.work_center import WorkCenter
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.audit_log import AuditLog
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
+from app.core.time_utils import to_utc_iso
 from app.services.audit_service import AuditService
 from app.services.scheduling_service import SchedulingService
 from app.core.realtime import safe_broadcast
@@ -110,7 +111,7 @@ def get_my_active_job(
         
         jobs.append({
             "time_entry_id": entry.id,
-            "clock_in": entry.clock_in,
+            "clock_in": to_utc_iso(entry.clock_in),
             "entry_type": entry.entry_type,
             "work_order_number": work_order.work_order_number if work_order else None,
             "part_number": work_order.part.part_number if work_order and work_order.part else None,
@@ -562,7 +563,7 @@ def get_active_shop_users(
             "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
             "operation": entry.operation.name if entry.operation else None,
             "work_center": entry.work_center.name if entry.work_center else None,
-            "clock_in": entry.clock_in,
+            "clock_in": to_utc_iso(entry.clock_in),
             "entry_type": entry.entry_type
         })
     

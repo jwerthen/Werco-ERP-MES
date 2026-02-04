@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+from app.core.time_utils import to_utc_iso
 from app.models.time_entry import TimeEntryType
 
 
@@ -62,3 +63,6 @@ class TimeEntryResponse(TimeEntryBase):
     
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime: to_utc_iso
+        }
