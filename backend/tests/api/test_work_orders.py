@@ -159,10 +159,10 @@ class TestWorkOrdersAPI:
         assert operation["started_by"] is not None
         assert operation["completed_by"] is not None
 
-    def test_assembly_work_order_uses_bom_and_routing_sequence_order(
+    def test_assembly_work_order_uses_released_routing_only(
         self, client: TestClient, auth_headers: dict, db_session
     ):
-        """Assembly auto-routing should follow BOM item and routing sequence order."""
+        """Assembly auto-routing should use only the released assembly routing."""
         assembly = Part(
             part_number="ASM-ORDER-001",
             name="Assembly Ordered",
@@ -240,7 +240,10 @@ class TestWorkOrdersAPI:
         routing_two = Routing(
             part_id=component_two.id, revision="A", status="released", is_active=True
         )
-        db_session.add_all([routing_one, routing_two])
+        assembly_routing = Routing(
+            part_id=assembly.id, revision="A", status="released", is_active=True
+        )
+        db_session.add_all([routing_one, routing_two, assembly_routing])
         db_session.flush()
 
         db_session.add_all(
@@ -275,6 +278,27 @@ class TestWorkOrdersAPI:
                     run_hours_per_unit=0.1,
                     is_active=True,
                 ),
+                RoutingOperation(
+                    routing_id=assembly_routing.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Assemble Frame",
+                    work_center_id=weld_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.2,
+                    is_active=True,
+                ),
+                RoutingOperation(
+                    routing_id=assembly_routing.id,
+                    sequence=20,
+                    operation_number="Op 20",
+                    name="Final Inspection",
+                    work_center_id=laser_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.05,
+                    is_active=True,
+                    is_inspection_point=True,
+                ),
             ]
         )
         db_session.commit()
@@ -289,10 +313,12 @@ class TestWorkOrdersAPI:
 
         operation_names = [op["name"] for op in data["operations"]]
         assert operation_names == [
-            f"{component_one.part_number} - Bend One",
-            f"{component_one.part_number} - Weld One",
-            f"{component_two.part_number} - Laser Two",
+            "Assemble Frame",
+            "Final Inspection",
         ]
+        assert "Bend One" not in operation_names
+        assert "Weld One" not in operation_names
+        assert "Laser Two" not in operation_names
 
     def test_assembly_work_order_places_final_inspection_last(
         self, client: TestClient, auth_headers: dict, db_session
@@ -407,12 +433,11 @@ class TestWorkOrdersAPI:
 
         operation_names = [op["name"] for op in data["operations"]]
         assert operation_names == [
-            f"{component.part_number} - Machine Component",
-            "FINAL ASSEMBLY: Build Final Assembly",
-            "FINAL INSPECTION: Final Inspection",
+            "Build Final Assembly",
+            "Final Inspection",
         ]
         operation_groups = [op["operation_group"] for op in data["operations"]]
-        assert operation_groups == [component.part_number, "ASSEMBLY", "INSPECT"]
+        assert operation_groups == ["ASSEMBLY", "INSPECT"]
 
     def test_assembly_work_order_blocks_out_of_sequence_start(
         self, client: TestClient, auth_headers: dict, db_session
@@ -465,28 +490,28 @@ class TestWorkOrdersAPI:
             )
         )
 
-        component_routing = Routing(
-            part_id=component.id, revision="A", status="released", is_active=True
+        assembly_routing = Routing(
+            part_id=assembly.id, revision="A", status="released", is_active=True
         )
-        db_session.add(component_routing)
+        db_session.add(assembly_routing)
         db_session.flush()
         db_session.add_all(
             [
                 RoutingOperation(
-                    routing_id=component_routing.id,
+                    routing_id=assembly_routing.id,
                     sequence=10,
                     operation_number="Op 10",
-                    name="Cut Component",
+                    name="Cut Assembly",
                     work_center_id=cut_wc.id,
                     setup_hours=0,
                     run_hours_per_unit=0.1,
                     is_active=True,
                 ),
                 RoutingOperation(
-                    routing_id=component_routing.id,
+                    routing_id=assembly_routing.id,
                     sequence=20,
                     operation_number="Op 20",
-                    name="Weld Component",
+                    name="Weld Assembly",
                     work_center_id=weld_wc.id,
                     setup_hours=0,
                     run_hours_per_unit=0.1,
