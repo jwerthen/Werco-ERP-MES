@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 import math
 from datetime import datetime, timezone, date
 import hashlib
@@ -11,7 +11,6 @@ from app.db.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
-from app.models.part import PartType
 from app.models.work_center import WorkCenter
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.audit_log import AuditLog
@@ -34,54 +33,34 @@ class OperationCompleteRequest(BaseModel):
 router = APIRouter()
 
 
-def _is_grouped_assembly(work_order: WorkOrder) -> bool:
-    return bool(work_order.part and work_order.part.part_type == PartType.ASSEMBLY)
-
-
-def _get_active_group(operations: List[WorkOrderOperation]) -> Optional[str]:
-    remaining = [op for op in operations if op.status != OperationStatus.COMPLETE]
-    if not remaining:
-        return None
-    first_op = min(remaining, key=lambda op: op.sequence)
-    return first_op.operation_group
-
-
 def _release_next_group(db: Session, work_order: WorkOrder, completed_op: WorkOrderOperation) -> None:
-    if not _is_grouped_assembly(work_order) or not completed_op.operation_group:
-        next_op = db.query(WorkOrderOperation).filter(
-            and_(
-                WorkOrderOperation.work_order_id == work_order.id,
-                WorkOrderOperation.sequence > completed_op.sequence,
-                WorkOrderOperation.status == OperationStatus.PENDING
-            )
-        ).order_by(WorkOrderOperation.sequence).first()
-        if next_op:
-            next_op.status = OperationStatus.READY
-        return
-
-    same_group_remaining = db.query(WorkOrderOperation).filter(
+    next_op = db.query(WorkOrderOperation).filter(
         and_(
             WorkOrderOperation.work_order_id == work_order.id,
-            WorkOrderOperation.operation_group == completed_op.operation_group,
-            WorkOrderOperation.status != OperationStatus.COMPLETE
+            WorkOrderOperation.sequence > completed_op.sequence,
+            WorkOrderOperation.status == OperationStatus.PENDING
         )
-    ).count()
-    if same_group_remaining > 0:
-        return
+    ).order_by(WorkOrderOperation.sequence).first()
+    if next_op:
+        next_op.status = OperationStatus.READY
 
-    remaining = db.query(WorkOrderOperation).filter(
+
+def _has_incomplete_predecessors(
+    db: Session,
+    work_order_id: int,
+    sequence: int,
+    current_operation_id: Optional[int] = None
+) -> bool:
+    query = db.query(WorkOrderOperation).filter(
         and_(
-            WorkOrderOperation.work_order_id == work_order.id,
+            WorkOrderOperation.work_order_id == work_order_id,
+            WorkOrderOperation.sequence < sequence,
             WorkOrderOperation.status != OperationStatus.COMPLETE
         )
-    ).order_by(WorkOrderOperation.sequence).all()
-    next_group = _get_active_group(remaining)
-    if not next_group:
-        return
-
-    for op in remaining:
-        if op.operation_group == next_group and op.status == OperationStatus.PENDING:
-            op.status = OperationStatus.READY
+    )
+    if current_operation_id is not None:
+        query = query.filter(WorkOrderOperation.id != current_operation_id)
+    return query.count() > 0
 
 @router.get("/my-active-job")
 def get_my_active_job(
@@ -165,32 +144,15 @@ def clock_in(
     if operation.status not in [OperationStatus.READY, OperationStatus.IN_PROGRESS]:
         raise HTTPException(status_code=400, detail="Operation is not ready to start")
 
-    # Prevent out-of-sequence starts (allow parallel within active group for assembly WOs)
+    # Prevent out-of-sequence starts
     work_order = operation.work_order
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
-
-    if _is_grouped_assembly(work_order) and operation.operation_group:
-        active_group = _get_active_group(work_order.operations)
-        if active_group and operation.operation_group != active_group:
-            raise HTTPException(
-                status_code=400,
-                detail="Operations in this group are not released yet"
-            )
-    else:
-        prev_ops = db.query(WorkOrderOperation).filter(
-            and_(
-                WorkOrderOperation.work_order_id == operation.work_order_id,
-                WorkOrderOperation.sequence < operation.sequence,
-                WorkOrderOperation.status != OperationStatus.COMPLETE
-            )
-        ).count()
-
-        if prev_ops > 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Previous operations must be completed first"
-            )
+    if _has_incomplete_predecessors(db, operation.work_order_id, operation.sequence, operation.id):
+        raise HTTPException(
+            status_code=400,
+            detail="Previous operations must be completed first"
+        )
     
     # Update operation status
     if operation.status == OperationStatus.READY:
@@ -717,25 +679,11 @@ def start_operation(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    if _is_grouped_assembly(work_order) and operation.operation_group:
-        active_group = _get_active_group(work_order.operations)
-        if active_group and operation.operation_group != active_group:
-            raise HTTPException(status_code=400, detail="Operations in this group are not released yet")
-    else:
-        # Check if previous operations are complete (if not first operation)
-        prev_ops = db.query(WorkOrderOperation).filter(
-            and_(
-                WorkOrderOperation.work_order_id == operation.work_order_id,
-                WorkOrderOperation.sequence < operation.sequence,
-                WorkOrderOperation.status != OperationStatus.COMPLETE
-            )
-        ).count()
-        
-        if prev_ops > 0:
-            raise HTTPException(
-                status_code=400, 
-                detail="Previous operations must be completed first"
-            )
+    if _has_incomplete_predecessors(db, operation.work_order_id, operation.sequence, operation.id):
+        raise HTTPException(
+            status_code=400,
+            detail="Previous operations must be completed first"
+        )
     
     # Update operation
     operation.status = OperationStatus.IN_PROGRESS
@@ -848,6 +796,12 @@ def complete_operation(
         raise HTTPException(
             status_code=400, 
             detail=f"Quantity ({completion_data.quantity_complete}) cannot exceed quantity ordered ({ordered_qty})"
+        )
+
+    if _has_incomplete_predecessors(db, operation.work_order_id, operation.sequence, operation.id):
+        raise HTTPException(
+            status_code=400,
+            detail="Previous operations must be completed first"
         )
     
     # Auto-start if not already in progress

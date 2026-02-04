@@ -294,6 +294,230 @@ class TestWorkOrdersAPI:
             f"{component_two.part_number} - Laser Two",
         ]
 
+    def test_assembly_work_order_places_final_inspection_last(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        """Final inspection should be moved to the last assembly stage."""
+        assembly = Part(
+            part_number="ASM-FINAL-001",
+            name="Assembly Final",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+        )
+        component = Part(
+            part_number="CMP-FINAL-001",
+            name="Component Final",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+        )
+        db_session.add_all([assembly, component])
+        db_session.flush()
+
+        machine_wc = WorkCenter(
+            code="WC-MACH-FINAL",
+            name="Machine Final",
+            work_center_type="machine",
+            is_active=True,
+        )
+        assembly_wc = WorkCenter(
+            code="WC-ASM-FINAL",
+            name="Assembly Final",
+            work_center_type="assembly",
+            is_active=True,
+        )
+        inspect_wc = WorkCenter(
+            code="WC-INSP-FINAL",
+            name="Final Inspection",
+            work_center_type="inspection",
+            is_active=True,
+        )
+        db_session.add_all([machine_wc, assembly_wc, inspect_wc])
+        db_session.flush()
+
+        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True)
+        db_session.add(bom)
+        db_session.flush()
+        db_session.add(
+            BOMItem(
+                bom_id=bom.id,
+                component_part_id=component.id,
+                item_number=10,
+                quantity=1,
+                item_type="make",
+                line_type="component",
+                unit_of_measure="each",
+            )
+        )
+
+        component_routing = Routing(
+            part_id=component.id, revision="A", status="released", is_active=True
+        )
+        assembly_routing = Routing(
+            part_id=assembly.id, revision="A", status="released", is_active=True
+        )
+        db_session.add_all([component_routing, assembly_routing])
+        db_session.flush()
+
+        db_session.add_all(
+            [
+                RoutingOperation(
+                    routing_id=component_routing.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Machine Component",
+                    work_center_id=machine_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.1,
+                    is_active=True,
+                ),
+                RoutingOperation(
+                    routing_id=assembly_routing.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Final Inspection",
+                    work_center_id=inspect_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.05,
+                    is_active=True,
+                    is_inspection_point=True,
+                ),
+                RoutingOperation(
+                    routing_id=assembly_routing.id,
+                    sequence=20,
+                    operation_number="Op 20",
+                    name="Build Final Assembly",
+                    work_center_id=assembly_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.2,
+                    is_active=True,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/work-orders/",
+            headers=auth_headers,
+            json={"part_id": assembly.id, "quantity_ordered": 1, "priority": 5},
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        data = response.json()
+
+        operation_names = [op["name"] for op in data["operations"]]
+        assert operation_names == [
+            f"{component.part_number} - Machine Component",
+            "FINAL ASSEMBLY: Build Final Assembly",
+            "FINAL INSPECTION: Final Inspection",
+        ]
+        operation_groups = [op["operation_group"] for op in data["operations"]]
+        assert operation_groups == [component.part_number, "ASSEMBLY", "INSPECT"]
+
+    def test_assembly_work_order_blocks_out_of_sequence_start(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        """Operators cannot start a later operation before predecessors are complete."""
+        assembly = Part(
+            part_number="ASM-SEQ-001",
+            name="Assembly Sequence",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+        )
+        component = Part(
+            part_number="CMP-SEQ-001",
+            name="Component Sequence",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+        )
+        db_session.add_all([assembly, component])
+        db_session.flush()
+
+        cut_wc = WorkCenter(
+            code="WC-CUT-SEQ",
+            name="Cut Seq",
+            work_center_type="laser",
+            is_active=True,
+        )
+        weld_wc = WorkCenter(
+            code="WC-WELD-SEQ2",
+            name="Weld Seq",
+            work_center_type="weld",
+            is_active=True,
+        )
+        db_session.add_all([cut_wc, weld_wc])
+        db_session.flush()
+
+        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True)
+        db_session.add(bom)
+        db_session.flush()
+        db_session.add(
+            BOMItem(
+                bom_id=bom.id,
+                component_part_id=component.id,
+                item_number=10,
+                quantity=1,
+                item_type="make",
+                line_type="component",
+                unit_of_measure="each",
+            )
+        )
+
+        component_routing = Routing(
+            part_id=component.id, revision="A", status="released", is_active=True
+        )
+        db_session.add(component_routing)
+        db_session.flush()
+        db_session.add_all(
+            [
+                RoutingOperation(
+                    routing_id=component_routing.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Cut Component",
+                    work_center_id=cut_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.1,
+                    is_active=True,
+                ),
+                RoutingOperation(
+                    routing_id=component_routing.id,
+                    sequence=20,
+                    operation_number="Op 20",
+                    name="Weld Component",
+                    work_center_id=weld_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.1,
+                    is_active=True,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        create_response = client.post(
+            "/api/v1/work-orders/",
+            headers=auth_headers,
+            json={"part_id": assembly.id, "quantity_ordered": 1, "priority": 5},
+        )
+        assert create_response.status_code == status.HTTP_201_CREATED
+        work_order_id = create_response.json()["id"]
+        operations = sorted(create_response.json()["operations"], key=lambda op: op["sequence"])
+        second_operation_id = operations[1]["id"]
+
+        release_response = client.post(
+            f"/api/v1/work-orders/{work_order_id}/release", headers=auth_headers
+        )
+        assert release_response.status_code == status.HTTP_200_OK
+
+        start_response = client.put(
+            f"/api/v1/shop-floor/operations/{second_operation_id}/start",
+            headers=auth_headers,
+        )
+        assert start_response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Previous operations must be completed first" in start_response.json()["detail"]
+
 
 @pytest.mark.api
 @pytest.mark.requires_db

@@ -27,58 +27,44 @@ from app.schemas.work_order import (
 router = APIRouter()
 
 
-def _is_grouped_assembly(work_order: WorkOrder) -> bool:
-    return bool(work_order.part and work_order.part.part_type == PartType.ASSEMBLY)
-
-
-def _get_active_group(operations: List[WorkOrderOperation]) -> Optional[str]:
-    remaining = [op for op in operations if op.status != OperationStatus.COMPLETE]
-    if not remaining:
-        return None
-    first_op = min(remaining, key=lambda op: op.sequence)
-    return first_op.operation_group
+def _has_incomplete_predecessors(
+    operations: List[WorkOrderOperation],
+    sequence: int,
+    current_operation_id: Optional[int] = None,
+) -> bool:
+    return any(
+        op.sequence < sequence
+        and op.status != OperationStatus.COMPLETE
+        and (current_operation_id is None or op.id != current_operation_id)
+        for op in operations
+    )
 
 
 def _release_first_group(work_order: WorkOrder) -> None:
-    if _is_grouped_assembly(work_order) and work_order.operations:
-        active_group = _get_active_group(work_order.operations)
-        if active_group:
-            for op in work_order.operations:
-                if op.operation_group == active_group:
-                    op.status = OperationStatus.READY
-            return
-    # Fallback to sequential behavior
-    if work_order.operations:
-        work_order.operations[0].status = OperationStatus.READY
+    if not work_order.operations:
+        return
+
+    first_pending = min(
+        (op for op in work_order.operations if op.status == OperationStatus.PENDING),
+        key=lambda op: op.sequence,
+        default=None,
+    )
+    if first_pending:
+        first_pending.status = OperationStatus.READY
 
 
 def _release_next_group(work_order: WorkOrder, completed_op: WorkOrderOperation) -> None:
-    if not _is_grouped_assembly(work_order) or not completed_op.operation_group:
-        next_ops = [op for op in work_order.operations if op.sequence > completed_op.sequence]
-        if next_ops:
-            next_op = min(next_ops, key=lambda x: x.sequence)
-            next_op.status = OperationStatus.READY
-        return
-
-    # If any ops remain in the same group, do not release next group
-    same_group_remaining = any(
-        op.status != OperationStatus.COMPLETE and op.operation_group == completed_op.operation_group
-        for op in work_order.operations
+    next_op = min(
+        (
+            op
+            for op in work_order.operations
+            if op.sequence > completed_op.sequence and op.status == OperationStatus.PENDING
+        ),
+        key=lambda x: x.sequence,
+        default=None,
     )
-    if same_group_remaining:
-        return
-
-    remaining = [op for op in work_order.operations if op.status != OperationStatus.COMPLETE]
-    if not remaining:
-        return
-
-    next_group = _get_active_group(remaining)
-    if not next_group:
-        return
-
-    for op in work_order.operations:
-        if op.status == OperationStatus.PENDING and op.operation_group == next_group:
-            op.status = OperationStatus.READY
+    if next_op:
+        next_op.status = OperationStatus.READY
 
 def generate_work_order_number(db: Session) -> str:
     """Generate next work order number (WO-YYYYMMDD-XXX)"""
@@ -250,10 +236,49 @@ def preview_work_order_operations(
                                 "component_part_id": component.id,
                                 "component_part_number": component.part_number,
                                 "component_quantity": float(item.quantity) * quantity,
-                                "operation_group": get_work_center_group(work_center)
+                                "operation_group": component.part_number[:50] if component.part_number else None
                             })
                 
                 result["component_routings"].append(comp_info)
+
+            assembly_routing = db.query(Routing).options(
+                selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
+            ).filter(
+                Routing.part_id == part_id,
+                Routing.is_active == True,
+                Routing.status == "released"
+            ).first()
+
+            if not assembly_routing:
+                assembly_routing = db.query(Routing).options(
+                    selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
+                ).filter(
+                    Routing.part_id == part_id,
+                    Routing.is_active == True,
+                    Routing.status == "draft"
+                ).first()
+
+            if assembly_routing:
+                active_assembly_ops = [
+                    op for op in sorted(assembly_routing.operations, key=lambda op: op.sequence) if op.is_active
+                ]
+                non_inspection_ops = [op for op in active_assembly_ops if not _is_inspection_operation(op)]
+                inspection_ops = [op for op in active_assembly_ops if _is_inspection_operation(op)]
+
+                for op in non_inspection_ops + inspection_ops:
+                    work_center = op.work_center
+                    is_inspection = _is_inspection_operation(op)
+                    result["operations_preview"].append({
+                        "name": f"{'FINAL INSPECTION' if is_inspection else 'FINAL ASSEMBLY'}: {op.name}",
+                        "work_center_id": op.work_center_id,
+                        "work_center_name": work_center.name if work_center else "Unknown",
+                        "setup_hours": op.setup_hours,
+                        "run_hours_per_unit": op.run_hours_per_unit,
+                        "component_part_id": None,
+                        "component_part_number": part.part_number,
+                        "component_quantity": quantity,
+                        "operation_group": "INSPECT" if is_inspection else "ASSEMBLY"
+                    })
     
     return result
 
@@ -282,6 +307,29 @@ def get_work_center_group(work_center: WorkCenter) -> str:
         return "INSPECT"
     else:
         return wc_type or "OTHER"
+
+
+def _is_inspection_operation(operation: RoutingOperation) -> bool:
+    if operation.is_inspection_point:
+        return True
+
+    inspection_tokens = ("INSPECT", "INSPECTION", "QUALITY", "QC")
+    text_fields = (
+        (operation.name or "").upper(),
+        (operation.description or "").upper(),
+    )
+    if any(token in field for field in text_fields for token in inspection_tokens):
+        return True
+
+    work_center = operation.work_center
+    if not work_center:
+        return False
+
+    wc_fields = (
+        (work_center.name or "").upper(),
+        (work_center.work_center_type or "").upper(),
+    )
+    return any(token in field for field in wc_fields for token in inspection_tokens)
 
 
 @router.post("/", response_model=WorkOrderResponse, status_code=status.HTTP_201_CREATED)
@@ -435,7 +483,7 @@ def _create_grouped_assembly_operations(
     bom: BOM, 
     wo_quantity: float
 ):
-    """Create assembly operations using BOM item order and component routing sequence order."""
+    """Create assembly operations with component routing completion before final assembly."""
 
     bom_items = db.query(BOMItem).options(
         joinedload(BOMItem.component_part)
@@ -505,8 +553,7 @@ def _create_grouped_assembly_operations(
                 status=OperationStatus.PENDING,
                 component_part_id=component.id,
                 component_quantity=component_qty,
-                # Disable grouped release behavior for assembly component operations.
-                operation_group=None
+                operation_group=component.part_number[:50] if component.part_number else None
             )
             db.add(wo_op)
 
@@ -532,20 +579,25 @@ def _create_grouped_assembly_operations(
         ).first()
     
     if assembly_routing:
-        for rop in sorted(assembly_routing.operations, key=lambda x: x.sequence):
-            if not rop.is_active:
-                continue
+        active_assembly_ops = [
+            op for op in sorted(assembly_routing.operations, key=lambda x: x.sequence) if op.is_active
+        ]
+        non_inspection_ops = [op for op in active_assembly_ops if not _is_inspection_operation(op)]
+        inspection_ops = [op for op in active_assembly_ops if _is_inspection_operation(op)]
+
+        for rop in non_inspection_ops + inspection_ops:
+            is_inspection = _is_inspection_operation(rop)
             wo_op = WorkOrderOperation(
                 work_order_id=work_order.id,
                 sequence=sequence,
                 operation_number=f"Op {sequence}",
-                name=f"FINAL: {rop.name}",
+                name=f"{'FINAL INSPECTION' if is_inspection else 'FINAL ASSEMBLY'}: {rop.name}",
                 description=rop.description,
                 work_center_id=rop.work_center_id,
                 setup_time_hours=rop.setup_hours,
                 run_time_hours=float(rop.run_hours_per_unit or 0) * wo_quantity,
                 status=OperationStatus.PENDING,
-                operation_group=None
+                operation_group="INSPECT" if is_inspection else "ASSEMBLY"
             )
             db.add(wo_op)
             sequence += 10
@@ -1062,10 +1114,8 @@ def start_operation(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    if _is_grouped_assembly(work_order) and operation.operation_group:
-        active_group = _get_active_group(work_order.operations)
-        if active_group and operation.operation_group != active_group:
-            raise HTTPException(status_code=400, detail="Operations in this group are not released yet")
+    if _has_incomplete_predecessors(work_order.operations, operation.sequence, operation.id):
+        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
     
     operation.status = OperationStatus.IN_PROGRESS
     operation.actual_start = datetime.utcnow()
@@ -1121,6 +1171,10 @@ def complete_operation(
     ).filter(WorkOrderOperation.id == operation_id).first()
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
+
+    work_order = operation.work_order
+    if work_order and _has_incomplete_predecessors(work_order.operations, operation.sequence, operation.id):
+        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
     
     operation.status = OperationStatus.COMPLETE
     operation.quantity_complete = quantity_complete
