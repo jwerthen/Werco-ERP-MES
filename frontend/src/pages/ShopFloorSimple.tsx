@@ -85,6 +85,8 @@ export default function ShopFloorSimple() {
   const [completeQty, setCompleteQty] = useState(0);
   const [completeNotes, setCompleteNotes] = useState('');
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [showMobileFilters, setShowMobileFilters] = useState(false);
+  const [showMobileCenters, setShowMobileCenters] = useState(false);
   
   // Toast notifications
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -407,8 +409,94 @@ export default function ShopFloorSimple() {
         ))}
       </div>
 
+      {/* Mobile Header */}
+      <div className="md:hidden space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+              <WrenchScrewdriverIcon className="h-6 w-6 text-werco-600" />
+              Shop Floor
+            </h1>
+            <p className="text-xs text-gray-500">Check in/out fast on mobile</p>
+          </div>
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="btn-secondary px-3 py-2 text-xs"
+          >
+            <ArrowPathIcon className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search WO or part..."
+              className="input pl-9 text-sm"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowMobileFilters((prev) => !prev)}
+            className={`btn-secondary px-3 py-2 text-xs ${showMobileFilters ? 'bg-werco-50 text-werco-700' : ''}`}
+          >
+            <FunnelIcon className="h-4 w-4" />
+          </button>
+        </div>
+        {showMobileFilters && (
+          <div className="card-compact space-y-3">
+            <div className="grid grid-cols-1 gap-2">
+              <select
+                value={workCenterId}
+                onChange={(e) => setWorkCenterId(e.target.value ? Number(e.target.value) : '')}
+                className="input text-sm"
+              >
+                <option value="">All Work Centers</option>
+                {workCenters.map(wc => (
+                  <option key={wc.id} value={wc.id}>{wc.name}</option>
+                ))}
+              </select>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="input text-sm"
+              >
+                <option value="">All Status</option>
+                <option value="pending">Pending</option>
+                <option value="ready">Ready</option>
+                <option value="in_progress">In Progress</option>
+                <option value="on_hold">On Hold</option>
+              </select>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setDueTodayOnly((prev) => !prev)}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                  dueTodayOnly ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600'
+                }`}
+              >
+                Due Today
+              </button>
+              <button
+                type="button"
+                onClick={() => setActionableOnly((prev) => !prev)}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                  actionableOnly ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-gray-200 text-gray-600'
+                }`}
+              >
+                Actionable Only
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Page Header */}
-      <div className="page-header">
+      <div className="page-header hidden md:flex">
         <div>
           <h1 className="page-title flex items-center gap-3">
             <WrenchScrewdriverIcon className="h-8 w-8 text-werco-600" />
@@ -428,8 +516,8 @@ export default function ShopFloorSimple() {
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="card" data-tour="sf-clock">
+      {/* Filters (desktop) */}
+      <div className="card hidden md:block" data-tour="sf-clock">
         <div className="flex flex-wrap gap-4 items-center">
           <div className="flex-1 min-w-[200px]">
             <div className="relative">
@@ -483,13 +571,22 @@ export default function ShopFloorSimple() {
             <h2 className="text-lg font-semibold text-gray-900">Work Center Status</h2>
             <p className="text-sm text-gray-500">Real-time work cell availability and queue</p>
           </div>
-          <button
-            type="button"
-            onClick={() => focusOperations('')}
-            className="text-sm font-semibold text-werco-700 hover:text-werco-800"
-          >
-            View All
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setShowMobileCenters((prev) => !prev)}
+              className="md:hidden text-sm font-semibold text-werco-700 hover:text-werco-800"
+            >
+              {showMobileCenters ? 'Hide Centers' : 'Show Centers'}
+            </button>
+            <button
+              type="button"
+              onClick={() => focusOperations('')}
+              className="hidden md:inline text-sm font-semibold text-werco-700 hover:text-werco-800"
+            >
+              View All
+            </button>
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -562,7 +659,7 @@ export default function ShopFloorSimple() {
             Due Today
           </button>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className={`${showMobileCenters ? 'grid' : 'hidden'} md:grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4`}>
           {workCenterBuckets.map((bucket) => {
             const isActive = bucket.inProgress > 0;
             const hasQueue = bucket.open > 0;
@@ -714,20 +811,21 @@ export default function ShopFloorSimple() {
                 </div>
                 
                 {/* Action Buttons */}
-                <div className="flex gap-2" data-tour="sf-complete">
+                <div className="flex flex-col sm:flex-row gap-2" data-tour="sf-complete">
                   {/* Start Button - visible when pending or ready */}
                   {(op.status === 'pending' || op.status === 'ready') && (
                     <button
                       onClick={() => handleStart(op)}
                       disabled={actionLoading === op.id}
-                      className="flex-1 btn-primary text-sm py-2.5"
+                      className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full"
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
                       ) : (
                         <>
                           <PlayIcon className="h-4 w-4 mr-1.5" />
-                          Start Operation
+                          <span className="hidden sm:inline">Start Operation</span>
+                          <span className="sm:hidden">Check In</span>
                         </>
                       )}
                     </button>
@@ -738,14 +836,15 @@ export default function ShopFloorSimple() {
                     <button
                       onClick={() => handleOpenComplete(op)}
                       disabled={actionLoading === op.id}
-                      className="flex-1 btn-success text-sm py-2.5"
+                      className="flex-1 btn-success text-base sm:text-sm py-3 sm:py-2.5 w-full"
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
                       ) : (
                         <>
                           <CheckCircleIcon className="h-4 w-4 mr-1.5" />
-                          Mark Complete
+                          <span className="hidden sm:inline">Mark Complete</span>
+                          <span className="sm:hidden">Check Out</span>
                         </>
                       )}
                     </button>
@@ -756,7 +855,7 @@ export default function ShopFloorSimple() {
                     <button
                       onClick={() => handleHold(op.id)}
                       disabled={actionLoading === op.id}
-                      className="btn-secondary text-sm py-2.5 px-3"
+                      className="btn-secondary text-sm py-2.5 px-3 w-full sm:w-auto"
                       title="Put on Hold"
                     >
                       <PauseIcon className="h-4 w-4" />
@@ -768,14 +867,15 @@ export default function ShopFloorSimple() {
                     <button
                       onClick={() => handleResume(op.id)}
                       disabled={actionLoading === op.id}
-                      className="flex-1 btn-primary text-sm py-2.5"
+                      className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full"
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
                       ) : (
                         <>
                           <PlayIcon className="h-4 w-4 mr-1.5" />
-                          Resume
+                          <span className="hidden sm:inline">Resume</span>
+                          <span className="sm:hidden">Check In</span>
                         </>
                       )}
                     </button>
@@ -784,7 +884,7 @@ export default function ShopFloorSimple() {
                   {/* View Details Button - always visible */}
                   <button
                     onClick={() => handleViewDetails(op)}
-                    className="btn-secondary text-sm py-2.5 px-3"
+                    className="btn-secondary text-sm py-2.5 px-3 w-full sm:w-auto"
                     title="View Details"
                   >
                     <EyeIcon className="h-4 w-4" />
