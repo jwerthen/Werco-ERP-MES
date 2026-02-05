@@ -66,6 +66,7 @@ interface RoutingPartOption {
   id: number;
   part_number: string;
   name: string;
+  part_type?: string;
 }
 
 type BOMLineType = 'component' | 'hardware' | 'consumable' | 'reference';
@@ -162,6 +163,8 @@ export default function RoutingPage() {
   const [routingByPartId, setRoutingByPartId] = useState<Record<number, Routing | null>>({});
   const [routingLoadingIds, setRoutingLoadingIds] = useState<Set<number>>(new Set());
   const [forcedRoutingPart, setForcedRoutingPart] = useState<RoutingPartOption | null>(null);
+  const [routingPartSearch, setRoutingPartSearch] = useState('');
+  const [routingPartOpen, setRoutingPartOpen] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -346,6 +349,10 @@ export default function RoutingPage() {
 
   const handleCreateRouting = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!newRouting.part_id) {
+      alert('Select a part before creating a routing.');
+      return;
+    }
     try {
       const created = await api.createRouting(newRouting);
       setRoutings([created, ...routings]);
@@ -520,6 +527,47 @@ export default function RoutingPage() {
     }
     return base;
   }, [parts, routablePartIds, forcedRoutingPart, newRouting.part_id]);
+
+  const selectedRoutingPart = useMemo(() => {
+    if (!newRouting.part_id) return forcedRoutingPart;
+    return (
+      routingPartOptions.find((part) => part.id === newRouting.part_id) ||
+      forcedRoutingPart ||
+      null
+    );
+  }, [newRouting.part_id, routingPartOptions, forcedRoutingPart]);
+
+  const filteredRoutingParts = useMemo(() => {
+    const search = routingPartSearch.trim().toLowerCase();
+    const base = [...routingPartOptions].sort((a, b) => a.part_number.localeCompare(b.part_number));
+    if (!search) {
+      return base.slice(0, 50);
+    }
+    return base
+      .filter((part) =>
+        part.part_number.toLowerCase().includes(search) ||
+        part.name.toLowerCase().includes(search)
+      )
+      .slice(0, 50);
+  }, [routingPartOptions, routingPartSearch]);
+
+  useEffect(() => {
+    if (!showCreateModal) return;
+    if (selectedRoutingPart) {
+      setRoutingPartSearch(`${selectedRoutingPart.part_number} - ${selectedRoutingPart.name}`);
+    } else {
+      setRoutingPartSearch('');
+    }
+  }, [showCreateModal, selectedRoutingPart]);
+
+  const handleSelectRoutingPart = (part: RoutingPartOption) => {
+    setNewRouting({ ...newRouting, part_id: part.id });
+    setRoutingPartSearch(`${part.part_number} - ${part.name}`);
+    setRoutingPartOpen(false);
+    if (forcedRoutingPart && forcedRoutingPart.id !== part.id) {
+      setForcedRoutingPart(null);
+    }
+  };
 
   const assemblyItems = useMemo(() => {
     if (!assemblyBOM) return [];
@@ -946,25 +994,74 @@ export default function RoutingPage() {
             <form onSubmit={handleCreateRouting} className="space-y-4">
               <div>
                 <label className="label">Part</label>
-                <select
-                  value={newRouting.part_id}
-                  onChange={(e) => {
-                    const nextId = parseInt(e.target.value);
-                    setNewRouting({ ...newRouting, part_id: nextId });
-                    if (!forcedRoutingPart || forcedRoutingPart.id !== nextId) {
-                      setForcedRoutingPart(null);
-                    }
-                  }}
-                  className="input"
-                  required
-                >
-                  <option value={0}>Select a part...</option>
-                  {routingPartOptions.map(part => (
-                    <option key={part.id} value={part.id}>
-                      {part.part_number} - {part.name}
-                    </option>
-                  ))}
-                </select>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={routingPartSearch}
+                    onChange={(e) => {
+                      setRoutingPartSearch(e.target.value);
+                      setRoutingPartOpen(true);
+                      if (newRouting.part_id) {
+                        setNewRouting({ ...newRouting, part_id: 0 });
+                        setForcedRoutingPart(null);
+                      }
+                    }}
+                    onFocus={() => setRoutingPartOpen(true)}
+                    onBlur={() => {
+                      window.setTimeout(() => setRoutingPartOpen(false), 150);
+                    }}
+                    className="input pr-10"
+                    placeholder="Search by part number or name..."
+                  />
+                  {newRouting.part_id ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewRouting({ ...newRouting, part_id: 0 });
+                        setRoutingPartSearch('');
+                        setRoutingPartOpen(true);
+                        setForcedRoutingPart(null);
+                      }}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      title="Clear selection"
+                    >
+                      x
+                    </button>
+                  ) : (
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">v</span>
+                  )}
+                  {routingPartOpen && (
+                    <div className="absolute z-10 mt-1 w-full rounded-md border border-gray-200 bg-white shadow-lg max-h-64 overflow-y-auto">
+                      {filteredRoutingParts.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-gray-500">No matching parts found.</div>
+                      ) : (
+                        filteredRoutingParts.map((part) => (
+                          <button
+                            type="button"
+                            key={part.id}
+                            onMouseDown={() => handleSelectRoutingPart(part)}
+                            className={`w-full px-3 py-2 text-left hover:bg-gray-50 ${
+                              part.id === newRouting.part_id ? 'bg-cyan-50' : ''
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <div className="text-sm font-medium text-gray-900">{part.part_number}</div>
+                                <div className="text-xs text-gray-500 truncate">{part.name}</div>
+                              </div>
+                              <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                                {part.part_type || 'part'}
+                              </span>
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Type to search. Select a result to continue.
+                </div>
               </div>
               <div>
                 <label className="label">Revision</label>
@@ -1000,7 +1097,7 @@ export default function RoutingPage() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary">Create</button>
+                <button type="submit" className="btn-primary" disabled={!newRouting.part_id}>Create</button>
               </div>
             </form>
           </div>
