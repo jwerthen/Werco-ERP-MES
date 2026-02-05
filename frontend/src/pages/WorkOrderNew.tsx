@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import {
@@ -75,6 +75,7 @@ export default function WorkOrderNew() {
   const [customerSearch, setCustomerSearch] = useState('');
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const [creatingCustomer, setCreatingCustomer] = useState(false);
+  const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
 
   const [form, setForm] = useState({
     part_id: 0,
@@ -111,9 +112,36 @@ export default function WorkOrderNew() {
     }
   };
 
-  const filteredCustomers = customerOptions.filter((customer) =>
-    customer.name.toLowerCase().includes(customerSearch.toLowerCase())
-  );
+  const normalizedCustomerSearch = customerSearch.trim().toLowerCase();
+  const matchingCustomers = useMemo(() => {
+    if (!normalizedCustomerSearch) {
+      return customerOptions;
+    }
+
+    return customerOptions.filter((customer) =>
+      customer.name.toLowerCase().includes(normalizedCustomerSearch)
+    );
+  }, [customerOptions, normalizedCustomerSearch]);
+
+  const filteredCustomers = useMemo(() => {
+    const ranked = [...matchingCustomers].sort((a, b) => {
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+
+      const aStarts = normalizedCustomerSearch ? aName.startsWith(normalizedCustomerSearch) : false;
+      const bStarts = normalizedCustomerSearch ? bName.startsWith(normalizedCustomerSearch) : false;
+      if (aStarts !== bStarts) return aStarts ? -1 : 1;
+
+      return a.name.localeCompare(b.name);
+    });
+
+    return ranked.slice(0, 8);
+  }, [matchingCustomers, normalizedCustomerSearch]);
+
+  const hasExactCustomerMatch = normalizedCustomerSearch.length > 0
+    && customerOptions.some((customer) => customer.name.trim().toLowerCase() === normalizedCustomerSearch);
+
+  const canCreateCustomer = customerSearch.trim().length > 0 && !hasExactCustomerMatch;
 
   const getCustomerByName = (nameRaw: string) => {
     const name = nameRaw.trim().toLowerCase();
@@ -142,6 +170,19 @@ export default function WorkOrderNew() {
     } finally {
       setCreatingCustomer(false);
     }
+  };
+
+  const selectCustomer = (customerName: string) => {
+    setCustomerSearch(customerName);
+    setForm((prev) => ({ ...prev, customer_name: customerName }));
+    setShowCustomerDropdown(false);
+    setHighlightedCustomerIndex(-1);
+  };
+
+  const createAndSelectCustomer = async () => {
+    const created = await createCustomerFromSearch();
+    if (!created) return;
+    selectCustomer(created.name);
   };
 
   const handlePartChange = async (partId: number) => {
@@ -221,6 +262,59 @@ export default function WorkOrderNew() {
       setLoadingRouting(false);
     }
   };
+
+  const handleCustomerKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const actionCount = filteredCustomers.length + (canCreateCustomer ? 1 : 0);
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!showCustomerDropdown) {
+        setShowCustomerDropdown(true);
+        return;
+      }
+      if (actionCount === 0) return;
+      setHighlightedCustomerIndex((prev) => {
+        const next = prev + 1;
+        return next >= actionCount ? 0 : next;
+      });
+      return;
+    }
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!showCustomerDropdown) {
+        setShowCustomerDropdown(true);
+        return;
+      }
+      if (actionCount === 0) return;
+      setHighlightedCustomerIndex((prev) => {
+        const next = prev - 1;
+        return next < 0 ? actionCount - 1 : next;
+      });
+      return;
+    }
+
+    if (e.key === 'Enter' && showCustomerDropdown) {
+      if (highlightedCustomerIndex < 0) return;
+      e.preventDefault();
+
+      if (highlightedCustomerIndex < filteredCustomers.length) {
+        selectCustomer(filteredCustomers[highlightedCustomerIndex].name);
+      } else if (canCreateCustomer && !creatingCustomer) {
+        await createAndSelectCustomer();
+      }
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      setShowCustomerDropdown(false);
+      setHighlightedCustomerIndex(-1);
+    }
+  };
+
+  useEffect(() => {
+    setHighlightedCustomerIndex(-1);
+  }, [customerSearch, showCustomerDropdown]);
 
   const handleQuantityChange = (qty: number) => {
     setForm({ ...form, quantity_ordered: qty });
@@ -397,11 +491,12 @@ export default function WorkOrderNew() {
                     onChange={(e) => {
                       const typedValue = e.target.value;
                       setCustomerSearch(typedValue);
-                      setForm({ ...form, customer_name: typedValue });
+                      setForm((prev) => ({ ...prev, customer_name: typedValue }));
                       setShowCustomerDropdown(true);
                     }}
                     onFocus={() => setShowCustomerDropdown(true)}
                     onBlur={() => setTimeout(() => setShowCustomerDropdown(false), 200)}
+                    onKeyDown={handleCustomerKeyDown}
                     className="input pr-8"
                     placeholder="Select or type customer"
                   />
@@ -413,33 +508,57 @@ export default function WorkOrderNew() {
                 {showCustomerDropdown && (
                   <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-y-auto">
                     {filteredCustomers.length > 0 ? (
-                      filteredCustomers.map((customer) => (
+                      <>
+                      {filteredCustomers.map((customer, index) => (
                         <button
                           key={customer.id}
                           type="button"
-                          className="w-full text-left px-3 py-2 hover:bg-gray-100 text-sm"
+                          className={`w-full text-left px-3 py-2 text-sm ${
+                            highlightedCustomerIndex === index ? 'bg-blue-50' : 'hover:bg-gray-100'
+                          }`}
+                          onMouseEnter={() => setHighlightedCustomerIndex(index)}
                           onMouseDown={(event) => {
                             event.preventDefault();
-                            setCustomerSearch(customer.name);
-                            setForm({ ...form, customer_name: customer.name });
-                            setShowCustomerDropdown(false);
+                            selectCustomer(customer.name);
                           }}
                         >
                           {customer.name}
                         </button>
-                      ))
-                    ) : customerSearch.trim() ? (
+                      ))}
+                      {matchingCustomers.length > filteredCustomers.length && (
+                        <div className="px-3 py-2 text-xs text-gray-500 border-t border-gray-100">
+                          Showing {filteredCustomers.length} of {matchingCustomers.length}. Keep typing to narrow results.
+                        </div>
+                      )}
+                      {canCreateCustomer && (
+                        <button
+                          type="button"
+                          className={`w-full text-left px-3 py-2 text-sm border-t border-gray-100 ${
+                            highlightedCustomerIndex === filteredCustomers.length
+                              ? 'bg-blue-50 text-blue-700'
+                              : 'hover:bg-blue-50 text-blue-600'
+                          } disabled:text-gray-400`}
+                          disabled={creatingCustomer}
+                          onMouseEnter={() => setHighlightedCustomerIndex(filteredCustomers.length)}
+                          onMouseDown={async (event) => {
+                            event.preventDefault();
+                            if (creatingCustomer) return;
+                            await createAndSelectCustomer();
+                          }}
+                        >
+                          <PlusIcon className="h-4 w-4 inline mr-1" />
+                          {creatingCustomer ? 'Creating customer...' : `Create "${customerSearch.trim()}"`}
+                        </button>
+                      )}
+                      </>
+                    ) : canCreateCustomer ? (
                       <button
                         type="button"
                         className="w-full text-left px-3 py-2 hover:bg-blue-50 text-sm text-blue-600 disabled:text-gray-400"
                         disabled={creatingCustomer}
                         onMouseDown={async (event) => {
                           event.preventDefault();
-                          const created = await createCustomerFromSearch();
-                          if (!created) return;
-                          setCustomerSearch(created.name);
-                          setForm({ ...form, customer_name: created.name });
-                          setShowCustomerDropdown(false);
+                          await createAndSelectCustomer();
                         }}
                       >
                         <PlusIcon className="h-4 w-4 inline mr-1" />
