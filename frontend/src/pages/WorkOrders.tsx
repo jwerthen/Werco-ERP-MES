@@ -14,6 +14,7 @@ import {
   ClockIcon,
   ExclamationTriangleIcon,
   TrashIcon,
+  CheckCircleIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 
@@ -47,6 +48,7 @@ export default function WorkOrders() {
   const [customerFilter, setCustomerFilter] = useState<string>('');
   const [hideCOTS, setHideCOTS] = useState(true);
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
+  const [releasingIds, setReleasingIds] = useState<Set<number>>(new Set());
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
@@ -110,6 +112,23 @@ export default function WorkOrders() {
       loadWorkOrders();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to delete work order');
+    }
+  };
+
+  const handleRelease = async (wo: WorkOrderSummary) => {
+    if (wo.status !== 'draft') return;
+    setReleasingIds((prev) => new Set(prev).add(wo.id));
+    try {
+      await api.releaseWorkOrder(wo.id);
+      loadWorkOrders();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to release work order');
+    } finally {
+      setReleasingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(wo.id);
+        return next;
+      });
     }
   };
 
@@ -350,6 +369,8 @@ export default function WorkOrders() {
                 workOrders={orders} 
                 hideColumn={groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined}
                 onDelete={handleDelete}
+                onRelease={handleRelease}
+                releasingIds={releasingIds}
               />
             </div>
           ))}
@@ -357,7 +378,12 @@ export default function WorkOrders() {
       ) : (
         // Flat Table View
         <div className="card card-flush overflow-hidden" data-tour="wo-list">
-          <WorkOrderTable workOrders={filteredWorkOrders} onDelete={handleDelete} />
+          <WorkOrderTable
+            workOrders={filteredWorkOrders}
+            onDelete={handleDelete}
+            onRelease={handleRelease}
+            releasingIds={releasingIds}
+          />
           
           {filteredWorkOrders.length === 0 && (
             <div className="text-center py-16">
@@ -379,9 +405,11 @@ interface WorkOrderTableProps {
   workOrders: WorkOrderSummary[];
   hideColumn?: 'customer' | 'part';
   onDelete?: (wo: WorkOrderSummary) => void;
+  onRelease?: (wo: WorkOrderSummary) => void;
+  releasingIds?: Set<number>;
 }
 
-function WorkOrderTable({ workOrders, hideColumn, onDelete }: WorkOrderTableProps) {
+function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasingIds }: WorkOrderTableProps) {
   const isOverdue = (wo: WorkOrderSummary) => {
     return wo.due_date && new Date(wo.due_date) < new Date() && !['complete', 'closed', 'cancelled'].includes(wo.status);
   };
@@ -398,7 +426,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete }: WorkOrderTableProp
             <th>Due Date</th>
             <th>Priority</th>
             <th>Status</th>
-            <th className="w-12"></th>
+            <th className="w-28"></th>
           </tr>
         </thead>
         <tbody>
@@ -406,6 +434,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete }: WorkOrderTableProp
             const status = statusConfig[wo.status] || statusConfig.draft;
             const priority = priorityConfig[wo.priority] || priorityConfig[4];
             const overdue = isOverdue(wo);
+            const isReleasing = releasingIds?.has(wo.id);
             
             return (
               <tr key={wo.id} className={overdue ? 'bg-red-50/50' : ''}>
@@ -462,6 +491,16 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete }: WorkOrderTableProp
                 </td>
                 <td>
                   <div className="flex items-center gap-1">
+                    {onRelease && wo.status === 'draft' && (
+                      <button
+                        onClick={() => onRelease(wo)}
+                        disabled={isReleasing}
+                        className="p-2 rounded-lg text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Release"
+                      >
+                        <CheckCircleIcon className="h-4 w-4" />
+                      </button>
+                    )}
                     {onDelete && (wo.status === 'draft' || wo.status === 'cancelled') && (
                       <button 
                         onClick={() => onDelete(wo)}
