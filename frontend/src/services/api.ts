@@ -468,6 +468,11 @@ class ApiService {
     return response.data;
   }
 
+  async updateWorkOrderPriority(id: number, priority: number) {
+    const response = await this.api.put(`/work-orders/${id}/priority`, { priority });
+    return response.data;
+  }
+
   async deleteWorkOrder(id: number) {
     const response = await this.api.delete(`/work-orders/${id}`);
     return response.data;

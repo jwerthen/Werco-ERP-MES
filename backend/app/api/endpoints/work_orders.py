@@ -3,6 +3,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Response
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import or_
+from pydantic import BaseModel, Field
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role, get_audit_service
 from app.models.user import User, UserRole
@@ -25,6 +26,10 @@ from app.schemas.work_order import (
 )
 
 router = APIRouter()
+
+
+class WorkOrderPriorityUpdate(BaseModel):
+    priority: int = Field(..., ge=1, le=10, description="Priority (1=highest, 10=lowest)")
 
 
 def _has_incomplete_predecessors(
@@ -571,6 +576,76 @@ def update_work_order(
     )
     
     return work_order
+
+
+@router.put("/{work_order_id}/priority")
+def update_work_order_priority(
+    work_order_id: int,
+    priority_in: WorkOrderPriorityUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+):
+    """Update only work order priority for quick dispatch changes."""
+    work_order = db.query(WorkOrder).options(joinedload(WorkOrder.operations)).filter(
+        WorkOrder.id == work_order_id
+    ).first()
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+    old_priority = work_order.priority
+    work_order.priority = priority_in.priority
+    work_order.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(work_order)
+
+    audit = AuditService(db, current_user, request)
+    audit.log_update(
+        resource_type="work_order",
+        resource_id=work_order.id,
+        resource_identifier=work_order.work_order_number,
+        old_values={"priority": old_priority},
+        new_values={"priority": work_order.priority}
+    )
+
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "work_order_priority_updated",
+            "priority": work_order.priority,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_priority_updated",
+            "work_order_id": work_order.id,
+            "priority": work_order.priority,
+        }
+    )
+
+    work_center_ids = list({
+        op.work_center_id
+        for op in work_order.operations
+        if op.work_center_id and op.status != OperationStatus.COMPLETE
+    })
+    for wc_id in work_center_ids:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            wc_id,
+            {
+                "event": "work_order_priority_updated",
+                "work_order_id": work_order.id,
+                "priority": work_order.priority,
+            }
+        )
+
+    return {
+        "message": f"Priority updated for {work_order.work_order_number}",
+        "work_order_id": work_order.id,
+        "priority": work_order.priority,
+    }
 
 
 @router.delete("/{work_order_id}", status_code=status.HTTP_204_NO_CONTENT)

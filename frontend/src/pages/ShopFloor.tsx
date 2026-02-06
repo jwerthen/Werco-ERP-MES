@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { WorkCenter, QueueItem, ActiveJob } from '../types';
 import { format } from 'date-fns';
+import { usePermissions } from '../hooks/usePermissions';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import {
@@ -41,6 +42,7 @@ interface WorkOrderDetails {
 }
 
 export default function ShopFloor() {
+  const { can } = usePermissions();
   const navigate = useNavigate();
   const location = useLocation();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
@@ -54,6 +56,7 @@ export default function ShopFloor() {
   const [clockOutData, setClockOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
+  const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const kioskParams = useMemo(() => {
     return {
@@ -68,6 +71,7 @@ export default function ShopFloor() {
     if (!token) return null;
     return buildWsUrl(`/ws/shop-floor/${selectedWorkCenter}`, { token });
   }, [selectedWorkCenter]);
+  const canEditPriority = can('work_orders:edit');
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -250,6 +254,49 @@ export default function ShopFloor() {
     setClockOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   };
 
+  const getPriorityClasses = (priority: number) => {
+    if (priority <= 2) return 'bg-red-100 text-red-700';
+    if (priority <= 5) return 'bg-amber-100 text-amber-700';
+    return 'bg-surface-100 text-surface-600';
+  };
+
+  const priorityFocusQueue = useMemo(() => {
+    const ranked = [...queue].sort((a, b) => {
+      const now = new Date().getTime();
+      const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+      const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+      const aOverdue = aDue < now ? 1 : 0;
+      const bOverdue = bDue < now ? 1 : 0;
+      if (aOverdue !== bOverdue) return bOverdue - aOverdue;
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      if (aDue !== bDue) return aDue - bDue;
+      return a.work_order_number.localeCompare(b.work_order_number);
+    });
+    return ranked.slice(0, 5);
+  }, [queue]);
+
+  const handlePriorityChange = async (workOrderId: number, priorityRaw: string) => {
+    const priority = parseInt(priorityRaw, 10);
+    if (Number.isNaN(priority)) return;
+
+    const existing = queue.find((item) => item.work_order_id === workOrderId);
+    if (!existing || existing.priority === priority) return;
+
+    setUpdatingPriorityWorkOrderId(workOrderId);
+    try {
+      await api.updateWorkOrderPriority(workOrderId, priority);
+      setQueue((prev) =>
+        prev.map((item) =>
+          item.work_order_id === workOrderId ? { ...item, priority } : item
+        )
+      );
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to update priority');
+    } finally {
+      setUpdatingPriorityWorkOrderId(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -364,6 +411,44 @@ export default function ShopFloor() {
         ))}
       </div>
 
+      {/* Priority Focus Queue */}
+      {priorityFocusQueue.length > 0 && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold text-surface-900">Priority Focus Queue</h2>
+            <span className="text-sm text-surface-500">Top {priorityFocusQueue.length} to run next</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+            {priorityFocusQueue.map((item, idx) => {
+              const due = item.due_date ? new Date(item.due_date) : null;
+              const overdue = Boolean(due && due < new Date());
+              return (
+                <button
+                  key={`focus-${item.operation_id}`}
+                  type="button"
+                  className={`text-left p-3 rounded-xl border transition-colors ${
+                    overdue ? 'border-red-200 bg-red-50 hover:bg-red-100' : 'border-surface-200 bg-white hover:bg-surface-50'
+                  }`}
+                  onClick={() => toggleRowExpansion(item.work_order_id)}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-surface-500">#{idx + 1}</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getPriorityClasses(item.priority)}`}>
+                      P{item.priority}
+                    </span>
+                  </div>
+                  <div className="text-sm font-semibold text-werco-700">{item.work_order_number}</div>
+                  <div className="text-xs text-surface-600 truncate">{item.operation_name}</div>
+                  <div className={`text-xs mt-2 ${overdue ? 'text-red-600 font-medium' : 'text-surface-500'}`}>
+                    {due ? `Due ${format(due, 'MMM d')}` : 'No due date'}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Job Queue */}
       <div className="card card-flush">
         <div className="px-6 py-4 border-b border-surface-200 flex items-center justify-between">
@@ -424,17 +509,26 @@ export default function ShopFloor() {
                           </button>
                         </td>
                         <td>
-                          <span className={`
-                            inline-flex items-center justify-center w-10 h-10 rounded-xl text-sm font-bold
-                            ${item.priority <= 2 
-                              ? 'bg-red-100 text-red-700' 
-                              : item.priority <= 5 
-                              ? 'bg-amber-100 text-amber-700' 
-                              : 'bg-surface-100 text-surface-600'
-                            }
-                          `}>
-                            P{item.priority}
-                          </span>
+                          {canEditPriority ? (
+                            <select
+                              value={item.priority}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => handlePriorityChange(item.work_order_id, e.target.value)}
+                              disabled={updatingPriorityWorkOrderId === item.work_order_id}
+                              className={`px-2 py-1 rounded text-xs font-bold border border-transparent ${getPriorityClasses(item.priority)}`}
+                              title="Update priority"
+                            >
+                              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
+                                <option key={p} value={p}>
+                                  P{p}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className={`inline-flex items-center justify-center w-10 h-10 rounded-xl text-sm font-bold ${getPriorityClasses(item.priority)}`}>
+                              P{item.priority}
+                            </span>
+                          )}
                         </td>
                         <td>
                           <span className="font-semibold text-werco-600">{item.work_order_number}</span>

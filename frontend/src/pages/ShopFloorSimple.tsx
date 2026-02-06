@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { format } from 'date-fns';
+import { usePermissions } from '../hooks/usePermissions';
 import {
   PlayIcon,
   CheckCircleIcon,
@@ -64,6 +65,7 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> =
 };
 
 export default function ShopFloorSimple() {
+  const { can } = usePermissions();
   const navigate = useNavigate();
   const location = useLocation();
   const [operations, setOperations] = useState<Operation[]>([]);
@@ -85,6 +87,7 @@ export default function ShopFloorSimple() {
   const [completeQty, setCompleteQty] = useState(0);
   const [completeNotes, setCompleteNotes] = useState('');
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [showMobileCenters, setShowMobileCenters] = useState(false);
   
@@ -223,6 +226,13 @@ export default function ShopFloorSimple() {
       due.getDate() === today.getDate()
     );
   };
+  const canEditPriority = can('work_orders:edit');
+
+  const getPriorityClasses = (priority: number) => {
+    if (priority <= 2) return 'bg-red-100 text-red-700';
+    if (priority <= 5) return 'bg-amber-100 text-amber-700';
+    return 'bg-gray-100 text-gray-600';
+  };
 
   const workCenterBuckets = useMemo(() => {
     const buckets = new Map<number, {
@@ -296,6 +306,22 @@ export default function ShopFloorSimple() {
     () => (actionableOnly ? operations.filter(op => actionableStatuses.has(op.status)) : operations),
     [actionableOnly, operations, actionableStatuses]
   );
+  const priorityFocusQueue = useMemo(() => {
+    const ranked = [...visibleOperations]
+      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status))
+      .sort((a, b) => {
+        const now = new Date().getTime();
+        const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+        const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+        const aOverdue = aDue < now ? 1 : 0;
+        const bOverdue = bDue < now ? 1 : 0;
+        if (aOverdue !== bOverdue) return bOverdue - aOverdue;
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        if (aDue !== bDue) return aDue - bDue;
+        return a.work_order_number.localeCompare(b.work_order_number);
+      });
+    return ranked.slice(0, 5);
+  }, [visibleOperations]);
 
   // Action handlers
   const handleStart = async (operation: Operation) => {
@@ -374,6 +400,27 @@ export default function ShopFloorSimple() {
       showToast('error', err.response?.data?.detail || 'Failed to resume operation');
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  const handlePriorityChange = async (workOrderId: number, priorityRaw: string) => {
+    const priority = parseInt(priorityRaw, 10);
+    if (Number.isNaN(priority)) return;
+
+    const existing = operations.find((op) => op.work_order_id === workOrderId);
+    if (!existing || existing.priority === priority) return;
+
+    setUpdatingPriorityWorkOrderId(workOrderId);
+    try {
+      await api.updateWorkOrderPriority(workOrderId, priority);
+      setOperations((prev) =>
+        prev.map((op) => (op.work_order_id === workOrderId ? { ...op, priority } : op))
+      );
+      showToast('success', `Priority updated to P${priority}`);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to update priority');
+    } finally {
+      setUpdatingPriorityWorkOrderId(null);
     }
   };
 
@@ -714,6 +761,45 @@ export default function ShopFloorSimple() {
         </div>
       </div>
 
+      {/* Priority Focus Queue */}
+      {priorityFocusQueue.length > 0 && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Most Important Next</h2>
+              <p className="text-sm text-gray-500">Focus list ranked by overdue, priority, and due date</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+            {priorityFocusQueue.map((op, idx) => {
+              const overdue = isOverdue(op.due_date);
+              return (
+                <button
+                  key={`focus-${op.id}`}
+                  type="button"
+                  onClick={() => handleViewDetails(op)}
+                  className={`rounded-xl border p-3 text-left transition ${
+                    overdue ? 'border-red-200 bg-red-50 hover:bg-red-100' : 'border-gray-200 bg-white hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-gray-500">#{idx + 1}</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getPriorityClasses(op.priority)}`}>
+                      P{op.priority}
+                    </span>
+                  </div>
+                  <div className="text-sm font-semibold text-werco-700">{op.work_order_number}</div>
+                  <div className="text-xs text-gray-600 truncate">{op.operation_number} - {op.operation_name}</div>
+                  <div className={`mt-2 text-xs ${overdue ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
+                    {op.due_date ? `Due ${format(new Date(op.due_date), 'MMM d')}` : 'No due date'}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Operations Grid */}
       {visibleOperations.length === 0 ? (
         <div className="card text-center py-16">
@@ -798,12 +884,22 @@ export default function ShopFloorSimple() {
                     )}
                   </div>
                   <div>
-                    {op.priority && (
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                        op.priority <= 2 ? 'bg-red-100 text-red-700' :
-                        op.priority <= 5 ? 'bg-amber-100 text-amber-700' :
-                        'bg-gray-100 text-gray-600'
-                      }`}>
+                    {canEditPriority ? (
+                      <select
+                        value={op.priority}
+                        onChange={(e) => handlePriorityChange(op.work_order_id, e.target.value)}
+                        disabled={updatingPriorityWorkOrderId === op.work_order_id}
+                        className={`px-2 py-0.5 rounded text-xs font-medium border border-transparent ${getPriorityClasses(op.priority)}`}
+                        title="Update priority"
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
+                          <option key={p} value={p}>
+                            P{p}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${getPriorityClasses(op.priority)}`}>
                         P{op.priority}
                       </span>
                     )}

@@ -86,6 +86,36 @@ class TestWorkOrdersAPI:
         assert data["status"] == "released"
         assert data["priority"] == 1
 
+    def test_update_work_order_priority_quick(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
+    ):
+        """Priority can be changed quickly without full work order payload."""
+        response = client.put(
+            f"/api/v1/work-orders/{test_work_order.id}/priority",
+            headers=auth_headers,
+            json={"priority": 1},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["work_order_id"] == test_work_order.id
+        assert data["priority"] == 1
+
+        wo_response = client.get(
+            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
+        )
+        assert wo_response.status_code == status.HTTP_200_OK
+        assert wo_response.json()["priority"] == 1
+
+    def test_update_work_order_priority_forbidden_for_operator(
+        self, client: TestClient, operator_headers: dict, test_work_order: WorkOrder
+    ):
+        response = client.put(
+            f"/api/v1/work-orders/{test_work_order.id}/priority",
+            headers=operator_headers,
+            json={"priority": 1},
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
     def test_delete_work_order(
         self, client: TestClient, admin_headers: dict, test_work_order: WorkOrder
     ):

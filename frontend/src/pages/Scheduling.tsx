@@ -3,6 +3,7 @@ import api from '../services/api';
 import { format, addDays, startOfWeek, parseISO, isBefore, isAfter, isSameDay } from 'date-fns';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
+import { usePermissions } from '../hooks/usePermissions';
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -64,6 +65,7 @@ const priorityColors: Record<number, string> = {
 };
 
 export default function Scheduling() {
+  const { can } = usePermissions();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -72,6 +74,7 @@ export default function Scheduling() {
   const [selectedJob, setSelectedJob] = useState<ScheduledJob | null>(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [scheduleForm, setScheduleForm] = useState({ scheduled_start: '', scheduled_end: '', work_center_id: 0 });
+  const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
@@ -81,6 +84,7 @@ export default function Scheduling() {
   // Drag and drop state
   const [dragState, setDragState] = useState<DragState>({ job: null, isDragging: false });
   const [dropTargetWc, setDropTargetWc] = useState<number | null>(null);
+  const canEditPriority = can('work_orders:edit');
 
   // Generate days for display: Monday-Saturday only (skip Sundays)
   const days = Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i))
@@ -275,6 +279,34 @@ export default function Scheduling() {
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to schedule');
     }
+  };
+
+  const handlePriorityChange = async (workOrderId: number, priorityRaw: string) => {
+    const priority = parseInt(priorityRaw, 10);
+    if (Number.isNaN(priority)) return;
+
+    const existing = jobs.find((job) => job.work_order_id === workOrderId);
+    if (!existing || existing.priority === priority) return;
+
+    setUpdatingPriorityWorkOrderId(workOrderId);
+    try {
+      await api.updateWorkOrderPriority(workOrderId, priority);
+      setJobs((prev) =>
+        prev.map((job) =>
+          job.work_order_id === workOrderId ? { ...job, priority } : job
+        )
+      );
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to update priority');
+    } finally {
+      setUpdatingPriorityWorkOrderId(null);
+    }
+  };
+
+  const priorityBadgeClasses = (priority: number) => {
+    if (priority <= 2) return 'bg-red-100 text-red-800';
+    if (priority <= 5) return 'bg-yellow-100 text-yellow-800';
+    return 'bg-gray-100 text-gray-800';
   };
 
   const navigateWeek = (direction: number) => {
@@ -484,13 +516,25 @@ export default function Scheduling() {
                     {job.due_date ? format(parseISO(job.due_date), 'MMM d') : '-'}
                   </td>
                   <td className="px-4 py-2 text-center">
-                    <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${
-                      job.priority <= 2 ? 'bg-red-100 text-red-800' :
-                      job.priority <= 5 ? 'bg-yellow-100 text-yellow-800' :
-                      'bg-gray-100 text-gray-800'
-                    }`}>
-                      {job.priority}
-                    </span>
+                    {canEditPriority ? (
+                      <select
+                        value={job.priority}
+                        onChange={(e) => handlePriorityChange(job.work_order_id, e.target.value)}
+                        disabled={updatingPriorityWorkOrderId === job.work_order_id}
+                        className={`px-2 py-1 rounded text-xs font-bold border border-transparent ${priorityBadgeClasses(job.priority)}`}
+                        title="Update priority"
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
+                          <option key={p} value={p}>
+                            P{p}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${priorityBadgeClasses(job.priority)}`}>
+                        {job.priority}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2 text-center">
                     <button
