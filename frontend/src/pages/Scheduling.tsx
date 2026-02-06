@@ -75,6 +75,7 @@ export default function Scheduling() {
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [scheduleForm, setScheduleForm] = useState({ scheduled_start: '', scheduled_end: '', work_center_id: 0 });
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
+  const [priorityReason, setPriorityReason] = useState('');
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
@@ -290,12 +291,16 @@ export default function Scheduling() {
 
     setUpdatingPriorityWorkOrderId(workOrderId);
     try {
-      await api.updateWorkOrderPriority(workOrderId, priority);
+      const reason = priorityReason.trim() || undefined;
+      await api.updateWorkOrderPriority(workOrderId, priority, reason);
       setJobs((prev) =>
         prev.map((job) =>
           job.work_order_id === workOrderId ? { ...job, priority } : job
         )
       );
+      if (reason) {
+        setPriorityReason('');
+      }
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to update priority');
     } finally {
@@ -478,7 +483,24 @@ export default function Scheduling() {
 
       {/* Unscheduled Work Orders Queue */}
       <div className="card">
-        <h2 className="text-lg font-semibold mb-4">Unscheduled Work Orders</h2>
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+          <h2 className="text-lg font-semibold">Unscheduled Work Orders</h2>
+          {canEditPriority && (
+            <div className="w-full sm:w-80">
+              <label className="text-xs font-medium text-gray-600 block mb-1">
+                Optional Priority Reason
+              </label>
+              <input
+                type="text"
+                value={priorityReason}
+                onChange={(e) => setPriorityReason(e.target.value)}
+                className="input text-sm"
+                maxLength={500}
+                placeholder="Applied to your next priority change"
+              />
+            </div>
+          )}
+        </div>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">

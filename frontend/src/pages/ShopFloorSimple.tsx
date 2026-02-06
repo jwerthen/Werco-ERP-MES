@@ -88,6 +88,7 @@ export default function ShopFloorSimple() {
   const [completeNotes, setCompleteNotes] = useState('');
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
+  const [priorityReason, setPriorityReason] = useState('');
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [showMobileCenters, setShowMobileCenters] = useState(false);
   
@@ -412,11 +413,15 @@ export default function ShopFloorSimple() {
 
     setUpdatingPriorityWorkOrderId(workOrderId);
     try {
-      await api.updateWorkOrderPriority(workOrderId, priority);
+      const reason = priorityReason.trim() || undefined;
+      await api.updateWorkOrderPriority(workOrderId, priority, reason);
       setOperations((prev) =>
         prev.map((op) => (op.work_order_id === workOrderId ? { ...op, priority } : op))
       );
       showToast('success', `Priority updated to P${priority}`);
+      if (reason) {
+        setPriorityReason('');
+      }
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to update priority');
     } finally {
@@ -518,6 +523,21 @@ export default function ShopFloorSimple() {
                 <option value="on_hold">On Hold</option>
               </select>
             </div>
+            {canEditPriority && (
+              <div>
+                <label className="text-xs font-medium text-gray-600 block mb-1">
+                  Optional Priority Reason
+                </label>
+                <input
+                  type="text"
+                  value={priorityReason}
+                  onChange={(e) => setPriorityReason(e.target.value)}
+                  className="input text-sm"
+                  maxLength={500}
+                  placeholder="Applied to your next priority change"
+                />
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
@@ -609,6 +629,21 @@ export default function ShopFloorSimple() {
             {operations.length} operation{operations.length !== 1 ? 's' : ''}
           </div>
         </div>
+        {canEditPriority && (
+          <div className="mt-3">
+            <label className="text-xs font-medium text-gray-600 block mb-1">
+              Optional Priority Reason
+            </label>
+            <input
+              type="text"
+              value={priorityReason}
+              onChange={(e) => setPriorityReason(e.target.value)}
+              className="input text-sm max-w-md"
+              maxLength={500}
+              placeholder="Applied to your next priority change"
+            />
+          </div>
+        )}
       </div>
 
       {/* Work Cell Buckets */}

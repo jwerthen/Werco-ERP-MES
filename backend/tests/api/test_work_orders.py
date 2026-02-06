@@ -6,6 +6,7 @@ from app.models.bom import BOM, BOMItem
 from app.models.part import Part
 from app.models.routing import Routing, RoutingOperation
 from app.models.work_center import WorkCenter
+from app.models.audit_log import AuditLog
 from app.models.work_order import WorkOrder
 
 
@@ -105,6 +106,30 @@ class TestWorkOrdersAPI:
         )
         assert wo_response.status_code == status.HTTP_200_OK
         assert wo_response.json()["priority"] == 1
+
+    def test_update_work_order_priority_with_reason_logged(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder, db_session
+    ):
+        reason = "Customer expedite request"
+        response = client.put(
+            f"/api/v1/work-orders/{test_work_order.id}/priority",
+            headers=auth_headers,
+            json={"priority": 1, "reason": reason},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["priority"] == 1
+        assert data["reason"] == reason
+
+        audit = (
+            db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "work_order")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert audit is not None
+        assert reason in (audit.description or "")
+        assert (audit.extra_data or {}).get("priority_reason") == reason
 
     def test_update_work_order_priority_forbidden_for_operator(
         self, client: TestClient, operator_headers: dict, test_work_order: WorkOrder

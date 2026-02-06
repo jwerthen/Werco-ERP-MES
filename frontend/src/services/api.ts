@@ -468,8 +468,8 @@ class ApiService {
     return response.data;
   }
 
-  async updateWorkOrderPriority(id: number, priority: number) {
-    const response = await this.api.put(`/work-orders/${id}/priority`, { priority });
+  async updateWorkOrderPriority(id: number, priority: number, reason?: string) {
+    const response = await this.api.put(`/work-orders/${id}/priority`, { priority, reason });
     return response.data;
   }
 

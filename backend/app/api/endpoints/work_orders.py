@@ -30,6 +30,7 @@ router = APIRouter()
 
 class WorkOrderPriorityUpdate(BaseModel):
     priority: int = Field(..., ge=1, le=10, description="Priority (1=highest, 10=lowest)")
+    reason: Optional[str] = Field(None, max_length=500, description="Optional reason for priority change")
 
 
 def _has_incomplete_predecessors(
@@ -594,6 +595,7 @@ def update_work_order_priority(
         raise HTTPException(status_code=404, detail="Work order not found")
 
     old_priority = work_order.priority
+    reason = (priority_in.reason or "").strip() or None
     work_order.priority = priority_in.priority
     work_order.updated_at = datetime.utcnow()
     db.commit()
@@ -605,8 +607,14 @@ def update_work_order_priority(
         resource_id=work_order.id,
         resource_identifier=work_order.work_order_number,
         old_values={"priority": old_priority},
-        new_values={"priority": work_order.priority}
+        new_values={"priority": work_order.priority},
+        description=(
+            f"Updated work_order priority: {work_order.work_order_number}"
+            + (f" (reason: {reason})" if reason else "")
+        ),
+        extra_data={"priority_reason": reason} if reason else None
     )
+    db.commit()
 
     safe_broadcast(
         broadcast_work_order_update,
@@ -614,6 +622,7 @@ def update_work_order_priority(
         {
             "event": "work_order_priority_updated",
             "priority": work_order.priority,
+            "reason": reason,
         }
     )
     safe_broadcast(
@@ -622,6 +631,7 @@ def update_work_order_priority(
             "event": "work_order_priority_updated",
             "work_order_id": work_order.id,
             "priority": work_order.priority,
+            "reason": reason,
         }
     )
 
@@ -638,6 +648,7 @@ def update_work_order_priority(
                 "event": "work_order_priority_updated",
                 "work_order_id": work_order.id,
                 "priority": work_order.priority,
+                "reason": reason,
             }
         )
 
@@ -645,6 +656,7 @@ def update_work_order_priority(
         "message": f"Priority updated for {work_order.work_order_number}",
         "work_order_id": work_order.id,
         "priority": work_order.priority,
+        "reason": reason,
     }
 
 

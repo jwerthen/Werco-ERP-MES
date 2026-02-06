@@ -57,6 +57,7 @@ export default function ShopFloor() {
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
+  const [priorityReason, setPriorityReason] = useState('');
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const kioskParams = useMemo(() => {
     return {
@@ -284,12 +285,16 @@ export default function ShopFloor() {
 
     setUpdatingPriorityWorkOrderId(workOrderId);
     try {
-      await api.updateWorkOrderPriority(workOrderId, priority);
+      const reason = priorityReason.trim() || undefined;
+      await api.updateWorkOrderPriority(workOrderId, priority, reason);
       setQueue((prev) =>
         prev.map((item) =>
           item.work_order_id === workOrderId ? { ...item, priority } : item
         )
       );
+      if (reason) {
+        setPriorityReason('');
+      }
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to update priority');
     } finally {
@@ -460,6 +465,21 @@ export default function ShopFloor() {
               {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} • {queue.length} job{queue.length !== 1 ? 's' : ''}
             </p>
           </div>
+          {canEditPriority && (
+            <div className="w-80 hidden lg:block">
+              <label className="text-xs font-medium text-surface-600 block mb-1">
+                Optional Priority Reason
+              </label>
+              <input
+                type="text"
+                value={priorityReason}
+                onChange={(e) => setPriorityReason(e.target.value)}
+                className="input text-sm"
+                maxLength={500}
+                placeholder="Applied to your next priority change"
+              />
+            </div>
+          )}
         </div>
         
         {queue.length === 0 ? (
