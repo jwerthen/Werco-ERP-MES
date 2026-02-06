@@ -203,9 +203,15 @@ def schedule_work_order(
     if not work_order.operations:
         raise HTTPException(status_code=400, detail="Work order has no operations")
     
-    # Get operations sorted by sequence
+    # Get operations sorted by sequence and schedule the first non-complete operation.
+    # This matches the scheduler UI where partially progressed work orders may be on Op 2+.
     operations = sorted(work_order.operations, key=lambda op: op.sequence)
-    first_op = operations[0]
+    first_op = next(
+        (op for op in operations if op.status != OperationStatus.COMPLETE),
+        None
+    )
+    if not first_op:
+        raise HTTPException(status_code=400, detail="All operations are complete")
     
     # Optionally override work center for first operation
     if schedule.work_center_id:
@@ -231,8 +237,11 @@ def schedule_work_order(
         if first_op.status == OperationStatus.PENDING:
             first_op.status = OperationStatus.READY
     
-    # Clear scheduling for subsequent operations (they will be scheduled when previous completes)
-    for op in operations[1:]:
+    # Clear scheduling for operations after the scheduled operation.
+    # Completed/prior operations are preserved as historical data.
+    for op in operations:
+        if op.sequence <= first_op.sequence:
+            continue
         op.scheduled_start = None
         op.scheduled_end = None
     work_center_ids = list({op.work_center_id for op in operations if op.work_center_id})
