@@ -1,14 +1,18 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.quote import Quote, QuoteLine, QuoteStatus
+from app.models.rfq_quote import QuoteEstimate, RfqPackage
 from app.models.work_order import WorkOrder
 from app.models.part import Part
+from app.services.quote_pdf_service import build_customer_quote_pdf
 from pydantic import BaseModel
+from io import BytesIO
 
 router = APIRouter()
 
@@ -67,6 +71,35 @@ class QuoteLineResponse(BaseModel):
         from_attributes = True
 
 
+class AIEstimateLineSummaryResponse(BaseModel):
+    part_number: Optional[str] = None
+    part_name: str
+    quantity: float
+    material: Optional[str] = None
+    thickness: Optional[str] = None
+    flat_area: Optional[float] = None
+    cut_length: Optional[float] = None
+    bend_count: Optional[int] = None
+    hole_count: Optional[int] = None
+    finish: Optional[str] = None
+    part_total: float = 0.0
+    confidence: Dict[str, float] = {}
+    sources: Dict[str, List[str]] = {}
+
+
+class AIEstimateResponse(BaseModel):
+    estimate_id: int
+    rfq_package_id: Optional[int] = None
+    rfq_reference: Optional[str] = None
+    totals: Dict[str, float]
+    lead_time: Dict[str, Any]
+    confidence: Dict[str, Any]
+    assumptions: List[Dict[str, Any]] = []
+    missing_specs: List[Dict[str, Any]] = []
+    source_attribution: Dict[str, List[str]] = {}
+    line_summaries: List[AIEstimateLineSummaryResponse] = []
+
+
 class QuoteResponse(BaseModel):
     id: int
     quote_number: str
@@ -82,6 +115,7 @@ class QuoteResponse(BaseModel):
     lead_time_days: Optional[int] = None
     lines: List[QuoteLineResponse] = []
     work_order_id: Optional[int] = None
+    ai_estimate: Optional[AIEstimateResponse] = None
     created_at: datetime
     
     class Config:
@@ -104,6 +138,79 @@ def generate_quote_number(db: Session) -> str:
         new_num = 1
     
     return f"{prefix}{new_num:04d}"
+
+
+def _format_date_for_pdf(value: Optional[date]) -> Optional[str]:
+    if not value:
+        return None
+    return value.strftime("%m/%d/%Y")
+
+
+def _load_ai_estimate(db: Session, quote_id: int) -> Optional[AIEstimateResponse]:
+    estimate = (
+        db.query(QuoteEstimate)
+        .options(joinedload(QuoteEstimate.line_summaries))
+        .filter(QuoteEstimate.quote_id == quote_id)
+        .order_by(QuoteEstimate.created_at.desc())
+        .first()
+    )
+    if not estimate:
+        return None
+
+    rfq_reference = None
+    if estimate.rfq_package_id:
+        package = db.query(RfqPackage).filter(RfqPackage.id == estimate.rfq_package_id).first()
+        if package:
+            rfq_reference = package.rfq_reference or package.rfq_number
+
+    return AIEstimateResponse(
+        estimate_id=estimate.id,
+        rfq_package_id=estimate.rfq_package_id,
+        rfq_reference=rfq_reference,
+        totals={
+            "material": float(estimate.material_total or 0),
+            "hardware_consumables": float(estimate.hardware_consumables_total or 0),
+            "outside_services": float(estimate.outside_services_total or 0),
+            "shop_labor_oh": float(estimate.shop_labor_oh_total or 0),
+            "margin": float(estimate.margin_total or 0),
+            "grand_total": float(estimate.grand_total or 0),
+        },
+        lead_time={
+            "min_days": estimate.lead_time_min_days,
+            "max_days": estimate.lead_time_max_days,
+            "confidence": float(estimate.lead_time_confidence or 0),
+            "label": (
+                f"{estimate.lead_time_min_days}-{estimate.lead_time_max_days} business days"
+                if estimate.lead_time_min_days and estimate.lead_time_max_days
+                else None
+            ),
+        },
+        confidence={
+            "overall": float(estimate.confidence_score or 0),
+            "detail": estimate.confidence_detail or {},
+        },
+        assumptions=estimate.assumptions or [],
+        missing_specs=estimate.missing_specs or [],
+        source_attribution=estimate.source_attribution or {},
+        line_summaries=[
+            AIEstimateLineSummaryResponse(
+                part_number=line.part_number,
+                part_name=line.part_name,
+                quantity=float(line.quantity or 0),
+                material=line.material,
+                thickness=line.thickness,
+                flat_area=float(line.flat_area) if line.flat_area is not None else None,
+                cut_length=float(line.cut_length) if line.cut_length is not None else None,
+                bend_count=line.bend_count,
+                hole_count=line.hole_count,
+                finish=line.finish,
+                part_total=float(line.part_total or 0),
+                confidence=line.confidence or {},
+                sources=line.sources or {},
+            )
+            for line in estimate.line_summaries
+        ],
+    )
 
 
 @router.get("/", response_model=List[QuoteResponse])
@@ -228,8 +335,45 @@ def get_quote(
     
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
-    
-    return quote
+
+    lines = []
+    for l in sorted(quote.lines, key=lambda item: item.line_number):
+        lines.append(
+            QuoteLineResponse(
+                id=l.id,
+                line_number=l.line_number,
+                part_id=l.part_id,
+                part_number=l.part.part_number if l.part else None,
+                description=l.description,
+                quantity=l.quantity,
+                unit_price=l.unit_price,
+                line_total=l.line_total,
+                material_cost=l.material_cost,
+                labor_hours=l.labor_hours,
+                labor_cost=l.labor_cost,
+            )
+        )
+
+    ai_estimate = _load_ai_estimate(db, quote.id)
+
+    return QuoteResponse(
+        id=quote.id,
+        quote_number=quote.quote_number,
+        revision=quote.revision,
+        customer_name=quote.customer_name,
+        customer_contact=quote.customer_contact,
+        customer_email=quote.customer_email,
+        status=quote.status.value if hasattr(quote.status, "value") else quote.status,
+        quote_date=quote.quote_date,
+        valid_until=quote.valid_until,
+        subtotal=quote.subtotal,
+        total=quote.total,
+        lead_time_days=quote.lead_time_days,
+        lines=lines,
+        work_order_id=quote.work_order_id,
+        ai_estimate=ai_estimate,
+        created_at=quote.created_at,
+    )
 
 
 @router.put("/{quote_id}", response_model=QuoteResponse)
@@ -338,6 +482,83 @@ def convert_to_work_order(
         "work_order_id": wo.id,
         "work_order_number": wo.work_order_number
     }
+
+
+@router.post("/{quote_id}/generate-pdf")
+def generate_quote_pdf(
+    quote_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate customer-ready quote PDF (no operation-time line items)."""
+    quote = db.query(Quote).options(joinedload(Quote.lines).joinedload(QuoteLine.part)).filter(Quote.id == quote_id).first()
+    if not quote:
+        raise HTTPException(status_code=404, detail="Quote not found")
+
+    ai_estimate = _load_ai_estimate(db, quote.id)
+    line_summaries: List[Dict[str, Any]] = []
+    assumptions: List[Dict[str, Any]] = []
+    rfq_reference = None
+    lead_time_label = f"{quote.lead_time_days} business days" if quote.lead_time_days else None
+
+    if ai_estimate:
+        rfq_reference = ai_estimate.rfq_reference
+        assumptions = ai_estimate.assumptions
+        lead_time_label = ai_estimate.lead_time.get("label") or lead_time_label
+        line_summaries = [
+            {
+                "part_display": f"{line.part_number or '-'} - {line.part_name}",
+                "qty": line.quantity,
+                "material": line.material,
+                "thickness": line.thickness,
+                "finish": line.finish,
+                "part_total": line.part_total,
+            }
+            for line in ai_estimate.line_summaries
+        ]
+    else:
+        for line in quote.lines:
+            line_summaries.append(
+                {
+                    "part_display": (
+                        f"{line.part.part_number} - {line.description}"
+                        if line.part
+                        else line.description
+                    ),
+                    "qty": line.quantity,
+                    "material": None,
+                    "thickness": None,
+                    "finish": None,
+                    "part_total": line.line_total,
+                }
+            )
+
+    pdf_bytes = build_customer_quote_pdf(
+        quote_number=quote.quote_number,
+        revision=quote.revision or "A",
+        customer_name=quote.customer_name,
+        customer_contact=quote.customer_contact,
+        customer_email=quote.customer_email,
+        rfq_reference=rfq_reference,
+        quote_date=_format_date_for_pdf(quote.quote_date) or "",
+        valid_until=_format_date_for_pdf(quote.valid_until),
+        lead_time_label=lead_time_label,
+        total_amount=float(quote.total or 0),
+        line_summaries=line_summaries,
+        assumptions=assumptions,
+        exclusions=[
+            "Quote excludes taxes, freight, and duties unless stated otherwise.",
+            "Subject to drawing/specification review at order entry.",
+            "Operation-level cycle times are internal and not included in customer quote.",
+        ],
+    )
+
+    filename = f"{quote.quote_number}.pdf"
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{quote_id}/lines", response_model=QuoteLineResponse)

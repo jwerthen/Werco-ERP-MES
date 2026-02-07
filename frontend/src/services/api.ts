@@ -1069,6 +1069,43 @@ class ApiService {
     return response.data;
   }
 
+  async generateCustomerQuotePdf(quoteId: number): Promise<Blob> {
+    const response = await this.api.post(`/quotes/${quoteId}/generate-pdf`, null, {
+      responseType: 'blob'
+    });
+    return response.data;
+  }
+
+  // AI RFQ Quotes
+  async createRfqPackage(formData: FormData) {
+    const response = await this.api.post('/rfq-packages/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  }
+
+  async getRfqPackage(packageId: number) {
+    const response = await this.api.get(`/rfq-packages/${packageId}`);
+    return response.data;
+  }
+
+  async generateRfqEstimate(packageId: number, data: { target_margin_pct?: number; valid_days?: number }) {
+    const response = await this.api.post(`/rfq-packages/${packageId}/generate-estimate`, data);
+    return response.data;
+  }
+
+  async approveRfqEstimate(packageId: number) {
+    const response = await this.api.post(`/rfq-packages/${packageId}/approve-create-quote`);
+    return response.data;
+  }
+
+  async exportInternalEstimate(packageId: number): Promise<Blob> {
+    const response = await this.api.get(`/rfq-packages/${packageId}/internal-estimate-export`, {
+      responseType: 'blob'
+    });
+    return response.data;
+  }
+
   // Users
   async getUsers(includeInactive = false) {
     const response = await this.api.get('/users/', { params: { include_inactive: includeInactive } });

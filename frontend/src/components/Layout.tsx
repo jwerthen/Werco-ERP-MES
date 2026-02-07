@@ -30,6 +30,7 @@ import {
   ChartBarIcon,
   PaperAirplaneIcon,
   CurrencyDollarIcon,
+  SparklesIcon,
   UsersIcon,
   BuildingOfficeIcon,
   WrenchScrewdriverIcon as WrenchIcon2,
@@ -88,6 +89,7 @@ const navigation: NavItem[] = [
     name: 'Sales & Shipping', 
     icon: PaperAirplaneIcon,
     children: [
+      { name: 'AI RFQ Quote', href: '/rfq-packages/new', icon: SparklesIcon },
       { name: 'Quote Calculator', href: '/quote-calculator', icon: CalculatorIcon },
       { name: 'Quotes', href: '/quotes', icon: CurrencyDollarIcon },
       { name: 'Shipping', href: '/shipping', icon: PaperAirplaneIcon },

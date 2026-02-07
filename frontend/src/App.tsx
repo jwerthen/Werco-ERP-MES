@@ -33,6 +33,7 @@ const Documents = lazy(() => import('./pages/Documents'));
 const Reports = lazy(() => import('./pages/Reports'));
 const Shipping = lazy(() => import('./pages/Shipping'));
 const Quotes = lazy(() => import('./pages/Quotes'));
+const RFQQuoting = lazy(() => import('./pages/RFQQuoting'));
 const Users = lazy(() => import('./pages/Users'));
 const Customers = lazy(() => import('./pages/Customers'));
 const Calibration = lazy(() => import('./pages/Calibration'));
@@ -327,6 +328,13 @@ function AppRoutes() {
       } />
       
       {/* Quotes */}
+      <Route path="/rfq-packages/new" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><RFQQuoting /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
       <Route path="/quotes" element={
         <PrivateRoute>
           <Layout>

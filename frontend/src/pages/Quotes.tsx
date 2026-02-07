@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { format } from 'date-fns';
+import { useNavigate } from 'react-router-dom';
 import {
   PlusIcon,
   PaperAirplaneIcon,
   ArrowRightIcon,
+  SparklesIcon,
 } from '@heroicons/react/24/outline';
 
 interface QuoteLine {
@@ -54,6 +56,7 @@ const statusColors: Record<string, string> = {
 };
 
 export default function Quotes() {
+  const navigate = useNavigate();
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,10 +176,16 @@ export default function Quotes() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Quotes & Estimates</h1>
-        <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center">
-          <PlusIcon className="h-5 w-5 mr-2" />
-          New Quote
-        </button>
+        <div className="flex gap-2">
+          <button onClick={() => navigate('/rfq-packages/new')} className="btn-secondary flex items-center">
+            <SparklesIcon className="h-5 w-5 mr-2" />
+            AI RFQ Quote
+          </button>
+          <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center">
+            <PlusIcon className="h-5 w-5 mr-2" />
+            New Quote
+          </button>
+        </div>
       </div>
 
       {/* Quotes Table */}

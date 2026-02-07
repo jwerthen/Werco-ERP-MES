@@ -14,6 +14,7 @@ from .quality import NonConformanceReport, CorrectiveActionRequest, FirstArticle
 from .purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POStatus, POReceipt, ReceiptStatus, InspectionStatus, DefectType, InspectionMethod
 from .shipping import Shipment, ShipmentStatus
 from .quote import Quote, QuoteLine, QuoteStatus
+from .rfq_quote import RfqPackage, RfqPackageFile, QuoteEstimate, QuoteLineSummary, PriceSnapshot
 from .customer import Customer
 from .calibration import Equipment, CalibrationRecord, CalibrationStatus
 from .supplier_part import SupplierPartMapping
@@ -39,4 +40,5 @@ __all__ = [
     "Job", "JobStatus", "JobPriority",
     "NotificationPreference", "NotificationLog", "DigestQueue",
     "Webhook", "WebhookDelivery",
+    "RfqPackage", "RfqPackageFile", "QuoteEstimate", "QuoteLineSummary", "PriceSnapshot",
 ]

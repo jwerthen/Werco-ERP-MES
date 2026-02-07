@@ -60,6 +60,7 @@ class Quote(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     lines = relationship("QuoteLine", back_populates="quote", cascade="all, delete-orphan")
+    estimates = relationship("QuoteEstimate", back_populates="quote")
 
 
 class QuoteLine(Base):
