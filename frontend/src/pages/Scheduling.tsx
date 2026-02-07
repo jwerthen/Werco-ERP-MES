@@ -180,7 +180,7 @@ export default function Scheduling() {
   useEffect(() => {
     setSelectedWorkOrderIds((previous) => {
       const activeIds = new Set(dispatchQueue.map((job) => job.work_order_id));
-      return new Set([...previous].filter((id) => activeIds.has(id)));
+      return new Set(Array.from(previous).filter((id) => activeIds.has(id)));
     });
   }, [dispatchQueue]);
 
