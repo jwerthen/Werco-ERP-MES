@@ -921,6 +921,14 @@ class ApiService {
     return response.data;
   }
 
+  async scheduleWorkOrderEarliest(
+    workOrderId: number,
+    data?: { work_center_id?: number; start_date?: string; horizon_days?: number }
+  ) {
+    const response = await this.api.post(`/scheduling/work-orders/${workOrderId}/schedule-earliest`, data || {});
+    return response.data;
+  }
+
   async scheduleOperation(operationId: number, data: { scheduled_start: string; scheduled_end?: string | null }) {
     const response = await this.api.put(`/scheduling/operations/${operationId}/schedule`, data);
     return response.data;
@@ -933,6 +941,13 @@ class ApiService {
 
   async getCapacitySummary(startDate: string, endDate: string) {
     const response = await this.api.get('/scheduling/capacity', { params: { start_date: startDate, end_date: endDate } });
+    return response.data;
+  }
+
+  async getCapacityHeatmap(startDate: string, endDate: string, workCenterId?: number) {
+    const response = await this.api.get('/scheduling/capacity-heatmap', {
+      params: { start_date: startDate, end_date: endDate, work_center_id: workCenterId },
+    });
     return response.data;
   }
 

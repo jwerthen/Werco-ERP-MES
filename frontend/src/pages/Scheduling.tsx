@@ -4,16 +4,20 @@ import { format, addDays, startOfWeek, parseISO, isBefore, isAfter, isSameDay } 
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { usePermissions } from '../hooks/usePermissions';
+import { calculateDispatchScore } from '../utils/dispatchScore';
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CalendarIcon,
+  BoltIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
 
 interface WorkCenter {
   id: number;
   code: string;
   name: string;
+  capacity_hours_per_day: number;
 }
 
 interface ScheduledJob {
@@ -47,6 +51,35 @@ interface DragState {
   isDragging: boolean;
 }
 
+interface DispatchQueueJob extends ScheduledJob {
+  dispatchScore: number;
+}
+
+interface CapacityHeatmapDay {
+  date: string;
+  scheduled_hours: number;
+  capacity_hours: number;
+  utilization_pct: number;
+  job_count: number;
+  overloaded: boolean;
+}
+
+interface CapacityHeatmapRow {
+  work_center_id: number;
+  work_center_code: string;
+  work_center_name: string;
+  capacity_hours_per_day: number;
+  days: CapacityHeatmapDay[];
+}
+
+interface CapacityHeatmapResponse {
+  start_date: string;
+  end_date: string;
+  overload_cells: number;
+  overloaded_work_centers: number[];
+  work_centers: CapacityHeatmapRow[];
+}
+
 const statusColors: Record<string, string> = {
   pending: 'bg-gray-400',
   ready: 'bg-blue-500',
@@ -64,10 +97,18 @@ const priorityColors: Record<number, string> = {
   10: 'border-l-gray-300',
 };
 
+const heatmapCellClass = (utilization: number) => {
+  if (utilization > 100) return 'bg-red-200 text-red-900';
+  if (utilization >= 90) return 'bg-amber-200 text-amber-900';
+  if (utilization >= 70) return 'bg-yellow-100 text-yellow-800';
+  return 'bg-emerald-100 text-emerald-900';
+};
+
 export default function Scheduling() {
   const { can } = usePermissions();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
+  const [capacityHeatmap, setCapacityHeatmap] = useState<CapacityHeatmapResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date(), { weekStartsOn: 1 }));
   const [daysToShow] = useState(7);
@@ -75,7 +116,14 @@ export default function Scheduling() {
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [scheduleForm, setScheduleForm] = useState({ scheduled_start: '', scheduled_end: '', work_center_id: 0 });
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
+  const [schedulingEarliestWorkOrderId, setSchedulingEarliestWorkOrderId] = useState<number | null>(null);
   const [priorityReason, setPriorityReason] = useState('');
+  const [showScheduledRows, setShowScheduledRows] = useState(true);
+  const [selectedWorkOrderIds, setSelectedWorkOrderIds] = useState<Set<number>>(new Set());
+  const [bulkPriority, setBulkPriority] = useState(5);
+  const [bulkWorkCenterId, setBulkWorkCenterId] = useState<number | ''>('');
+  const [bulkShiftDays, setBulkShiftDays] = useState(1);
+  const [bulkActionRunning, setBulkActionRunning] = useState<string | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
@@ -88,26 +136,81 @@ export default function Scheduling() {
   const canEditPriority = can('work_orders:edit');
 
   // Generate days for display: Monday-Saturday only (skip Sundays)
-  const days = Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i))
-    .filter(day => day.getDay() !== 0); // 0 = Sunday
+  const days = useMemo(
+    () => Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i)).filter((day) => day.getDay() !== 0),
+    [daysToShow, weekStart]
+  );
+  const visibleStart = days[0] || weekStart;
+  const visibleEnd = days[days.length - 1] || addDays(weekStart, daysToShow - 1);
+
+  const openJobs = useMemo(() => jobs.filter((job) => job.status !== 'complete'), [jobs]);
+
+  const dispatchQueue = useMemo<DispatchQueueJob[]>(() => {
+    return openJobs
+      .map((job) => ({
+        ...job,
+        dispatchScore: calculateDispatchScore({
+          priority: job.priority,
+          dueDate: job.due_date || null,
+          remainingHours: job.remaining_hours,
+          scheduledStart: job.scheduled_start || null,
+          status: job.status,
+        }),
+      }))
+      .sort((a, b) => {
+        if (a.dispatchScore !== b.dispatchScore) return b.dispatchScore - a.dispatchScore;
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+        const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+        if (aDue !== bDue) return aDue - bDue;
+        return a.work_order_number.localeCompare(b.work_order_number);
+      });
+  }, [openJobs]);
+
+  const queueRows = useMemo(
+    () => (showScheduledRows ? dispatchQueue : dispatchQueue.filter((job) => !job.scheduled_start)),
+    [dispatchQueue, showScheduledRows]
+  );
+
+  const selectedQueueJobs = useMemo(
+    () => dispatchQueue.filter((job) => selectedWorkOrderIds.has(job.work_order_id)),
+    [dispatchQueue, selectedWorkOrderIds]
+  );
+
+  useEffect(() => {
+    setSelectedWorkOrderIds((previous) => {
+      const activeIds = new Set(dispatchQueue.map((job) => job.work_order_id));
+      return new Set([...previous].filter((id) => activeIds.has(id)));
+    });
+  }, [dispatchQueue]);
+
+  const heatmapByWorkCenter = useMemo(() => {
+    const map = new Map<number, CapacityHeatmapRow>();
+    (capacityHeatmap?.work_centers || []).forEach((row) => map.set(row.work_center_id, row));
+    return map;
+  }, [capacityHeatmap]);
 
   const loadData = useCallback(async () => {
     try {
-      const [wcRes, jobsRes] = await Promise.all([
+      const startDate = format(visibleStart, 'yyyy-MM-dd');
+      const endDate = format(visibleEnd, 'yyyy-MM-dd');
+      const [wcRes, jobsRes, heatmapRes] = await Promise.all([
         api.getWorkCenters(),
         api.getSchedulableWorkOrders({
-          start_date: format(weekStart, 'yyyy-MM-dd'),
-          end_date: format(addDays(weekStart, daysToShow), 'yyyy-MM-dd')
-        })
+          start_date: startDate,
+          end_date: endDate
+        }),
+        api.getCapacityHeatmap(startDate, endDate),
       ]);
       setWorkCenters(wcRes);
       setJobs(jobsRes);
+      setCapacityHeatmap(heatmapRes);
     } catch (err) {
       console.error('Failed to load scheduling data:', err);
     } finally {
       setLoading(false);
     }
-  }, [weekStart, daysToShow]);
+  }, [visibleEnd, visibleStart]);
 
   const scheduleRealtimeRefresh = useCallback(() => {
     if (realtimeRefreshRef.current) return;
@@ -205,7 +308,7 @@ export default function Scheduling() {
   };
 
   const getUnscheduledJobs = (wcId: number) => {
-    return jobs.filter(job => job.work_center_id === wcId && !job.scheduled_start);
+    return openJobs.filter((job) => job.work_center_id === wcId && !job.scheduled_start);
   };
 
   const openScheduleModal = (job: ScheduledJob) => {
@@ -253,11 +356,8 @@ export default function Scheduling() {
     }
     
     try {
-      // Update work center for the current operation
       await api.updateOperationWorkCenter(job.current_operation_id, targetWcId);
-      
-      // Reload data to reflect changes
-      loadData();
+      await loadData();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to move work order');
     }
@@ -270,15 +370,28 @@ export default function Scheduling() {
     if (!selectedJob) return;
     
     try {
-      // Schedule the entire work order (first op gets scheduled, rest follow automatically)
       await api.scheduleWorkOrder(selectedJob.work_order_id, {
         scheduled_start: scheduleForm.scheduled_start,
         work_center_id: selectedJob.work_center_id
       });
       setShowScheduleModal(false);
-      loadData();
+      await loadData();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to schedule');
+    }
+  };
+
+  const handleScheduleEarliest = async (job: ScheduledJob) => {
+    setSchedulingEarliestWorkOrderId(job.work_order_id);
+    try {
+      await api.scheduleWorkOrderEarliest(job.work_order_id, {
+        work_center_id: job.work_center_id,
+      });
+      await loadData();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to schedule earliest');
+    } finally {
+      setSchedulingEarliestWorkOrderId(null);
     }
   };
 
@@ -306,6 +419,111 @@ export default function Scheduling() {
     } finally {
       setUpdatingPriorityWorkOrderId(null);
     }
+  };
+
+  const runBulkAction = async (
+    actionKey: string,
+    actionRunner: (job: DispatchQueueJob) => Promise<'success' | 'skipped'>
+  ) => {
+    if (selectedQueueJobs.length === 0) {
+      alert('Select at least one work order first.');
+      return;
+    }
+
+    setBulkActionRunning(actionKey);
+    let success = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const job of selectedQueueJobs) {
+      try {
+        const result = await actionRunner(job);
+        if (result === 'skipped') {
+          skipped += 1;
+        } else {
+          success += 1;
+        }
+      } catch (err) {
+        failed += 1;
+        console.error(`Bulk action failed for ${job.work_order_number}`, err);
+      }
+    }
+
+    setBulkActionRunning(null);
+    await loadData();
+    alert(`Bulk action complete. Updated: ${success}, skipped: ${skipped}, failed: ${failed}.`);
+  };
+
+  const handleBulkSetPriority = async () => {
+    const reason = priorityReason.trim() || undefined;
+    await runBulkAction('priority', async (job) => {
+      await api.updateWorkOrderPriority(job.work_order_id, bulkPriority, reason);
+      return 'success';
+    });
+    if (reason) {
+      setPriorityReason('');
+    }
+  };
+
+  const handleBulkMoveWorkCenter = async () => {
+    if (!bulkWorkCenterId) {
+      alert('Select a target work center first.');
+      return;
+    }
+    await runBulkAction('work-center', async (job) => {
+      await api.updateOperationWorkCenter(job.current_operation_id, bulkWorkCenterId);
+      return 'success';
+    });
+  };
+
+  const handleBulkShiftDates = async () => {
+    if (bulkShiftDays === 0) {
+      alert('Shift days cannot be zero.');
+      return;
+    }
+    await runBulkAction('shift', async (job) => {
+      if (!job.scheduled_start) {
+        return 'skipped';
+      }
+      const shiftedDate = addDays(parseISO(job.scheduled_start), bulkShiftDays);
+      await api.scheduleWorkOrder(job.work_order_id, {
+        scheduled_start: format(shiftedDate, 'yyyy-MM-dd'),
+        work_center_id: job.work_center_id,
+      });
+      return 'success';
+    });
+  };
+
+  const handleBulkScheduleEarliest = async () => {
+    await runBulkAction('earliest', async (job) => {
+      if (job.scheduled_start) {
+        return 'skipped';
+      }
+      await api.scheduleWorkOrderEarliest(job.work_order_id, {
+        work_center_id: job.work_center_id,
+      });
+      return 'success';
+    });
+  };
+
+  const toggleRowSelection = (workOrderId: number) => {
+    setSelectedWorkOrderIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(workOrderId)) {
+        next.delete(workOrderId);
+      } else {
+        next.add(workOrderId);
+      }
+      return next;
+    });
+  };
+
+  const selectAllVisibleRows = () => {
+    setSelectedWorkOrderIds(new Set(queueRows.map((job) => job.work_order_id)));
+  };
+
+  const clearSelections = () => {
+    setSelectedWorkOrderIds(new Set());
   };
 
   const priorityBadgeClasses = (priority: number) => {
@@ -346,7 +564,7 @@ export default function Scheduling() {
             <ChevronRightIcon className="h-5 w-5" />
           </button>
           <span className="ml-4 font-medium">
-            {format(weekStart, 'MMM d')} - {format(addDays(weekStart, daysToShow - 1), 'MMM d, yyyy')}
+            {format(visibleStart, 'MMM d')} - {format(visibleEnd, 'MMM d, yyyy')}
           </span>
         </div>
       </div>
@@ -381,6 +599,8 @@ export default function Scheduling() {
               {workCenters.map((wc) => {
                 const unscheduled = getUnscheduledJobs(wc.id);
                 const isDropTarget = dropTargetWc === wc.id;
+                const heatmapRow = heatmapByWorkCenter.get(wc.id);
+                const hasOverload = Boolean(heatmapRow?.days.some((day) => day.overloaded));
                 
                 return (
                   <tr 
@@ -398,6 +618,12 @@ export default function Scheduling() {
                       {unscheduled.length > 0 && (
                         <div className="mt-1 text-xs text-orange-600">
                           {unscheduled.length} unscheduled
+                        </div>
+                      )}
+                      {hasOverload && (
+                        <div className="mt-1 text-xs text-red-600 flex items-center gap-1">
+                          <ExclamationTriangleIcon className="h-3.5 w-3.5" />
+                          Overloaded
                         </div>
                       )}
                       {isDropTarget && dragState.job && (
@@ -481,12 +707,73 @@ export default function Scheduling() {
         </div>
       )}
 
-      {/* Unscheduled Work Orders Queue */}
+      <div className="card">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <h2 className="text-lg font-semibold">Capacity Heatmap</h2>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-600">
+              {capacityHeatmap?.overload_cells || 0} overloaded slot{capacityHeatmap?.overload_cells === 1 ? '' : 's'}
+            </span>
+            {(capacityHeatmap?.overload_cells || 0) > 0 && (
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-700">
+                <ExclamationTriangleIcon className="h-3.5 w-3.5" />
+                Action Needed
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-full border-collapse text-xs">
+            <thead>
+              <tr className="bg-gray-50">
+                <th className="sticky left-0 bg-gray-50 z-10 px-3 py-2 text-left border-r">Work Center</th>
+                {days.map((day) => (
+                  <th key={`hm-${day.toISOString()}`} className="px-2 py-2 text-center border-r min-w-[84px]">
+                    {format(day, 'EEE d')}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {workCenters.map((wc) => {
+                const row = heatmapByWorkCenter.get(wc.id);
+                return (
+                  <tr key={`hm-row-${wc.id}`} className="border-t">
+                    <td className="sticky left-0 z-10 bg-white px-3 py-2 border-r">
+                      <div className="font-medium">{wc.code}</div>
+                      <div className="text-[11px] text-gray-500">{wc.capacity_hours_per_day || 8}h/day</div>
+                    </td>
+                    {days.map((day) => {
+                      const key = format(day, 'yyyy-MM-dd');
+                      const dayData = row?.days.find((entry) => entry.date === key);
+                      const utilization = dayData?.utilization_pct || 0;
+                      return (
+                        <td key={`${wc.id}-${key}`} className="px-1.5 py-1.5 border-r">
+                          <div className={`rounded px-1.5 py-1 text-center font-medium ${heatmapCellClass(utilization)}`}>
+                            {Math.round(utilization)}%
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Dispatch Queue and Bulk Actions */}
       <div className="card">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
-          <h2 className="text-lg font-semibold">Unscheduled Work Orders</h2>
+          <div>
+            <h2 className="text-lg font-semibold">Dispatch Queue</h2>
+            <p className="text-sm text-gray-600">
+              Sorted by dispatch score. {dispatchQueue.filter((job) => !job.scheduled_start).length} unscheduled.
+            </p>
+          </div>
           {canEditPriority && (
-            <div className="w-full sm:w-80">
+            <div className="w-full sm:w-96">
               <label className="text-xs font-medium text-gray-600 block mb-1">
                 Optional Priority Reason
               </label>
@@ -496,30 +783,145 @@ export default function Scheduling() {
                 onChange={(e) => setPriorityReason(e.target.value)}
                 className="input text-sm"
                 maxLength={500}
-                placeholder="Applied to your next priority change"
+                placeholder="Applied to your next priority update"
               />
             </div>
           )}
+        </div>
+        <div className="border rounded-lg p-3 mb-4 bg-gray-50">
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <span className="text-sm font-medium">Bulk Actions</span>
+            <span className="text-sm text-gray-600">Selected: {selectedQueueJobs.length}</span>
+            <button type="button" onClick={selectAllVisibleRows} className="text-xs text-werco-primary hover:underline">
+              Select visible
+            </button>
+            <button type="button" onClick={clearSelections} className="text-xs text-gray-600 hover:underline">
+              Clear
+            </button>
+            <label className="ml-auto text-xs text-gray-600 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={showScheduledRows}
+                onChange={(e) => setShowScheduledRows(e.target.checked)}
+              />
+              Include scheduled rows
+            </label>
+          </div>
+          <div className="grid grid-cols-1 xl:grid-cols-4 gap-2">
+            {canEditPriority && (
+              <div className="flex gap-2">
+                <select
+                  value={bulkPriority}
+                  onChange={(e) => setBulkPriority(parseInt(e.target.value, 10))}
+                  className="input text-sm"
+                >
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
+                    <option key={`bulk-p-${p}`} value={p}>
+                      Set P{p}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn-secondary text-sm"
+                  disabled={bulkActionRunning !== null}
+                  onClick={handleBulkSetPriority}
+                >
+                  Apply
+                </button>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <select
+                value={bulkWorkCenterId}
+                onChange={(e) => setBulkWorkCenterId(e.target.value ? parseInt(e.target.value, 10) : '')}
+                className="input text-sm"
+              >
+                <option value="">Move to work center</option>
+                {workCenters.map((wc) => (
+                  <option key={`bulk-wc-${wc.id}`} value={wc.id}>
+                    {wc.code}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="btn-secondary text-sm"
+                disabled={bulkActionRunning !== null}
+                onClick={handleBulkMoveWorkCenter}
+              >
+                Move
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="number"
+                value={bulkShiftDays}
+                onChange={(e) => setBulkShiftDays(parseInt(e.target.value, 10) || 0)}
+                className="input text-sm w-24"
+                min={-30}
+                max={30}
+              />
+              <button
+                type="button"
+                className="btn-secondary text-sm"
+                disabled={bulkActionRunning !== null}
+                onClick={handleBulkShiftDates}
+              >
+                Shift Dates
+              </button>
+            </div>
+            <button
+              type="button"
+              className="btn-primary text-sm flex items-center justify-center"
+              disabled={bulkActionRunning !== null}
+              onClick={handleBulkScheduleEarliest}
+            >
+              <BoltIcon className="h-4 w-4 mr-1" />
+              Schedule Selected Earliest
+            </button>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
+                <th className="px-3 py-2 text-center">
+                  <input
+                    type="checkbox"
+                    checked={queueRows.length > 0 && queueRows.every((job) => selectedWorkOrderIds.has(job.work_order_id))}
+                    onChange={(e) => (e.target.checked ? selectAllVisibleRows() : clearSelections())}
+                  />
+                </th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">WO #</th>
+                <th className="px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase">Dispatch</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Current Op</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Progress</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
                 <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Hours Left</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Due</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Scheduled</th>
                 <th className="px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase">Priority</th>
                 <th className="px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {jobs.filter(j => !j.scheduled_start && j.status !== 'complete').map((job) => (
-                <tr key={job.work_order_id} className="hover:bg-gray-50">
+              {queueRows.map((job) => (
+                <tr key={job.work_order_id} className={`hover:bg-gray-50 ${selectedWorkOrderIds.has(job.work_order_id) ? 'bg-blue-50/50' : ''}`}>
+                  <td className="px-3 py-2 text-center">
+                    <input
+                      type="checkbox"
+                      checked={selectedWorkOrderIds.has(job.work_order_id)}
+                      onChange={() => toggleRowSelection(job.work_order_id)}
+                    />
+                  </td>
                   <td className="px-4 py-2 font-medium text-werco-primary">{job.work_order_number}</td>
+                  <td className="px-4 py-2 text-center">
+                    <span className="inline-flex items-center justify-center min-w-[56px] px-2 py-1 rounded text-xs font-semibold bg-blue-100 text-blue-800">
+                      {job.dispatchScore}
+                    </span>
+                  </td>
                   <td className="px-4 py-2 text-sm">{job.current_operation_name}</td>
                   <td className="px-4 py-2">
                     <span className="text-sm font-medium">Op {job.operations_complete + 1}/{job.total_operations}</span>
@@ -536,6 +938,9 @@ export default function Scheduling() {
                   </td>
                   <td className="px-4 py-2 text-sm">
                     {job.due_date ? format(parseISO(job.due_date), 'MMM d') : '-'}
+                  </td>
+                  <td className="px-4 py-2 text-sm">
+                    {job.scheduled_start ? format(parseISO(job.scheduled_start), 'MMM d') : 'Unscheduled'}
                   </td>
                   <td className="px-4 py-2 text-center">
                     {canEditPriority ? (
@@ -559,19 +964,29 @@ export default function Scheduling() {
                     )}
                   </td>
                   <td className="px-4 py-2 text-center">
-                    <button
-                      onClick={() => openScheduleModal(job)}
-                      className="text-werco-primary hover:underline text-sm"
-                    >
-                      Schedule
-                    </button>
+                    <div className="flex justify-center gap-2">
+                      <button
+                        onClick={() => openScheduleModal(job)}
+                        className="text-werco-primary hover:underline text-sm"
+                      >
+                        Schedule
+                      </button>
+                      <button
+                        onClick={() => handleScheduleEarliest(job)}
+                        disabled={schedulingEarliestWorkOrderId === job.work_order_id}
+                        className="text-blue-700 hover:underline text-sm disabled:text-gray-400"
+                        title="One-click earliest slot"
+                      >
+                        {schedulingEarliestWorkOrderId === job.work_order_id ? '...' : 'Earliest'}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {jobs.filter(j => !j.scheduled_start && j.status !== 'complete').length === 0 && (
-            <p className="text-center text-gray-500 py-4">All work orders are scheduled</p>
+          {queueRows.length === 0 && (
+            <p className="text-center text-gray-500 py-4">No work orders match current filter</p>
           )}
         </div>
       </div>
@@ -635,11 +1050,22 @@ export default function Scheduling() {
                   Scheduling this work order will start the first operation. Subsequent operations will auto-advance when each is completed.
                 </p>
               </div>
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowScheduleModal(false)} className="btn-secondary">
-                  Cancel
+              <div className="flex justify-between gap-3 pt-4 border-t">
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center text-sm"
+                  onClick={() => handleScheduleEarliest(selectedJob)}
+                  disabled={schedulingEarliestWorkOrderId === selectedJob.work_order_id}
+                >
+                  <BoltIcon className="h-4 w-4 mr-1" />
+                  Earliest Slot
                 </button>
-                <button type="submit" className="btn-primary">Schedule Work Order</button>
+                <div className="flex gap-3">
+                  <button type="button" onClick={() => setShowScheduleModal(false)} className="btn-secondary">
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn-primary">Schedule Work Order</button>
+                </div>
               </div>
             </form>
           </div>

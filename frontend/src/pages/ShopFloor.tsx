@@ -6,6 +6,7 @@ import { format } from 'date-fns';
 import { usePermissions } from '../hooks/usePermissions';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
+import { calculateDispatchScore } from '../utils/dispatchScore';
 import {
   PlayIcon,
   StopIcon,
@@ -261,20 +262,34 @@ export default function ShopFloor() {
     return 'bg-surface-100 text-surface-600';
   };
 
-  const priorityFocusQueue = useMemo(() => {
-    const ranked = [...queue].sort((a, b) => {
-      const now = new Date().getTime();
+  const sortedQueue = useMemo(() => {
+    return [...queue].sort((a, b) => {
+      const aScore = calculateDispatchScore({
+        priority: a.priority,
+        dueDate: a.due_date || null,
+        remainingHours: Number(a.setup_time_hours || 0) + Number(a.run_time_hours || 0),
+        scheduledStart: null,
+        status: a.status,
+      });
+      const bScore = calculateDispatchScore({
+        priority: b.priority,
+        dueDate: b.due_date || null,
+        remainingHours: Number(b.setup_time_hours || 0) + Number(b.run_time_hours || 0),
+        scheduledStart: null,
+        status: b.status,
+      });
+      if (aScore !== bScore) return bScore - aScore;
+      if (a.priority !== b.priority) return a.priority - b.priority;
       const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
       const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
-      const aOverdue = aDue < now ? 1 : 0;
-      const bOverdue = bDue < now ? 1 : 0;
-      if (aOverdue !== bOverdue) return bOverdue - aOverdue;
-      if (a.priority !== b.priority) return a.priority - b.priority;
       if (aDue !== bDue) return aDue - bDue;
       return a.work_order_number.localeCompare(b.work_order_number);
     });
-    return ranked.slice(0, 5);
   }, [queue]);
+
+  const priorityFocusQueue = useMemo(() => {
+    return sortedQueue.slice(0, 5);
+  }, [sortedQueue]);
 
   const handlePriorityChange = async (workOrderId: number, priorityRaw: string) => {
     const priority = parseInt(priorityRaw, 10);
@@ -462,7 +477,7 @@ export default function ShopFloor() {
               Job Queue
             </h2>
             <p className="text-sm text-surface-500">
-              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} • {queue.length} job{queue.length !== 1 ? 's' : ''}
+              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} • {sortedQueue.length} job{sortedQueue.length !== 1 ? 's' : ''}
             </p>
           </div>
           {canEditPriority && (
@@ -482,7 +497,7 @@ export default function ShopFloor() {
           )}
         </div>
         
-        {queue.length === 0 ? (
+        {sortedQueue.length === 0 ? (
           <div className="text-center py-16">
             <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
               <QueueListIcon className="h-8 w-8 text-surface-400" />
@@ -507,7 +522,7 @@ export default function ShopFloor() {
                 </tr>
               </thead>
               <tbody>
-                {queue.map((item) => {
+                {sortedQueue.map((item) => {
                   const progress = (item.quantity_complete / item.quantity_ordered) * 100;
                   const isOverdue = item.due_date && new Date(item.due_date) < new Date();
                   const isExpanded = expandedRows.has(item.work_order_id);

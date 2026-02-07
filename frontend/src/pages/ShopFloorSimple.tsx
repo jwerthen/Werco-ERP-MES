@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { format } from 'date-fns';
 import { usePermissions } from '../hooks/usePermissions';
+import { calculateDispatchScore } from '../utils/dispatchScore';
 import {
   PlayIcon,
   CheckCircleIcon,
@@ -307,22 +308,35 @@ export default function ShopFloorSimple() {
     () => (actionableOnly ? operations.filter(op => actionableStatuses.has(op.status)) : operations),
     [actionableOnly, operations, actionableStatuses]
   );
-  const priorityFocusQueue = useMemo(() => {
-    const ranked = [...visibleOperations]
-      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status))
-      .sort((a, b) => {
-        const now = new Date().getTime();
-        const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
-        const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
-        const aOverdue = aDue < now ? 1 : 0;
-        const bOverdue = bDue < now ? 1 : 0;
-        if (aOverdue !== bOverdue) return bOverdue - aOverdue;
-        if (a.priority !== b.priority) return a.priority - b.priority;
-        if (aDue !== bDue) return aDue - bDue;
-        return a.work_order_number.localeCompare(b.work_order_number);
+  const sortedVisibleOperations = useMemo(() => {
+    return [...visibleOperations].sort((a, b) => {
+      const aScore = calculateDispatchScore({
+        priority: a.priority,
+        dueDate: a.due_date || null,
+        remainingHours: Math.max(0, Number(a.quantity_ordered || 0) - Number(a.quantity_complete || 0)),
+        scheduledStart: null,
+        status: a.status,
       });
-    return ranked.slice(0, 5);
+      const bScore = calculateDispatchScore({
+        priority: b.priority,
+        dueDate: b.due_date || null,
+        remainingHours: Math.max(0, Number(b.quantity_ordered || 0) - Number(b.quantity_complete || 0)),
+        scheduledStart: null,
+        status: b.status,
+      });
+      if (aScore !== bScore) return bScore - aScore;
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+      const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+      if (aDue !== bDue) return aDue - bDue;
+      return a.work_order_number.localeCompare(b.work_order_number);
+    });
   }, [visibleOperations]);
+  const priorityFocusQueue = useMemo(() => {
+    const ranked = [...sortedVisibleOperations]
+      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status));
+    return ranked.slice(0, 5);
+  }, [sortedVisibleOperations]);
 
   // Action handlers
   const handleStart = async (operation: Operation) => {
@@ -836,7 +850,7 @@ export default function ShopFloorSimple() {
       )}
 
       {/* Operations Grid */}
-      {visibleOperations.length === 0 ? (
+      {sortedVisibleOperations.length === 0 ? (
         <div className="card text-center py-16">
           <CubeIcon className="h-12 w-12 text-gray-300 mx-auto mb-4" />
           <p className="text-gray-600 font-medium">No operations found</p>
@@ -844,7 +858,7 @@ export default function ShopFloorSimple() {
         </div>
       ) : (
         <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
-          {visibleOperations.map(op => {
+          {sortedVisibleOperations.map(op => {
             const colors = STATUS_COLORS[op.status] || STATUS_COLORS.pending;
             const progress = op.quantity_ordered > 0 
               ? (op.quantity_complete / op.quantity_ordered) * 100 
