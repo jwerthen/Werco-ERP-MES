@@ -1,5 +1,14 @@
 // jest-dom adds custom jest matchers for asserting on DOM nodes.
 import '@testing-library/jest-dom';
+import { TextDecoder, TextEncoder } from 'util';
+
+if (!global.TextEncoder) {
+  global.TextEncoder = TextEncoder as any;
+}
+
+if (!global.TextDecoder) {
+  global.TextDecoder = TextDecoder as any;
+}
 
 // Mock window.matchMedia
 Object.defineProperty(window, 'matchMedia', {

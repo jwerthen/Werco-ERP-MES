@@ -1,8 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
 /* ============================================
    CUSTOM ANIMATIONS
@@ -21,8 +19,8 @@
 }
 
 @keyframes glowPulse {
-  0%, 100% { box-shadow: 0 0 20px rgba(27, 77, 156, 0.3), 0 0 40px rgba(27, 77, 156, 0.1); }
-  50% { box-shadow: 0 0 30px rgba(27, 77, 156, 0.5), 0 0 60px rgba(27, 77, 156, 0.2); }
+  0%, 100% { box-shadow: 0 0 20px rgba(6, 182, 212, 0.3), 0 0 40px rgba(6, 182, 212, 0.1); }
+  50% { box-shadow: 0 0 30px rgba(6, 182, 212, 0.5), 0 0 60px rgba(6, 182, 212, 0.2); }
 }
 
 @keyframes subtleFloat {
@@ -36,8 +34,8 @@
 }
 
 @keyframes borderGlow {
-  0%, 100% { border-color: rgba(27, 77, 156, 0.3); }
-  50% { border-color: rgba(27, 77, 156, 0.6); }
+  0%, 100% { border-color: rgba(6, 182, 212, 0.3); }
+  50% { border-color: rgba(6, 182, 212, 0.6); }
 }
 
 /* ============================================
@@ -47,36 +45,36 @@
 @layer base {
   html {
     @apply scroll-smooth;
+    /* Prevent horizontal scroll on mobile */
     overflow-x: hidden;
   }
-
+  
   body {
-    @apply text-slate-200 font-sans antialiased;
-    background: #0d1117;
+    @apply bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50 text-slate-900 font-sans antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     min-height: 100vh;
-    min-height: 100dvh;
+    min-height: 100dvh; /* Dynamic viewport height for mobile browsers */
     overflow-x: hidden;
   }
 
-  /* Focus states - Werco blue */
+  /* Better focus states for accessibility */
   *:focus-visible {
-    @apply outline-none ring-2 ring-werco-navy-600 ring-offset-2 ring-offset-[#0d1117];
+    @apply outline-none ring-2 ring-cyan-500 ring-offset-2;
   }
 
   /* Safe area insets for notched devices */
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
-
+  
   .pt-safe {
     padding-top: env(safe-area-inset-top, 0px);
   }
-
+  
   .pl-safe {
     padding-left: env(safe-area-inset-left, 0px);
   }
-
+  
   .pr-safe {
     padding-right: env(safe-area-inset-right, 0px);
   }
@@ -93,27 +91,27 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Custom scrollbar - Werco branded */
+  /* Custom scrollbar - modernized */
   ::-webkit-scrollbar {
     @apply w-2 h-2;
   }
-
+  
   ::-webkit-scrollbar-track {
-    @apply bg-slate-800;
+    @apply bg-slate-100;
   }
-
+  
   ::-webkit-scrollbar-thumb {
-    @apply bg-slate-600 rounded-full;
+    @apply bg-slate-300 rounded-full;
     transition: background-color 0.2s;
   }
-
+  
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-slate-500;
+    @apply bg-slate-400;
   }
 
-  /* Selection color - Werco blue accent */
+  /* Selection color - rose accent */
   ::selection {
-    @apply bg-werco-navy-600/30 text-white;
+    @apply bg-cyan-500/20 text-cyan-900;
   }
 }
 
@@ -125,86 +123,89 @@
   /* ------------------------------------
      BUTTONS
      ------------------------------------ */
-
+  
   /* Base button styles */
-  .btn {
-    @apply inline-flex items-center justify-center
-           px-4 py-2.5
-           text-sm font-semibold
-           rounded-xl
-           transition-all duration-200 ease-out
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-success,
+  .btn-danger,
+  .btn-warning,
+  .btn-ghost,
+  .btn-outline {
+    @apply inline-flex items-center justify-center 
+           px-4 py-2.5 
+           text-sm font-semibold 
+           rounded-xl 
+           transition-all duration-300 ease-out
            focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2
            disabled:opacity-50 disabled:cursor-not-allowed
            active:scale-[0.98];
-    min-height: 44px;
+    min-height: 44px; /* Touch target */
   }
 
   .btn-primary {
-    @apply btn text-white;
-    background: linear-gradient(135deg, #1B4D9C 0%, #163d7d 50%, #123266 100%);
-    box-shadow: 0 4px 15px rgba(27, 77, 156, 0.3);
+    @apply text-white;
+    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 50%, #0e7490 100%);
+    box-shadow: 0 4px 15px rgba(6, 182, 212, 0.3);
   }
-
+  
   .btn-primary:hover {
-    box-shadow: 0 6px 25px rgba(27, 77, 156, 0.45);
+    box-shadow: 0 6px 25px rgba(6, 182, 212, 0.5);
     transform: translateY(-1px);
-    background: linear-gradient(135deg, #2158ad 0%, #1B4D9C 50%, #163d7d 100%);
   }
-
+  
   .btn-secondary {
-    @apply btn
-           bg-slate-800 text-slate-200 border border-slate-600
-           hover:bg-slate-700 hover:border-slate-500
+    @apply bg-white text-slate-700 border border-slate-200
+           hover:bg-slate-50 hover:border-slate-300
            focus-visible:ring-slate-400
            shadow-sm;
   }
-
+  
   .btn-success {
-    @apply btn text-white;
+    @apply text-white;
     background: linear-gradient(135deg, #10b981 0%, #059669 100%);
     box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
   }
-
+  
   .btn-success:hover {
     box-shadow: 0 6px 25px rgba(16, 185, 129, 0.5);
     transform: translateY(-1px);
   }
 
   .btn-danger {
-    @apply btn text-white;
-    background: linear-gradient(135deg, #C8352B 0%, #b91c1c 100%);
-    box-shadow: 0 4px 15px rgba(200, 53, 43, 0.3);
+    @apply text-white;
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
   }
-
+  
   .btn-danger:hover {
-    box-shadow: 0 6px 25px rgba(200, 53, 43, 0.5);
+    box-shadow: 0 6px 25px rgba(239, 68, 68, 0.5);
     transform: translateY(-1px);
   }
 
   .btn-warning {
-    @apply btn text-white;
+    @apply text-white;
     background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
     box-shadow: 0 4px 15px rgba(245, 158, 11, 0.3);
   }
-
+  
   .btn-warning:hover {
     box-shadow: 0 6px 25px rgba(245, 158, 11, 0.5);
     transform: translateY(-1px);
   }
 
   .btn-ghost {
-    @apply btn
-           bg-transparent text-slate-300
-           hover:bg-slate-700 hover:text-white
+    @apply bg-transparent text-slate-600
+           hover:bg-slate-100 hover:text-slate-900
            focus-visible:ring-slate-400;
   }
 
   .btn-outline {
-    @apply btn
-           bg-transparent text-werco-navy-300
-           border-2 border-werco-navy-500
-           hover:bg-werco-navy-600 hover:text-white
-           focus-visible:ring-werco-navy-600;
+    @apply bg-transparent text-cyan-600 
+           border-2 border-cyan-500
+           hover:bg-cyan-50
+           focus-visible:ring-cyan-500;
   }
 
   /* Button sizes */
@@ -224,87 +225,93 @@
   }
 
   /* ------------------------------------
-     CARDS - Clean Elevated Style
+     CARDS - Glassmorphism Style
      ------------------------------------ */
 
-  .card {
-    @apply rounded-2xl p-6
-           border border-slate-700/50
-           transition-all duration-200;
-    background: #151b28;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2), 0 1px 2px rgba(0, 0, 0, 0.1);
+  .card,
+  .card-hover,
+  .card-compact,
+  .card-flush,
+  .card-accent,
+  .stat-card {
+    @apply bg-white/90 backdrop-blur-sm rounded-2xl p-6
+           border border-white/50
+           transition-all duration-300;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(0, 0, 0, 0.02);
   }
 
   .card-hover {
-    @apply card cursor-pointer;
+    @apply cursor-pointer;
   }
-
+  
   .card-hover:hover {
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(27, 77, 156, 0.15);
+    @apply bg-white;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(6, 182, 212, 0.1);
     transform: translateY(-2px);
   }
 
   .card-compact {
-    @apply card p-4;
+    @apply p-4;
   }
 
   .card-flush {
-    @apply card p-0;
+    @apply p-0;
   }
-
+  
   .card-accent {
-    @apply card relative overflow-hidden;
+    @apply relative overflow-hidden;
   }
-
+  
   .card-accent::before {
     content: '';
     @apply absolute top-0 left-0 right-0 h-1;
-    background: linear-gradient(90deg, #1B4D9C 0%, #3366FF 50%, #1B4D9C 100%);
+    background: linear-gradient(90deg, #f43f5e 0%, #e11d48 50%, #be123c 100%);
   }
 
   .card-header {
-    @apply flex items-center justify-between pb-4 mb-4 border-b border-slate-700/50;
+    @apply flex items-center justify-between pb-4 mb-4 border-b border-slate-100;
   }
 
   .card-title {
-    @apply text-lg font-semibold text-slate-100;
+    @apply text-lg font-semibold text-slate-800;
   }
 
   .card-subtitle {
-    @apply text-sm text-slate-400 mt-0.5;
+    @apply text-sm text-slate-500 mt-0.5;
   }
 
   /* ------------------------------------
-     FORMS - Clean Professional Style
+     FORMS - Modern Glow Style
      ------------------------------------ */
 
   .label {
-    @apply block text-sm font-medium text-slate-300 mb-1.5;
+    @apply block text-sm font-medium text-slate-700 mb-1.5;
   }
 
-  .input {
+  .input,
+  .input-error {
     @apply w-full px-4 py-2.5
-           border-2 border-slate-600
+           bg-white
+           border-2 border-slate-200 
            rounded-xl
-           text-slate-200 text-base
-           placeholder:text-slate-500
+           text-slate-800 text-base
+           placeholder:text-slate-400
            transition-all duration-200
-           focus:border-werco-navy-600 focus:outline-none
-           disabled:bg-slate-800 disabled:cursor-not-allowed;
-    background: rgba(30, 41, 59, 0.6);
+           focus:border-cyan-500 focus:outline-none
+           disabled:bg-slate-100 disabled:cursor-not-allowed;
     min-height: 44px;
   }
-
+  
   .input:focus {
-    box-shadow: 0 0 0 3px rgba(27, 77, 156, 0.2), 0 0 20px rgba(27, 77, 156, 0.1);
+    box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.15), 0 0 20px rgba(6, 182, 212, 0.1);
   }
 
   .input-error {
-    @apply input border-red-500 focus:border-red-400;
+    @apply border-red-400 focus:border-red-500;
   }
-
+  
   .input-error:focus {
-    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2), 0 0 20px rgba(239, 68, 68, 0.1);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15), 0 0 20px rgba(239, 68, 68, 0.1);
   }
 
   .input-group {
@@ -316,12 +323,12 @@
   }
 
   .input-group-text {
-    @apply flex items-center px-4 bg-slate-800 border-2 border-slate-600 text-slate-400 text-sm;
+    @apply flex items-center px-4 bg-slate-50 border-2 border-slate-200 text-slate-600 text-sm;
   }
 
   select.input {
     @apply pr-10 bg-no-repeat cursor-pointer;
-    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2394a3b8' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
     background-position: right 0.75rem center;
     background-size: 1.25rem 1.25rem;
   }
@@ -331,25 +338,24 @@
   }
 
   .checkbox {
-    @apply h-5 w-5 rounded-md border-slate-600 text-werco-navy-600 bg-slate-800
-           focus:ring-werco-navy-600 focus:ring-offset-0
+    @apply h-5 w-5 rounded-md border-slate-300 text-cyan-600 
+           focus:ring-cyan-500 focus:ring-offset-0
            cursor-pointer transition-colors;
   }
 
   .radio {
-    @apply h-5 w-5 border-slate-600 text-werco-navy-600 bg-slate-800
-           focus:ring-werco-navy-600 focus:ring-offset-0
+    @apply h-5 w-5 border-slate-300 text-cyan-600 
+           focus:ring-cyan-500 focus:ring-offset-0
            cursor-pointer transition-colors;
   }
 
   /* ------------------------------------
-     TABLES - Professional Style
+     TABLES - Modern Style
      ------------------------------------ */
 
   .table-container {
-    @apply overflow-x-auto rounded-2xl border border-slate-700/50;
-    background: #151b28;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    @apply overflow-x-auto rounded-2xl bg-white/90 backdrop-blur-sm;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
   }
 
   .table {
@@ -357,23 +363,23 @@
   }
 
   .table thead {
-    @apply bg-gradient-to-r from-slate-800/80 to-slate-800/60 border-b border-slate-700/50;
+    @apply bg-gradient-to-r from-slate-50 to-slate-100/80 border-b border-slate-200/50;
   }
 
   .table th {
-    @apply px-4 py-3.5 text-xs font-semibold text-slate-400 uppercase tracking-wider;
+    @apply px-4 py-3.5 text-xs font-semibold text-slate-600 uppercase tracking-wider;
   }
 
   .table td {
-    @apply px-4 py-4 text-sm text-slate-300 border-b border-slate-700/30;
+    @apply px-4 py-4 text-sm text-slate-700 border-b border-slate-100/80;
   }
 
   .table tbody tr {
-    @apply transition-all duration-150;
+    @apply transition-all duration-200;
   }
-
+  
   .table tbody tr:hover {
-    @apply bg-white/[0.03];
+    @apply bg-cyan-50/30;
   }
 
   .table tbody tr:last-child td {
@@ -390,70 +396,81 @@
   }
 
   /* ------------------------------------
-     BADGES / STATUS PILLS
+     BADGES / STATUS PILLS - Modern Style
      ------------------------------------ */
 
-  .badge {
-    @apply inline-flex items-center px-2.5 py-1
+  .badge,
+  .badge-primary,
+  .badge-success,
+  .badge-warning,
+  .badge-danger,
+  .badge-info,
+  .badge-neutral {
+    @apply inline-flex items-center px-2.5 py-1 
            rounded-lg text-xs font-semibold
            uppercase tracking-wide;
   }
 
   .badge-primary {
-    @apply badge bg-blue-500/20 text-blue-300;
+    @apply bg-cyan-100 text-cyan-700;
   }
 
   .badge-success {
-    @apply badge bg-emerald-500/20 text-emerald-300;
+    @apply bg-emerald-100 text-emerald-700;
   }
 
   .badge-warning {
-    @apply badge bg-amber-500/20 text-amber-300;
+    @apply bg-amber-100 text-amber-700;
   }
 
   .badge-danger {
-    @apply badge bg-red-500/20 text-red-300;
+    @apply bg-red-100 text-red-700;
   }
 
   .badge-info {
-    @apply badge bg-blue-500/20 text-blue-300;
+    @apply bg-blue-100 text-blue-700;
   }
 
   .badge-neutral {
-    @apply badge bg-slate-500/20 text-slate-300;
+    @apply bg-slate-100 text-slate-600;
   }
 
   /* Status dot indicator with glow */
-  .status-dot {
+  .status-dot,
+  .status-dot-success,
+  .status-dot-warning,
+  .status-dot-danger,
+  .status-dot-info {
     @apply inline-block w-2.5 h-2.5 rounded-full;
   }
 
   .status-dot-success {
-    @apply status-dot bg-emerald-500;
+    @apply bg-emerald-500;
     box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
   }
 
   .status-dot-warning {
-    @apply status-dot bg-amber-500;
+    @apply bg-amber-500;
     box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
   }
 
   .status-dot-danger {
-    @apply status-dot bg-red-500;
+    @apply bg-red-500;
     box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
   }
 
   .status-dot-info {
-    @apply status-dot bg-blue-500;
-    box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+    @apply bg-cyan-500;
+    box-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
   }
 
   /* ------------------------------------
-     NAVIGATION - Werco Dark Navy Style
+     NAVIGATION - Premium Dark Style
      ------------------------------------ */
 
-  .nav-link {
-    @apply flex items-center gap-3 px-4 py-3
+  .nav-link,
+  .nav-link-active {
+    @apply flex items-center gap-3 px-4 py-3 
            text-sm font-medium rounded-xl
            transition-all duration-200
            hover:bg-white/10;
@@ -461,37 +478,41 @@
   }
 
   .nav-link-active {
-    @apply nav-link text-white;
-    background: linear-gradient(135deg, rgba(51, 102, 255, 0.2) 0%, rgba(27, 77, 156, 0.25) 100%);
-    box-shadow: 0 0 20px rgba(51, 102, 255, 0.1);
+    @apply text-white;
+    background: linear-gradient(135deg, rgba(244, 63, 94, 0.2) 0%, rgba(225, 29, 72, 0.2) 100%);
+    box-shadow: 0 0 20px rgba(244, 63, 94, 0.15);
   }
 
   /* ------------------------------------
-     ALERTS
+     ALERTS - Modern Rounded Style
      ------------------------------------ */
 
-  .alert {
+  .alert,
+  .alert-success,
+  .alert-warning,
+  .alert-danger,
+  .alert-info {
     @apply flex items-start gap-3 p-4 rounded-2xl border;
   }
 
   .alert-success {
-    @apply alert bg-emerald-500/10 border-emerald-500/30 text-emerald-300;
+    @apply bg-emerald-50 border-emerald-200 text-emerald-800;
   }
 
   .alert-warning {
-    @apply alert bg-amber-500/10 border-amber-500/30 text-amber-300;
+    @apply bg-amber-50 border-amber-200 text-amber-800;
   }
 
   .alert-danger {
-    @apply alert bg-red-500/10 border-red-500/30 text-red-300;
+    @apply bg-red-50 border-red-200 text-red-800;
   }
 
   .alert-info {
-    @apply alert bg-blue-500/10 border-blue-500/30 text-blue-300;
+    @apply bg-cyan-50 border-cyan-200 text-cyan-800;
   }
 
   /* ------------------------------------
-     MODALS - Clean Elevated Style
+     MODALS - Glassmorphism Style
      ------------------------------------ */
 
   .modal-overlay {
@@ -499,24 +520,25 @@
            flex items-center justify-center p-4;
   }
 
-  .modal {
-    @apply rounded-3xl shadow-2xl max-w-lg w-full
-           max-h-[90vh] overflow-hidden
-           animate-scale-in;
-    background: #1a1f2e;
-    border: 1px solid rgba(51, 65, 85, 0.5);
+  .modal,
+  .modal-lg,
+  .modal-xl {
+    @apply bg-white/95 backdrop-blur-xl rounded-3xl shadow-2xl max-w-lg w-full
+           max-h-[90vh] overflow-hidden;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    animation: scaleIn 0.2s ease-out forwards;
   }
 
   .modal-lg {
-    @apply modal max-w-2xl;
+    @apply max-w-2xl;
   }
 
   .modal-xl {
-    @apply modal max-w-4xl;
+    @apply max-w-4xl;
   }
 
   .modal-header {
-    @apply flex items-center justify-between px-6 py-4 border-b border-slate-700/50;
+    @apply flex items-center justify-between px-6 py-4 border-b border-slate-100;
   }
 
   .modal-body {
@@ -524,17 +546,17 @@
   }
 
   .modal-footer {
-    @apply flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-700/50 bg-slate-800/50;
+    @apply flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 bg-slate-50/50;
   }
 
   /* ------------------------------------
-     STATS / KPI CARDS
+     STATS / KPI CARDS - Enhanced Style
      ------------------------------------ */
 
   .stat-card {
-    @apply card flex items-center gap-4;
+    @apply flex items-center gap-4;
   }
-
+  
   .stat-card:hover {
     transform: translateY(-2px);
   }
@@ -544,27 +566,30 @@
   }
 
   .stat-value {
-    @apply text-2xl font-bold text-white tabular-nums;
+    @apply text-2xl font-bold text-slate-800;
+    font-variant-numeric: tabular-nums;
   }
 
   .stat-label {
-    @apply text-sm text-slate-400;
+    @apply text-sm text-slate-500;
   }
 
-  .stat-trend {
+  .stat-trend,
+  .stat-trend-up,
+  .stat-trend-down {
     @apply flex items-center gap-1 text-sm font-medium mt-1;
   }
 
   .stat-trend-up {
-    @apply stat-trend text-emerald-400;
+    @apply text-emerald-600;
   }
 
   .stat-trend-down {
-    @apply stat-trend text-red-400;
+    @apply text-red-600;
   }
 
   /* ------------------------------------
-     PAGE HEADERS
+     PAGE HEADERS - Modern Style
      ------------------------------------ */
 
   .page-header {
@@ -572,11 +597,11 @@
   }
 
   .page-title {
-    @apply text-2xl font-bold text-white tracking-tight;
+    @apply text-2xl font-bold text-slate-800 tracking-tight;
   }
 
   .page-subtitle {
-    @apply text-slate-400 mt-1;
+    @apply text-slate-500 mt-1;
   }
 
   .page-actions {
@@ -584,38 +609,41 @@
   }
 
   /* ------------------------------------
-     LOADING STATES
+     LOADING STATES - Enhanced
      ------------------------------------ */
 
-  .skeleton {
-    @apply bg-gradient-to-r from-slate-700 via-slate-600 to-slate-700 rounded-xl animate-pulse;
+  .skeleton,
+  .skeleton-text,
+  .skeleton-title,
+  .skeleton-avatar {
+    @apply bg-gradient-to-r from-slate-200 via-slate-100 to-slate-200 rounded-xl animate-pulse;
     background-size: 200% 100%;
     animation: shimmer 1.5s ease-in-out infinite;
   }
 
   .skeleton-text {
-    @apply skeleton h-4 w-full;
+    @apply h-4 w-full;
   }
 
   .skeleton-title {
-    @apply skeleton h-6 w-3/4;
+    @apply h-6 w-3/4;
   }
 
   .skeleton-avatar {
-    @apply skeleton rounded-full;
+    @apply rounded-full;
   }
 
   .spinner {
-    @apply animate-spin rounded-full border-2 border-slate-600;
-    border-top-color: #3366FF;
+    @apply animate-spin rounded-full border-2 border-slate-200;
+    border-top-color: #f43f5e;
   }
 
   /* ------------------------------------
-     TOOLTIPS
+     TOOLTIPS - Modern Style
      ------------------------------------ */
 
   .tooltip {
-    @apply absolute z-50 px-3 py-2 text-xs font-medium
+    @apply absolute z-50 px-3 py-2 text-xs font-medium 
            bg-slate-900 text-white rounded-xl shadow-lg
            pointer-events-none opacity-0 transition-opacity
            group-hover:opacity-100;
@@ -626,24 +654,24 @@
      ------------------------------------ */
 
   .divider {
-    @apply border-t border-slate-700 my-4;
+    @apply border-t border-slate-200 my-4;
   }
 
   .divider-vertical {
-    @apply border-l border-slate-700 h-full mx-4;
+    @apply border-l border-slate-200 h-full mx-4;
   }
 
   /* ------------------------------------
-     PROGRESS BARS - Werco Branded
+     PROGRESS BARS - Gradient Style
      ------------------------------------ */
 
   .progress {
-    @apply h-2 bg-slate-700 rounded-full overflow-hidden;
+    @apply h-2 bg-slate-200 rounded-full overflow-hidden;
   }
 
   .progress-bar {
     @apply h-full rounded-full transition-all duration-500;
-    background: linear-gradient(90deg, #1B4D9C 0%, #3366FF 100%);
+    background: linear-gradient(90deg, #f43f5e 0%, #e11d48 100%);
   }
 
   .progress-success .progress-bar {
@@ -655,7 +683,7 @@
   }
 
   .progress-danger .progress-bar {
-    background: linear-gradient(90deg, #C8352B 0%, #b91c1c 100%);
+    background: linear-gradient(90deg, #ef4444 0%, #dc2626 100%);
   }
 
   /* ------------------------------------
@@ -664,12 +692,11 @@
 
   /* Mobile data card */
   .mobile-card {
-    @apply rounded-xl border border-slate-700/50 overflow-hidden;
-    background: #151b28;
+    @apply bg-white rounded-xl border border-slate-200 overflow-hidden;
   }
 
   .mobile-card-header {
-    @apply px-4 py-3 border-b border-slate-700/50 flex items-start justify-between gap-3;
+    @apply px-4 py-3 border-b border-slate-100 flex items-start justify-between gap-3;
   }
 
   .mobile-card-body {
@@ -677,14 +704,13 @@
   }
 
   .mobile-card-footer {
-    @apply px-4 py-3 bg-slate-800/50 border-t border-slate-700/50;
+    @apply px-4 py-3 bg-slate-50 border-t border-slate-100;
   }
 
   /* Mobile list item */
   .mobile-list-item {
-    @apply flex items-center gap-4 px-4 py-4 border-b border-slate-700/30
-           active:bg-slate-700/50 transition-colors;
-    background: #151b28;
+    @apply flex items-center gap-4 px-4 py-4 bg-white border-b border-slate-100
+           active:bg-slate-50 transition-colors;
     min-height: 72px;
   }
 
@@ -694,19 +720,19 @@
 
   /* Bottom navigation */
   .bottom-nav {
-    @apply fixed bottom-0 left-0 right-0 z-40
-           border-t border-slate-700/50
-           pb-safe;
-    background: #0f1419;
+    @apply fixed bottom-0 left-0 right-0 z-40 
+           bg-white border-t border-slate-200;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
-  .bottom-nav-item {
+  .bottom-nav-item,
+  .bottom-nav-item-active {
     @apply flex flex-col items-center justify-center flex-1 h-16
            text-slate-500 transition-colors;
   }
 
   .bottom-nav-item-active {
-    @apply bottom-nav-item text-blue-400;
+    @apply text-cyan-600;
   }
 
   /* Swipe actions container */
@@ -733,7 +759,7 @@
            w-14 h-14 rounded-full shadow-lg
            text-white transition-all duration-200
            active:scale-95;
-    background: linear-gradient(135deg, #1B4D9C 0%, #163d7d 100%);
+    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
     bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
     right: 1rem;
   }
@@ -755,12 +781,11 @@
   }
 
   .table-mobile tbody tr {
-    @apply block mb-4 rounded-xl border border-slate-700/50 overflow-hidden;
-    background: #151b28;
+    @apply block mb-4 bg-white rounded-xl border border-slate-200 overflow-hidden;
   }
 
   .table-mobile tbody td {
-    @apply block px-4 py-2 border-b border-slate-700/30 last:border-b-0;
+    @apply block px-4 py-2 border-b border-slate-100 last:border-b-0;
   }
 
   .table-mobile tbody td::before {
@@ -802,36 +827,31 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Gradient text - Werco brand */
+  /* Gradient text - Cyan accent */
   .text-gradient {
-    @apply bg-gradient-to-r from-werco-navy-600 to-werco-500 bg-clip-text text-transparent;
+    @apply bg-gradient-to-r from-cyan-600 to-cyan-500 bg-clip-text text-transparent;
   }
 
-  /* Glass effect */
+  /* Glass effect - Enhanced */
   .glass {
-    @apply bg-slate-900/80 backdrop-blur-xl;
-    border: 1px solid rgba(51, 65, 85, 0.5);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    @apply bg-white/80 backdrop-blur-xl;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
   }
-
+  
   /* Glass card dark */
   .glass-dark {
-    @apply bg-slate-900/90 backdrop-blur-xl text-white;
+    @apply bg-slate-900/80 backdrop-blur-xl text-white;
     border: 1px solid rgba(255, 255, 255, 0.1);
   }
 
-  /* Glow effects - Werco branded */
-  .glow-blue {
-    box-shadow: 0 0 20px rgba(27, 77, 156, 0.3), 0 0 40px rgba(27, 77, 156, 0.1);
-  }
-
-  .glow-red {
-    box-shadow: 0 0 20px rgba(200, 53, 43, 0.3), 0 0 40px rgba(200, 53, 43, 0.1);
-  }
-
-  /* Legacy alias */
+  /* Glow effects */
   .glow-rose {
-    box-shadow: 0 0 20px rgba(27, 77, 156, 0.3), 0 0 40px rgba(27, 77, 156, 0.1);
+    box-shadow: 0 0 20px rgba(244, 63, 94, 0.3), 0 0 40px rgba(244, 63, 94, 0.1);
+  }
+  
+  .glow-red {
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.3), 0 0 40px rgba(239, 68, 68, 0.1);
   }
 
   /* Truncate multi-line */
@@ -859,19 +879,19 @@
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
-
+  
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
   }
-
-  /* Input focus glow - Werco branded */
+  
+  /* Input focus glow */
   .input-glow:focus {
-    box-shadow: 0 0 0 3px rgba(27, 77, 156, 0.15), 0 0 20px rgba(27, 77, 156, 0.08);
+    box-shadow: 0 0 0 3px rgba(244, 63, 94, 0.2), 0 0 20px rgba(244, 63, 94, 0.1);
   }
-
-  /* Animated gradient background - Werco navy */
+  
+  /* Animated gradient background */
   .bg-gradient-animated {
-    background: linear-gradient(-45deg, #0a1628, #1B4D9C, #0a1628, #123266);
+    background: linear-gradient(-45deg, #0f172a, #1e3a5f, #0f172a, #164e63);
     background-size: 400% 400%;
     animation: gradientShift 15s ease infinite;
   }
@@ -896,22 +916,22 @@
 }
 
 @keyframes slideDown {
-  from {
+  from { 
     opacity: 0;
     transform: translateY(-10px);
   }
-  to {
+  to { 
     opacity: 1;
     transform: translateY(0);
   }
 }
 
 @keyframes scaleIn {
-  from {
+  from { 
     opacity: 0;
     transform: scale(0.95);
   }
-  to {
+  to { 
     opacity: 1;
     transform: scale(1);
   }
@@ -943,6 +963,6 @@
   }
 
   .card {
-    @apply shadow-none border border-slate-300 bg-white text-black;
+    @apply shadow-none border border-slate-300;
   }
 }

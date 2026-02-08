@@ -6,20 +6,26 @@ from sqlalchemy import or_
 import os
 import uuid
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role, get_current_company_id
+from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.document import Document, DocumentType
 from pydantic import BaseModel
 
 router = APIRouter()
 
-# Create uploads directory (use env var for non-Docker environments)
-UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/app/uploads")
-try:
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-except OSError:
-    UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "uploads")
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
+def _resolve_upload_dir() -> str:
+    preferred_dir = os.getenv("UPLOAD_DIR", "/app/uploads")
+    try:
+        os.makedirs(preferred_dir, exist_ok=True)
+        return preferred_dir
+    except OSError:
+        # Fall back to a local writable directory for tests/dev environments.
+        fallback_dir = os.path.abspath(os.getenv("UPLOAD_DIR_FALLBACK", "./uploads"))
+        os.makedirs(fallback_dir, exist_ok=True)
+        return fallback_dir
+
+
+UPLOAD_DIR = _resolve_upload_dir()
 
 
 class DocumentResponse(BaseModel):
@@ -68,10 +74,9 @@ def list_documents(
     document_type: Optional[str] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    current_user: User = Depends(get_current_user)
 ):
-    query = db.query(Document).filter(Document.company_id == company_id)
+    query = db.query(Document)
     
     if part_id:
         query = query.filter(Document.part_id == part_id)
@@ -105,56 +110,16 @@ async def upload_document(
     vendor_id: int = Form(None),
     revision: str = Form("A"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    current_user: User = Depends(get_current_user)
 ):
     """Upload a new document"""
-    # Allowed file extensions and MIME types
-    ALLOWED_EXTENSIONS = {
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv",
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff",
-        ".txt", ".rtf", ".dwg", ".dxf", ".step", ".stp", ".igs", ".iges",
-    }
-    ALLOWED_MIME_TYPES = {
-        "application/pdf", "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "text/csv", "text/plain", "application/rtf",
-        "image/png", "image/jpeg", "image/gif", "image/bmp", "image/tiff",
-        "application/octet-stream",  # Common for CAD files
-    }
-    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
-
-    # Validate file extension
-    file_ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
-    if file_ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File type '{file_ext}' is not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
-        )
-
-    # Validate MIME type
-    if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"MIME type '{file.content_type}' is not allowed."
-        )
-
-    # Read and validate file size
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File size ({len(content)} bytes) exceeds maximum allowed ({MAX_FILE_SIZE} bytes)."
-        )
-    if len(content) == 0:
-        raise HTTPException(status_code=400, detail="Empty files are not allowed.")
-
-    # Generate unique filename and save
+    # Generate unique filename
+    file_ext = os.path.splitext(file.filename)[1] if file.filename else ""
     unique_name = f"{uuid.uuid4()}{file_ext}"
     file_path = os.path.join(UPLOAD_DIR, unique_name)
-
+    
+    # Save file
+    content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
     
@@ -178,7 +143,6 @@ async def upload_document(
         created_by=current_user.id
     )
     
-    document.company_id = company_id
     db.add(document)
     db.commit()
     db.refresh(document)
@@ -190,10 +154,9 @@ async def upload_document(
 def get_document(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    current_user: User = Depends(get_current_user)
 ):
-    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
+    document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
@@ -203,12 +166,11 @@ def get_document(
 def download_document(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    current_user: User = Depends(get_current_user)
 ):
     from fastapi.responses import FileResponse
     
-    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
+    document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
@@ -226,10 +188,9 @@ def download_document(
 def delete_document(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
 ):
-    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
+    document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
