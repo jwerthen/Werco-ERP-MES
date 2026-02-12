@@ -63,3 +63,25 @@ def test_rfq_package_generate_estimate_flow(client, auth_headers, tmp_path):
     )
     assert export_response.status_code == 200
     assert export_response.headers["content-type"].startswith("application/json")
+
+
+def test_rfq_generate_estimate_requires_geometry(client, auth_headers):
+    bom_bytes = _make_bom_bytes()
+    create_response = client.post(
+        "/api/v1/rfq-packages/",
+        headers=auth_headers,
+        data={"customer_name": "No Geometry Test", "rfq_reference": "RFQ-NOGEO-1"},
+        files=[
+            ("files", ("demo_bom.xlsx", bom_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+        ],
+    )
+    assert create_response.status_code == 200, create_response.text
+    package_id = create_response.json()["id"]
+
+    estimate_response = client.post(
+        f"/api/v1/rfq-packages/{package_id}/generate-estimate",
+        headers=auth_headers,
+        json={"target_margin_pct": 20, "valid_days": 30},
+    )
+    assert estimate_response.status_code == 400
+    assert "geometry" in estimate_response.json()["detail"].lower()

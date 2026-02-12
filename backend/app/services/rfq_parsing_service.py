@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -114,6 +113,37 @@ def _extract_pdf_part_hint(text: str) -> Optional[str]:
     return None
 
 
+def _parse_int(value: Any) -> Optional[int]:
+    float_value = _safe_float(value)
+    if float_value is None:
+        return None
+    try:
+        return int(round(float_value))
+    except Exception:
+        return None
+
+
+def _find_dimension_pair(text: str) -> Optional[Tuple[float, float]]:
+    if not text:
+        return None
+    # Common forms: 12 x 8, 12.5 X 8.2 in, 320 x 220 mm.
+    match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:in|mm|\"|inches)?\s*[xX]\s*(\d+(?:\.\d+)?)\s*(?:in|mm|\"|inches)?",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    first = _safe_float(match.group(1))
+    second = _safe_float(match.group(2))
+    if first is None or second is None:
+        return None
+    # If millimeters are explicit, convert to inches.
+    if "mm" in text.lower():
+        return first / 25.4, second / 25.4
+    return first, second
+
+
 def parse_bom_xlsx(file_path: str, file_name: str) -> Dict[str, Any]:
     from openpyxl import load_workbook
 
@@ -130,38 +160,79 @@ def parse_bom_xlsx(file_path: str, file_name: str) -> Dict[str, Any]:
         header_map: Dict[str, int] = {}
         for idx, row in enumerate(rows[:30]):
             normalized = [str(cell).strip().lower() if cell is not None else "" for cell in row]
-            has_qty = any(token in ("qty", "quantity") for token in normalized)
-            has_part = any("part" in token or token in ("pn", "p/n") for token in normalized)
+            clean_tokens = [_clean_key(token) for token in normalized if token]
+            has_qty = any("qty" in token or "quantity" in token for token in clean_tokens)
+            has_part = any("part" in token or token in ("pn", "pn", "item", "itemno") for token in clean_tokens)
             if has_qty and has_part:
                 header_row_index = idx
                 for col_idx, token in enumerate(normalized):
                     if token:
-                        header_map[token] = col_idx
+                        header_map[_clean_key(token)] = col_idx
                 break
 
         if header_row_index is None:
             continue
 
         def _get_value(data_row: Tuple[Any, ...], *candidates: str) -> Any:
-            for candidate in candidates:
-                for key, col_idx in header_map.items():
-                    if candidate in key and col_idx < len(data_row):
-                        return data_row[col_idx]
+            candidate_keys = [_clean_key(candidate) for candidate in candidates]
+            for key, col_idx in header_map.items():
+                if col_idx >= len(data_row):
+                    continue
+                if any(candidate_key in key for candidate_key in candidate_keys):
+                    return data_row[col_idx]
+            # Fallback: direct token startswith for noisy headers like "qty ea".
+            for key, col_idx in header_map.items():
+                if col_idx >= len(data_row):
+                    continue
+                if any(key.startswith(candidate_key) for candidate_key in candidate_keys):
+                    return data_row[col_idx]
             return None
 
+        def _get_notes_blob(data_row: Tuple[Any, ...]) -> str:
+            notes_cells: List[str] = []
+            for key, col_idx in header_map.items():
+                if col_idx >= len(data_row):
+                    continue
+                if any(token in key for token in ("note", "remark", "comment", "description", "desc")):
+                    value = data_row[col_idx]
+                    if value is not None and str(value).strip():
+                        notes_cells.append(str(value).strip())
+            return " ".join(notes_cells)
+
         for row_idx, row in enumerate(rows[header_row_index + 1 :], start=header_row_index + 2):
-            part_number = _get_value(row, "part number", "part", "pn", "p/n")
-            description = _get_value(row, "description", "desc", "name")
-            qty = _safe_float(_get_value(row, "qty", "quantity")) or 0
+            part_number = _get_value(row, "part number", "part no", "part", "pn", "p/n", "item", "item no")
+            description = _get_value(row, "description", "desc", "name", "part description")
+            qty = _safe_float(_get_value(row, "qty", "quantity", "order qty", "required qty")) or 0
             if not part_number and not description:
                 continue
             if qty <= 0:
                 qty = 1
 
-            material = _get_value(row, "material")
-            thickness = _get_value(row, "thickness", "gauge")
-            finish = _get_value(row, "finish", "coating")
-            item_type = str(_get_value(row, "type", "item type") or "").lower()
+            material = _get_value(row, "material", "matl", "alloy")
+            thickness = _get_value(row, "thickness", "gauge", "ga")
+            finish = _get_value(row, "finish", "coating", "paint", "plating")
+            item_type = str(_get_value(row, "type", "item type", "category") or "").lower()
+            notes_blob = _get_notes_blob(row)
+
+            flat_area = _safe_float(_get_value(row, "flat area", "area in2", "area"))
+            cut_length = _safe_float(_get_value(row, "cut length", "perimeter", "total cut"))
+            hole_count = _parse_int(_get_value(row, "hole count", "holes"))
+            bend_count = _parse_int(_get_value(row, "bend count", "bends"))
+            length = _safe_float(_get_value(row, "flat length", "length"))
+            width = _safe_float(_get_value(row, "flat width", "width"))
+            if flat_area is None and length and width:
+                flat_area = length * width
+            if cut_length is None and length and width:
+                cut_length = 2.0 * (length + width)
+
+            if (flat_area is None or cut_length is None) and notes_blob:
+                dim_pair = _find_dimension_pair(notes_blob)
+                if dim_pair:
+                    dim_l, dim_w = dim_pair
+                    if flat_area is None:
+                        flat_area = dim_l * dim_w
+                    if cut_length is None:
+                        cut_length = 2.0 * (dim_l + dim_w)
 
             source_ref = f"{file_name}!{sheet.title}:row{row_idx}"
             row_data = {
@@ -171,14 +242,23 @@ def parse_bom_xlsx(file_path: str, file_name: str) -> Dict[str, Any]:
                 "material": str(material).strip() if material else None,
                 "thickness": str(thickness).strip() if thickness else None,
                 "finish": str(finish).strip() if finish else None,
-                "notes": str(description).strip() if description else "",
+                "flat_area": flat_area,
+                "cut_length": cut_length,
+                "hole_count": hole_count,
+                "bend_count": bend_count,
+                "notes": (str(description).strip() if description else "") + (f" | {notes_blob}" if notes_blob else ""),
                 "source": source_ref,
             }
 
             combined = " ".join(
-                [str(part_number or ""), str(description or ""), item_type]
+                [str(part_number or ""), str(description or ""), item_type, notes_blob]
             ).lower()
-            is_hardware = "hardware" in item_type or any(keyword in combined for keyword in HARDWARE_HINTS)
+            part_number_value = str(part_number or "").upper()
+            is_hardware = (
+                "hardware" in item_type
+                or part_number_value.startswith(("HW", "BOLT", "NUT", "SCREW", "RVT", "PEM"))
+                or any(keyword in combined for keyword in HARDWARE_HINTS)
+            )
             if is_hardware:
                 hardware_rows.append(row_data)
             else:
@@ -197,6 +277,15 @@ def parse_pdf_drawing(file_path: str, file_name: str) -> Dict[str, Any]:
     weld_required = bool(re.search(r"(?:\bweld\b|fillet|gmaw|mig|tig)", text, re.IGNORECASE))
     assembly_required = bool(re.search(r"(?:assembly|assy)", text, re.IGNORECASE))
     part_hint = _extract_pdf_part_hint(text) or Path(file_name).stem
+    dim_pair = _find_dimension_pair(text)
+    inferred_flat_area = None
+    inferred_cut_length = None
+    geometry_confidence = 0.0
+    if dim_pair:
+        dim_l, dim_w = dim_pair
+        inferred_flat_area = dim_l * dim_w
+        inferred_cut_length = 2.0 * (dim_l + dim_w)
+        geometry_confidence = 0.45
 
     sources: Dict[str, List[str]] = {}
     if material:
@@ -205,12 +294,16 @@ def parse_pdf_drawing(file_path: str, file_name: str) -> Dict[str, Any]:
         sources["thickness"] = [f"{file_name}:text"]
     if finish:
         sources["finish"] = [f"{file_name}:text"]
+    if inferred_flat_area:
+        sources["geometry"] = [f"{file_name}:text-dimensions"]
 
     return {
         "part_hint": part_hint,
         "material": material,
         "thickness": thickness_raw,
         "thickness_in": thickness_in,
+        "flat_area": inferred_flat_area,
+        "cut_length": inferred_cut_length,
         "finish": finish,
         "weld_required": weld_required,
         "assembly_required": assembly_required,
@@ -219,6 +312,7 @@ def parse_pdf_drawing(file_path: str, file_name: str) -> Dict[str, Any]:
             "material": 0.80 if material else 0.0,
             "thickness": thickness_conf,
             "finish": 0.75 if finish else 0.0,
+            "geometry": geometry_confidence,
         },
         "sources": sources,
         "text_length": len(text),
@@ -445,15 +539,47 @@ def build_normalized_part_specs(
             part["finish"] = row["finish"]
             part["confidence"]["finish"] = max(part["confidence"]["finish"], 0.85)
             part["sources"].setdefault("finish", []).append(row["source"])
+        if row.get("flat_area") is not None:
+            part["flat_area"] = row["flat_area"]
+            part["confidence"]["geometry"] = max(part["confidence"]["geometry"], 0.65)
+            part["sources"].setdefault("geometry", []).append(row["source"])
+            assumptions.append(
+                {
+                    "part_id": part["part_id"],
+                    "field": "geometry",
+                    "assumption": "Geometry derived from BOM dimensions/columns.",
+                    "confidence": 0.65,
+                }
+            )
+        if row.get("cut_length") is not None:
+            part["cut_length"] = row["cut_length"]
+            part["confidence"]["geometry"] = max(part["confidence"]["geometry"], 0.65)
+            part["sources"].setdefault("geometry", []).append(row["source"])
+        if row.get("hole_count") is not None:
+            part["hole_count"] = row["hole_count"]
+            part["sources"].setdefault("geometry", []).append(row["source"])
+        if row.get("bend_count") is not None:
+            part["bend_count"] = row["bend_count"]
+            part["sources"].setdefault("geometry", []).append(row["source"])
 
     def attach_by_hint(payload: Dict[str, Any], field: str) -> Dict[str, Any]:
         hint = _clean_key(payload.get("part_hint") or "")
+        if len(parts) == 1:
+            return next(iter(parts.values()))
         if hint and hint in parts:
             return parts[hint]
         if hint:
             for part_key, part_value in parts.items():
                 if hint in part_key or part_key in hint:
                     return part_value
+            reduced_hint = hint
+            for token in ("flat", "pattern", "rev", "sheet", "part", "dxf", "step", "stp"):
+                reduced_hint = reduced_hint.replace(token, "")
+            reduced_hint = reduced_hint.strip()
+            if reduced_hint:
+                for part_key, part_value in parts.items():
+                    if reduced_hint in part_key or part_key in reduced_hint:
+                        return part_value
         key = hint or f"part-{len(parts)+1}"
         return ensure_part(key, payload.get("part_hint") or key)
 
@@ -472,6 +598,24 @@ def build_normalized_part_specs(
             part["finish"] = payload["finish"]
             part["confidence"]["finish"] = max(part["confidence"]["finish"], payload["confidence"]["finish"])
             part["sources"].setdefault("finish", []).extend(payload["sources"].get("finish", []))
+        if payload.get("flat_area") is not None and part.get("flat_area") is None:
+            part["flat_area"] = payload["flat_area"]
+            part["confidence"]["geometry"] = max(
+                part["confidence"]["geometry"],
+                payload.get("confidence", {}).get("geometry", 0.0),
+            )
+            part["sources"].setdefault("geometry", []).extend(payload["sources"].get("geometry", []))
+            assumptions.append(
+                {
+                    "part_id": part["part_id"],
+                    "field": "geometry",
+                    "assumption": "Geometry inferred from PDF dimension text.",
+                    "confidence": payload.get("confidence", {}).get("geometry", 0.0),
+                }
+            )
+        if payload.get("cut_length") is not None and part.get("cut_length") is None:
+            part["cut_length"] = payload["cut_length"]
+            part["sources"].setdefault("geometry", []).extend(payload["sources"].get("geometry", []))
         part["weld_required"] = part["weld_required"] or payload.get("weld_required", False)
         part["assembly_required"] = part["assembly_required"] or payload.get("assembly_required", False)
         part["tolerances_flag"] = part["tolerances_flag"] or payload.get("tolerances_flag", False)
@@ -569,6 +713,10 @@ def parse_rfq_package_files(files: List[RfqPackageFile]) -> Dict[str, Any]:
             elif ext == ".pdf":
                 pdf = parse_pdf_drawing(file_record.file_path, name)
                 pdf_specs.append(pdf)
+                if pdf.get("text_length", 0) < 120:
+                    warnings.append(
+                        f"{name}: low extracted text volume. If this is a scanned drawing, upload DXF or machine-readable PDF for better accuracy."
+                    )
                 file_results[file_record.id] = {
                     "parse_status": "parsed",
                     "summary": {"text_length": pdf["text_length"], "part_hint": pdf["part_hint"]},
@@ -576,6 +724,10 @@ def parse_rfq_package_files(files: List[RfqPackageFile]) -> Dict[str, Any]:
             elif ext == ".dxf":
                 dxf = parse_dxf_geometry(file_record.file_path, name)
                 dxf_specs.append(dxf)
+                if not dxf.get("flat_area") or not dxf.get("cut_length"):
+                    warnings.append(
+                        f"{name}: geometry extracted with limited confidence. Verify units and closed outer profile."
+                    )
                 file_results[file_record.id] = {
                     "parse_status": "parsed",
                     "summary": {"flat_area": dxf["flat_area"], "cut_length": dxf["cut_length"]},
@@ -609,3 +761,5 @@ def parse_rfq_package_files(files: List[RfqPackageFile]) -> Dict[str, Any]:
         "warnings": warnings,
         "file_results": file_results,
     }
+
+

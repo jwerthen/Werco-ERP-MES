@@ -17,6 +17,14 @@ interface RfqPackageResponse {
   status: string;
   warnings: string[];
   file_count: number;
+  files: Array<{
+    id?: number;
+    name: string;
+    extension?: string;
+    parse_status?: string;
+    parse_error?: string | null;
+    summary?: Record<string, any>;
+  }>;
   quote_id?: number;
 }
 
@@ -273,8 +281,55 @@ export default function RFQQuoting() {
         </div>
 
         {packageData && (
-          <div className="text-sm text-gray-600 border-t pt-3">
-            Package <span className="font-semibold text-gray-900">{packageData.rfq_number}</span> with {packageData.file_count} files is ready.
+          <div className="text-sm text-gray-600 border-t pt-3 space-y-2">
+            <p>
+              Package <span className="font-semibold text-gray-900">{packageData.rfq_number}</span> with {packageData.file_count} files is ready.
+            </p>
+            {packageData.warnings?.length > 0 && (
+              <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-amber-700">
+                {packageData.warnings.map((warning, idx) => (
+                  <p key={`warning-${idx}`}>- {warning}</p>
+                ))}
+              </div>
+            )}
+            {packageData.files?.length > 0 && (
+              <div className="rounded-md border border-gray-200 overflow-x-auto">
+                <table className="min-w-full text-xs">
+                  <thead className="bg-gray-50 text-gray-600">
+                    <tr>
+                      <th className="text-left px-3 py-2">File</th>
+                      <th className="text-left px-3 py-2">Type</th>
+                      <th className="text-left px-3 py-2">Parse Status</th>
+                      <th className="text-left px-3 py-2">Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {packageData.files.map((file, idx) => (
+                      <tr key={`${file.name}-${idx}`} className="border-t">
+                        <td className="px-3 py-2">{file.name}</td>
+                        <td className="px-3 py-2">{file.extension || '-'}</td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={`px-2 py-0.5 rounded-full ${
+                              file.parse_status === 'error'
+                                ? 'bg-red-100 text-red-700'
+                                : file.parse_status?.includes('parsed')
+                                  ? 'bg-green-100 text-green-700'
+                                  : 'bg-gray-100 text-gray-700'
+                            }`}
+                          >
+                            {file.parse_status || 'pending'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-gray-500">
+                          {file.parse_error || (file.summary ? JSON.stringify(file.summary) : '-')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </div>

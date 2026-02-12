@@ -10,8 +10,20 @@ def test_parse_bom_xlsx_extracts_parts_and_hardware(tmp_path: Path):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "BOM"
-    sheet.append(["Part Number", "Description", "Qty", "Material", "Thickness", "Finish", "Type"])
-    sheet.append(["P-100", "Main Bracket", 4, "A36 Steel", "0.125", "Powder Coat", "Part"])
+    sheet.append(
+        [
+            "Part Number",
+            "Description",
+            "Qty",
+            "Material",
+            "Thickness",
+            "Finish",
+            "Type",
+            "Flat Length",
+            "Flat Width",
+        ]
+    )
+    sheet.append(["P-100", "Main Bracket", 4, "A36 Steel", "0.125", "Powder Coat", "Part", 12, 8])
     sheet.append(["HW-200", "PEM Nut 1/4-20", 8, "", "", "", "Hardware"])
 
     file_path = tmp_path / "sample_bom.xlsx"
@@ -23,6 +35,8 @@ def test_parse_bom_xlsx_extracts_parts_and_hardware(tmp_path: Path):
     assert result["parts"][0]["part_number"] == "P-100"
     assert result["parts"][0]["qty"] == 4
     assert result["parts"][0]["material"] == "A36 Steel"
+    assert result["parts"][0]["flat_area"] == 96
+    assert result["parts"][0]["cut_length"] == 40
     assert "sample_bom.xlsx!BOM:row2" in result["parts"][0]["source"]
 
 

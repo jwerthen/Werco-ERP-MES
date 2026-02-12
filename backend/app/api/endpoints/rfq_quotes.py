@@ -58,6 +58,7 @@ class RfqPackageResponse(BaseModel):
     status: str
     warnings: List[str] = []
     file_count: int
+    files: List[Dict[str, Any]] = []
     quote_id: Optional[int] = None
     created_at: datetime
 
@@ -260,6 +261,15 @@ async def create_rfq_package(
         status=package.status,
         warnings=[],
         file_count=file_count,
+        files=[
+            {
+                "name": upload.filename,
+                "extension": Path(upload.filename or "").suffix.lower(),
+                "parse_status": "pending",
+                "parse_error": None,
+            }
+            for upload in files
+        ],
         created_at=package.created_at,
     )
 
@@ -288,6 +298,17 @@ def get_rfq_package(
         status=package.status,
         warnings=package.parsing_warnings or [],
         file_count=len(package.files),
+        files=[
+            {
+                "id": file.id,
+                "name": file.file_name,
+                "extension": file.file_ext,
+                "parse_status": file.parse_status,
+                "parse_error": file.parse_error,
+                "summary": file.extracted_summary,
+            }
+            for file in package.files
+        ],
         quote_id=latest_estimate.quote_id if latest_estimate else None,
         created_at=package.created_at,
     )
@@ -320,6 +341,28 @@ def generate_estimate(
 
     if not parsed["parts"]:
         raise HTTPException(status_code=400, detail="No parsable part data found in RFQ files.")
+
+    geometry_ready_parts = [
+        part
+        for part in parsed["parts"]
+        if float(part.get("flat_area") or 0) > 0 and float(part.get("cut_length") or 0) > 0
+    ]
+    if not geometry_ready_parts:
+        package.parsing_warnings = (
+            parsed["warnings"]
+            + [
+                "No usable geometry extracted. Provide flat pattern DXF or BOM length/width columns before generating estimate."
+            ]
+        )
+        package.status = "needs_review"
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not extract geometry (flat area + cut length) from uploaded files. "
+                "Upload at least one flat pattern DXF, or include BOM dimensions."
+            ),
+        )
 
     customer_name = package.customer_name or "Unspecified Customer"
     quote = Quote(
