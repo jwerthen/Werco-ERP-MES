@@ -79,6 +79,84 @@ class TestUsersAPI:
         # User may or may not be able to update themselves depending on implementation
         assert response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
 
+    def test_import_users_csv_success(self, client: TestClient, admin_headers):
+        """Test admin can import multiple users from CSV."""
+        csv_content = (
+            "employee_id,first_name,last_name,role,department\n"
+            "EMP-CSV-001,Jane,Doe,operator,Fabrication\n"
+            "EMP-CSV-002,John,Smith,supervisor,Assembly\n"
+        )
+        response = client.post(
+            "/api/v1/users/import-csv",
+            headers=admin_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+            data={"default_password": "SecureP@ss123!"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["total_rows"] == 2
+        assert data["created_count"] == 2
+        assert data["skipped_count"] == 0
+        assert len(data["created_ids"]) == 2
+        assert data["errors"] == []
+
+    def test_import_users_csv_partial_success_with_errors(
+        self,
+        client: TestClient,
+        admin_headers,
+    ):
+        """Test CSV import creates valid rows and skips invalid rows."""
+        csv_content = (
+            "employee_id,first_name,last_name,email,password,role\n"
+            "EMP-ADMIN-001,Dup,User,dup@werco.com,SecureP@ss123!,operator\n"
+            "EMP-CSV-003,No,Password,nopassword@werco.com,,operator\n"
+            "EMP-CSV-004,Bad,Role,badrole@werco.com,SecureP@ss123!,not-a-role\n"
+            "EMP-CSV-005,Needs,Password,manager@werco.com,,manager\n"
+            "EMP-CSV-006,Valid,User,valid@werco.com,SecureP@ss123!,operator\n"
+        )
+        response = client.post(
+            "/api/v1/users/import-csv",
+            headers=admin_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["total_rows"] == 5
+        assert data["created_count"] == 2
+        assert data["skipped_count"] == 3
+        assert len(data["errors"]) == 3
+
+    def test_import_users_csv_operator_without_password_allowed(self, client: TestClient, admin_headers):
+        """Operators can be imported without a password for employee-ID login."""
+        csv_content = (
+            "employee_id,first_name,last_name,role\n"
+            "EMP-CSV-777,Floor,Operator,operator\n"
+        )
+        response = client.post(
+            "/api/v1/users/import-csv",
+            headers=admin_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["total_rows"] == 1
+        assert data["created_count"] == 1
+        assert data["skipped_count"] == 0
+
+    def test_import_users_csv_forbidden_for_manager(self, client: TestClient, manager_headers):
+        """Test non-admin cannot import CSV users."""
+        csv_content = "employee_id,first_name,last_name\nEMP-CSV-900,Jane,Doe\n"
+        response = client.post(
+            "/api/v1/users/import-csv",
+            headers=manager_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+            data={"default_password": "SecureP@ss123!"},
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
 
 @pytest.mark.api
 class TestUserRoles:

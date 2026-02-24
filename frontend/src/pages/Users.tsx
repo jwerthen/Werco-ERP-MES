@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { UserRole } from '../types';
-import { PlusIcon, PencilIcon, KeyIcon, UserMinusIcon, UserPlusIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, KeyIcon, UserMinusIcon, UserPlusIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline';
 
 interface UserData {
   id: number;
@@ -15,6 +15,21 @@ interface UserData {
   is_active: boolean;
   created_at: string;
   last_login?: string;
+}
+
+interface UserCsvImportError {
+  row: number;
+  employee_id?: string;
+  email?: string;
+  reason: string;
+}
+
+interface UserCsvImportResult {
+  total_rows: number;
+  created_count: number;
+  skipped_count: number;
+  created_ids: number[];
+  errors: UserCsvImportError[];
 }
 
 const roleColors: Record<UserRole, string> = {
@@ -43,8 +58,13 @@ export default function Users() {
   const [showInactive, setShowInactive] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importDefaultPassword, setImportDefaultPassword] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<UserCsvImportResult | null>(null);
 
   const [formData, setFormData] = useState({
     email: '',
@@ -140,6 +160,30 @@ export default function Users() {
     setShowPasswordModal(true);
   };
 
+  const handleImportCsv = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importFile) {
+      alert('Please choose a CSV file');
+      return;
+    }
+
+    setImporting(true);
+    try {
+      const result = await api.importUsersCsv(importFile, importDefaultPassword);
+      setImportResult(result);
+      setShowImportModal(false);
+      setImportFile(null);
+      setImportDefaultPassword('');
+      if (result.created_count > 0) {
+        await loadUsers();
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to import CSV');
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const resetForm = () => {
     setEditingUser(null);
     setFormData({
@@ -166,13 +210,22 @@ export default function Users() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">User Management</h1>
-        <button
-          onClick={() => { resetForm(); setShowModal(true); }}
-          className="btn-primary flex items-center"
-        >
-          <PlusIcon className="h-5 w-5 mr-2" />
-          Add User
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="btn-secondary flex items-center"
+          >
+            <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
+            Import CSV
+          </button>
+          <button
+            onClick={() => { resetForm(); setShowModal(true); }}
+            className="btn-primary flex items-center"
+          >
+            <PlusIcon className="h-5 w-5 mr-2" />
+            Add User
+          </button>
+        </div>
       </div>
 
       <div className="flex items-center">
@@ -186,6 +239,36 @@ export default function Users() {
           <span className="text-sm text-gray-700">Show inactive users</span>
         </label>
       </div>
+
+      {importResult && (
+        <div className="card">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <div className="text-sm text-gray-700">
+              Imported rows: <span className="font-semibold">{importResult.total_rows}</span>
+            </div>
+            <div className="text-sm text-green-700">
+              Created: <span className="font-semibold">{importResult.created_count}</span>
+            </div>
+            <div className="text-sm text-amber-700">
+              Skipped: <span className="font-semibold">{importResult.skipped_count}</span>
+            </div>
+          </div>
+          {importResult.errors.length > 0 && (
+            <div className="mt-3 border-t border-gray-200 pt-3">
+              <p className="text-sm font-medium text-gray-900 mb-2">Import issues</p>
+              <ul className="space-y-1 text-sm text-gray-700 max-h-40 overflow-auto">
+                {importResult.errors.map((error, idx) => (
+                  <li key={`${error.row}-${idx}`}>
+                    Row {error.row}: {error.reason}
+                    {error.employee_id ? ` (employee_id: ${error.employee_id})` : ''}
+                    {error.email ? ` (email: ${error.email})` : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
@@ -395,6 +478,63 @@ export default function Users() {
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary">Reset Password</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* CSV Import Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+            <h3 className="text-lg font-semibold mb-4">Import Users From CSV</h3>
+            <form onSubmit={handleImportCsv} className="space-y-4">
+              <div>
+                <label className="label">CSV File</label>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                  className="input"
+                  required
+                />
+              </div>
+              <div>
+                <label className="label">Default Password (optional)</label>
+                <input
+                  type="password"
+                  value={importDefaultPassword}
+                  onChange={(e) => setImportDefaultPassword(e.target.value)}
+                  className="input"
+                  placeholder="Used when a CSV row does not include password"
+                />
+              </div>
+              <div className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded p-3">
+                <p className="font-medium text-gray-800 mb-1">CSV columns</p>
+                <p>Required: employee_id, first_name, last_name</p>
+                <p>Optional: email, password, role, department</p>
+                <p className="mt-1">
+                  Operators can omit passwords and use employee-ID login only. For non-operators, provide a password
+                  in CSV or set a default password.
+                </p>
+              </div>
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowImportModal(false);
+                    setImportFile(null);
+                    setImportDefaultPassword('');
+                  }}
+                  className="btn-secondary"
+                  disabled={importing}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary" disabled={importing}>
+                  {importing ? 'Importing...' : 'Import'}
+                </button>
               </div>
             </form>
           </div>

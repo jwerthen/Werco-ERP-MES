@@ -1117,6 +1117,19 @@ class ApiService {
     return response.data;
   }
 
+  async importUsersCsv(file: File, defaultPassword?: string) {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (defaultPassword && defaultPassword.trim()) {
+      formData.append('default_password', defaultPassword.trim());
+    }
+
+    const response = await this.api.post('/users/import-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  }
+
   async updateUser(userId: number, data: any) {
     const response = await this.api.put(`/users/${userId}`, data);
     return response.data;
