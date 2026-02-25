@@ -168,12 +168,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout();
       return;
     }
-    const normalizedUserId = user.employee_id.replace(/\D/g, '').slice(-4).padStart(4, '0');
-    if (normalizedUserId !== employeeId) {
+
+    const enteredId = employeeId.trim();
+    const exactMatch = user.employee_id.toLowerCase() === enteredId.toLowerCase();
+    const userDigits = user.employee_id.replace(/\D/g, '');
+    const userBadgeId = userDigits ? userDigits.slice(-4).padStart(4, '0') : null;
+    const enteredDigits = enteredId.replace(/\D/g, '');
+    const enteredBadgeId = enteredDigits ? enteredDigits.slice(-4).padStart(4, '0') : null;
+    const badgeMatch = userBadgeId !== null && enteredBadgeId !== null && userBadgeId === enteredBadgeId;
+
+    if (!exactMatch && !badgeMatch) {
       throw new Error('Employee ID does not match the active user');
     }
     try {
-      await api.logoutWithEmployeeId(employeeId);
+      await api.logoutWithEmployeeId(enteredId);
     } finally {
       logout();
     }

@@ -117,12 +117,18 @@ export default function Login() {
 
     try {
       if (loginMode === 'employee') {
-        const normalizedId = employeeId.replace(/\D/g, '').slice(0, 4);
-        if (normalizedId.length === 0) {
+        const rawEmployeeId = employeeId.trim();
+        if (rawEmployeeId.length === 0) {
           throw new Error('Employee ID required');
         }
-        const paddedId = normalizedId.padStart(4, '0');
-        await loginWithEmployeeId(paddedId);
+
+        // Numeric-only input is treated as a badge ID and normalized to 4 digits.
+        const digitsOnly = rawEmployeeId.replace(/\D/g, '');
+        const employeeLoginId = /^\d+$/.test(rawEmployeeId)
+          ? digitsOnly.slice(-4).padStart(4, '0')
+          : rawEmployeeId;
+
+        await loginWithEmployeeId(employeeLoginId);
         try {
           const storedUser = localStorage.getItem('user');
           const signedInUser = storedUser ? JSON.parse(storedUser) : null;
@@ -344,7 +350,7 @@ export default function Login() {
               {loginMode === 'employee' ? (
                 <div className="space-y-2">
                   <label htmlFor="employeeId" className="block text-sm font-medium text-slate-700">
-                    Employee ID (4 digits)
+                    Employee ID
                   </label>
                   <div className="relative">
                     <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
@@ -355,19 +361,19 @@ export default function Login() {
                     <input
                       id="employeeId"
                       type="text"
-                      inputMode="numeric"
-                      maxLength={4}
+                      inputMode="text"
+                      maxLength={50}
                       required
                       value={employeeId}
-                      onChange={(e) => setEmployeeId(e.target.value.replace(/\\D/g, '').slice(0, 4))}
+                      onChange={(e) => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                       onFocus={() => setFocusedField('employeeId')}
                       onBlur={() => setFocusedField(null)}
-                      className="input-glow w-full pl-12 pr-4 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200 tracking-widest text-center text-lg"
-                      placeholder="0000"
+                      className="input-glow w-full pl-12 pr-4 py-3.5 bg-white border-2 border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:border-cyan-500 focus:outline-none transition-all duration-200 text-center text-lg"
+                      placeholder="0000 or EMP-1001"
                       autoComplete="off"
                     />
                   </div>
-                  <p className="text-xs text-slate-500">Use your 4-digit badge ID.</p>
+                  <p className="text-xs text-slate-500">Use your employee ID or 4-digit badge ID.</p>
                 </div>
               ) : (
                 <>

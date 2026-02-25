@@ -531,17 +531,16 @@ export default function Layout({ children }: LayoutProps) {
 
             <div className="modal-body space-y-3">
               <p className="text-sm text-slate-600">
-                Enter your 4-digit employee ID to sign out.
+                Enter your employee ID (or 4-digit badge ID) to sign out.
               </p>
               <input
                 type="text"
-                inputMode="numeric"
-                pattern="\\d{4}"
-                maxLength={4}
+                inputMode="text"
+                maxLength={50}
                 value={logoutEmployeeId}
-                onChange={(e) => setLogoutEmployeeId(e.target.value.replace(/\\D/g, '').slice(0, 4))}
-                className="input text-center text-lg tracking-widest"
-                placeholder="0000"
+                onChange={(e) => setLogoutEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
+                className="input text-center text-lg"
+                placeholder="0000 or EMP-1001"
                 autoFocus
               />
               {logoutError && (
@@ -563,7 +562,7 @@ export default function Layout({ children }: LayoutProps) {
               <button
                 onClick={handleLogoutConfirm}
                 className="btn-primary"
-                disabled={logoutEmployeeId.length !== 4}
+                disabled={logoutEmployeeId.trim().length === 0}
               >
                 Sign Out
               </button>

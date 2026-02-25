@@ -4,6 +4,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from app.db.database import get_db
 from app.core.security import (
     verify_password, get_password_hash, create_access_token, 
@@ -145,11 +146,29 @@ def _normalize_employee_id(value: str) -> Optional[str]:
 
 
 def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
-    """Find user by normalized 4-digit employee_id."""
-    candidates = db.query(User).filter(User.employee_id.like(f"%{employee_id}")).all()
+    """Find user by exact employee ID, then fallback to 4-digit badge normalization."""
+    raw_id = (employee_id or "").strip()
+    if not raw_id:
+        return None
+
+    exact_matches = db.query(User).filter(func.lower(User.employee_id) == raw_id.lower()).all()
+    if len(exact_matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Employee ID is not unique. Please contact an administrator."
+        )
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+
+    normalized_input = _normalize_employee_id(raw_id)
+    if not normalized_input:
+        return None
+
+    # Fallback path for kiosk badge IDs: compare normalized values.
+    candidates = db.query(User).all()
     matches = [
         u for u in candidates
-        if _normalize_employee_id(u.employee_id) == employee_id
+        if _normalize_employee_id(u.employee_id) == normalized_input
     ]
     if not matches:
         return None
@@ -168,7 +187,7 @@ def employee_login(
     db: Session = Depends(get_db)
 ):
     """
-    Authenticate a user by 4-digit employee ID and receive JWT tokens.
+    Authenticate a user by employee ID or 4-digit badge ID and receive JWT tokens.
     Intended for shop floor job stations and kiosks.
     """
     user = _find_user_by_employee_id(db, payload.employee_id)

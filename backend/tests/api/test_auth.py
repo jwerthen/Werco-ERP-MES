@@ -6,6 +6,9 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from app.core.security import get_password_hash
+from app.models.user import User, UserRole
+
 
 @pytest.mark.api
 class TestAuthLogin:
@@ -233,3 +236,51 @@ class TestAuthSecurity:
         """Test accessing protected endpoint with valid token."""
         response = client.get("/api/v1/users/me", headers=auth_headers)
         assert response.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.api
+class TestEmployeeIdLogin:
+    """Test employee-ID based authentication paths."""
+
+    def test_employee_login_with_exact_employee_id(self, client: TestClient, test_user):
+        """Full employee IDs should be accepted."""
+        response = client.post(
+            "/api/v1/auth/employee-login",
+            json={"employee_id": test_user.employee_id},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["user"]["id"] == test_user.id
+
+    def test_employee_login_with_4_digit_badge_id(self, client: TestClient, test_user):
+        """4-digit badge IDs should match normalized employee IDs."""
+        response = client.post(
+            "/api/v1/auth/employee-login",
+            json={"employee_id": "0001"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["user"]["id"] == test_user.id
+
+    def test_employee_login_with_last4_digits_of_long_id(self, client: TestClient, db_session):
+        """Numeric employee IDs longer than 4 should be reachable by last 4 digits."""
+        user = User(
+            email="badge-login@werco.com",
+            employee_id="12345",
+            first_name="Badge",
+            last_name="Login",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.OPERATOR,
+            is_active=True,
+        )
+        db_session.add(user)
+        db_session.commit()
+        db_session.refresh(user)
+
+        response = client.post(
+            "/api/v1/auth/employee-login",
+            json={"employee_id": "2345"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["user"]["id"] == user.id

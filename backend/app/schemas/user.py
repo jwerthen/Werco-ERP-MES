@@ -81,7 +81,13 @@ class UserLogin(BaseModel):
 
 
 class EmployeeLoginRequest(BaseModel):
-    employee_id: str = Field(..., min_length=4, max_length=4, pattern=r'^\d{4}$', description="4-digit employee ID")
+    employee_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        pattern=r'^[A-Za-z0-9\-_]+$',
+        description="Employee ID or 4-digit badge ID",
+    )
 
 
 class Token(BaseModel):
