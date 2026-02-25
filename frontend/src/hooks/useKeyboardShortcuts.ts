@@ -39,7 +39,8 @@ const isInputElement = (element: Element | null): boolean => {
   );
 };
 
-const normalizeKey = (key: string): string => {
+const normalizeKey = (key?: string | null): string => {
+  if (!key || typeof key !== 'string') return '';
   return key.toLowerCase();
 };
 
@@ -83,7 +84,12 @@ export function useKeyboardShortcuts(
     const isInInput = isInputElement(activeElement);
 
     for (const shortcut of shortcutsRef.current) {
-      const keyMatches = normalizeKey(event.key) === normalizeKey(shortcut.key);
+      const shortcutKey = normalizeKey(shortcut.key);
+      if (!shortcutKey) {
+        continue;
+      }
+
+      const keyMatches = normalizeKey(event.key) === shortcutKey;
       const ctrlMatches = shortcut.ctrl ? (event.ctrlKey || event.metaKey) : !event.ctrlKey && !event.metaKey;
       const shiftMatches = shortcut.shift ? event.shiftKey : !event.shiftKey;
       const altMatches = shortcut.alt ? event.altKey : !event.altKey;
@@ -93,7 +99,7 @@ export function useKeyboardShortcuts(
         const shouldIgnore = (ignoreInputFocus || shortcut.ignoreWhenInputFocused) && isInInput;
         
         // Exception: Escape and certain shortcuts should work even in inputs
-        const isEscapeOrGlobal = shortcut.key.toLowerCase() === 'escape' || shortcut.ctrl;
+        const isEscapeOrGlobal = shortcutKey === 'escape' || shortcut.ctrl;
         
         if (shouldIgnore && !isEscapeOrGlobal) {
           continue;

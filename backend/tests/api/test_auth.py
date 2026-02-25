@@ -284,3 +284,27 @@ class TestEmployeeIdLogin:
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["user"]["id"] == user.id
+
+    def test_employee_login_repairs_legacy_local_email(self, client: TestClient, db_session):
+        """Legacy @werco.local users should be auto-repaired and still login."""
+        user = User(
+            email="emp-339@werco.local",
+            employee_id="339",
+            first_name="Legacy",
+            last_name="Local",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.OPERATOR,
+            is_active=True,
+        )
+        db_session.add(user)
+        db_session.commit()
+        db_session.refresh(user)
+
+        response = client.post(
+            "/api/v1/auth/employee-login",
+            json={"employee_id": "0339"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["user"]["id"] == user.id
+        assert data["user"]["email"].endswith("@users.werco.com")

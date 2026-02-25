@@ -123,6 +123,7 @@ def login(
     refresh_token, session_id, _ = create_refresh_token(subject=user.id)
     
     log_auth_event(db, "LOGIN_SUCCESS", user=user, success=True, request=request)
+    _ensure_valid_auth_email(user, db)
     
     return Token(
         access_token=access_token,
@@ -143,6 +144,32 @@ def _normalize_employee_id(value: str) -> Optional[str]:
     if len(digits) < 4:
         return digits.zfill(4)
     return digits[-4:]
+
+
+def _build_repaired_email(user: User, db: Session) -> str:
+    """Generate a valid non-reserved email for legacy .local imports."""
+    employee_key = re.sub(r"[^a-z0-9._-]", "", (user.employee_id or "").lower()) or "employee"
+    local = f"emp-{employee_key}"
+    candidate = f"{local}@users.werco.com"
+    suffix = 2
+    while True:
+        existing = db.query(User).filter(func.lower(User.email) == candidate.lower()).first()
+        if not existing or existing.id == user.id:
+            return candidate
+        candidate = f"{local}-{suffix}@users.werco.com"
+        suffix += 1
+
+
+def _ensure_valid_auth_email(user: User, db: Session) -> None:
+    """
+    Patch legacy reserved-domain addresses so token response validation does not crash.
+    This keeps logins working for users imported before the email-domain fix.
+    """
+    email = (user.email or "").strip()
+    if email.lower().endswith("@werco.local"):
+        user.email = _build_repaired_email(user, db)
+        db.commit()
+        db.refresh(user)
 
 
 def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
@@ -225,6 +252,7 @@ def employee_login(
     refresh_token, _, _ = create_refresh_token(subject=user.id)
 
     log_auth_event(db, "EMPLOYEE_LOGIN_SUCCESS", user=user, success=True, request=request)
+    _ensure_valid_auth_email(user, db)
 
     return Token(
         access_token=access_token,

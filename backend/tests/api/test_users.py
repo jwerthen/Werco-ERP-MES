@@ -101,6 +101,12 @@ class TestUsersAPI:
         assert len(data["created_ids"]) == 2
         assert data["errors"] == []
 
+        users_response = client.get("/api/v1/users/", headers=admin_headers)
+        assert users_response.status_code == status.HTTP_200_OK
+        users = users_response.json()
+        imported_user = next(u for u in users if u["employee_id"] == "EMP-CSV-001")
+        assert imported_user["email"].endswith("@users.werco.com")
+
     def test_import_users_csv_partial_success_with_errors(
         self,
         client: TestClient,

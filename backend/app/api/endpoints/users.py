@@ -89,10 +89,10 @@ def _generated_email(employee_id: str, existing_emails: set[str]) -> str:
         local_part = "employee"
 
     base = f"emp-{local_part}"
-    candidate = f"{base}@werco.local"
+    candidate = f"{base}@users.werco.com"
     suffix = 2
     while candidate in existing_emails:
-        candidate = f"{base}-{suffix}@werco.local"
+        candidate = f"{base}-{suffix}@users.werco.com"
         suffix += 1
     return candidate
 
