@@ -232,10 +232,7 @@ export default function Login() {
             
             {/* Tagline */}
             <p className="text-lg text-slate-300 max-w-md leading-relaxed">
-              Precision fabrication management for{' '}
-              <span className="text-cyan-400 font-medium">power generation</span>,{' '}
-              <span className="text-cyan-400 font-medium">data center</span>, and{' '}
-              <span className="text-cyan-400 font-medium">defense</span> sectors.
+              Built for What Flies, Fights, and Powers the Future.
             </p>
             
             {/* Certification badges */}
@@ -245,7 +242,7 @@ export default function Login() {
                 <span className="text-sm font-medium text-white">AS9100D Compliant</span>
               </div>
               <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-sm">
-                <ShieldCheckIcon className="h-5 w-5 text-red-400" />
+                <ShieldCheckIcon className="h-5 w-5 text-cyan-400" />
                 <span className="text-sm font-medium text-white">ISO 9001 Certified</span>
               </div>
             </div>
@@ -257,7 +254,7 @@ export default function Login() {
                 <div className="text-sm text-slate-400 mt-1">System Uptime</div>
               </div>
               <div>
-                <div className="text-3xl font-bold text-red-400">24/7</div>
+                <div className="text-3xl font-bold text-cyan-400">24/7</div>
                 <div className="text-sm text-slate-400 mt-1">Operations</div>
               </div>
               <div>
