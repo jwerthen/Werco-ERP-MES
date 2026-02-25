@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { ShieldCheckIcon, LockClosedIcon, EnvelopeIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
-import { isKioskMode } from '../utils/kiosk';
 
 // Animated particle component for background
 const AnimatedParticles = () => {
@@ -99,16 +98,14 @@ export default function Login() {
   const { login, loginWithEmployeeId } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const kioskMode = useMemo(
-    () => isKioskMode(location.pathname, location.search),
-    [location.pathname, location.search]
-  );
+  const kioskParam = useMemo(() => new URLSearchParams(location.search).get('kiosk'), [location.search]);
+  const forceEmployeeMode = kioskParam === '1';
 
   useEffect(() => {
-    if (kioskMode) {
+    if (forceEmployeeMode) {
       setLoginMode('employee');
     }
-  }, [kioskMode]);
+  }, [forceEmployeeMode]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -247,21 +244,6 @@ export default function Login() {
               </div>
             </div>
             
-            {/* Decorative stats/metrics */}
-            <div className="grid grid-cols-3 gap-6 pt-8 border-t border-white/10">
-              <div>
-                <div className="text-3xl font-bold text-cyan-400">99.9%</div>
-                <div className="text-sm text-slate-400 mt-1">System Uptime</div>
-              </div>
-              <div>
-                <div className="text-3xl font-bold text-cyan-400">24/7</div>
-                <div className="text-sm text-slate-400 mt-1">Operations</div>
-              </div>
-              <div>
-                <div className="text-3xl font-bold text-blue-400">100%</div>
-                <div className="text-sm text-slate-400 mt-1">Traceability</div>
-              </div>
-            </div>
           </div>
           
           <p className="text-slate-500 text-sm">
@@ -314,7 +296,7 @@ export default function Login() {
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-6">
-              <div className={`flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-1 ${kioskMode ? 'opacity-70 pointer-events-none' : ''}`}>
+              <div className={`flex items-center justify-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-1 ${forceEmployeeMode ? 'opacity-70 pointer-events-none' : ''}`}>
                 <button
                   type="button"
                   onClick={() => setLoginMode('employee')}
