@@ -18,7 +18,8 @@ jobs:
     name: Deploy Frontend (Railway Production)
     runs-on: ubuntu-latest
     env:
-      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN || vars.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID || vars.RAILWAY_PROJECT_ID }}
       RAILWAY_FRONTEND_SERVICE: ${{ vars.RAILWAY_FRONTEND_SERVICE }}
     environment:
       name: production
@@ -30,8 +31,6 @@ jobs:
         run: npm install -g @railway/cli
 
       - name: Validate Railway token secret
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           if [ -z "${RAILWAY_TOKEN}" ]; then
             echo "RAILWAY_TOKEN is empty or missing"
@@ -46,14 +45,10 @@ jobs:
           fi
 
       - name: Validate Railway token authentication
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           railway whoami > /dev/null
 
       - name: Deploy frontend service from frontend root
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           cd frontend
           service_name="${RAILWAY_FRONTEND_SERVICE:-werco-frontend}"
