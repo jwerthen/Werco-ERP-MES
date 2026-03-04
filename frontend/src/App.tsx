@@ -1,4 +1,4 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TourProvider } from './context/TourContext';
@@ -7,6 +7,7 @@ import { TourHighlight } from './components/Tour';
 import Layout from './components/Layout';
 import { SkeletonDashboard, LoadingOverlay } from './components/ui/Skeleton';
 import { isKioskMode, syncKioskMode } from './utils/kiosk';
+import { lazyWithRetry } from './utils/lazyWithRetry';
 
 // Eagerly loaded - critical path
 import Login from './pages/Login';
@@ -14,39 +15,39 @@ import Dashboard from './pages/Dashboard';
 import Unauthorized from './pages/Unauthorized';
 
 // Lazy loaded pages - code splitting for better performance
-const WorkOrders = lazy(() => import('./pages/WorkOrders'));
-const WorkOrderNew = lazy(() => import('./pages/WorkOrderNew'));
-const WorkOrderDetail = lazy(() => import('./pages/WorkOrderDetail'));
-const ShopFloor = lazy(() => import('./pages/ShopFloor'));
-const ShopFloorSimple = lazy(() => import('./pages/ShopFloorSimple'));
-const WorkCenters = lazy(() => import('./pages/WorkCenters'));
-const Parts = lazy(() => import('./pages/Parts'));
-const BOM = lazy(() => import('./pages/BOM'));
-const Routing = lazy(() => import('./pages/Routing'));
-const Inventory = lazy(() => import('./pages/Inventory'));
-const MRP = lazy(() => import('./pages/MRP'));
-const Quality = lazy(() => import('./pages/Quality'));
-const CustomFields = lazy(() => import('./pages/CustomFields'));
-const Purchasing = lazy(() => import('./pages/Purchasing'));
-const Scheduling = lazy(() => import('./pages/Scheduling'));
-const Documents = lazy(() => import('./pages/Documents'));
-const Reports = lazy(() => import('./pages/Reports'));
-const Shipping = lazy(() => import('./pages/Shipping'));
-const Quotes = lazy(() => import('./pages/Quotes'));
-const RFQQuoting = lazy(() => import('./pages/RFQQuoting'));
-const Users = lazy(() => import('./pages/Users'));
-const Customers = lazy(() => import('./pages/Customers'));
-const Calibration = lazy(() => import('./pages/Calibration'));
-const PrintTraveler = lazy(() => import('./pages/PrintTraveler'));
-const PrintPurchaseOrder = lazy(() => import('./pages/PrintPurchaseOrder'));
-const Traceability = lazy(() => import('./pages/Traceability'));
-const PrintPackingSlip = lazy(() => import('./pages/PrintPackingSlip'));
-const AuditLog = lazy(() => import('./pages/AuditLog'));
-const QuoteCalculator = lazy(() => import('./pages/QuoteCalculator'));
-const AdminSettings = lazy(() => import('./pages/AdminSettings'));
-const Receiving = lazy(() => import('./pages/Receiving'));
-const POUpload = lazy(() => import('./pages/POUpload'));
-const Analytics = lazy(() => import('./pages/Analytics'));
+const WorkOrders = lazyWithRetry(() => import('./pages/WorkOrders'));
+const WorkOrderNew = lazyWithRetry(() => import('./pages/WorkOrderNew'));
+const WorkOrderDetail = lazyWithRetry(() => import('./pages/WorkOrderDetail'));
+const ShopFloor = lazyWithRetry(() => import('./pages/ShopFloor'));
+const ShopFloorSimple = lazyWithRetry(() => import('./pages/ShopFloorSimple'));
+const WorkCenters = lazyWithRetry(() => import('./pages/WorkCenters'));
+const Parts = lazyWithRetry(() => import('./pages/Parts'));
+const BOM = lazyWithRetry(() => import('./pages/BOM'));
+const Routing = lazyWithRetry(() => import('./pages/Routing'));
+const Inventory = lazyWithRetry(() => import('./pages/Inventory'));
+const MRP = lazyWithRetry(() => import('./pages/MRP'));
+const Quality = lazyWithRetry(() => import('./pages/Quality'));
+const CustomFields = lazyWithRetry(() => import('./pages/CustomFields'));
+const Purchasing = lazyWithRetry(() => import('./pages/Purchasing'));
+const Scheduling = lazyWithRetry(() => import('./pages/Scheduling'));
+const Documents = lazyWithRetry(() => import('./pages/Documents'));
+const Reports = lazyWithRetry(() => import('./pages/Reports'));
+const Shipping = lazyWithRetry(() => import('./pages/Shipping'));
+const Quotes = lazyWithRetry(() => import('./pages/Quotes'));
+const RFQQuoting = lazyWithRetry(() => import('./pages/RFQQuoting'));
+const Users = lazyWithRetry(() => import('./pages/Users'));
+const Customers = lazyWithRetry(() => import('./pages/Customers'));
+const Calibration = lazyWithRetry(() => import('./pages/Calibration'));
+const PrintTraveler = lazyWithRetry(() => import('./pages/PrintTraveler'));
+const PrintPurchaseOrder = lazyWithRetry(() => import('./pages/PrintPurchaseOrder'));
+const Traceability = lazyWithRetry(() => import('./pages/Traceability'));
+const PrintPackingSlip = lazyWithRetry(() => import('./pages/PrintPackingSlip'));
+const AuditLog = lazyWithRetry(() => import('./pages/AuditLog'));
+const QuoteCalculator = lazyWithRetry(() => import('./pages/QuoteCalculator'));
+const AdminSettings = lazyWithRetry(() => import('./pages/AdminSettings'));
+const Receiving = lazyWithRetry(() => import('./pages/Receiving'));
+const POUpload = lazyWithRetry(() => import('./pages/POUpload'));
+const Analytics = lazyWithRetry(() => import('./pages/Analytics'));
 
 // Loading fallback for lazy-loaded pages
 const PageLoader = () => (
