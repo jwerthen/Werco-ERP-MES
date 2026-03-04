@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDateTime } from '../utils/centralTime';
 import {
   MagnifyingGlassIcon,
   ShieldCheckIcon,
@@ -222,7 +222,15 @@ export default function AuditLog() {
                   onClick={() => setSelectedLog(log)}
                 >
                   <td className="px-4 py-3 text-sm whitespace-nowrap">
-                    {format(new Date(log.timestamp), 'MM/dd/yyyy HH:mm:ss')}
+                    {formatCentralDateTime(log.timestamp, {
+                      month: '2-digit',
+                      day: '2-digit',
+                      year: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                      hour12: false,
+                    })}
                   </td>
                   <td className="px-4 py-3 text-sm">
                     <div className="flex items-center">
@@ -276,7 +284,17 @@ export default function AuditLog() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-sm text-gray-500">Timestamp</label>
-                  <p className="font-medium">{format(new Date(selectedLog.timestamp), 'MM/dd/yyyy HH:mm:ss')}</p>
+                  <p className="font-medium">
+                    {formatCentralDateTime(selectedLog.timestamp, {
+                      month: '2-digit',
+                      day: '2-digit',
+                      year: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                      hour12: false,
+                    })}
+                  </p>
                 </div>
                 <div>
                   <label className="text-sm text-gray-500">User</label>

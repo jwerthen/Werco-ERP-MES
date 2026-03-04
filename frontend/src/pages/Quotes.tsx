@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
-import { format } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
+import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
   PaperAirplaneIcon,
@@ -223,10 +223,10 @@ export default function Quotes() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-sm">
-                    {format(new Date(q.quote_date), 'MMM d, yyyy')}
+                    {formatCentralDate(q.quote_date)}
                   </td>
                   <td className="px-4 py-3 text-sm">
-                    {q.valid_until ? format(new Date(q.valid_until), 'MMM d, yyyy') : '-'}
+                    {q.valid_until ? formatCentralDate(q.valid_until) : '-'}
                   </td>
                   <td className="px-4 py-3 text-right font-medium">
                     ${q.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}

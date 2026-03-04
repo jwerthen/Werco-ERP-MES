@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
   ExclamationTriangleIcon,
@@ -321,7 +321,7 @@ export default function QualityPage() {
                           {ncr.disposition.replace(/_/g, ' ')}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-sm">{format(new Date(ncr.created_at), 'MMM d, yyyy')}</td>
+                      <td className="px-4 py-3 text-sm">{formatCentralDate(ncr.created_at)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -372,7 +372,7 @@ export default function QualityPage() {
                           {car.status.replace(/_/g, ' ')}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-sm">{car.due_date ? format(new Date(car.due_date), 'MMM d, yyyy') : '-'}</td>
+                      <td className="px-4 py-3 text-sm">{car.due_date ? formatCentralDate(car.due_date) : '-'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -424,7 +424,7 @@ export default function QualityPage() {
                         {' / '}
                         <span className="text-gray-500">{fai.total_characteristics}</span>
                       </td>
-                      <td className="px-4 py-3 text-sm">{fai.due_date ? format(new Date(fai.due_date), 'MMM d, yyyy') : '-'}</td>
+                      <td className="px-4 py-3 text-sm">{fai.due_date ? formatCentralDate(fai.due_date) : '-'}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   PlayIcon,
   ExclamationTriangleIcon,
@@ -254,8 +254,8 @@ export default function MRPPage() {
                         </span>
                       </td>
                       <td className="px-4 py-2 text-right font-medium">{shortage.quantity}</td>
-                      <td className="px-4 py-2 text-sm">{format(new Date(shortage.required_date), 'MMM d, yyyy')}</td>
-                      <td className="px-4 py-2 text-sm">{format(new Date(shortage.order_by_date), 'MMM d, yyyy')}</td>
+                      <td className="px-4 py-2 text-sm">{formatCentralDate(shortage.required_date)}</td>
+                      <td className="px-4 py-2 text-sm">{formatCentralDate(shortage.order_by_date)}</td>
                       <td className="px-4 py-2 text-center">
                         <button
                           onClick={() => processAction(shortage.action_id)}
@@ -298,7 +298,7 @@ export default function MRPPage() {
                     <div className="font-medium">{run.run_number}</div>
                     <div className="text-sm text-gray-500">
                       {run.completed_at
-                        ? format(new Date(run.completed_at), 'MMM d, yyyy h:mm a')
+                        ? formatCentralDateTime(run.completed_at)
                         : 'In progress...'}
                     </div>
                   </div>
@@ -356,7 +356,7 @@ export default function MRPPage() {
                         <span className="text-gray-500">Qty:</span>
                         <span className="font-medium ml-1">{action.quantity}</span>
                         <span className="text-gray-500 ml-3">Order by:</span>
-                        <span className="ml-1">{format(new Date(action.suggested_order_date), 'MMM d')}</span>
+                        <span className="ml-1">{formatCentralDate(action.suggested_order_date, { year: undefined })}</span>
                       </div>
                       {!action.is_processed ? (
                         <button

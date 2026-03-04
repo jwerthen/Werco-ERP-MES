@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
+import { formatCentralDate } from '../utils/centralTime';
 import {
   ClockIcon,
   CurrencyDollarIcon,
@@ -258,7 +259,7 @@ export default function Reports() {
                     />
                   </div>
                   <div className="text-xs text-gray-500 mt-1 transform -rotate-45 origin-top-left">
-                    {new Date(day.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    {formatCentralDate(day.date, { month: 'short', day: 'numeric', year: undefined })}
                   </div>
                 </div>
               );

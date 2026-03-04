@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 
 interface ShipmentDetail {
   id: number;
@@ -77,7 +77,9 @@ export default function PrintPackingSlip() {
           <h1 className="text-2xl font-bold">PACKING SLIP</h1>
           <p className="text-lg font-mono">{shipment.shipment_number}</p>
           <p className="text-sm text-gray-600">
-            Date: {shipment.ship_date ? format(new Date(shipment.ship_date), 'MM/dd/yyyy') : format(new Date(), 'MM/dd/yyyy')}
+            Date: {shipment.ship_date
+              ? formatCentralDate(shipment.ship_date, { month: '2-digit', day: '2-digit', year: 'numeric' })
+              : formatCentralDate(getCentralTodayISODate(), { month: '2-digit', day: '2-digit', year: 'numeric' })}
           </p>
         </div>
       </div>
@@ -215,7 +217,11 @@ export default function PrintPackingSlip() {
                 </div>
                 <div>
                   <p><strong>Work Order:</strong> {shipment.work_order_number}</p>
-                  <p><strong>Ship Date:</strong> {shipment.ship_date ? format(new Date(shipment.ship_date), 'MM/dd/yyyy') : format(new Date(), 'MM/dd/yyyy')}</p>
+                  <p>
+                    <strong>Ship Date:</strong> {shipment.ship_date
+                      ? formatCentralDate(shipment.ship_date, { month: '2-digit', day: '2-digit', year: 'numeric' })
+                      : formatCentralDate(getCentralTodayISODate(), { month: '2-digit', day: '2-digit', year: 'numeric' })}
+                  </p>
                 </div>
               </div>
             </div>

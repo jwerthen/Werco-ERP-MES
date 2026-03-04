@@ -2,11 +2,16 @@ import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { WorkCenter, QueueItem, ActiveJob } from '../types';
-import { format } from 'date-fns';
 import { usePermissions } from '../hooks/usePermissions';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { calculateDispatchScore } from '../utils/dispatchScore';
+import {
+  formatCentralDate,
+  formatCentralTime,
+  getDateSortValue,
+  isDateBeforeTodayInCentral,
+} from '../utils/centralTime';
 import {
   PlayIcon,
   StopIcon,
@@ -246,8 +251,7 @@ export default function ShopFloor() {
   };
 
   const formatClockInTime = (clockIn: string) => {
-    const date = new Date(clockIn);
-    return format(date, 'h:mm a');
+    return formatCentralTime(clockIn);
   };
 
   const closeClockOutModal = () => {
@@ -280,8 +284,8 @@ export default function ShopFloor() {
       });
       if (aScore !== bScore) return bScore - aScore;
       if (a.priority !== b.priority) return a.priority - b.priority;
-      const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
-      const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+      const aDue = getDateSortValue(a.due_date);
+      const bDue = getDateSortValue(b.due_date);
       if (aDue !== bDue) return aDue - bDue;
       return a.work_order_number.localeCompare(b.work_order_number);
     });
@@ -440,8 +444,7 @@ export default function ShopFloor() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
             {priorityFocusQueue.map((item, idx) => {
-              const due = item.due_date ? new Date(item.due_date) : null;
-              const overdue = Boolean(due && due < new Date());
+              const overdue = Boolean(item.due_date && isDateBeforeTodayInCentral(item.due_date));
               return (
                 <button
                   key={`focus-${item.operation_id}`}
@@ -460,7 +463,7 @@ export default function ShopFloor() {
                   <div className="text-sm font-semibold text-werco-700">{item.work_order_number}</div>
                   <div className="text-xs text-surface-600 truncate">{item.operation_name}</div>
                   <div className={`text-xs mt-2 ${overdue ? 'text-red-600 font-medium' : 'text-surface-500'}`}>
-                    {due ? `Due ${format(due, 'MMM d')}` : 'No due date'}
+                    {item.due_date ? `Due ${formatCentralDate(item.due_date, { year: undefined })}` : 'No due date'}
                   </div>
                 </button>
               );
@@ -477,7 +480,7 @@ export default function ShopFloor() {
               Job Queue
             </h2>
             <p className="text-sm text-surface-500">
-              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} • {sortedQueue.length} job{sortedQueue.length !== 1 ? 's' : ''}
+              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} â€¢ {sortedQueue.length} job{sortedQueue.length !== 1 ? 's' : ''}
             </p>
           </div>
           {canEditPriority && (
@@ -524,7 +527,7 @@ export default function ShopFloor() {
               <tbody>
                 {sortedQueue.map((item) => {
                   const progress = (item.quantity_complete / item.quantity_ordered) * 100;
-                  const isOverdue = item.due_date && new Date(item.due_date) < new Date();
+                  const isOverdue = Boolean(item.due_date && isDateBeforeTodayInCentral(item.due_date));
                   const isExpanded = expandedRows.has(item.work_order_id);
                   const details = workOrderDetails[item.work_order_id];
                   
@@ -598,7 +601,7 @@ export default function ShopFloor() {
                         </td>
                         <td>
                           <span className={`text-sm font-medium ${isOverdue ? 'text-red-600' : 'text-surface-700'}`}>
-                            {item.due_date ? format(new Date(item.due_date), 'MMM d') : '—'}
+                            {item.due_date ? formatCentralDate(item.due_date, { year: undefined }) : 'â€”'}
                           </span>
                           {isOverdue && (
                             <span className="block text-xs text-red-500 font-medium">OVERDUE</span>
@@ -667,11 +670,11 @@ export default function ShopFloor() {
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                     <div className="bg-white rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer</p>
-                                      <p className="font-semibold text-surface-900">{details.customer_name || '—'}</p>
+                                      <p className="font-semibold text-surface-900">{details.customer_name || 'â€”'}</p>
                                     </div>
                                     <div className="bg-white rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer PO</p>
-                                      <p className="font-semibold text-surface-900">{details.customer_po || '—'}</p>
+                                      <p className="font-semibold text-surface-900">{details.customer_po || 'â€”'}</p>
                                     </div>
                                     <div className="bg-white rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Qty Complete / Ordered</p>
@@ -682,7 +685,7 @@ export default function ShopFloor() {
                                     <div className="bg-white rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Due Date</p>
                                       <p className="font-semibold text-surface-900">
-                                        {details.due_date ? format(new Date(details.due_date), 'MMM d, yyyy') : '—'}
+                                        {details.due_date ? formatCentralDate(details.due_date) : 'â€”'}
                                       </p>
                                     </div>
                                   </div>
@@ -733,8 +736,8 @@ export default function ShopFloor() {
                                                   {op.status.replace('_', ' ')}
                                                 </span>
                                               </td>
-                                              <td className="px-4 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || '—'}</td>
-                                              <td className="px-4 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || '—'}</td>
+                                              <td className="px-4 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || 'â€”'}</td>
+                                              <td className="px-4 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || 'â€”'}</td>
                                             </tr>
                                           ))}
                                         </tbody>
@@ -781,7 +784,7 @@ export default function ShopFloor() {
               <div className="bg-surface-50 rounded-xl p-4 mb-4">
                 <p className="text-sm text-surface-500 mb-1">Completing work on</p>
                 <p className="font-semibold text-surface-900">
-                  {clockOutJob?.work_order_number} — {clockOutJob?.operation_name}
+                  {clockOutJob?.work_order_number} â€” {clockOutJob?.operation_name}
                 </p>
               </div>
               
@@ -842,3 +845,4 @@ export default function ShopFloor() {
     </div>
   );
 }
+

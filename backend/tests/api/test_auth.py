@@ -83,6 +83,46 @@ class TestAuthLogin:
         assert "role" in user_data
         assert "hashed_password" not in user_data  # Security check
 
+    def test_login_is_case_insensitive_for_email(self, client: TestClient, test_user, test_user_credentials):
+        """Email login should accept mixed-case addresses."""
+        response = client.post(
+            "/api/v1/auth/login",
+            data={
+                "username": "TestUser@Werco.com",
+                "password": test_user_credentials["password"]
+            }
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["user"]["email"] == test_user_credentials["email"]
+
+    def test_login_repairs_legacy_local_email_when_using_repaired_address(self, client: TestClient, db_session):
+        """Legacy @werco.local users should be reachable via their repaired email."""
+        user = User(
+            email="emp-339@werco.local",
+            employee_id="339",
+            first_name="Legacy",
+            last_name="Local",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.OPERATOR,
+            is_active=True,
+        )
+        db_session.add(user)
+        db_session.commit()
+        db_session.refresh(user)
+
+        response = client.post(
+            "/api/v1/auth/login",
+            data={
+                "username": "emp-339@users.werco.com",
+                "password": "SecureP@ss123!",
+            }
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["user"]["id"] == user.id
+        assert data["user"]["email"] == "emp-339@users.werco.com"
+
 
 @pytest.mark.api
 class TestAuthTokenRefresh:

@@ -5,6 +5,7 @@ import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { DashboardData, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
+import { formatCentralTime } from '../utils/centralTime';
 import {
   ClipboardDocumentListIcon,
   ExclamationTriangleIcon,
@@ -238,7 +239,7 @@ export default function Dashboard() {
             )}
             {lastUpdated && !isRefreshing && (
               <span className="text-xs text-surface-400">
-                Updated {lastUpdated.toLocaleTimeString()}
+                Updated {formatCentralTime(lastUpdated, { timeZoneName: 'short' })}
               </span>
             )}
           </div>

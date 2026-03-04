@@ -21,6 +21,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, 
   Tooltip, ResponsiveContainer
 } from 'recharts';
+import { formatCentralDate } from '../utils/centralTime';
 
 interface KPIValue {
   value: number;
@@ -223,6 +224,9 @@ const PERIODS = [
   { value: '90d', label: '90 Days' },
   { value: 'ytd', label: 'Year to Date' },
 ];
+
+const formatChartDate = (value: string) =>
+  formatCentralDate(value, { month: 'short', day: 'numeric', year: undefined });
 
 export default function Analytics() {
   const navigate = useNavigate();
@@ -621,12 +625,12 @@ export default function Analytics() {
                     <XAxis 
                       dataKey="date" 
                       tick={{ fontSize: 12 }}
-                      tickFormatter={(val) => new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      tickFormatter={formatChartDate}
                     />
                     <YAxis tick={{ fontSize: 12 }} />
                     <Tooltip 
                       formatter={(value: number) => [value.toLocaleString(), '']}
-                      labelFormatter={(label) => new Date(label).toLocaleDateString()}
+                      labelFormatter={(label) => formatCentralDate(String(label))}
                     />
                     <Line 
                       type="monotone" 
@@ -757,12 +761,12 @@ export default function Analytics() {
                         <XAxis
                           dataKey="date"
                           tick={{ fontSize: 12 }}
-                          tickFormatter={(val) => new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          tickFormatter={formatChartDate}
                         />
                         <YAxis tick={{ fontSize: 12 }} />
                         <Tooltip
                           formatter={(value: number) => [`${value.toFixed(1)}%`, '']}
-                          labelFormatter={(label) => new Date(label).toLocaleDateString()}
+                          labelFormatter={(label) => formatCentralDate(String(label))}
                         />
                         <Line type="monotone" dataKey="oee" name="OEE" stroke="#1B4D9C" strokeWidth={2} dot={false} />
                         <Line type="monotone" dataKey="availability" name="Availability" stroke="#10B981" strokeWidth={2} dot={false} />
@@ -782,12 +786,12 @@ export default function Analytics() {
                         <XAxis
                           dataKey="date"
                           tick={{ fontSize: 12 }}
-                          tickFormatter={(val) => new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          tickFormatter={formatChartDate}
                         />
                         <YAxis tick={{ fontSize: 12 }} />
                         <Tooltip
                           formatter={(value: number) => [value.toLocaleString(), '']}
-                          labelFormatter={(label) => new Date(label).toLocaleDateString()}
+                          labelFormatter={(label) => formatCentralDate(String(label))}
                         />
                         <Line type="monotone" dataKey="units_produced" name="Units Produced" stroke="#1B4D9C" strokeWidth={2} dot={false} />
                         <Line type="monotone" dataKey="units_scrapped" name="Units Scrapped" stroke="#C8352B" strokeWidth={2} dot={false} />
@@ -860,12 +864,12 @@ export default function Analytics() {
                         <XAxis
                           dataKey="date"
                           tick={{ fontSize: 12 }}
-                          tickFormatter={(val) => new Date(val).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          tickFormatter={formatChartDate}
                         />
                         <YAxis tick={{ fontSize: 12 }} />
                         <Tooltip
                           formatter={(value: number) => [value.toLocaleString(), '']}
-                          labelFormatter={(label) => new Date(label).toLocaleDateString()}
+                          labelFormatter={(label) => formatCentralDate(String(label))}
                         />
                         <Line type="monotone" dataKey="defect_rate" name="Defect Rate" stroke="#C8352B" strokeWidth={2} dot={false} />
                         <Line type="monotone" dataKey="first_pass_yield" name="First Pass Yield" stroke="#10B981" strokeWidth={2} dot={false} />
@@ -1005,7 +1009,7 @@ export default function Analytics() {
                     <div key={week.week_start}>
                       <div className="flex justify-between text-sm mb-2">
                         <span className="font-medium">
-                          {new Date(week.week_start).toLocaleDateString()} - {new Date(week.week_end).toLocaleDateString()}
+                          {formatCentralDate(week.week_start)} - {formatCentralDate(week.week_end)}
                         </span>
                         <span className="text-gray-600">{week.overall_utilization.toFixed(0)}%</span>
                       </div>

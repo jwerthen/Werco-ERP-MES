@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
-import { format } from 'date-fns';
 import type { UserRole } from '../types';
+import { formatCentralDateTime } from '../utils/centralTime';
 import {
   Cog6ToothIcon,
   PlusIcon,
@@ -854,7 +854,7 @@ function AuditLogTable({ data }: { data: any[] }) {
         <tbody>
           {data.map(entry => (
             <tr key={entry.id}>
-              <td className="text-sm tabular-nums">{format(new Date(entry.changed_at), 'MMM d, yyyy h:mm a')}</td>
+              <td className="text-sm tabular-nums">{formatCentralDateTime(entry.changed_at)}</td>
               <td className="font-medium">{entry.user_name || '—'}</td>
               <td>
                 <span className="badge badge-neutral">{entry.entity_type}</span>

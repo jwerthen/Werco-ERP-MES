@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 import {
   PlusIcon,
   WrenchIcon,
@@ -88,7 +88,7 @@ export default function Calibration() {
   });
 
   const [calibrationData, setCalibrationData] = useState({
-    calibration_date: format(new Date(), 'yyyy-MM-dd'),
+    calibration_date: getCentralTodayISODate(),
     performed_by: '',
     calibration_provider: '',
     certificate_number: '',
@@ -149,7 +149,7 @@ export default function Calibration() {
   const openCalibrationModal = (eq: Equipment) => {
     setSelectedEquipmentId(eq.id);
     setCalibrationData({
-      calibration_date: format(new Date(), 'yyyy-MM-dd'),
+      calibration_date: getCentralTodayISODate(),
       performed_by: '',
       calibration_provider: eq.calibration_provider || '',
       certificate_number: '',
@@ -329,12 +329,12 @@ export default function Calibration() {
                   <td className="px-4 py-4 text-sm">{eq.equipment_type || '-'}</td>
                   <td className="px-4 py-4 text-sm">{eq.location || '-'}</td>
                   <td className="px-4 py-4 text-sm">
-                    {eq.last_calibration_date ? format(new Date(eq.last_calibration_date), 'MMM d, yyyy') : '-'}
+                    {eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : '-'}
                   </td>
                   <td className="px-4 py-4">
                     {eq.next_calibration_date ? (
                       <div>
-                        <div className="text-sm">{format(new Date(eq.next_calibration_date), 'MMM d, yyyy')}</div>
+                        <div className="text-sm">{formatCentralDate(eq.next_calibration_date)}</div>
                         {eq.days_until_due !== undefined && (
                           <div className={`text-xs ${eq.days_until_due < 0 ? 'text-red-600' : eq.days_until_due <= 30 ? 'text-yellow-600' : 'text-gray-500'}`}>
                             {eq.days_until_due < 0 ? `${Math.abs(eq.days_until_due)} days overdue` : 

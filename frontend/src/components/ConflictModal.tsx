@@ -8,6 +8,7 @@
 
 import React from 'react';
 import { ConflictData, formatFieldName, formatValue, getChangedFields } from '../utils/optimisticLock';
+import { formatCentralDateTime } from '../utils/centralTime';
 
 interface ConflictModalProps<T extends Record<string, unknown>> {
   conflict: ConflictData<T>;
@@ -81,7 +82,7 @@ export function ConflictModal<T extends Record<string, unknown>>({
               <strong> Current version:</strong> {conflict.current_version}
               {conflict.updated_at && (
                 <span className="ml-2 text-amber-600">
-                  (Updated {new Date(conflict.updated_at).toLocaleString()})
+                  (Updated {formatCentralDateTime(conflict.updated_at, { timeZoneName: 'short' })})
                 </span>
               )}
             </p>

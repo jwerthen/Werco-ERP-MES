@@ -68,7 +68,7 @@ def login(
     - 401: Invalid credentials
     - 403: Account locked or inactive
     """
-    user = db.query(User).filter(User.email == form_data.username).first()
+    user = _find_user_by_auth_email(db, form_data.username)
     
     if not user:
         log_auth_event(db, "LOGIN_FAILED", email=form_data.username, 
@@ -144,6 +144,30 @@ def _normalize_employee_id(value: str) -> Optional[str]:
     if len(digits) < 4:
         return digits.zfill(4)
     return digits[-4:]
+
+
+def _find_user_by_auth_email(db: Session, email: str) -> Optional[User]:
+    """
+    Find a user for email login using a case-insensitive lookup.
+
+    Legacy imports may still have `@werco.local` stored until first successful
+    login repair. Allow the repaired `@users.werco.com` address to find the
+    legacy record so the repair path can complete.
+    """
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return None
+
+    user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
+    if user:
+        return user
+
+    if normalized_email.endswith("@users.werco.com"):
+        local_part = normalized_email.removesuffix("@users.werco.com")
+        legacy_email = f"{local_part}@werco.local"
+        return db.query(User).filter(func.lower(User.email) == legacy_email).first()
+
+    return None
 
 
 def _build_repaired_email(user: User, db: Session) -> str:

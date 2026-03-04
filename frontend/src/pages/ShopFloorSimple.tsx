@@ -1,9 +1,15 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
-import { format } from 'date-fns';
 import { usePermissions } from '../hooks/usePermissions';
 import { calculateDispatchScore } from '../utils/dispatchScore';
+import {
+  formatCentralDate,
+  formatCentralDateTime,
+  getDateSortValue,
+  isDateBeforeTodayInCentral,
+  isDateTodayInCentral,
+} from '../utils/centralTime';
 import {
   PlayIcon,
   CheckCircleIcon,
@@ -215,18 +221,11 @@ export default function ShopFloorSimple() {
 
   const isOverdue = (dueDate: string | null) => {
     if (!dueDate) return false;
-    return new Date(dueDate) < new Date();
+    return isDateBeforeTodayInCentral(dueDate);
   };
 
   const isDueToday = (dueDate: string | null) => {
-    if (!dueDate) return false;
-    const due = new Date(dueDate);
-    const today = new Date();
-    return (
-      due.getFullYear() === today.getFullYear() &&
-      due.getMonth() === today.getMonth() &&
-      due.getDate() === today.getDate()
-    );
+    return Boolean(dueDate && isDateTodayInCentral(dueDate));
   };
   const canEditPriority = can('work_orders:edit');
 
@@ -326,8 +325,8 @@ export default function ShopFloorSimple() {
       });
       if (aScore !== bScore) return bScore - aScore;
       if (a.priority !== b.priority) return a.priority - b.priority;
-      const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
-      const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+      const aDue = getDateSortValue(a.due_date);
+      const bDue = getDateSortValue(b.due_date);
       if (aDue !== bDue) return aDue - bDue;
       return a.work_order_number.localeCompare(b.work_order_number);
     });
@@ -840,7 +839,7 @@ export default function ShopFloorSimple() {
                   <div className="text-sm font-semibold text-werco-700">{op.work_order_number}</div>
                   <div className="text-xs text-gray-600 truncate">{op.operation_number} - {op.operation_name}</div>
                   <div className={`mt-2 text-xs ${overdue ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
-                    {op.due_date ? `Due ${format(new Date(op.due_date), 'MMM d')}` : 'No due date'}
+                    {op.due_date ? `Due ${formatCentralDate(op.due_date, { year: undefined })}` : 'No due date'}
                   </div>
                 </button>
               );
@@ -928,7 +927,7 @@ export default function ShopFloorSimple() {
                   <div>
                     {op.due_date && (
                       <span className={overdue ? 'text-red-600 font-medium' : ''}>
-                        Due: {format(new Date(op.due_date), 'MMM d')}
+                        Due: {formatCentralDate(op.due_date, { year: undefined })}
                       </span>
                     )}
                   </div>
@@ -1225,7 +1224,7 @@ export default function ShopFloorSimple() {
                     {detailsModal.history.map((h: any, i: number) => (
                       <div key={i} className="flex items-start gap-3 text-sm">
                         <span className="text-gray-400 w-32 flex-shrink-0">
-                          {h.created_at ? format(new Date(h.created_at), 'MMM d, h:mm a') : '—'}
+                          {h.created_at ? formatCentralDateTime(h.created_at, { year: undefined }) : '—'}
                         </span>
                         <span className="text-gray-700">{h.details}</span>
                       </div>

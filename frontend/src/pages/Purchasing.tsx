@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   PlusIcon,
   TruckIcon,
@@ -685,7 +685,7 @@ export default function Purchasing() {
                     <td className="px-4 py-3 text-right">{item.quantity_received}</td>
                     <td className="px-4 py-3 text-right font-medium text-orange-600">{item.quantity_remaining}</td>
                     <td className="px-4 py-3">
-                      {item.required_date ? format(new Date(item.required_date), 'MMM d') : '-'}
+                      {item.required_date ? formatCentralDate(item.required_date, { year: undefined }) : '-'}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <button
@@ -737,7 +737,7 @@ export default function Purchasing() {
                     <td className="px-4 py-3 text-right font-medium">{item.quantity_received}</td>
                     <td className="px-4 py-3 font-mono text-sm">{item.lot_number || '-'}</td>
                     <td className="px-4 py-3 text-sm">
-                      {format(new Date(item.received_at), 'MMM d, h:mm a')}
+                      {formatCentralDateTime(item.received_at, { year: undefined })}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <button
@@ -805,10 +805,10 @@ export default function Purchasing() {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-sm">
-                      {po.order_date ? format(new Date(po.order_date), 'MMM d, yyyy') : '-'}
+                      {po.order_date ? formatCentralDate(po.order_date) : '-'}
                     </td>
                     <td className="px-4 py-3 text-sm">
-                      {po.required_date ? format(new Date(po.required_date), 'MMM d, yyyy') : '-'}
+                      {po.required_date ? formatCentralDate(po.required_date) : '-'}
                     </td>
                     <td className="px-4 py-3 text-right font-medium">
                       ${Number(po.total || 0).toFixed(2)}
@@ -1379,7 +1379,7 @@ export default function Purchasing() {
                             <div>{doc.file_name || '-'}</div>
                             <div className="text-xs text-gray-500">{formatFileSize(doc.file_size)}</div>
                           </td>
-                          <td className="px-3 py-2 text-sm">{format(new Date(doc.created_at), 'MMM d, yyyy')}</td>
+                          <td className="px-3 py-2 text-sm">{formatCentralDate(doc.created_at)}</td>
                           <td className="px-3 py-2 text-right">
                             <div className="flex justify-end gap-2">
                               <button

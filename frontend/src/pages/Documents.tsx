@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate } from '../utils/centralTime';
 import {
   ArrowUpTrayIcon,
   ArrowDownTrayIcon,
@@ -248,7 +248,7 @@ export default function Documents() {
                     {doc.part_id ? partsById.get(doc.part_id)?.part_number || '-' : '-'}
                   </td>
                   <td className="px-4 py-3 text-sm">
-                    {format(new Date(doc.created_at), 'MMM d, yyyy')}
+                    {formatCentralDate(doc.created_at)}
                   </td>
                   <td className="px-4 py-3 text-center">
                     <div className="flex justify-center gap-2">

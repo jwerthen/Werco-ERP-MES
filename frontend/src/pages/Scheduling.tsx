@@ -1,10 +1,19 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import api from '../services/api';
-import { format, addDays, startOfWeek, parseISO, isBefore, isAfter, isSameDay } from 'date-fns';
+import { addDays, startOfWeek, isBefore, isAfter, isSameDay } from 'date-fns';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { usePermissions } from '../hooks/usePermissions';
 import { calculateDispatchScore } from '../utils/dispatchScore';
+import {
+  formatCentralDate,
+  formatInCentralTime,
+  getCentralDateStamp,
+  getCentralTodayDate,
+  getCentralTodayISODate,
+  getDateSortValue,
+  toCentralCalendarDate,
+} from '../utils/centralTime';
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -110,7 +119,7 @@ export default function Scheduling() {
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [capacityHeatmap, setCapacityHeatmap] = useState<CapacityHeatmapResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [weekStart, setWeekStart] = useState(startOfWeek(new Date(), { weekStartsOn: 1 }));
+  const [weekStart, setWeekStart] = useState(startOfWeek(getCentralTodayDate(), { weekStartsOn: 1 }));
   const [daysToShow] = useState(7);
   const [selectedJob, setSelectedJob] = useState<ScheduledJob | null>(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
@@ -137,11 +146,15 @@ export default function Scheduling() {
 
   // Generate days for display: Monday-Saturday only (skip Sundays)
   const days = useMemo(
-    () => Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i)).filter((day) => day.getDay() !== 0),
+    () =>
+      Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i)).filter(
+        (day) => formatInCentralTime(day, { weekday: 'short' }) !== 'Sun'
+      ),
     [daysToShow, weekStart]
   );
   const visibleStart = days[0] || weekStart;
   const visibleEnd = days[days.length - 1] || addDays(weekStart, daysToShow - 1);
+  const todayStamp = getCentralTodayISODate();
 
   const openJobs = useMemo(() => jobs.filter((job) => job.status !== 'complete'), [jobs]);
 
@@ -160,8 +173,8 @@ export default function Scheduling() {
       .sort((a, b) => {
         if (a.dispatchScore !== b.dispatchScore) return b.dispatchScore - a.dispatchScore;
         if (a.priority !== b.priority) return a.priority - b.priority;
-        const aDue = a.due_date ? new Date(a.due_date).getTime() : Number.MAX_SAFE_INTEGER;
-        const bDue = b.due_date ? new Date(b.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+        const aDue = getDateSortValue(a.due_date);
+        const bDue = getDateSortValue(b.due_date);
         if (aDue !== bDue) return aDue - bDue;
         return a.work_order_number.localeCompare(b.work_order_number);
       });
@@ -192,8 +205,8 @@ export default function Scheduling() {
 
   const loadData = useCallback(async () => {
     try {
-      const startDate = format(visibleStart, 'yyyy-MM-dd');
-      const endDate = format(visibleEnd, 'yyyy-MM-dd');
+      const startDate = getCentralDateStamp(visibleStart);
+      const endDate = getCentralDateStamp(visibleEnd);
       const [wcRes, jobsRes, heatmapRes] = await Promise.all([
         api.getWorkCenters(),
         api.getSchedulableWorkOrders({
@@ -250,8 +263,9 @@ export default function Scheduling() {
       if (job.work_center_id !== wcId) return false;
       if (!job.scheduled_start) return false;
       
-      const jobStart = parseISO(job.scheduled_start);
-      const jobEnd = job.scheduled_end ? parseISO(job.scheduled_end) : jobStart;
+      const jobStart = toCentralCalendarDate(job.scheduled_start);
+      const jobEnd = toCentralCalendarDate(job.scheduled_end || job.scheduled_start);
+      if (!jobStart || !jobEnd) return false;
       
       // Job starts on this exact day
       if (isSameDay(jobStart, day)) return true;
@@ -269,8 +283,9 @@ export default function Scheduling() {
   const getJobSpan = (job: ScheduledJob, day: Date, dayIdx: number): number => {
     if (!job.scheduled_start) return 1;
     
-    const jobStart = parseISO(job.scheduled_start);
-    const jobEnd = job.scheduled_end ? parseISO(job.scheduled_end) : jobStart;
+    const jobStart = toCentralCalendarDate(job.scheduled_start);
+    const jobEnd = toCentralCalendarDate(job.scheduled_end || job.scheduled_start);
+    if (!jobStart || !jobEnd) return 1;
     
     // If job started before current view, calculate from current day
     const effectiveStart = isBefore(jobStart, day) ? day : jobStart;
@@ -293,8 +308,9 @@ export default function Scheduling() {
       if (job.work_center_id !== wcId) continue;
       if (!job.scheduled_start || !job.scheduled_end) continue;
       
-      const jobStart = parseISO(job.scheduled_start);
-      const jobEnd = parseISO(job.scheduled_end);
+      const jobStart = toCentralCalendarDate(job.scheduled_start);
+      const jobEnd = toCentralCalendarDate(job.scheduled_end);
+      if (!jobStart || !jobEnd) continue;
       
       // Skip if this is the first day (those are handled by getJobsStartingOnDay)
       if (dayIdx === 0) continue;
@@ -314,7 +330,7 @@ export default function Scheduling() {
   const openScheduleModal = (job: ScheduledJob) => {
     setSelectedJob(job);
     setScheduleForm({
-      scheduled_start: job.scheduled_start ? job.scheduled_start.split('T')[0] : format(new Date(), 'yyyy-MM-dd'),
+      scheduled_start: job.scheduled_start ? getCentralDateStamp(job.scheduled_start) : getCentralTodayISODate(),
       scheduled_end: job.scheduled_end ? job.scheduled_end.split('T')[0] : '',
       work_center_id: job.work_center_id
     });
@@ -485,9 +501,13 @@ export default function Scheduling() {
       if (!job.scheduled_start) {
         return 'skipped';
       }
-      const shiftedDate = addDays(parseISO(job.scheduled_start), bulkShiftDays);
+      const scheduledStart = toCentralCalendarDate(job.scheduled_start);
+      if (!scheduledStart) {
+        return 'skipped';
+      }
+      const shiftedDate = addDays(scheduledStart, bulkShiftDays);
       await api.scheduleWorkOrder(job.work_order_id, {
-        scheduled_start: format(shiftedDate, 'yyyy-MM-dd'),
+        scheduled_start: getCentralDateStamp(shiftedDate),
         work_center_id: job.work_center_id,
       });
       return 'success';
@@ -537,7 +557,7 @@ export default function Scheduling() {
   };
 
   const goToToday = () => {
-    setWeekStart(startOfWeek(new Date(), { weekStartsOn: 1 }));
+    setWeekStart(startOfWeek(getCentralTodayDate(), { weekStartsOn: 1 }));
   };
 
   if (loading) {
@@ -564,7 +584,7 @@ export default function Scheduling() {
             <ChevronRightIcon className="h-5 w-5" />
           </button>
           <span className="ml-4 font-medium">
-            {format(visibleStart, 'MMM d')} - {format(visibleEnd, 'MMM d, yyyy')}
+            {formatCentralDate(visibleStart, { month: 'short', day: 'numeric', year: undefined })} - {formatCentralDate(visibleEnd)}
           </span>
         </div>
       </div>
@@ -582,15 +602,15 @@ export default function Scheduling() {
                   <th
                     key={idx}
                     className={`px-2 py-2 text-center text-xs font-medium w-24 border-r ${
-                      format(day, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd')
+                      getCentralDateStamp(day) === todayStamp
                         ? 'bg-blue-50 text-blue-700'
-                        : day.getDay() === 6
+                        : formatInCentralTime(day, { weekday: 'short' }) === 'Sat'
                         ? 'bg-gray-100 text-gray-500'
                         : 'text-gray-500'
                     }`}
                   >
-                    <div>{format(day, 'EEE')}</div>
-                    <div className="text-sm font-bold">{format(day, 'd')}</div>
+                    <div>{formatInCentralTime(day, { weekday: 'short' })}</div>
+                    <div className="text-sm font-bold">{formatInCentralTime(day, { day: 'numeric' })}</div>
                   </th>
                 ))}
               </tr>
@@ -635,8 +655,8 @@ export default function Scheduling() {
                     {days.map((day, dayIdx) => {
                       const jobsStartingToday = getJobsStartingOnDay(wc.id, day, dayIdx);
                       const spanningJob = isJobSpanningDay(wc.id, day, dayIdx);
-                      const isWeekend = day.getDay() === 6; // Saturday only
-                      const isToday = format(day, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
+                      const isWeekend = formatInCentralTime(day, { weekday: 'short' }) === 'Sat';
+                      const isToday = getCentralDateStamp(day) === todayStamp;
                       
                       // If a job is spanning through this day (but didn't start here), render empty cell
                       // The bar from the start day will cover this cell via colspan
@@ -729,7 +749,7 @@ export default function Scheduling() {
                 <th className="sticky left-0 bg-gray-50 z-10 px-3 py-2 text-left border-r">Work Center</th>
                 {days.map((day) => (
                   <th key={`hm-${day.toISOString()}`} className="px-2 py-2 text-center border-r min-w-[84px]">
-                    {format(day, 'EEE d')}
+                    {`${formatInCentralTime(day, { weekday: 'short' })} ${formatInCentralTime(day, { day: 'numeric' })}`}
                   </th>
                 ))}
               </tr>
@@ -744,7 +764,7 @@ export default function Scheduling() {
                       <div className="text-[11px] text-gray-500">{wc.capacity_hours_per_day || 8}h/day</div>
                     </td>
                     {days.map((day) => {
-                      const key = format(day, 'yyyy-MM-dd');
+                      const key = getCentralDateStamp(day);
                       const dayData = row?.days.find((entry) => entry.date === key);
                       const utilization = dayData?.utilization_pct || 0;
                       return (
@@ -937,10 +957,10 @@ export default function Scheduling() {
                     {job.remaining_hours.toFixed(1)}h
                   </td>
                   <td className="px-4 py-2 text-sm">
-                    {job.due_date ? format(parseISO(job.due_date), 'MMM d') : '-'}
+                    {job.due_date ? formatCentralDate(job.due_date, { year: undefined }) : '-'}
                   </td>
                   <td className="px-4 py-2 text-sm">
-                    {job.scheduled_start ? format(parseISO(job.scheduled_start), 'MMM d') : 'Unscheduled'}
+                    {job.scheduled_start ? formatCentralDate(job.scheduled_start, { year: undefined }) : 'Unscheduled'}
                   </td>
                   <td className="px-4 py-2 text-center">
                     {canEditPriority ? (

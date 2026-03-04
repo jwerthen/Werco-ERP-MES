@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   MagnifyingGlassIcon,
   DocumentMagnifyingGlassIcon,
@@ -247,7 +247,9 @@ export default function Traceability() {
               <div>
                 <label className="text-sm text-gray-500">Received Date</label>
                 <p className="font-medium">
-                  {lotTrace.received_date ? format(new Date(lotTrace.received_date), 'MM/dd/yyyy') : '-'}
+                  {lotTrace.received_date
+                    ? formatCentralDate(lotTrace.received_date, { month: '2-digit', day: '2-digit', year: 'numeric' })
+                    : '-'}
                 </p>
               </div>
             </div>
@@ -329,7 +331,11 @@ export default function Traceability() {
                           )}
                         </div>
                         <span className="text-sm text-gray-500">
-                          {format(new Date(item.timestamp), 'MM/dd/yyyy h:mm a')}
+                          {formatCentralDateTime(item.timestamp, {
+                            month: '2-digit',
+                            day: '2-digit',
+                            year: 'numeric',
+                          })}
                         </span>
                       </div>
                       {item.user && (

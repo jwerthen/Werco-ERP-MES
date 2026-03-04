@@ -2,8 +2,8 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { Part, WorkOrder } from '../types';
-import { format } from 'date-fns';
 import QRCode from 'qrcode';
+import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 
 interface MaterialRequirement {
   bom_item_id: number;
@@ -134,8 +134,14 @@ export default function PrintTraveler() {
     const parsed = typeof value === 'string' ? Number(value) : value;
     return Number.isFinite(parsed) ? Number(parsed).toFixed(2) : '0.00';
   };
-  const printDate = format(new Date(), 'MM/dd/yyyy');
-  const dueDate = workOrder.due_date ? format(new Date(workOrder.due_date), 'MM/dd/yyyy') : '-';
+  const printDate = formatCentralDate(getCentralTodayISODate(), {
+    month: '2-digit',
+    day: '2-digit',
+    year: 'numeric',
+  });
+  const dueDate = workOrder.due_date
+    ? formatCentralDate(workOrder.due_date, { month: '2-digit', day: '2-digit', year: 'numeric' })
+    : '-';
 
   return (
     <div className="p-8 max-w-5xl mx-auto print:p-4">

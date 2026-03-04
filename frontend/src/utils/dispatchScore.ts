@@ -1,3 +1,5 @@
+import { getCentralDateStamp, getCentralTodayISODate } from './centralTime';
+
 interface DispatchScoreInput {
   priority: number;
   dueDate?: string | null;
@@ -11,21 +13,9 @@ const clampPriority = (priority: number) => {
   return Math.min(10, Math.max(1, priority));
 };
 
-const parseDate = (value?: string | null) => {
-  if (!value) return null;
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return parsed;
-};
-
-const startOfToday = () => {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
-};
-
-const daysBetween = (target: Date, base: Date) => {
+const daysBetween = (targetDate: string, baseDate: string) => {
   const oneDay = 24 * 60 * 60 * 1000;
-  return Math.floor((target.getTime() - base.getTime()) / oneDay);
+  return Math.floor((Date.parse(`${targetDate}T00:00:00Z`) - Date.parse(`${baseDate}T00:00:00Z`)) / oneDay);
 };
 
 export const calculateDispatchScore = ({
@@ -36,13 +26,13 @@ export const calculateDispatchScore = ({
   status,
 }: DispatchScoreInput): number => {
   const normalizedPriority = clampPriority(priority);
-  const today = startOfToday();
-  const due = parseDate(dueDate);
+  const today = getCentralTodayISODate();
+  const due = dueDate ? getCentralDateStamp(dueDate) : '';
 
   let score = (11 - normalizedPriority) * 16;
 
   if (due) {
-    const dayDelta = daysBetween(new Date(due.getFullYear(), due.getMonth(), due.getDate()), today);
+    const dayDelta = daysBetween(due, today);
     if (dayDelta < 0) {
       score += 180 + Math.min(90, Math.abs(dayDelta) * 12);
     } else {
@@ -66,4 +56,3 @@ export const calculateDispatchScore = ({
 
   return Math.round(Math.max(0, score));
 };
-

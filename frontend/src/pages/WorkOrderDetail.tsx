@@ -2,10 +2,10 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { User, WorkOrder } from '../types';
-import { format } from 'date-fns';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
+import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ArrowLeftIcon,
   PlayIcon,
@@ -64,23 +64,8 @@ interface ActiveShopUser {
   entry_type?: string;
 }
 
-const formatDateTimeCST = (value?: string) => {
-  if (!value) return '-';
-  try {
-    const parsed = new Date(value);
-    return parsed.toLocaleString('en-US', {
-      timeZone: 'America/Chicago',
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-    }) + ' CT';
-  } catch {
-    return value;
-  }
-};
+const formatDateTimeCT = (value?: string) =>
+  formatCentralDateTime(value, { timeZoneName: 'short' });
 
 export default function WorkOrderDetail() {
   const { id } = useParams();
@@ -341,7 +326,7 @@ export default function WorkOrderDetail() {
             <div>
               <dt className="text-sm text-gray-500">Due Date</dt>
               <dd className="text-lg font-medium">
-                {workOrder.due_date ? format(new Date(workOrder.due_date), 'MMM d, yyyy') : '-'}
+                {workOrder.due_date ? formatCentralDate(workOrder.due_date) : '-'}
               </dd>
             </div>
             <div>
@@ -396,7 +381,7 @@ export default function WorkOrderDetail() {
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Entry Type</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Clocked In (CST)</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Clocked In (CT)</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -410,7 +395,7 @@ export default function WorkOrderDetail() {
                       <td className="px-4 py-3 text-sm text-gray-700">
                         {entry.entry_type ? entry.entry_type.toString().replace('_', ' ') : '-'}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{formatDateTimeCST(entry.clock_in)}</td>
+                      <td className="px-4 py-3 text-sm text-gray-700">{formatDateTimeCT(entry.clock_in)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -442,9 +427,9 @@ export default function WorkOrderDetail() {
                   {isAdminView && (
                     <>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started By</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started At (CST)</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started At (CT)</th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Completed By</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Completed At (CST)</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Completed At (CT)</th>
                     </>
                   )}
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
@@ -520,13 +505,13 @@ export default function WorkOrderDetail() {
                               {op.started_by ? (userNameById[op.started_by] || `User #${op.started_by}`) : '-'}
                             </td>
                             <td className="px-4 py-3 text-sm text-gray-700">
-                              {formatDateTimeCST(op.actual_start)}
+                              {formatDateTimeCT(op.actual_start)}
                             </td>
                             <td className="px-4 py-3 text-sm text-gray-700">
                               {op.completed_by ? (userNameById[op.completed_by] || `User #${op.completed_by}`) : '-'}
                             </td>
                             <td className="px-4 py-3 text-sm text-gray-700">
-                              {formatDateTimeCST(op.actual_end)}
+                              {formatDateTimeCT(op.actual_end)}
                             </td>
                           </>
                         )}

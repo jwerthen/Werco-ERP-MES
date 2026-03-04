@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate } from '../utils/centralTime';
 import {
   TruckIcon,
   PaperAirplaneIcon,
@@ -157,7 +157,7 @@ export default function Shipping() {
                   <td className="px-4 py-3">{wo.customer_name || '-'}</td>
                   <td className="px-4 py-3 text-right font-medium">{wo.quantity_complete}</td>
                   <td className="px-4 py-3">
-                    {wo.due_date ? format(new Date(wo.due_date), 'MMM d') : '-'}
+                    {wo.due_date ? formatCentralDate(wo.due_date, { year: undefined }) : '-'}
                   </td>
                   <td className="px-4 py-3 text-center">
                     <button

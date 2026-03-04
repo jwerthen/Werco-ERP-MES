@@ -7,6 +7,7 @@ import {
   WorkOrderOperationFormData,
   workOrderOperationSchema,
 } from '../../validation/schemas';
+import { getCentralTodayISODate } from '../../utils/centralTime';
 
 interface WorkOrderFormProps {
   initialData?: Partial<WorkOrderFormData>;
@@ -114,7 +115,7 @@ export function WorkOrderForm({
                 {...register('due_date')}
                 type="date"
                 className={`input ${errors.due_date ? 'input-error' : ''}`}
-                min={new Date().toISOString().split('T')[0]}
+                min={getCentralTodayISODate()}
               />
             </FormField>
 

@@ -2,9 +2,9 @@ import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrderSummary, WorkOrderStatus } from '../types';
-import { format } from 'date-fns';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
+import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../utils/centralTime';
 import { 
   PlusIcon, 
   MagnifyingGlassIcon, 
@@ -187,15 +187,10 @@ export default function WorkOrders() {
   // Stats
   const stats = useMemo(() => {
     const overdue = filteredWorkOrders.filter(wo => 
-      wo.due_date && new Date(wo.due_date) < new Date() && !['complete', 'closed', 'cancelled'].includes(wo.status)
+      wo.due_date && isDateBeforeTodayInCentral(wo.due_date) && !['complete', 'closed', 'cancelled'].includes(wo.status)
     ).length;
     const inProgress = filteredWorkOrders.filter(wo => wo.status === 'in_progress').length;
-    const dueToday = filteredWorkOrders.filter(wo => {
-      if (!wo.due_date) return false;
-      const due = new Date(wo.due_date);
-      const today = new Date();
-      return due.toDateString() === today.toDateString();
-    }).length;
+    const dueToday = filteredWorkOrders.filter(wo => Boolean(wo.due_date && isDateTodayInCentral(wo.due_date))).length;
     return { overdue, inProgress, dueToday };
   }, [filteredWorkOrders]);
 
@@ -411,7 +406,11 @@ interface WorkOrderTableProps {
 
 function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasingIds }: WorkOrderTableProps) {
   const isOverdue = (wo: WorkOrderSummary) => {
-    return wo.due_date && new Date(wo.due_date) < new Date() && !['complete', 'closed', 'cancelled'].includes(wo.status);
+    return Boolean(
+      wo.due_date &&
+      isDateBeforeTodayInCentral(wo.due_date) &&
+      !['complete', 'closed', 'cancelled'].includes(wo.status)
+    );
   };
 
   return (
@@ -472,7 +471,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
                 </td>
                 <td>
                   <span className={`text-sm font-medium ${overdue ? 'text-red-600' : 'text-surface-700'}`}>
-                    {wo.due_date ? format(new Date(wo.due_date), 'MMM d, yyyy') : '—'}
+                    {wo.due_date ? formatCentralDate(wo.due_date) : '—'}
                   </span>
                   {overdue && (
                     <span className="ml-2 badge badge-danger text-[10px] py-0.5">OVERDUE</span>

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
-import { format } from 'date-fns';
+import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   TruckIcon,
   MagnifyingGlassIcon,
@@ -503,7 +503,7 @@ export default function ReceivingPage() {
                         </div>
                         {po.required_date && (
                           <p className="text-xs text-gray-500 mt-1">
-                            Required: {format(new Date(po.required_date), 'MMM d, yyyy')}
+                            Required: {formatCentralDate(po.required_date)}
                           </p>
                         )}
                       </div>
@@ -542,19 +542,19 @@ export default function ReceivingPage() {
                       <div>
                         <p className="text-gray-500">Order Date</p>
                         <p className="font-medium">
-                          {selectedPO.order_date ? format(new Date(selectedPO.order_date), 'MMM d, yyyy') : '-'}
+                          {selectedPO.order_date ? formatCentralDate(selectedPO.order_date) : '-'}
                         </p>
                       </div>
                       <div>
                         <p className="text-gray-500">Required Date</p>
                         <p className="font-medium">
-                          {selectedPO.required_date ? format(new Date(selectedPO.required_date), 'MMM d, yyyy') : '-'}
+                          {selectedPO.required_date ? formatCentralDate(selectedPO.required_date) : '-'}
                         </p>
                       </div>
                       <div>
                         <p className="text-gray-500">Expected Date</p>
                         <p className="font-medium">
-                          {selectedPO.expected_date ? format(new Date(selectedPO.expected_date), 'MMM d, yyyy') : '-'}
+                          {selectedPO.expected_date ? formatCentralDate(selectedPO.expected_date) : '-'}
                         </p>
                       </div>
                       <div>
@@ -675,7 +675,7 @@ export default function ReceivingPage() {
                                       </span>
                                     </td>
                                     <td className="px-4 py-2 text-sm text-gray-600">
-                                      {r.received_at ? format(new Date(r.received_at), 'MMM d, yyyy') : '-'}
+                                      {r.received_at ? formatCentralDate(r.received_at) : '-'}
                                     </td>
                                   </tr>
                                 ))
@@ -749,7 +749,7 @@ export default function ReceivingPage() {
                       </div>
                       {line.required_date && (
                         <p className="text-xs text-gray-500 mt-2">
-                          Required: {format(new Date(line.required_date), 'MMM d, yyyy')}
+                          Required: {formatCentralDate(line.required_date)}
                         </p>
                       )}
                     </div>
@@ -807,7 +807,12 @@ export default function ReceivingPage() {
                         )}
                       </td>
                       <td className="px-4 py-3 text-sm">
-                        {format(new Date(item.received_at), 'MMM d, HH:mm')}
+                        {formatCentralDateTime(item.received_at, {
+                          year: undefined,
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          hour12: false,
+                        })}
                       </td>
                       <td className="px-4 py-3 text-center">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${
@@ -879,7 +884,7 @@ export default function ReceivingPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-sm">
-                        {format(new Date(item.received_at), 'MMM d, yyyy')}
+                        {formatCentralDate(item.received_at)}
                       </td>
                     </tr>
                   ))}
