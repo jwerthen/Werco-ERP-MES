@@ -17,6 +17,8 @@ jobs:
   deploy-frontend:
     name: Deploy Frontend (Railway Production)
     runs-on: ubuntu-latest
+    env:
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
     environment:
       name: production
       url: ${{ vars.PRODUCTION_URL }}
@@ -31,7 +33,7 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           cd frontend
-          railway up --service werco-frontend . --path-as-root --environment production
+          railway up --service werco-frontend . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}"
 
       - name: Verify deployment no longer serves stale dashboard bundle
         env:
