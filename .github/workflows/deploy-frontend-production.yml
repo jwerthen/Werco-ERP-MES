@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      RAILWAY_FRONTEND_SERVICE: ${{ vars.RAILWAY_FRONTEND_SERVICE }}
     environment:
       name: production
       url: ${{ vars.PRODUCTION_URL }}
@@ -28,12 +29,27 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
+      - name: Validate Railway credentials
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "${RAILWAY_TOKEN}" ]; then
+            echo "RAILWAY_TOKEN is empty or missing"
+            exit 1
+          fi
+          if [ -z "${RAILWAY_PROJECT_ID}" ]; then
+            echo "RAILWAY_PROJECT_ID is empty or missing"
+            exit 1
+          fi
+          railway whoami > /dev/null
+
       - name: Deploy frontend service from frontend root
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           cd frontend
-          railway up --service werco-frontend . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}"
+          service_name="${RAILWAY_FRONTEND_SERVICE:-werco-frontend}"
+          railway up . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}" --service "${service_name}"
 
       - name: Verify deployment no longer serves stale dashboard bundle
         env:
