@@ -36,9 +36,7 @@ RUN addgroup -g 1001 -S werco && \
     adduser -u 1001 -S werco -G werco && \
     chown -R werco:werco /usr/share/nginx/html && \
     chown -R werco:werco /var/cache/nginx && \
-    chown -R werco:werco /var/log/nginx && \
-    touch /var/run/nginx.pid && \
-    chown -R werco:werco /var/run/nginx.pid
+    chown -R werco:werco /var/log/nginx
 
 # Security headers are configured in nginx.conf
 EXPOSE 3000
@@ -49,4 +47,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 
 USER werco
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["nginx", "-g", "pid /tmp/nginx.pid; daemon off;"]
