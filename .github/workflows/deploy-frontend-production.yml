@@ -1,0 +1,72 @@
+name: Deploy Frontend Production
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend-production.yml'
+      - '.github/workflows/ci-cd.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-frontend-production
+  cancel-in-progress: true
+
+jobs:
+  deploy-frontend:
+    name: Deploy Frontend (Railway Production)
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy frontend service from frontend root
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          cd frontend
+          railway up --service werco-frontend . --path-as-root --environment production
+
+      - name: Verify deployment no longer serves stale dashboard bundle
+        env:
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+          import sys
+
+          base = (os.environ.get("PRODUCTION_URL") or "").strip().rstrip("/")
+          if not base:
+            print("PRODUCTION_URL is not configured")
+            sys.exit(1)
+
+          stale_main = "/static/js/main.5b05fd32.js"
+          last_main = None
+
+          for attempt in range(1, 13):
+            try:
+              with urllib.request.urlopen(base + "/asset-manifest.json", timeout=20) as resp:
+                manifest = json.loads(resp.read().decode())
+              main_js = manifest.get("files", {}).get("main.js")
+              last_main = main_js
+              print(f"Attempt {attempt}: main.js={main_js}")
+              if main_js and main_js != stale_main:
+                print("Frontend manifest updated.")
+                sys.exit(0)
+            except Exception as exc:
+              print(f"Attempt {attempt}: failed to read manifest: {exc}")
+
+            time.sleep(10)
+
+          print(f"Stale bundle still detected after retries: {last_main}")
+          sys.exit(1)
+          PY
