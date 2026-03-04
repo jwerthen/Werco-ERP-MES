@@ -243,14 +243,14 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           cd backend
-          railway up --service werco-api-staging --environment staging
+          railway up --service werco-api-staging . --path-as-root --environment staging
 
       - name: Deploy Frontend to Staging
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           cd frontend
-          railway up --service werco-frontend-staging --environment staging
+          railway up --service werco-frontend-staging . --path-as-root --environment staging
 
       - name: Verify Staging Deployment
         run: |
@@ -276,14 +276,14 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           cd backend
-          railway up --service werco-api --environment production
+          railway up --service werco-api . --path-as-root --environment production
 
       - name: Deploy Frontend to Production
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           cd frontend
-          railway up --service werco-frontend --environment production
+          railway up --service werco-frontend . --path-as-root --environment production
 
       - name: Verify Production Deployment
         run: |
