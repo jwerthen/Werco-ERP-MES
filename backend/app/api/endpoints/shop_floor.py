@@ -1,4 +1,5 @@
 from typing import Optional
+from collections import defaultdict
 import math
 from datetime import datetime, timezone, date
 import hashlib
@@ -20,6 +21,7 @@ from app.services.audit_service import AuditService
 from app.services.scheduling_service import SchedulingService
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
+    manager,
     broadcast_dashboard_update,
     broadcast_shop_floor_update,
     broadcast_work_order_update,
@@ -453,11 +455,74 @@ def shop_floor_dashboard(
     
     # Get work centers (single query)
     work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
-    
+
+    active_entries = db.query(TimeEntry).options(
+        joinedload(TimeEntry.user),
+        joinedload(TimeEntry.work_order).joinedload(WorkOrder.part),
+        joinedload(TimeEntry.operation),
+        joinedload(TimeEntry.work_center)
+    ).filter(TimeEntry.clock_out.is_(None)).all()
+
+    assignments_by_user: dict[int, list[dict]] = defaultdict(list)
+    assignments_by_work_center: dict[int, list[dict]] = defaultdict(list)
+    active_assignments: list[dict] = []
+
+    for entry in active_entries:
+        assignment = {
+            "time_entry_id": entry.id,
+            "clock_in": to_utc_iso(entry.clock_in),
+            "entry_type": entry.entry_type.value if hasattr(entry.entry_type, "value") else entry.entry_type,
+            "user": {
+                "id": entry.user.id if entry.user else None,
+                "employee_id": entry.user.employee_id if entry.user else None,
+                "name": entry.user.full_name if entry.user else None,
+                "role": entry.user.role.value if entry.user and hasattr(entry.user.role, "value") else (entry.user.role if entry.user else None),
+                "department": entry.user.department if entry.user else None,
+            },
+            "work_order": {
+                "id": entry.work_order.id if entry.work_order else None,
+                "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
+                "status": entry.work_order.status.value if entry.work_order and hasattr(entry.work_order.status, "value") else (entry.work_order.status if entry.work_order else None),
+                "part_number": entry.work_order.part.part_number if entry.work_order and entry.work_order.part else None,
+                "part_name": entry.work_order.part.name if entry.work_order and entry.work_order.part else None,
+                "customer_name": entry.work_order.customer_name if entry.work_order else None,
+                "priority": entry.work_order.priority if entry.work_order else None,
+                "due_date": entry.work_order.due_date.isoformat() if entry.work_order and entry.work_order.due_date else None,
+                "quantity_ordered": entry.work_order.quantity_ordered if entry.work_order else None,
+                "quantity_complete": entry.work_order.quantity_complete if entry.work_order else None,
+            },
+            "operation": {
+                "id": entry.operation.id if entry.operation else None,
+                "operation_number": entry.operation.operation_number if entry.operation else None,
+                "name": entry.operation.name if entry.operation else None,
+                "status": entry.operation.status.value if entry.operation and hasattr(entry.operation.status, "value") else (entry.operation.status if entry.operation else None),
+                "sequence": entry.operation.sequence if entry.operation else None,
+                "quantity_complete": entry.operation.quantity_complete if entry.operation else None,
+                "quantity_scrapped": entry.operation.quantity_scrapped if entry.operation else None,
+            },
+            "work_center": {
+                "id": entry.work_center.id if entry.work_center else None,
+                "code": entry.work_center.code if entry.work_center else None,
+                "name": entry.work_center.name if entry.work_center else None,
+                "status": entry.work_center.current_status if entry.work_center else None,
+                "type": (
+                    entry.work_center.work_center_type.value
+                    if entry.work_center and hasattr(entry.work_center.work_center_type, "value")
+                    else (entry.work_center.work_center_type if entry.work_center else None)
+                ),
+            },
+        }
+        active_assignments.append(assignment)
+        if entry.user_id:
+            assignments_by_user[entry.user_id].append(assignment)
+        if entry.work_center_id:
+            assignments_by_work_center[entry.work_center_id].append(assignment)
+
     # Build response using pre-computed counts
     wc_status = []
     for wc in work_centers:
         counts = op_counts_by_wc.get(wc.id, {'active': 0, 'queued': 0})
+        active_people = assignments_by_work_center.get(wc.id, [])
         wc_status.append({
             "id": wc.id,
             "code": wc.code,
@@ -465,21 +530,73 @@ def shop_floor_dashboard(
             "type": wc.work_center_type.value if hasattr(wc.work_center_type, 'value') else wc.work_center_type,
             "status": wc.current_status,
             "active_operations": counts['active'],
-            "queued_operations": counts['queued']
+            "queued_operations": counts['queued'],
+            "active_people_count": len(active_people),
+            "active_people": [
+                {
+                    "user_id": assignment["user"]["id"],
+                    "name": assignment["user"]["name"],
+                    "employee_id": assignment["user"]["employee_id"],
+                    "work_order_number": assignment["work_order"]["work_order_number"],
+                    "operation_name": assignment["operation"]["name"],
+                    "clock_in": assignment["clock_in"],
+                }
+                for assignment in active_people
+            ],
         })
+
+    connected_user_ids = {
+        int(user_id)
+        for user_id in manager.get_connected_user_ids()
+        if str(user_id).isdigit()
+    }
+    signed_in_users: list[dict] = []
+    if connected_user_ids:
+        connected_users = db.query(User).filter(User.id.in_(connected_user_ids)).all()
+        signed_in_users = [
+            {
+                "id": user.id,
+                "employee_id": user.employee_id,
+                "name": user.full_name,
+                "role": user.role.value if hasattr(user.role, "value") else user.role,
+                "department": user.department,
+                "connected_since": manager.get_connected_since(str(user.id)),
+                "has_active_job": bool(assignments_by_user.get(user.id)),
+                "active_job_count": len(assignments_by_user.get(user.id, [])),
+                "active_work_centers": sorted({
+                    assignment["work_center"]["name"]
+                    for assignment in assignments_by_user.get(user.id, [])
+                    if assignment["work_center"]["name"]
+                }),
+                "active_work_orders": sorted({
+                    assignment["work_order"]["work_order_number"]
+                    for assignment in assignments_by_user.get(user.id, [])
+                    if assignment["work_order"]["work_order_number"]
+                }),
+            }
+            for user in connected_users
+        ]
+        signed_in_users.sort(key=lambda user: (not user["has_active_job"], user["name"] or ""))
     
     # Recent completions
     recent = db.query(WorkOrder).filter(
         WorkOrder.status == WorkOrderStatus.COMPLETE
     ).order_by(WorkOrder.actual_end.desc()).limit(5).all()
+
+    checked_in_user_ids = {entry.user_id for entry in active_entries if entry.user_id}
     
     data = {
         "summary": {
             "active_work_orders": active_wos,
             "due_today": due_today,
-            "overdue": overdue
+            "overdue": overdue,
+            "signed_in_users": len(signed_in_users),
+            "checked_in_users": len(checked_in_user_ids),
+            "idle_signed_in_users": max(len(signed_in_users) - len(checked_in_user_ids), 0),
         },
         "work_centers": wc_status,
+        "signed_in_users": signed_in_users,
+        "active_assignments": active_assignments,
         "recent_completions": [
             {
                 "work_order_number": wo.work_order_number,

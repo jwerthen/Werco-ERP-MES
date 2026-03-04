@@ -3,6 +3,7 @@ WebSocket connection manager for real-time updates.
 Handles broadcasting messages to connected clients.
 """
 from typing import List, Dict, Any
+from datetime import datetime, timezone
 from fastapi import WebSocket, WebSocketDisconnect
 import logging
 import json
@@ -16,6 +17,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
         self.user_connections: Dict[str, List[WebSocket]] = {}
+        self.user_connected_at: Dict[str, datetime] = {}
 
     async def connect(self, websocket: WebSocket, user_id: str = None):
         """Accept and store a WebSocket connection."""
@@ -23,8 +25,10 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
         if user_id:
+            user_id = str(user_id)
             if user_id not in self.user_connections:
                 self.user_connections[user_id] = []
+                self.user_connected_at[user_id] = datetime.now(timezone.utc)
             self.user_connections[user_id].append(websocket)
 
         logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
@@ -34,11 +38,18 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
-        if user_id and user_id in self.user_connections:
-            if websocket in self.user_connections[user_id]:
-                self.user_connections[user_id].remove(websocket)
-            if not self.user_connections[user_id]:
-                del self.user_connections[user_id]
+        candidate_user_ids = [str(user_id)] if user_id else [
+            uid for uid, connections in self.user_connections.items() if websocket in connections
+        ]
+
+        for candidate_user_id in candidate_user_ids:
+            if candidate_user_id not in self.user_connections:
+                continue
+            if websocket in self.user_connections[candidate_user_id]:
+                self.user_connections[candidate_user_id].remove(websocket)
+            if not self.user_connections[candidate_user_id]:
+                del self.user_connections[candidate_user_id]
+                self.user_connected_at.pop(candidate_user_id, None)
 
         logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
 
@@ -98,7 +109,16 @@ class ConnectionManager:
 
     def get_user_connection_count(self, user_id: str) -> int:
         """Get number of connections for a specific user."""
-        return len(self.user_connections.get(user_id, []))
+        return len(self.user_connections.get(str(user_id), []))
+
+    def get_connected_user_ids(self) -> List[str]:
+        """Get unique authenticated user IDs with an active WebSocket presence."""
+        return list(self.user_connections.keys())
+
+    def get_connected_since(self, user_id: str) -> str | None:
+        """Return when the user first connected in the current presence session."""
+        connected_at = self.user_connected_at.get(str(user_id))
+        return connected_at.isoformat() if connected_at else None
 
 
 # Global connection manager instance

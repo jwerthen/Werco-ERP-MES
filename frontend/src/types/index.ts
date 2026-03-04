@@ -171,8 +171,13 @@ export interface DashboardData {
     active_work_orders: number;
     due_today: number;
     overdue: number;
+    signed_in_users: number;
+    checked_in_users: number;
+    idle_signed_in_users: number;
   };
   work_centers: WorkCenterStatus[];
+  signed_in_users: SignedInUserStatus[];
+  active_assignments: ActiveAssignment[];
   recent_completions: {
     work_order_number: string;
     completed_at: string;
@@ -188,6 +193,69 @@ export interface WorkCenterStatus {
   status: string;
   active_operations: number;
   queued_operations: number;
+  active_people_count: number;
+  active_people: {
+    user_id: number;
+    name: string;
+    employee_id: string;
+    work_order_number: string;
+    operation_name: string;
+    clock_in: string;
+  }[];
+}
+
+export interface SignedInUserStatus {
+  id: number;
+  employee_id: string;
+  name: string;
+  role: UserRole;
+  department?: string;
+  connected_since?: string;
+  has_active_job: boolean;
+  active_job_count: number;
+  active_work_centers: string[];
+  active_work_orders: string[];
+}
+
+export interface ActiveAssignment {
+  time_entry_id: number;
+  clock_in: string;
+  entry_type: TimeEntryType;
+  user: {
+    id: number;
+    employee_id: string;
+    name: string;
+    role: UserRole;
+    department?: string;
+  };
+  work_order: {
+    id: number;
+    work_order_number: string;
+    status: WorkOrderStatus;
+    part_number?: string;
+    part_name?: string;
+    customer_name?: string;
+    priority?: number;
+    due_date?: string;
+    quantity_ordered?: number;
+    quantity_complete?: number;
+  };
+  operation: {
+    id: number;
+    operation_number?: string;
+    name: string;
+    status: OperationStatus;
+    sequence?: number;
+    quantity_complete?: number;
+    quantity_scrapped?: number;
+  };
+  work_center: {
+    id: number;
+    code?: string;
+    name: string;
+    status?: string;
+    type?: WorkCenterType;
+  };
 }
 
 export interface QueueItem {

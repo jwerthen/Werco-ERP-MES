@@ -8,6 +8,8 @@ import BottomNav from './ui/BottomNav';
 import SkipLink from './SkipLink';
 import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
 import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
+import { useWebSocket } from '../hooks/useWebSocket';
+import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { isKioskMode } from '../utils/kiosk';
 import {
   HomeIcon,
@@ -253,6 +255,17 @@ export default function Layout({ children }: LayoutProps) {
   const globalSearch = useGlobalSearch();
   const keyboardShortcuts = useKeyboardShortcutsContext();
   const isKiosk = isKioskMode(location.pathname, location.search) && user?.role === 'operator';
+  const presenceUrl = useMemo(() => {
+    if (!user) return null;
+    const token = getAccessToken();
+    if (!token) return null;
+    return buildWsUrl('/ws/updates', { token });
+  }, [user]);
+
+  useWebSocket({
+    url: presenceUrl,
+    enabled: Boolean(presenceUrl),
+  });
 
   // Global keyboard shortcuts for layout
   useKeyboardShortcuts([

@@ -2,10 +2,10 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
-import { DashboardData, WorkCenterStatus } from '../types';
+import { ActiveAssignment, DashboardData, SignedInUserStatus, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
-import { formatCentralTime } from '../utils/centralTime';
+import { formatCentralDate, formatCentralTime, isDateBeforeTodayInCentral } from '../utils/centralTime';
 import {
   ClipboardDocumentListIcon,
   ExclamationTriangleIcon,
@@ -15,10 +15,11 @@ import {
   WrenchScrewdriverIcon,
   ShieldExclamationIcon,
   ArrowRightIcon,
-  ArrowTrendingUpIcon,
-  ArrowTrendingDownIcon,
   ClockIcon,
   ArrowPathIcon,
+  SignalIcon,
+  UserGroupIcon,
+  UsersIcon,
 } from '@heroicons/react/24/outline';
 import { 
   ExclamationTriangleIcon as ExclamationTriangleSolid,
@@ -45,12 +46,47 @@ const statusColors: Record<string, { bg: string; dot: string; text: string }> = 
   offline: { bg: 'bg-red-50', dot: 'bg-red-500', text: 'text-red-700' },
 };
 
+const roleBadgeClasses: Record<string, string> = {
+  admin: 'bg-slate-100 text-slate-700',
+  manager: 'bg-indigo-100 text-indigo-700',
+  supervisor: 'bg-blue-100 text-blue-700',
+  operator: 'bg-emerald-100 text-emerald-700',
+  quality: 'bg-amber-100 text-amber-700',
+  shipping: 'bg-cyan-100 text-cyan-700',
+  viewer: 'bg-slate-100 text-slate-600',
+};
+
 interface Alert {
   type: 'error' | 'warning' | 'info';
   message: string;
   link?: string;
   icon?: React.ElementType;
 }
+
+const formatElapsed = (clockIn: string, nowMs: number) => {
+  const startMs = new Date(clockIn).getTime();
+  if (Number.isNaN(startMs)) return '--';
+
+  const diffMs = Math.max(nowMs - startMs, 0);
+  const totalMinutes = Math.floor(diffMs / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours === 0) {
+    return `${minutes}m`;
+  }
+
+  return `${hours}h ${minutes}m`;
+};
+
+const getRoleBadgeClass = (role?: string) => {
+  return roleBadgeClasses[role || 'viewer'] || 'bg-slate-100 text-slate-700';
+};
+
+const getEntryTypeLabel = (entryType?: string) => {
+  if (!entryType) return 'Run';
+  return entryType.charAt(0).toUpperCase() + entryType.slice(1);
+};
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
@@ -65,6 +101,7 @@ export default function Dashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [dataChanged, setDataChanged] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const _refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null); // eslint-disable-line @typescript-eslint/no-unused-vars
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const realtimeUrl = useMemo(() => {
@@ -79,6 +116,11 @@ export default function Dashboard() {
       return () => clearTimeout(timeout);
     }
   }, [dataChanged]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNowMs(Date.now()), 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const loadDashboard = useCallback(async (isInitial = false) => {
     if (!isInitial) {
@@ -201,6 +243,28 @@ export default function Dashboard() {
     }
   };
 
+  const activeAssignments = useMemo(() => {
+    return [...(data?.active_assignments || [])].sort((left, right) => {
+      const centerCompare = (left.work_center.name || '').localeCompare(right.work_center.name || '');
+      if (centerCompare !== 0) return centerCompare;
+      return new Date(left.clock_in).getTime() - new Date(right.clock_in).getTime();
+    });
+  }, [data?.active_assignments]);
+
+  const assignmentsByWorkCenter = useMemo(() => {
+    return activeAssignments.reduce<Record<string, ActiveAssignment[]>>((groups, assignment) => {
+      const key = assignment.work_center.name || 'Unassigned';
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+      groups[key].push(assignment);
+      return groups;
+    }, {});
+  }, [activeAssignments]);
+
+  const signedInUsers = data?.signed_in_users || [];
+  const idleSignedInUsers = signedInUsers.filter((user) => !user.has_active_job);
+
   if (loading) {
     return <SkeletonDashboard />;
   }
@@ -232,7 +296,7 @@ export default function Dashboard() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            <p className="page-subtitle">Manufacturing operations overview</p>
+            <p className="page-subtitle">Live view of shop activity, staffing, and job progress</p>
             {/* Refresh indicator */}
             {isRefreshing && (
               <ArrowPathIcon className="h-4 w-4 text-surface-400 animate-spin" />
@@ -295,7 +359,7 @@ export default function Dashboard() {
       )}
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-tour="dashboard-stats">
+      <div className="grid grid-cols-2 xl:grid-cols-3 gap-4" data-tour="dashboard-stats">
         <StatCard
           icon={ClipboardDocumentListIcon}
           iconBg="bg-blue-100"
@@ -303,6 +367,23 @@ export default function Dashboard() {
           label="Active Work Orders"
           value={data?.summary.active_work_orders || 0}
           href="/work-orders"
+        />
+        <StatCard
+          icon={SignalIcon}
+          iconBg="bg-cyan-100"
+          iconColor="text-cyan-600"
+          label="Signed In Now"
+          value={data?.summary.signed_in_users || 0}
+          subtitle="Live ERP sessions"
+        />
+        <StatCard
+          icon={UserGroupIcon}
+          iconBg="bg-emerald-100"
+          iconColor="text-emerald-600"
+          label="Checked In Now"
+          value={data?.summary.checked_in_users || 0}
+          subtitle="Active time entries"
+          href="/shop-floor"
         />
         <StatCard
           icon={CalendarIcon}
@@ -322,18 +403,17 @@ export default function Dashboard() {
           href="/work-orders"
         />
         <StatCard
-          icon={ShieldExclamationIcon}
-          iconBg={openNCRs > 0 ? "bg-orange-100" : "bg-emerald-100"}
-          iconColor={openNCRs > 0 ? "text-orange-600" : "text-emerald-600"}
-          label="Open NCRs"
-          value={openNCRs}
-          valueColor={openNCRs > 0 ? "text-orange-600" : undefined}
-          href="/quality"
+          icon={UsersIcon}
+          iconBg={(data?.summary.idle_signed_in_users || 0) > 0 ? "bg-amber-100" : "bg-slate-100"}
+          iconColor={(data?.summary.idle_signed_in_users || 0) > 0 ? "text-amber-600" : "text-slate-600"}
+          label="Signed In, Idle"
+          value={data?.summary.idle_signed_in_users || 0}
+          subtitle="Not clocked into work"
         />
       </div>
 
       {/* Secondary KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           icon={WrenchScrewdriverIcon}
           iconBg={equipmentDue > 0 ? "bg-amber-100" : "bg-emerald-100"}
@@ -360,9 +440,70 @@ export default function Dashboard() {
           value={data?.recent_completions?.length || 0}
           href="/work-orders"
         />
+        <StatCard
+          icon={ShieldExclamationIcon}
+          iconBg={openNCRs > 0 ? "bg-orange-100" : "bg-emerald-100"}
+          iconColor={openNCRs > 0 ? "text-orange-600" : "text-emerald-600"}
+          label="Open NCRs"
+          value={openNCRs}
+          valueColor={openNCRs > 0 ? "text-orange-600" : undefined}
+          href="/quality"
+        />
+      </div>
+
+      {/* Live Shop Activity */}
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h2 className="card-title">Live Shop Activity</h2>
+            <p className="card-subtitle">Who is signed in, who is clocked into work, and what each active job is doing now</p>
+          </div>
+        </div>
+
+        <div className="mb-4 flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-700">
+            Signed in = active authenticated ERP session
+          </span>
+          <span className="rounded-full bg-emerald-100 px-3 py-1 font-medium text-emerald-700">
+            Checked in = active time clock entry
+          </span>
+        </div>
+
+        {activeAssignments.length > 0 ? (
+          <div className="space-y-6">
+            {Object.entries(assignmentsByWorkCenter).map(([workCenterName, assignments]) => (
+              <div key={workCenterName}>
+                <div className="mb-3">
+                  <h3 className="text-lg font-semibold text-surface-900">{workCenterName}</h3>
+                  <p className="text-sm text-surface-500">
+                    {assignments.length} active assignment{assignments.length === 1 ? '' : 's'}
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  {assignments.map((assignment) => (
+                    <ActiveAssignmentCard
+                      key={assignment.time_entry_id}
+                      assignment={assignment}
+                      nowMs={nowMs}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-surface-300 bg-surface-50 px-6 py-12 text-center">
+            <UserGroupIcon className="mx-auto h-10 w-10 text-surface-400" />
+            <p className="mt-4 text-lg font-medium text-surface-700">No one is clocked into a job right now</p>
+            <p className="mt-2 text-sm text-surface-500">
+              Signed-in users still appear in the live presence panel, but there are no active time entries right now.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Work Center Status */}
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)] gap-6">
       <div className="card">
         <div className="card-header">
           <div>
@@ -374,7 +515,7 @@ export default function Dashboard() {
           </Link>
         </div>
         
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {data?.work_centers.map((wc: WorkCenterStatus) => {
             const statusStyle = statusColors[wc.status] || statusColors.offline;
             const typeColor = workCenterTypeColors[wc.type] || 'bg-slate-500';
@@ -403,20 +544,76 @@ export default function Dashboard() {
                   {wc.type.replace('_', ' ')}
                 </p>
                 
-                <div className="flex items-center gap-4 text-sm">
+                <div className="grid grid-cols-3 gap-3 text-sm">
                   <div>
-                    <span className="text-surface-500">Active: </span>
-                    <span className="font-semibold text-surface-900">{wc.active_operations}</span>
+                    <p className="text-surface-500">Active</p>
+                    <p className="font-semibold text-surface-900">{wc.active_operations}</p>
                   </div>
                   <div>
-                    <span className="text-surface-500">Queue: </span>
-                    <span className="font-semibold text-surface-900">{wc.queued_operations}</span>
+                    <p className="text-surface-500">Queue</p>
+                    <p className="font-semibold text-surface-900">{wc.queued_operations}</p>
                   </div>
+                  <div>
+                    <p className="text-surface-500">People</p>
+                    <p className="font-semibold text-surface-900">{wc.active_people_count}</p>
+                  </div>
+                </div>
+
+                <div className="mt-4 border-t border-white/60 pt-4">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-surface-500">
+                    Active People
+                  </p>
+                  {wc.active_people.length > 0 ? (
+                    <div className="space-y-2">
+                      {wc.active_people.map((person) => (
+                        <div key={`${wc.id}-${person.user_id}-${person.clock_in}`} className="rounded-lg bg-white/70 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="font-medium text-surface-800">{person.name}</p>
+                              <p className="text-xs text-surface-500">{person.employee_id}</p>
+                            </div>
+                            <p className="text-xs text-surface-500">{formatElapsed(person.clock_in, nowMs)}</p>
+                          </div>
+                          <p className="mt-2 text-sm text-surface-600">
+                            {person.work_order_number} • {person.operation_name}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-surface-500">No one is clocked into this work center.</p>
+                  )}
                 </div>
               </div>
             );
           })}
         </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h2 className="card-title">Signed In Right Now</h2>
+            <p className="card-subtitle">Live user presence across the ERP</p>
+          </div>
+        </div>
+
+        {signedInUsers.length ? (
+          <div className="space-y-3">
+            {signedInUsers.map((user) => (
+              <SignedInUserRow key={user.id} user={user} />
+            ))}
+            {idleSignedInUsers.length > 0 && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                <p className="font-semibold">Signed in but not on a job</p>
+                <p className="mt-1">{idleSignedInUsers.map((user) => user.name).join(', ')}</p>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-sm text-surface-500">No active signed-in sessions detected.</p>
+        )}
+      </div>
       </div>
 
       {/* Recent Completions */}
@@ -469,6 +666,141 @@ export default function Dashboard() {
   );
 }
 
+function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignment; nowMs: number }) {
+  const orderedQty = Number(assignment.work_order.quantity_ordered || 0);
+  const completeQty = Number(assignment.operation.quantity_complete ?? assignment.work_order.quantity_complete ?? 0);
+  const progress = orderedQty > 0 ? Math.min(100, Math.round((completeQty / orderedQty) * 100)) : 0;
+  const dueDate = assignment.work_order.due_date;
+  const isOverdue = Boolean(dueDate && isDateBeforeTodayInCentral(dueDate));
+
+  return (
+    <div className="rounded-2xl border border-surface-200 bg-white p-5 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-lg font-semibold text-surface-900">{assignment.user.name}</h3>
+            <span className="rounded-full bg-surface-100 px-2.5 py-1 text-xs font-medium text-surface-600">
+              {assignment.user.employee_id}
+            </span>
+            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${getRoleBadgeClass(assignment.user.role)}`}>
+              {assignment.user.role.replace('_', ' ')}
+            </span>
+          </div>
+          <p className="mt-1 text-sm text-surface-500">
+            {assignment.work_center.name}
+            {assignment.user.department ? ` • ${assignment.user.department}` : ''}
+          </p>
+        </div>
+        <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+          {getEntryTypeLabel(assignment.entry_type)}
+        </span>
+      </div>
+
+      <div className="mt-4 rounded-xl bg-slate-50 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-surface-500">Work order</p>
+            <Link
+              to={`/work-orders/${assignment.work_order.id}`}
+              className="text-lg font-semibold text-werco-700 hover:text-werco-800"
+            >
+              {assignment.work_order.work_order_number}
+            </Link>
+          </div>
+          {assignment.work_order.priority ? (
+            <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
+              Priority {assignment.work_order.priority}
+            </span>
+          ) : null}
+        </div>
+        <p className="mt-1 text-sm text-surface-700">
+          {assignment.work_order.part_number}
+          {assignment.work_order.part_name ? ` • ${assignment.work_order.part_name}` : ''}
+        </p>
+        <p className="mt-2 text-sm text-surface-600">
+          {assignment.operation.operation_number ? `${assignment.operation.operation_number} • ` : ''}
+          {assignment.operation.name}
+        </p>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+        <div className="rounded-xl border border-surface-200 p-3">
+          <p className="text-surface-500">Started</p>
+          <p className="mt-1 font-semibold text-surface-900">{formatCentralTime(assignment.clock_in)}</p>
+          <p className="mt-1 text-xs text-surface-500">{formatElapsed(assignment.clock_in, nowMs)} elapsed</p>
+        </div>
+        <div className="rounded-xl border border-surface-200 p-3">
+          <p className="text-surface-500">Due</p>
+          <p className={`mt-1 font-semibold ${isOverdue ? 'text-red-600' : 'text-surface-900'}`}>
+            {dueDate ? formatCentralDate(dueDate, { year: undefined }) : 'No due date'}
+          </p>
+          <p className="mt-1 text-xs text-surface-500">{assignment.work_order.customer_name || 'No customer specified'}</p>
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <div className="mb-1 flex items-center justify-between text-sm">
+          <span className="text-surface-500">Progress</span>
+          <span className="font-medium text-surface-700">
+            {completeQty}/{orderedQty || 0} ({progress}%)
+          </span>
+        </div>
+        <div className="h-2 rounded-full bg-surface-200">
+          <div className="h-2 rounded-full bg-werco-500 transition-all" style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SignedInUserRow({ user }: { user: SignedInUserStatus }) {
+  return (
+    <div className="rounded-xl border border-surface-200 bg-white p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-semibold text-surface-900">{user.name}</h3>
+            <span className="rounded-full bg-surface-100 px-2 py-0.5 text-xs font-medium text-surface-600">
+              {user.employee_id}
+            </span>
+          </div>
+          <p className="mt-1 text-sm text-surface-500">
+            {user.role.replace('_', ' ')}
+            {user.department ? ` • ${user.department}` : ''}
+          </p>
+        </div>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${user.has_active_job ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+          {user.has_active_job ? 'Checked In' : 'Signed In'}
+        </span>
+      </div>
+
+      <div className="mt-3 space-y-1 text-sm text-surface-600">
+        <p>
+          Active jobs: <span className="font-medium text-surface-800">{user.active_job_count}</span>
+        </p>
+        <p>
+          Work centers:{' '}
+          <span className="font-medium text-surface-800">
+            {user.active_work_centers.length ? user.active_work_centers.join(', ') : 'No active assignment'}
+          </span>
+        </p>
+        <p>
+          Work orders:{' '}
+          <span className="font-medium text-surface-800">
+            {user.active_work_orders.length ? user.active_work_orders.join(', ') : 'No active assignment'}
+          </span>
+        </p>
+        <p>
+          Connected:{' '}
+          <span className="font-medium text-surface-800">
+            {user.connected_since ? formatCentralTime(user.connected_since, { timeZoneName: 'short' }) : 'Unknown'}
+          </span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // Stat Card Component
 interface StatCardProps {
   icon: React.ElementType;
@@ -478,11 +810,10 @@ interface StatCardProps {
   value: number | string;
   valueColor?: string;
   subtitle?: string;
-  trend?: { value: number; isUp: boolean };
   href?: string;
 }
 
-function StatCard({ icon: Icon, iconBg, iconColor, label, value, valueColor, subtitle, trend, href }: StatCardProps) {
+function StatCard({ icon: Icon, iconBg, iconColor, label, value, valueColor, subtitle, href }: StatCardProps) {
   const content = (
     <div className="stat-card group">
       <div className={`stat-icon ${iconBg} transition-transform group-hover:scale-110`}>
@@ -492,16 +823,6 @@ function StatCard({ icon: Icon, iconBg, iconColor, label, value, valueColor, sub
         <p className="stat-label">{label}</p>
         <p className={`stat-value ${valueColor || ''}`}>{value}</p>
         {subtitle && <p className="text-xs text-surface-400 mt-0.5">{subtitle}</p>}
-        {trend && (
-          <div className={trend.isUp ? 'stat-trend-up' : 'stat-trend-down'}>
-            {trend.isUp ? (
-              <ArrowTrendingUpIcon className="h-4 w-4" />
-            ) : (
-              <ArrowTrendingDownIcon className="h-4 w-4" />
-            )}
-            <span>{trend.value}%</span>
-          </div>
-        )}
       </div>
     </div>
   );
