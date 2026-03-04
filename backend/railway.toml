@@ -1,7 +1,10 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "./Dockerfile"
+dockerfilePath = "Dockerfile"
 watchPatterns = ["**/*"]
+
+# NOTE: Ensure the backend service's "Root Directory" setting in Railway dashboard
+# is set to "backend" (not the repo root) for this config to work correctly.
 
 [deploy]
 healthcheckPath = "/health"
