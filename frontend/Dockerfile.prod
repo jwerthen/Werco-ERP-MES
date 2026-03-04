@@ -25,6 +25,10 @@ RUN npm run build
 # Production stage - nginx serves static files
 FROM nginx:alpine
 
+# Update the base nginx config for non-root execution.
+RUN sed -i 's|^pid .*;|pid /tmp/nginx.pid;|' /etc/nginx/nginx.conf && \
+    sed -i '/^user /d' /etc/nginx/nginx.conf
+
 # Copy custom nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
@@ -47,4 +51,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 
 USER werco
 
-CMD ["nginx", "-g", "pid /tmp/nginx.pid; daemon off;"]
+CMD ["nginx", "-g", "daemon off;"]
