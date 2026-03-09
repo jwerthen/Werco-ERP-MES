@@ -18,8 +18,9 @@ jobs:
     name: Deploy Frontend (Railway Production)
     runs-on: ubuntu-latest
     env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN || secrets.RAILWAY_API_TOKEN || secrets.RAILWAY_TOKEN_PRODUCTION || vars.RAILWAY_TOKEN || vars.RAILWAY_API_TOKEN }}
-      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID || vars.RAILWAY_PROJECT_ID || vars.RAILWAY_PROJECT }}
+      # Use explicit environment secrets to avoid stale fallback tokens.
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
       RAILWAY_FRONTEND_SERVICE: ${{ vars.RAILWAY_FRONTEND_SERVICE }}
     environment:
       name: production
@@ -46,7 +47,14 @@ jobs:
 
       - name: Validate Railway token authentication
         run: |
-          railway whoami > /dev/null
+          # Account/workspace tokens pass `whoami`; project tokens may not.
+          if railway whoami > /dev/null 2>&1; then
+            echo "Railway account authentication validated via whoami."
+            exit 0
+          fi
+
+          echo "whoami failed; validating project-scoped token access instead..."
+          railway status --project "${RAILWAY_PROJECT_ID}" > /dev/null
 
       - name: Deploy frontend service from frontend root
         run: |
