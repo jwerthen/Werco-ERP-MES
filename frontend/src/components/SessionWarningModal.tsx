@@ -28,38 +28,26 @@ export default function SessionWarningModal() {
   if (!sessionWarning) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
-        <div className="bg-amber-50 px-6 py-4 border-b border-amber-200">
-          <div className="flex items-center">
-            <ExclamationTriangleIcon className="h-6 w-6 text-amber-600 mr-3" />
-            <h3 className="text-lg font-semibold text-amber-800">Session Timeout Warning</h3>
-          </div>
+    <div className="du-modal du-modal-open">
+      <div className="du-modal-box max-w-md p-0 overflow-hidden">
+        <div className="du-alert du-alert-warning rounded-none border-0 border-b border-amber-200/60">
+          <ExclamationTriangleIcon className="h-6 w-6" />
+          <h3 className="text-lg font-semibold">Session Timeout Warning</h3>
         </div>
-        
-        <div className="px-6 py-4">
-          <p className="text-gray-700 mb-4">
-            Your session is about to expire due to inactivity.
+
+        <div className="px-6 py-5 space-y-4">
+          <p className="text-base-content/80">Your session is about to expire due to inactivity.</p>
+          <p className="text-base-content/70">
+            You will be logged out in <span className="du-badge du-badge-warning font-bold">{countdown}s</span>.
           </p>
-          <p className="text-gray-600 mb-4">
-            You will be logged out in <span className="font-bold text-amber-600">{countdown}</span> seconds.
-          </p>
-          <p className="text-sm text-gray-500">
-            Click "Stay Logged In" to continue your session.
-          </p>
+          <p className="text-sm text-base-content/60">Click "Stay Logged In" to continue your session.</p>
         </div>
-        
-        <div className="px-6 py-4 bg-gray-50 flex justify-end space-x-3">
-          <button
-            onClick={logout}
-            className="px-4 py-2 text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition-colors"
-          >
+
+        <div className="du-modal-action mt-0 px-6 py-4 bg-base-200/60 border-t border-base-300 justify-end gap-3">
+          <button onClick={logout} className="du-btn du-btn-ghost">
             Log Out Now
           </button>
-          <button
-            onClick={extendSession}
-            className="px-4 py-2 text-white bg-cyan-600 rounded-lg hover:bg-cyan-700 transition-colors"
-          >
+          <button onClick={extendSession} className="du-btn du-btn-primary">
             Stay Logged In
           </button>
         </div>

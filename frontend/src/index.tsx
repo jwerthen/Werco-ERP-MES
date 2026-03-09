@@ -5,9 +5,9 @@ import './styles/accessibility.css';
 import './styles/print.css';
 import App from './App';
 
-const root = ReactDOM.createRoot(
-  document.getElementById('root') as HTMLElement
-);
+document.documentElement.setAttribute('data-theme', 'werco');
+
+const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
 
 root.render(
   <React.StrictMode>

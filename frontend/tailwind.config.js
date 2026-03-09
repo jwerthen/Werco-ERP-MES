@@ -1,25 +1,22 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  content: [
-    "./src/**/*.{js,jsx,ts,tsx}",
-    "./public/index.html"
-  ],
+  content: ['./src/**/*.{js,jsx,ts,tsx}', './public/index.html'],
   theme: {
     // Custom breakpoints for better mobile support
     screens: {
-      'xs': '375px',      // Small phones
-      'sm': '640px',      // Large phones / landscape
-      'md': '768px',      // Tablets
-      'lg': '1024px',     // Small laptops
-      'xl': '1280px',     // Desktops
-      '2xl': '1536px',    // Large desktops
+      xs: '375px', // Small phones
+      sm: '640px', // Large phones / landscape
+      md: '768px', // Tablets
+      lg: '1024px', // Small laptops
+      xl: '1280px', // Desktops
+      '2xl': '1536px', // Large desktops
       // Touch-specific breakpoints
-      'touch': { 'raw': '(hover: none) and (pointer: coarse)' },
-      'stylus': { 'raw': '(hover: none) and (pointer: fine)' },
-      'mouse': { 'raw': '(hover: hover) and (pointer: fine)' },
+      touch: { raw: '(hover: none) and (pointer: coarse)' },
+      stylus: { raw: '(hover: none) and (pointer: fine)' },
+      mouse: { raw: '(hover: hover) and (pointer: fine)' },
       // Orientation
-      'portrait': { 'raw': '(orientation: portrait)' },
-      'landscape': { 'raw': '(orientation: landscape)' },
+      portrait: { raw: '(orientation: portrait)' },
+      landscape: { raw: '(orientation: landscape)' },
     },
     extend: {
       colors: {
@@ -84,7 +81,7 @@ module.exports = {
           complete: '#059669',
           closed: '#9ca3af',
           cancelled: '#ef4444',
-        }
+        },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
@@ -93,11 +90,11 @@ module.exports = {
       },
       fontSize: {
         // Slightly larger base for shop floor readability
-        'xs': ['0.75rem', { lineHeight: '1rem' }],
-        'sm': ['0.875rem', { lineHeight: '1.25rem' }],
-        'base': ['1rem', { lineHeight: '1.5rem' }],
-        'lg': ['1.125rem', { lineHeight: '1.75rem' }],
-        'xl': ['1.25rem', { lineHeight: '1.75rem' }],
+        xs: ['0.75rem', { lineHeight: '1rem' }],
+        sm: ['0.875rem', { lineHeight: '1.25rem' }],
+        base: ['1rem', { lineHeight: '1.5rem' }],
+        lg: ['1.125rem', { lineHeight: '1.75rem' }],
+        xl: ['1.25rem', { lineHeight: '1.75rem' }],
         '2xl': ['1.5rem', { lineHeight: '2rem' }],
         '3xl': ['1.875rem', { lineHeight: '2.25rem' }],
         '4xl': ['2.25rem', { lineHeight: '2.5rem' }],
@@ -110,32 +107,32 @@ module.exports = {
       },
       spacing: {
         // Touch-friendly spacing (44px minimum touch targets)
-        '11': '2.75rem',
-        '13': '3.25rem',
-        '15': '3.75rem',
-        '18': '4.5rem',
-        '22': '5.5rem',
-        '30': '7.5rem',
+        11: '2.75rem',
+        13: '3.25rem',
+        15: '3.75rem',
+        18: '4.5rem',
+        22: '5.5rem',
+        30: '7.5rem',
       },
       borderRadius: {
-        'sm': '0.25rem',
-        'DEFAULT': '0.5rem',
-        'md': '0.5rem',
-        'lg': '0.75rem',
-        'xl': '1rem',
+        sm: '0.25rem',
+        DEFAULT: '0.5rem',
+        md: '0.5rem',
+        lg: '0.75rem',
+        xl: '1rem',
         '2xl': '1.25rem',
         '3xl': '1.5rem',
       },
       boxShadow: {
-        'sm': '0 1px 2px 0 rgb(0 0 0 / 0.05)',
-        'DEFAULT': '0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)',
-        'md': '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)',
-        'lg': '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)',
-        'xl': '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
-        'glow': '0 0 20px rgb(27 77 156 / 0.3)',
+        sm: '0 1px 2px 0 rgb(0 0 0 / 0.05)',
+        DEFAULT: '0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)',
+        md: '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)',
+        lg: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)',
+        xl: '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
+        glow: '0 0 20px rgb(27 77 156 / 0.3)',
         'glow-accent': '0 0 20px rgb(200 53 43 / 0.3)',
         'inner-glow': 'inset 0 2px 4px 0 rgb(0 0 0 / 0.05)',
-        'card': '0 2px 8px -2px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.06)',
+        card: '0 2px 8px -2px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.06)',
         'card-hover': '0 8px 24px -4px rgb(0 0 0 / 0.12), 0 4px 8px -2px rgb(0 0 0 / 0.08)',
       },
       animation: {
@@ -144,7 +141,7 @@ module.exports = {
         'slide-down': 'slideDown 0.3s ease-out',
         'scale-in': 'scaleIn 0.2s ease-out',
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-        'shimmer': 'shimmer 2s linear infinite',
+        shimmer: 'shimmer 2s linear infinite',
       },
       keyframes: {
         fadeIn: {
@@ -172,10 +169,34 @@ module.exports = {
         xs: '2px',
       },
       transitionDuration: {
-        '250': '250ms',
-        '350': '350ms',
+        250: '250ms',
+        350: '350ms',
       },
     },
   },
-  plugins: [],
-}
+  plugins: [require('daisyui')],
+  daisyui: {
+    // Prefix DaisyUI utilities to avoid collisions with existing .btn/.card/.alert/.modal classes.
+    prefix: 'du-',
+    base: false,
+    logs: false,
+    themes: [
+      {
+        werco: {
+          primary: '#1B4D9C',
+          secondary: '#3366FF',
+          accent: '#C8352B',
+          neutral: '#27272a',
+          'base-100': '#ffffff',
+          'base-200': '#f4f4f5',
+          'base-300': '#e4e4e7',
+          'base-content': '#18181b',
+          info: '#3b82f6',
+          success: '#10b981',
+          warning: '#f59e0b',
+          error: '#ef4444',
+        },
+      },
+    ],
+  },
+};

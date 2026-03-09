@@ -57,27 +57,27 @@ interface NavItem {
 
 const navigation: NavItem[] = [
   { name: 'Dashboard', href: '/', icon: HomeIcon },
-  { 
-    name: 'Shop Floor', 
+  {
+    name: 'Shop Floor',
     icon: WrenchScrewdriverIcon,
     children: [
       { name: 'Time Clock', href: '/shop-floor', icon: WrenchScrewdriverIcon },
       { name: 'Operations', href: '/shop-floor/operations', icon: ClipboardDocumentListIcon },
-    ]
+    ],
   },
   { name: 'Scheduling', href: '/scheduling', icon: CalendarDaysIcon },
   { name: 'Work Orders', href: '/work-orders', icon: ClipboardDocumentListIcon },
-  { 
-    name: 'Engineering', 
+  {
+    name: 'Engineering',
     icon: CubeIcon,
     children: [
       { name: 'Parts', href: '/parts', icon: CubeIcon },
       { name: 'Bill of Materials', href: '/bom', icon: DocumentDuplicateIcon },
       { name: 'Routing', href: '/routing', icon: ListBulletIcon },
-    ]
+    ],
   },
-  { 
-    name: 'Inventory & Purchasing', 
+  {
+    name: 'Inventory & Purchasing',
     icon: ArchiveBoxIcon,
     children: [
       { name: 'Inventory', href: '/inventory', icon: ArchiveBoxIcon },
@@ -85,10 +85,10 @@ const navigation: NavItem[] = [
       { name: 'Upload PO', href: '/po-upload', icon: DocumentDuplicateIcon },
       { name: 'Receiving', href: '/receiving', icon: TruckIcon },
       { name: 'MRP', href: '/mrp', icon: CalculatorIcon },
-    ]
+    ],
   },
-  { 
-    name: 'Sales & Shipping', 
+  {
+    name: 'Sales & Shipping',
     icon: PaperAirplaneIcon,
     children: [
       { name: 'AI RFQ Quote', href: '/rfq-packages/new', icon: SparklesIcon },
@@ -96,22 +96,22 @@ const navigation: NavItem[] = [
       { name: 'Quotes', href: '/quotes', icon: CurrencyDollarIcon },
       { name: 'Shipping', href: '/shipping', icon: PaperAirplaneIcon },
       { name: 'Customers', href: '/customers', icon: BuildingOfficeIcon },
-    ]
+    ],
   },
-  { 
-    name: 'Quality', 
+  {
+    name: 'Quality',
     icon: ShieldCheckIcon,
     children: [
       { name: 'NCR / CAR / FAI', href: '/quality', icon: ShieldCheckIcon },
       { name: 'Calibration', href: '/calibration', icon: WrenchIcon2 },
       { name: 'Traceability', href: '/traceability', icon: DocumentMagnifyingGlassIcon },
-    ]
+    ],
   },
   { name: 'Documents', href: '/documents', icon: DocumentTextIcon },
   { name: 'Analytics', href: '/analytics', icon: ChartBarIcon },
   { name: 'Reports', href: '/reports', icon: DocumentTextIcon },
-  { 
-    name: 'Administration', 
+  {
+    name: 'Administration',
     icon: Cog6ToothIcon,
     children: [
       { name: 'Work Centers', href: '/work-centers', icon: CogIcon },
@@ -119,13 +119,19 @@ const navigation: NavItem[] = [
       { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
       { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
       { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },
-    ]
+    ],
   },
 ];
 
-const NavGroup = React.memo(function NavGroup({ item, location, onNavigate, collapsed, isAdmin }: { 
-  item: NavItem; 
-  location: any; 
+const NavGroup = React.memo(function NavGroup({
+  item,
+  location,
+  onNavigate,
+  collapsed,
+  isAdmin,
+}: {
+  item: NavItem;
+  location: any;
   onNavigate?: () => void;
   collapsed?: boolean;
   isAdmin?: boolean;
@@ -135,7 +141,7 @@ const NavGroup = React.memo(function NavGroup({ item, location, onNavigate, coll
     () => item.children?.filter(child => !child.adminOnly || isAdmin),
     [item.children, isAdmin]
   );
-  
+
   const [isOpen, setIsOpen] = useState(() => {
     if (visibleChildren) {
       return visibleChildren.some(child => location.pathname === child.href);
@@ -160,15 +166,14 @@ const NavGroup = React.memo(function NavGroup({ item, location, onNavigate, coll
         className={`
           group flex items-center gap-3 px-3 py-2.5 rounded-xl
           text-sm font-medium transition-all duration-200
-          ${isActive 
-            ? 'bg-white/15 text-white shadow-sm' 
-            : 'text-white/70 hover:bg-white/10 hover:text-white'
-          }
+          ${isActive ? 'bg-white/15 text-white shadow-sm' : 'text-white/70 hover:bg-white/10 hover:text-white'}
         `}
         onClick={onNavigate}
         title={collapsed ? item.name : undefined}
       >
-        <item.icon className={`h-5 w-5 flex-shrink-0 transition-colors ${isActive ? 'text-white' : 'text-white/60 group-hover:text-white'}`} />
+        <item.icon
+          className={`h-5 w-5 flex-shrink-0 transition-colors ${isActive ? 'text-white' : 'text-white/60 group-hover:text-white'}`}
+        />
         {!collapsed && <span>{item.name}</span>}
         {item.badge && !collapsed && (
           <span className="ml-auto bg-accent-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">
@@ -186,27 +191,24 @@ const NavGroup = React.memo(function NavGroup({ item, location, onNavigate, coll
         className={`
           group w-full flex items-center gap-3 px-3 py-2.5 rounded-xl
           text-sm font-medium transition-all duration-200
-          ${hasActiveChild 
-            ? 'bg-white/10 text-white' 
-            : 'text-white/70 hover:bg-white/10 hover:text-white'
-          }
+          ${hasActiveChild ? 'bg-white/10 text-white' : 'text-white/70 hover:bg-white/10 hover:text-white'}
         `}
         title={collapsed ? item.name : undefined}
       >
-        <item.icon className={`h-5 w-5 flex-shrink-0 transition-colors ${hasActiveChild ? 'text-white' : 'text-white/60 group-hover:text-white'}`} />
+        <item.icon
+          className={`h-5 w-5 flex-shrink-0 transition-colors ${hasActiveChild ? 'text-white' : 'text-white/60 group-hover:text-white'}`}
+        />
         {!collapsed && (
           <>
             <span className="flex-1 text-left">{item.name}</span>
-            <ChevronDownIcon 
-              className={`h-4 w-4 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} 
-            />
+            <ChevronDownIcon className={`h-4 w-4 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
           </>
         )}
       </button>
-      
+
       {!collapsed && isOpen && visibleChildren && visibleChildren.length > 0 && (
         <div className="mt-1 ml-3 pl-3 border-l-2 border-white/20 space-y-0.5">
-          {visibleChildren.map((child) => {
+          {visibleChildren.map(child => {
             const isChildActive = location.pathname === child.href;
             return (
               <Link
@@ -215,9 +217,10 @@ const NavGroup = React.memo(function NavGroup({ item, location, onNavigate, coll
                 className={`
                   flex items-center gap-2.5 px-3 py-2 rounded-lg
                   text-sm transition-all duration-200
-                  ${isChildActive 
-                    ? 'bg-white/15 text-white font-medium' 
-                    : 'text-white/60 hover:bg-white/10 hover:text-white'
+                  ${
+                    isChildActive
+                      ? 'bg-white/15 text-white font-medium'
+                      : 'text-white/60 hover:bg-white/10 hover:text-white'
                   }
                 `}
                 onClick={onNavigate}
@@ -229,7 +232,6 @@ const NavGroup = React.memo(function NavGroup({ item, location, onNavigate, coll
           })}
         </div>
       )}
-
     </div>
   );
 });
@@ -238,7 +240,13 @@ const SidebarPattern = () => (
   <svg className="absolute inset-0 w-full h-full opacity-[0.03]" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <pattern id="sidebar-hex" width="56" height="100" patternUnits="userSpaceOnUse" patternTransform="scale(1.5)">
-        <path d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-cyan-300"/>
+        <path
+          d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="0.5"
+          className="text-cyan-300"
+        />
       </pattern>
     </defs>
     <rect width="100%" height="100%" fill="url(#sidebar-hex)" />
@@ -303,14 +311,14 @@ export default function Layout({ children }: LayoutProps) {
 
   const visibleNavigation = useMemo(() => {
     if (isKiosk) {
-      return navigation.filter((item) => item.name === 'Shop Floor');
+      return navigation.filter(item => item.name === 'Shop Floor');
     }
 
-    return navigation.map((item) => {
+    return navigation.map(item => {
       if (item.name !== 'Shop Floor' || !item.children) return item;
       return {
         ...item,
-        children: item.children.filter((child) => child.href !== '/shop-floor/operations'),
+        children: item.children.filter(child => child.href !== '/shop-floor/operations'),
       };
     });
   }, [isKiosk]);
@@ -330,17 +338,17 @@ export default function Layout({ children }: LayoutProps) {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50">
       {/* Skip to main content link for accessibility */}
       <SkipLink />
-      
+
       {/* Mobile sidebar backdrop */}
       {sidebarOpen && (
-        <div 
+        <div
           className="fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
       {/* Sidebar - Dark premium style */}
-      <aside 
+      <aside
         className={`
           fixed inset-y-0 left-0 z-50 w-72 
           bg-gradient-to-b from-slate-900 via-slate-900 to-blue-950
@@ -354,17 +362,13 @@ export default function Layout({ children }: LayoutProps) {
         <SidebarPattern />
         <div className="absolute top-1/4 -left-20 w-40 h-40 bg-cyan-500/10 rounded-full blur-3xl" />
         <div className="absolute bottom-1/4 -right-20 w-60 h-60 bg-blue-500/10 rounded-full blur-3xl" />
-        
+
         {/* Logo header */}
         <div className="relative flex items-center justify-between h-20 px-4 border-b border-white/10 flex-shrink-0">
           <Link to="/" className="flex items-center gap-3">
-            <img 
-              src="/Werco_Logo-PNG.png" 
-              alt="Werco Manufacturing" 
-              className="h-12 w-auto brightness-0 invert" 
-            />
+            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-12 w-auto brightness-0 invert" />
           </Link>
-          <button 
+          <button
             onClick={() => setSidebarOpen(false)}
             className="lg:hidden p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
             aria-label="Close navigation menu"
@@ -374,16 +378,16 @@ export default function Layout({ children }: LayoutProps) {
         </div>
 
         {/* Navigation */}
-        <nav 
-          className="relative flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide" 
+        <nav
+          className="relative flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide"
           data-tour="sidebar"
           aria-label="Main navigation"
         >
-          {visibleNavigation.map((item) => (
-            <NavGroup 
-              key={item.name} 
-              item={item} 
-              location={location} 
+          {visibleNavigation.map(item => (
+            <NavGroup
+              key={item.name}
+              item={item}
+              location={location}
               onNavigate={() => setSidebarOpen(false)}
               isAdmin={user?.role === 'admin'}
             />
@@ -395,16 +399,15 @@ export default function Layout({ children }: LayoutProps) {
           <div className="flex items-center gap-3">
             <div className="flex-shrink-0">
               <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 flex items-center justify-center text-white font-semibold text-sm shadow-lg">
-                {user?.first_name?.[0]}{user?.last_name?.[0]}
+                {user?.first_name?.[0]}
+                {user?.last_name?.[0]}
               </div>
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-white truncate">
                 {user?.first_name} {user?.last_name}
               </p>
-              <p className="text-xs text-cyan-400/80 truncate capitalize">
-                {user?.role?.replace('_', ' ')}
-              </p>
+              <p className="text-xs text-cyan-400/80 truncate capitalize">{user?.role?.replace('_', ' ')}</p>
             </div>
             <button
               onClick={() => {
@@ -443,11 +446,7 @@ export default function Layout({ children }: LayoutProps) {
 
             {/* Mobile logo */}
             <div className="lg:hidden">
-              <img 
-                src="/Werco_Logo-PNG.png" 
-                alt="Werco Manufacturing" 
-                className="h-10 w-auto" 
-              />
+              <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-10 w-auto" />
             </div>
 
             {/* Right side actions */}
@@ -474,7 +473,11 @@ export default function Layout({ children }: LayoutProps) {
                 aria-label="Show keyboard shortcuts"
               >
                 <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"
+                  />
                 </svg>
               </button>
 
@@ -486,7 +489,8 @@ export default function Layout({ children }: LayoutProps) {
               {/* User avatar (mobile) */}
               <div className="lg:hidden flex items-center">
                 <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 flex items-center justify-center text-white font-medium text-sm shadow-md">
-                  {user?.first_name?.[0]}{user?.last_name?.[0]}
+                  {user?.first_name?.[0]}
+                  {user?.last_name?.[0]}
                 </div>
               </div>
             </div>
@@ -494,15 +498,8 @@ export default function Layout({ children }: LayoutProps) {
         </header>
 
         {/* Main content - extra bottom padding for mobile nav */}
-        <main 
-          id="main-content" 
-          className="flex-1 p-4 sm:p-6 lg:p-8 pb-20 lg:pb-8"
-          role="main"
-          tabIndex={-1}
-        >
-          <div className="max-w-7xl mx-auto animate-fade-in">
-            {children}
-          </div>
+        <main id="main-content" className="flex-1 p-4 sm:p-6 lg:p-8 pb-20 lg:pb-8" role="main" tabIndex={-1}>
+          <div className="max-w-7xl mx-auto animate-fade-in">{children}</div>
         </main>
 
         {/* Footer - Hidden on mobile, visible on desktop */}
@@ -529,52 +526,48 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Employee ID Logout Modal */}
       {logoutModalOpen && isShopFloorKiosk && (
-        <div className="modal-overlay" onClick={() => setLogoutModalOpen(false)}>
-          <div className="modal max-w-sm" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 className="text-lg font-semibold text-slate-900">Sign out</h3>
+        <div className="du-modal du-modal-open" onClick={() => setLogoutModalOpen(false)}>
+          <div className="du-modal-box max-w-sm p-0 overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-base-300">
+              <h3 className="text-lg font-semibold text-base-content">Sign out</h3>
               <button
                 onClick={() => setLogoutModalOpen(false)}
-                className="p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                className="du-btn du-btn-sm du-btn-circle du-btn-ghost"
                 aria-label="Close"
               >
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="modal-body space-y-3">
-              <p className="text-sm text-slate-600">
-                Enter your employee ID (or 4-digit badge ID) to sign out.
-              </p>
+            <div className="px-6 py-4 space-y-3">
+              <p className="text-sm text-base-content/70">Enter your employee ID (or 4-digit badge ID) to sign out.</p>
               <input
                 type="text"
                 inputMode="text"
                 maxLength={50}
                 value={logoutEmployeeId}
-                onChange={(e) => setLogoutEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
-                className="input text-center text-lg"
+                onChange={e => setLogoutEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
+                className="du-input du-input-bordered w-full text-center text-lg"
                 placeholder="0000 or EMP-1001"
                 autoFocus
               />
-              {logoutError && (
-                <div className="text-sm text-red-600">{logoutError}</div>
-              )}
+              {logoutError && <div className="du-alert du-alert-error py-2 text-sm">{logoutError}</div>}
             </div>
 
-            <div className="modal-footer">
+            <div className="du-modal-action mt-0 px-6 py-4 bg-base-200/60 border-t border-base-300 justify-end gap-3">
               <button
                 onClick={() => {
                   setLogoutModalOpen(false);
                   setLogoutEmployeeId('');
                   setLogoutError('');
                 }}
-                className="btn-secondary"
+                className="du-btn du-btn-ghost"
               >
                 Cancel
               </button>
               <button
                 onClick={handleLogoutConfirm}
-                className="btn-primary"
+                className="du-btn du-btn-error"
                 disabled={logoutEmployeeId.trim().length === 0}
               >
                 Sign Out
@@ -586,4 +579,3 @@ export default function Layout({ children }: LayoutProps) {
     </div>
   );
 }
-
