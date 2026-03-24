@@ -32,7 +32,7 @@ function pruneEtagCache(): void {
   // Map iterates in insertion order; delete oldest entries
   const excess = etagCache.size - ETAG_CACHE_MAX_SIZE;
   let removed = 0;
-  for (const key of etagCache.keys()) {
+  for (const key of Array.from(etagCache.keys())) {
     if (removed >= excess) break;
     etagCache.delete(key);
     removed++;
