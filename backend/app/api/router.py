@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.endpoints import auth, work_centers, parts, work_orders, shop_floor, bom, routing, mrp, custom_fields, quality, inventory, purchasing, scheduling, documents, reports, shipping, quotes, users, customers, calibration, scanner, traceability, audit, quote_calculator, dxf_parser, admin_settings, receiving, po_upload, analytics, errors, search, exports, print_reports, rfq_quotes
+from app.api.endpoints import auth, work_centers, parts, work_orders, shop_floor, bom, routing, mrp, custom_fields, quality, inventory, purchasing, scheduling, documents, reports, shipping, quotes, users, customers, calibration, scanner, traceability, audit, quote_calculator, dxf_parser, admin_settings, receiving, po_upload, analytics, errors, search, exports, print_reports, rfq_quotes, oee, downtime, job_costing, tool_management, maintenance, operator_certifications, engineering_changes, spc, customer_complaints, supplier_scorecards
 
 api_router = APIRouter()
 
@@ -36,4 +36,14 @@ api_router.include_router(analytics.router, prefix="/analytics", tags=["Analytic
 api_router.include_router(search.router, prefix="/search", tags=["Global Search"])
 api_router.include_router(exports.router, prefix="/exports", tags=["Data Export"])
 api_router.include_router(print_reports.router, prefix="/print", tags=["Print Reports"])
+api_router.include_router(oee.router, prefix="/oee", tags=["OEE Tracking"])
+api_router.include_router(downtime.router, prefix="/downtime", tags=["Downtime Tracking"])
+api_router.include_router(job_costing.router, prefix="/job-costs", tags=["Job Costing"])
+api_router.include_router(tool_management.router, prefix="/tool-management", tags=["Tool & Fixture Management"])
+api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Preventive Maintenance"])
+api_router.include_router(operator_certifications.router, prefix="/certifications", tags=["Operator Certifications"])
+api_router.include_router(engineering_changes.router, prefix="/eco", tags=["Engineering Change Orders"])
+api_router.include_router(spc.router, prefix="/spc", tags=["Statistical Process Control"])
+api_router.include_router(customer_complaints.router, prefix="/complaints", tags=["Customer Complaints & RMA"])
+api_router.include_router(supplier_scorecards.router, prefix="/supplier-scorecards", tags=["Supplier Scorecards"])
 api_router.include_router(errors.router, tags=["Error Logging"])

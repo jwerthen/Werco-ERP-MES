@@ -190,6 +190,16 @@ tags_metadata = [
     {"name": "DXF Parser", "description": "DXF file parsing for part dimensions"},
     {"name": "PO Upload", "description": "Purchase order file upload and parsing"},
     {"name": "AI RFQ Quotes", "description": "AI-assisted RFQ package parsing and sheet-metal quote estimating"},
+    {"name": "OEE Tracking", "description": "Overall Equipment Effectiveness monitoring and reporting"},
+    {"name": "Downtime Tracking", "description": "Machine downtime events and reason code tracking"},
+    {"name": "Job Costing", "description": "Job cost tracking with estimated vs actual variance analysis"},
+    {"name": "Tool & Fixture Management", "description": "Tool inventory, checkout, and life tracking"},
+    {"name": "Preventive Maintenance", "description": "Preventive maintenance scheduling and work orders"},
+    {"name": "Operator Certifications", "description": "Operator certifications, training records, and skill matrix"},
+    {"name": "Engineering Change Orders", "description": "ECO/ECN workflow with approval and implementation tracking"},
+    {"name": "Statistical Process Control", "description": "SPC charts, measurements, and process capability studies"},
+    {"name": "Customer Complaints & RMA", "description": "Customer complaint tracking and return material authorization"},
+    {"name": "Supplier Scorecards", "description": "Supplier performance scoring, audits, and approved supplier list"},
     {"name": "Error Logging", "description": "Client-side error logging"},
 ]
 

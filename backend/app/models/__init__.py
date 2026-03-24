@@ -23,6 +23,16 @@ from .analytics import ReportTemplate, KPITarget
 from .notification import NotificationPreference, NotificationLog, DigestQueue
 from .job import Job, JobStatus, JobPriority
 from .webhook import Webhook, WebhookDelivery
+from .oee import OEERecord, OEETarget
+from .downtime import DowntimeEvent, DowntimeReasonCode, DowntimeCategory, DowntimePlannedType
+from .job_costing import JobCost, CostEntry, JobCostStatus, CostEntryType, CostEntrySource
+from .tool_management import Tool, ToolCheckout, ToolUsageLog, ToolStatus, ToolType
+from .maintenance import MaintenanceSchedule, MaintenanceWorkOrder, MaintenanceLog, MaintenanceType, MaintenancePriority, MaintenanceStatus, MaintenanceFrequency
+from .operator_certification import OperatorCertification, TrainingRecord, SkillMatrix, CertificationType, CertificationStatus
+from .engineering_change import EngineeringChangeOrder, ECOApproval, ECOImplementationTask, ECOStatus, ECOPriority, ECOType
+from .spc import SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability, ChartType
+from .customer_complaint import CustomerComplaint, ReturnMaterialAuthorization, ComplaintStatus, ComplaintSeverity, RMAStatus
+from .supplier_scorecard import SupplierScorecard, SupplierAudit, ApprovedSupplierList, ScorecardPeriod
 
 __all__ = [
     "User", "UserRole",
@@ -41,4 +51,15 @@ __all__ = [
     "NotificationPreference", "NotificationLog", "DigestQueue",
     "Webhook", "WebhookDelivery",
     "RfqPackage", "RfqPackageFile", "QuoteEstimate", "QuoteLineSummary", "PriceSnapshot",
+    "OEERecord", "OEETarget",
+    "DowntimeEvent", "DowntimeReasonCode", "DowntimeCategory", "DowntimePlannedType",
+    "JobCost", "CostEntry", "JobCostStatus", "CostEntryType", "CostEntrySource",
+    "Tool", "ToolCheckout", "ToolUsageLog", "ToolStatus", "ToolType",
+    "MaintenanceSchedule", "MaintenanceWorkOrder", "MaintenanceLog",
+    "MaintenanceType", "MaintenancePriority", "MaintenanceStatus", "MaintenanceFrequency",
+    "OperatorCertification", "TrainingRecord", "SkillMatrix", "CertificationType", "CertificationStatus",
+    "EngineeringChangeOrder", "ECOApproval", "ECOImplementationTask", "ECOStatus", "ECOPriority", "ECOType",
+    "SPCCharacteristic", "SPCControlLimit", "SPCMeasurement", "SPCProcessCapability", "ChartType",
+    "CustomerComplaint", "ReturnMaterialAuthorization", "ComplaintStatus", "ComplaintSeverity", "RMAStatus",
+    "SupplierScorecard", "SupplierAudit", "ApprovedSupplierList", "ScorecardPeriod",
 ]

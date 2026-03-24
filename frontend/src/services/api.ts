@@ -1759,9 +1759,753 @@ class ApiService {
     return response.data;
   }
 
+  // OEE Tracking
+  async getOEERecords(params?: { work_center_id?: number; date_from?: string; date_to?: string; shift?: string; skip?: number; limit?: number }) {
+    const response = await this.api.get('/oee/records', { params });
+    return response.data;
+  }
+
+  async getOEERecord(id: number) {
+    const response = await this.api.get(`/oee/records/${id}`);
+    return response.data;
+  }
+
+  async createOEERecord(data: any) {
+    const response = await this.api.post('/oee/records', data);
+    return response.data;
+  }
+
+  async updateOEERecord(id: number, data: any) {
+    const response = await this.api.put(`/oee/records/${id}`, data);
+    return response.data;
+  }
+
+  async deleteOEERecord(id: number) {
+    const response = await this.api.delete(`/oee/records/${id}`);
+    return response.data;
+  }
+
+  async autoCalculateOEE(workCenterId: number, params?: { record_date?: string; shift?: string }) {
+    const response = await this.api.post(`/oee/calculate/${workCenterId}`, null, { params });
+    return response.data;
+  }
+
+  async getOEEDashboard(params?: { period?: string }) {
+    const response = await this.api.get('/oee/dashboard', { params });
+    return response.data;
+  }
+
+  async getOEETrends(params?: { work_center_id?: number; period?: string }) {
+    const response = await this.api.get('/oee/trends', { params });
+    return response.data;
+  }
+
+  async getOEESixBigLosses(workCenterId: number, params?: { period?: string }) {
+    const response = await this.api.get(`/oee/six-big-losses/${workCenterId}`, { params });
+    return response.data;
+  }
+
+  async getOEETargets() {
+    const response = await this.api.get('/oee/targets');
+    return response.data;
+  }
+
+  async createOEETarget(data: any) {
+    const response = await this.api.post('/oee/targets', data);
+    return response.data;
+  }
+
+  async updateOEETarget(id: number, data: any) {
+    const response = await this.api.put(`/oee/targets/${id}`, data);
+    return response.data;
+  }
+
+  async deleteOEETarget(id: number) {
+    const response = await this.api.delete(`/oee/targets/${id}`);
+    return response.data;
+  }
+
+  // Downtime Tracking
+  async getDowntimeEvents(params?: { work_center_id?: number; category?: string; planned_type?: string; date_from?: string; date_to?: string; active_only?: boolean }) {
+    const response = await this.api.get('/downtime/', { params });
+    return response.data;
+  }
+
+  async getDowntimeEvent(id: number) {
+    const response = await this.api.get(`/downtime/${id}`);
+    return response.data;
+  }
+
+  async getActiveDowntime() {
+    const response = await this.api.get('/downtime/active');
+    return response.data;
+  }
+
+  async createDowntimeEvent(data: any) {
+    const response = await this.api.post('/downtime/', data);
+    return response.data;
+  }
+
+  async updateDowntimeEvent(id: number, data: any) {
+    const response = await this.api.put(`/downtime/${id}`, data);
+    return response.data;
+  }
+
+  async resolveDowntimeEvent(id: number, data: any) {
+    const response = await this.api.post(`/downtime/${id}/resolve`, data);
+    return response.data;
+  }
+
+  async getDowntimeSummary(params?: { date_from?: string; date_to?: string; work_center_id?: number }) {
+    const response = await this.api.get('/downtime/summary', { params });
+    return response.data;
+  }
+
+  async getDowntimeByWorkCenter(params?: { date_from?: string; date_to?: string }) {
+    const response = await this.api.get('/downtime/by-work-center', { params });
+    return response.data;
+  }
+
+  async getDowntimeReasonCodes(params?: { category?: string; active_only?: boolean }) {
+    const response = await this.api.get('/downtime/reason-codes', { params });
+    return response.data;
+  }
+
+  async createDowntimeReasonCode(data: any) {
+    const response = await this.api.post('/downtime/reason-codes', data);
+    return response.data;
+  }
+
+  async updateDowntimeReasonCode(id: number, data: any) {
+    const response = await this.api.put(`/downtime/reason-codes/${id}`, data);
+    return response.data;
+  }
+
+  // Job Costing
+  async getJobCosts(params?: Record<string, any>) {
+    const response = await this.api.get('/job-costs/', { params });
+    return response.data;
+  }
+
+  async getJobCost(id: number) {
+    const response = await this.api.get(`/job-costs/${id}`);
+    return response.data;
+  }
+
+  async createJobCost(data: any) {
+    const response = await this.api.post('/job-costs/', data);
+    return response.data;
+  }
+
+  async updateJobCost(id: number, data: any) {
+    const response = await this.api.put(`/job-costs/${id}`, data);
+    return response.data;
+  }
+
+  async getJobCostSummary() {
+    const response = await this.api.get('/job-costs/summary');
+    return response.data;
+  }
+
+  async getJobCostEntries(jobCostId: number) {
+    const response = await this.api.get(`/job-costs/${jobCostId}/entries`);
+    return response.data;
+  }
+
+  async addJobCostEntry(jobCostId: number, data: any) {
+    const response = await this.api.post(`/job-costs/${jobCostId}/entries`, data);
+    return response.data;
+  }
+
+  async deleteJobCostEntry(jobCostId: number, entryId: number) {
+    const response = await this.api.delete(`/job-costs/${jobCostId}/entries/${entryId}`);
+    return response.data;
+  }
+
+  async recalculateJobCost(jobCostId: number) {
+    const response = await this.api.post(`/job-costs/${jobCostId}/calculate`);
+    return response.data;
+  }
+
+  async getJobCostVarianceReport(jobCostId: number) {
+    const response = await this.api.get(`/job-costs/${jobCostId}/variance-report`);
+    return response.data;
+  }
+
+  // Tool & Fixture Management
+  async getToolDashboard() {
+    const response = await this.api.get('/tool-management/tools/dashboard');
+    return response.data;
+  }
+
+  async getTools(params?: { status?: string; tool_type?: string; search?: string; include_inactive?: boolean }) {
+    const response = await this.api.get('/tool-management/tools/', { params });
+    return response.data;
+  }
+
+  async getTool(id: number) {
+    const response = await this.api.get(`/tool-management/tools/${id}`);
+    return response.data;
+  }
+
+  async createTool(data: any) {
+    const response = await this.api.post('/tool-management/tools/', data);
+    return response.data;
+  }
+
+  async updateTool(id: number, data: any) {
+    const response = await this.api.put(`/tool-management/tools/${id}`, data);
+    return response.data;
+  }
+
+  async retireTool(id: number) {
+    const response = await this.api.delete(`/tool-management/tools/${id}`);
+    return response.data;
+  }
+
+  async checkoutTool(id: number, data: any) {
+    const response = await this.api.post(`/tool-management/tools/${id}/checkout`, data);
+    return response.data;
+  }
+
+  async checkinTool(id: number, data: any) {
+    const response = await this.api.post(`/tool-management/tools/${id}/checkin`, data);
+    return response.data;
+  }
+
+  async logToolUsage(id: number, data: any) {
+    const response = await this.api.post(`/tool-management/tools/${id}/log-usage`, data);
+    return response.data;
+  }
+
+  async getToolHistory(id: number) {
+    const response = await this.api.get(`/tool-management/tools/${id}/history`);
+    return response.data;
+  }
+
+  async getToolsCheckedOut() {
+    const response = await this.api.get('/tool-management/tools/checked-out');
+    return response.data;
+  }
+
+  async getToolsReplacementDue() {
+    const response = await this.api.get('/tool-management/tools/replacement-due');
+    return response.data;
+  }
+
+  async getToolsInspectionDue() {
+    const response = await this.api.get('/tool-management/tools/inspection-due');
+    return response.data;
+  }
+
+  // Preventive Maintenance
+  async getMaintenanceSchedules(params?: { work_center_id?: number; is_active?: boolean }) {
+    const response = await this.api.get('/maintenance/schedules', { params });
+    return response.data;
+  }
+
+  async getMaintenanceSchedule(id: number) {
+    const response = await this.api.get(`/maintenance/schedules/${id}`);
+    return response.data;
+  }
+
+  async createMaintenanceSchedule(data: any) {
+    const response = await this.api.post('/maintenance/schedules', data);
+    return response.data;
+  }
+
+  async updateMaintenanceSchedule(id: number, data: any) {
+    const response = await this.api.put(`/maintenance/schedules/${id}`, data);
+    return response.data;
+  }
+
+  async deleteMaintenanceSchedule(id: number) {
+    const response = await this.api.delete(`/maintenance/schedules/${id}`);
+    return response.data;
+  }
+
+  async getMaintenanceWorkOrders(params?: { status?: string; work_center_id?: number; maintenance_type?: string; start_date?: string; end_date?: string }) {
+    const response = await this.api.get('/maintenance/work-orders', { params });
+    return response.data;
+  }
+
+  async getMaintenanceWorkOrder(id: number) {
+    const response = await this.api.get(`/maintenance/work-orders/${id}`);
+    return response.data;
+  }
+
+  async createMaintenanceWorkOrder(data: any) {
+    const response = await this.api.post('/maintenance/work-orders', data);
+    return response.data;
+  }
+
+  async updateMaintenanceWorkOrder(id: number, data: any) {
+    const response = await this.api.put(`/maintenance/work-orders/${id}`, data);
+    return response.data;
+  }
+
+  async startMaintenanceWorkOrder(id: number) {
+    const response = await this.api.post(`/maintenance/work-orders/${id}/start`);
+    return response.data;
+  }
+
+  async completeMaintenanceWorkOrder(id: number, data: any) {
+    const response = await this.api.post(`/maintenance/work-orders/${id}/complete`, data);
+    return response.data;
+  }
+
+  async getOverdueMaintenanceWorkOrders() {
+    const response = await this.api.get('/maintenance/work-orders/overdue');
+    return response.data;
+  }
+
+  async getMaintenanceCalendar(start_date: string, end_date: string) {
+    const response = await this.api.get('/maintenance/calendar', { params: { start_date, end_date } });
+    return response.data;
+  }
+
+  async getMaintenanceDashboard() {
+    const response = await this.api.get('/maintenance/dashboard');
+    return response.data;
+  }
+
+  async getMaintenanceHistory(work_center_id: number, limit?: number) {
+    const response = await this.api.get(`/maintenance/history/${work_center_id}`, { params: { limit } });
+    return response.data;
+  }
+
+  async createMaintenanceLog(data: any) {
+    const response = await this.api.post('/maintenance/log', data);
+    return response.data;
+  }
+
+  // Operator Certifications
+  async getCertificationsDashboard() {
+    const response = await this.api.get('/certifications/certifications/dashboard');
+    return response.data;
+  }
+
+  async getCertifications(params?: { user_id?: number; status?: string; expiring_within_days?: number; skip?: number; limit?: number }) {
+    const response = await this.api.get('/certifications/certifications/', { params });
+    return response.data;
+  }
+
+  async getCertification(id: number) {
+    const response = await this.api.get(`/certifications/certifications/${id}`);
+    return response.data;
+  }
+
+  async createCertification(data: any) {
+    const response = await this.api.post('/certifications/certifications/', data);
+    return response.data;
+  }
+
+  async updateCertification(id: number, data: any) {
+    const response = await this.api.put(`/certifications/certifications/${id}`, data);
+    return response.data;
+  }
+
+  async deleteCertification(id: number) {
+    const response = await this.api.delete(`/certifications/certifications/${id}`);
+    return response.data;
+  }
+
+  async getExpiringCertifications(params?: { days?: number }) {
+    const response = await this.api.get('/certifications/certifications/expiring', { params });
+    return response.data;
+  }
+
+  async getUserCertifications(userId: number) {
+    const response = await this.api.get(`/certifications/certifications/user/${userId}`);
+    return response.data;
+  }
+
+  async getTrainingRecords(params?: { user_id?: number; status?: string }) {
+    const response = await this.api.get('/certifications/training/', { params });
+    return response.data;
+  }
+
+  async createTrainingRecord(data: any) {
+    const response = await this.api.post('/certifications/training/', data);
+    return response.data;
+  }
+
+  async updateTrainingRecord(id: number, data: any) {
+    const response = await this.api.put(`/certifications/training/${id}`, data);
+    return response.data;
+  }
+
+  async getSkillMatrix(params?: { user_id?: number; work_center_id?: number }) {
+    const response = await this.api.get('/certifications/skill-matrix/', { params });
+    return response.data;
+  }
+
+  async createSkillMatrixEntry(data: any) {
+    const response = await this.api.post('/certifications/skill-matrix/', data);
+    return response.data;
+  }
+
+  async updateSkillMatrixEntry(id: number, data: any) {
+    const response = await this.api.put(`/certifications/skill-matrix/${id}`, data);
+    return response.data;
+  }
+
+  // Engineering Change Orders
+  async getECODashboard() {
+    const response = await this.api.get('/eco/eco/dashboard');
+    return response.data;
+  }
+
+  async getECOs(params?: { status?: string; priority?: string; eco_type?: string; requestor_id?: number; skip?: number; limit?: number }) {
+    const response = await this.api.get('/eco/eco/', { params });
+    return response.data;
+  }
+
+  async getECO(id: number) {
+    const response = await this.api.get(`/eco/eco/${id}`);
+    return response.data;
+  }
+
+  async createECO(data: any) {
+    const response = await this.api.post('/eco/eco/', data);
+    return response.data;
+  }
+
+  async updateECO(id: number, data: any) {
+    const response = await this.api.put(`/eco/eco/${id}`, data);
+    return response.data;
+  }
+
+  async submitECO(id: number) {
+    const response = await this.api.post(`/eco/eco/${id}/submit`);
+    return response.data;
+  }
+
+  async approveECO(id: number, data?: any) {
+    const response = await this.api.post(`/eco/eco/${id}/approve`, data);
+    return response.data;
+  }
+
+  async rejectECO(id: number, data?: any) {
+    const response = await this.api.post(`/eco/eco/${id}/reject`, data);
+    return response.data;
+  }
+
+  async implementECO(id: number) {
+    const response = await this.api.post(`/eco/eco/${id}/implement`);
+    return response.data;
+  }
+
+  async completeECO(id: number) {
+    const response = await this.api.post(`/eco/eco/${id}/complete`);
+    return response.data;
+  }
+
+  async getECOApprovals(ecoId: number) {
+    const response = await this.api.get(`/eco/eco/${ecoId}/approvals`);
+    return response.data;
+  }
+
+  async addECOApproval(ecoId: number, data: any) {
+    const response = await this.api.post(`/eco/eco/${ecoId}/approvals`, data);
+    return response.data;
+  }
+
+  async addECOTask(ecoId: number, data: any) {
+    const response = await this.api.post(`/eco/eco/${ecoId}/tasks`, data);
+    return response.data;
+  }
+
+  async updateECOTask(ecoId: number, taskId: number, data: any) {
+    const response = await this.api.put(`/eco/eco/${ecoId}/tasks/${taskId}`, data);
+    return response.data;
+  }
+
+  async getECOAffectedItems(ecoId: number) {
+    const response = await this.api.get(`/eco/eco/affected-items/${ecoId}`);
+    return response.data;
+  }
+
+  // SPC (Statistical Process Control)
+  async getSPCDashboard() {
+    const response = await this.api.get('/spc/dashboard');
+    return response.data;
+  }
+
+  async getSPCCharacteristics(params?: { part_id?: number; active_only?: boolean }) {
+    const response = await this.api.get('/spc/characteristics', { params });
+    return response.data;
+  }
+
+  async getSPCCharacteristic(id: number) {
+    const response = await this.api.get(`/spc/characteristics/${id}`);
+    return response.data;
+  }
+
+  async createSPCCharacteristic(data: any) {
+    const response = await this.api.post('/spc/characteristics', data);
+    return response.data;
+  }
+
+  async updateSPCCharacteristic(id: number, data: any) {
+    const response = await this.api.put(`/spc/characteristics/${id}`, data);
+    return response.data;
+  }
+
+  async addSPCMeasurements(data: any) {
+    const response = await this.api.post('/spc/measurements', data);
+    return response.data;
+  }
+
+  async getSPCMeasurements(characteristicId: number, params?: { limit?: number; offset?: number }) {
+    const response = await this.api.get(`/spc/measurements/${characteristicId}`, { params });
+    return response.data;
+  }
+
+  async getSPCChartData(characteristicId: number, params?: { chart_type?: string; limit?: number }) {
+    const response = await this.api.get(`/spc/chart-data/${characteristicId}`, { params });
+    return response.data;
+  }
+
+  async calculateSPCControlLimits(characteristicId: number) {
+    const response = await this.api.post(`/spc/control-limits/${characteristicId}/calculate`);
+    return response.data;
+  }
+
+  async getSPCControlLimits(characteristicId: number) {
+    const response = await this.api.get(`/spc/control-limits/${characteristicId}`);
+    return response.data;
+  }
+
+  async runSPCCapabilityStudy(characteristicId: number) {
+    const response = await this.api.post(`/spc/capability-study/${characteristicId}`);
+    return response.data;
+  }
+
+  async getSPCCapability(characteristicId: number) {
+    const response = await this.api.get(`/spc/capability/${characteristicId}`);
+    return response.data;
+  }
+
+  async getSPCOutOfControl() {
+    const response = await this.api.get('/spc/out-of-control');
+    return response.data;
+  }
+
+  async getSPCViolations(characteristicId: number) {
+    const response = await this.api.get(`/spc/violations/${characteristicId}`);
+    return response.data;
+  }
+
+  // Customer Complaints & RMA
+  async getComplaintsDashboard() {
+    const response = await this.api.get('/complaints/complaints/dashboard');
+    return response.data;
+  }
+
+  async getComplaints(params?: { status?: string; severity?: string; customer_id?: number; skip?: number; limit?: number }) {
+    const response = await this.api.get('/complaints/complaints/', { params });
+    return response.data;
+  }
+
+  async getComplaint(id: number) {
+    const response = await this.api.get(`/complaints/complaints/${id}`);
+    return response.data;
+  }
+
+  async createComplaint(data: any) {
+    const response = await this.api.post('/complaints/complaints/', data);
+    return response.data;
+  }
+
+  async updateComplaint(id: number, data: any) {
+    const response = await this.api.put(`/complaints/complaints/${id}`, data);
+    return response.data;
+  }
+
+  async investigateComplaint(id: number, data: any) {
+    const response = await this.api.post(`/complaints/complaints/${id}/investigate`, data);
+    return response.data;
+  }
+
+  async resolveComplaint(id: number, data: any) {
+    const response = await this.api.post(`/complaints/complaints/${id}/resolve`, data);
+    return response.data;
+  }
+
+  async closeComplaint(id: number, data?: any) {
+    const response = await this.api.post(`/complaints/complaints/${id}/close`, data);
+    return response.data;
+  }
+
+  async createNCRFromComplaint(complaintId: number) {
+    const response = await this.api.post(`/complaints/complaints/${complaintId}/create-ncr`);
+    return response.data;
+  }
+
+  async createCARFromComplaint(complaintId: number) {
+    const response = await this.api.post(`/complaints/complaints/${complaintId}/create-car`);
+    return response.data;
+  }
+
+  async get8DReport(complaintId: number) {
+    const response = await this.api.get(`/complaints/complaints/8d-report/${complaintId}`);
+    return response.data;
+  }
+
+  async getRMAs(params?: { status?: string; customer_id?: number }) {
+    const response = await this.api.get('/complaints/rma/', { params });
+    return response.data;
+  }
+
+  async getRMA(id: number) {
+    const response = await this.api.get(`/complaints/rma/${id}`);
+    return response.data;
+  }
+
+  async createRMA(data: any) {
+    const response = await this.api.post('/complaints/rma/', data);
+    return response.data;
+  }
+
+  async updateRMA(id: number, data: any) {
+    const response = await this.api.put(`/complaints/rma/${id}`, data);
+    return response.data;
+  }
+
+  async approveRMA(id: number) {
+    const response = await this.api.post(`/complaints/rma/${id}/approve`);
+    return response.data;
+  }
+
+  async denyRMA(id: number, data?: any) {
+    const response = await this.api.post(`/complaints/rma/${id}/deny`, data);
+    return response.data;
+  }
+
+  async receiveRMA(id: number, data?: any) {
+    const response = await this.api.post(`/complaints/rma/${id}/receive`, data);
+    return response.data;
+  }
+
+  async inspectRMA(id: number, data?: any) {
+    const response = await this.api.post(`/complaints/rma/${id}/inspect`, data);
+    return response.data;
+  }
+
+  async disposeRMA(id: number, data?: any) {
+    const response = await this.api.post(`/complaints/rma/${id}/dispose`, data);
+    return response.data;
+  }
+
+  // Supplier Scorecards
+  async getSupplierScorecardsDashboard() {
+    const response = await this.api.get('/supplier-scorecards/supplier-scorecards/dashboard');
+    return response.data;
+  }
+
+  async getSupplierRanking() {
+    const response = await this.api.get('/supplier-scorecards/supplier-scorecards/ranking');
+    return response.data;
+  }
+
+  async getSupplierScorecards(params?: { vendor_id?: number; period?: string; skip?: number; limit?: number }) {
+    const response = await this.api.get('/supplier-scorecards/supplier-scorecards/', { params });
+    return response.data;
+  }
+
+  async getSupplierScorecard(id: number) {
+    const response = await this.api.get(`/supplier-scorecards/supplier-scorecards/${id}`);
+    return response.data;
+  }
+
+  async createSupplierScorecard(data: any) {
+    const response = await this.api.post('/supplier-scorecards/supplier-scorecards/', data);
+    return response.data;
+  }
+
+  async updateSupplierScorecard(id: number, data: any) {
+    const response = await this.api.put(`/supplier-scorecards/supplier-scorecards/${id}`, data);
+    return response.data;
+  }
+
+  async calculateSupplierScorecard(vendorId: number) {
+    const response = await this.api.post(`/supplier-scorecards/supplier-scorecards/calculate/${vendorId}`);
+    return response.data;
+  }
+
+  async getSupplierHistory(vendorId: number) {
+    const response = await this.api.get(`/supplier-scorecards/supplier-scorecards/vendor/${vendorId}/history`);
+    return response.data;
+  }
+
+  async getSupplierAudits(params?: { vendor_id?: number; status?: string }) {
+    const response = await this.api.get('/supplier-scorecards/supplier-audits/', { params });
+    return response.data;
+  }
+
+  async getSupplierAuditsDueSoon() {
+    const response = await this.api.get('/supplier-scorecards/supplier-audits/due-soon');
+    return response.data;
+  }
+
+  async createSupplierAudit(data: any) {
+    const response = await this.api.post('/supplier-scorecards/supplier-audits/', data);
+    return response.data;
+  }
+
+  async updateSupplierAudit(id: number, data: any) {
+    const response = await this.api.put(`/supplier-scorecards/supplier-audits/${id}`, data);
+    return response.data;
+  }
+
+  async getApprovedSuppliers(params?: { vendor_id?: number; status?: string }) {
+    const response = await this.api.get('/supplier-scorecards/approved-suppliers/', { params });
+    return response.data;
+  }
+
+  async getApprovedSupplier(id: number) {
+    const response = await this.api.get(`/supplier-scorecards/approved-suppliers/${id}`);
+    return response.data;
+  }
+
+  async createApprovedSupplier(data: any) {
+    const response = await this.api.post('/supplier-scorecards/approved-suppliers/', data);
+    return response.data;
+  }
+
+  async updateApprovedSupplier(id: number, data: any) {
+    const response = await this.api.put(`/supplier-scorecards/approved-suppliers/${id}`, data);
+    return response.data;
+  }
+
   // Generic get method for flexibility
   async get<T = any>(url: string, config?: { params?: Record<string, any> }): Promise<{ data: T }> {
     const response = await this.api.get<T>(url, config);
+    return { data: response.data };
+  }
+
+  // Generic post method for flexibility
+  async post<T = any>(url: string, data?: any): Promise<{ data: T }> {
+    const response = await this.api.post<T>(url, data);
+    return { data: response.data };
+  }
+
+  // Generic put method for flexibility
+  async put<T = any>(url: string, data?: any): Promise<{ data: T }> {
+    const response = await this.api.put<T>(url, data);
+    return { data: response.data };
+  }
+
+  // Generic patch method for flexibility
+  async patch<T = any>(url: string, data?: any): Promise<{ data: T }> {
+    const response = await this.api.patch<T>(url, data);
+    return { data: response.data };
+  }
+
+  // Generic delete method for flexibility
+  async delete<T = any>(url: string): Promise<{ data: T }> {
+    const response = await this.api.delete<T>(url);
     return { data: response.data };
   }
 }

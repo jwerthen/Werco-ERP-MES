@@ -40,6 +40,7 @@ import {
   ChevronDownIcon,
   Cog6ToothIcon,
   MagnifyingGlassIcon,
+  StopIcon,
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -63,6 +64,7 @@ const navigation: NavItem[] = [
     children: [
       { name: 'Time Clock', href: '/shop-floor', icon: WrenchScrewdriverIcon },
       { name: 'Operations', href: '/shop-floor/operations', icon: ClipboardDocumentListIcon },
+      { name: 'Downtime', href: '/downtime', icon: StopIcon },
     ],
   },
   { name: 'Scheduling', href: '/scheduling', icon: CalendarDaysIcon },
@@ -74,6 +76,7 @@ const navigation: NavItem[] = [
       { name: 'Parts', href: '/parts', icon: CubeIcon },
       { name: 'Bill of Materials', href: '/bom', icon: DocumentDuplicateIcon },
       { name: 'Routing', href: '/routing', icon: ListBulletIcon },
+      { name: 'Engineering Changes', href: '/engineering-changes', icon: DocumentDuplicateIcon },
     ],
   },
   {
@@ -103,11 +106,17 @@ const navigation: NavItem[] = [
     icon: ShieldCheckIcon,
     children: [
       { name: 'NCR / CAR / FAI', href: '/quality', icon: ShieldCheckIcon },
+      { name: 'SPC', href: '/spc', icon: ChartBarIcon },
       { name: 'Calibration', href: '/calibration', icon: WrenchIcon2 },
       { name: 'Traceability', href: '/traceability', icon: DocumentMagnifyingGlassIcon },
+      { name: 'Customer Complaints', href: '/customer-complaints', icon: DocumentTextIcon },
     ],
   },
+  { name: 'Maintenance', href: '/maintenance', icon: WrenchIcon2 },
+  { name: 'Tool Management', href: '/tool-management', icon: WrenchScrewdriverIcon },
+  { name: 'OEE', href: '/oee', icon: ChartBarIcon },
   { name: 'Documents', href: '/documents', icon: DocumentTextIcon },
+  { name: 'Job Costing', href: '/job-costing', icon: CurrencyDollarIcon },
   { name: 'Analytics', href: '/analytics', icon: ChartBarIcon },
   { name: 'Reports', href: '/reports', icon: DocumentTextIcon },
   {
@@ -116,6 +125,8 @@ const navigation: NavItem[] = [
     children: [
       { name: 'Work Centers', href: '/work-centers', icon: CogIcon },
       { name: 'Users', href: '/users', icon: UsersIcon },
+      { name: 'Operator Certifications', href: '/certifications', icon: ShieldCheckIcon },
+      { name: 'Supplier Scorecards', href: '/supplier-scorecards', icon: ChartBarIcon },
       { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
       { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
       { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },

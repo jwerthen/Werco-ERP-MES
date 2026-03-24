@@ -49,6 +49,16 @@ const AdminSettings = lazyWithRetry(() => import('./pages/AdminSettings'));
 const Receiving = lazyWithRetry(() => import('./pages/Receiving'));
 const POUpload = lazyWithRetry(() => import('./pages/POUpload'));
 const Analytics = lazyWithRetry(() => import('./pages/Analytics'));
+const JobCosting = lazyWithRetry(() => import('./pages/JobCosting'));
+const DowntimeTracking = lazyWithRetry(() => import('./pages/DowntimeTracking'));
+const Maintenance = lazyWithRetry(() => import('./pages/Maintenance'));
+const OEEDashboard = lazyWithRetry(() => import('./pages/OEE'));
+const OperatorCertifications = lazyWithRetry(() => import('./pages/OperatorCertifications'));
+const EngineeringChanges = lazyWithRetry(() => import('./pages/EngineeringChanges'));
+const SPCPage = lazyWithRetry(() => import('./pages/SPC'));
+const CustomerComplaints = lazyWithRetry(() => import('./pages/CustomerComplaints'));
+const ToolManagement = lazyWithRetry(() => import('./pages/ToolManagement'));
+const SupplierScorecards = lazyWithRetry(() => import('./pages/SupplierScorecards'));
 
 // Loading fallback for lazy-loaded pages
 const PageLoader = () => (
@@ -484,6 +494,96 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><Analytics /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Job Costing */}
+      <Route path="/job-costing" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><JobCosting /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Downtime Tracking */}
+      <Route path="/downtime" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><DowntimeTracking /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Maintenance */}
+      <Route path="/maintenance" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Maintenance /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* OEE */}
+      <Route path="/oee" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><OEEDashboard /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Operator Certifications */}
+      <Route path="/certifications" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><OperatorCertifications /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Engineering Changes */}
+      <Route path="/engineering-changes" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><EngineeringChanges /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* SPC */}
+      <Route path="/spc" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><SPCPage /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Customer Complaints */}
+      <Route path="/customer-complaints" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><CustomerComplaints /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Tool Management */}
+      <Route path="/tool-management" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><ToolManagement /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Supplier Scorecards */}
+      <Route path="/supplier-scorecards" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><SupplierScorecards /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
