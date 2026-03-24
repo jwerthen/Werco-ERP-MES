@@ -27,6 +27,9 @@ COPY postcss.config.js ./
 ARG REACT_APP_API_URL
 ENV REACT_APP_API_URL=$REACT_APP_API_URL
 
+# Fail fast if the API URL was not provided at build time
+RUN if [ -z "$REACT_APP_API_URL" ]; then echo "ERROR: REACT_APP_API_URL is required at build time"; exit 1; fi
+
 # Build the production app
 RUN npm run build
 
@@ -43,8 +46,8 @@ RUN rm -f /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh && \
     rm -f /docker-entrypoint.d/20-envsubst-on-templates.sh && \
     rm -f /docker-entrypoint.d/30-tune-worker-processes.sh
 
-# Copy custom nginx config
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Copy nginx config as a template (uses $PORT substitution at runtime)
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 
 # Copy built files
 COPY --from=build /app/build /usr/share/nginx/html
@@ -54,15 +57,19 @@ RUN addgroup -g 1001 -S werco && \
     adduser -u 1001 -S werco -G werco && \
     chown -R werco:werco /usr/share/nginx/html && \
     chown -R werco:werco /var/cache/nginx && \
-    chown -R werco:werco /var/log/nginx
+    chown -R werco:werco /var/log/nginx && \
+    chown -R werco:werco /etc/nginx/conf.d && \
+    chown -R werco:werco /etc/nginx/templates
 
-# Security headers are configured in nginx.conf
+# Default port for Railway (overridden by Railway's PORT env var)
+ENV PORT=3000
 EXPOSE 3000
 
-# Health check
+# Health check uses the dynamic PORT
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost:3000/ || exit 1
+    CMD wget --quiet --tries=1 --spider http://localhost:${PORT}/ || exit 1
 
 USER werco
 
-CMD ["nginx", "-g", "daemon off;"]
+# Substitute $PORT into nginx config at startup, then run nginx
+CMD ["/bin/sh", "-c", "envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
