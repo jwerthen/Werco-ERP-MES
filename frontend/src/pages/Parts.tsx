@@ -662,7 +662,7 @@ export default function Parts() {
             type="checkbox"
             checked={showComponentsOnly}
             onChange={(e) => setShowComponentsOnly(e.target.checked)}
-            className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+            className="rounded border-gray-300 text-werco-navy-600 focus:ring-werco-navy-600"
           />
           Show BOM components
         </label>

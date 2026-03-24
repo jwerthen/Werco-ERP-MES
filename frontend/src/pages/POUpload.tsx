@@ -192,7 +192,7 @@ export default function POUpload() {
         const pnRaw = item.part_number || '';
         const pn = pnRaw.trim().toLowerCase();
         const suggested = item.suggested_part_number || '';
-        const looksLikeDescription = pnRaw && (pn.includes(' ') && !pnRaw.includes('-')) || pn.includes('ga') || pn.includes(' x ');
+        const looksLikeDescription = (pnRaw && pn.includes(' ') && !pnRaw.includes('-')) || pn.includes('ga') || pn.includes(' x ');
         const shouldUseSuggested = Boolean(suggested) && (!pn || (desc && pn === desc) || looksLikeDescription);
         return {
           ...item,
@@ -886,7 +886,7 @@ export default function POUpload() {
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'purchased'}
                               onChange={() => setPartType(idx, 'purchased')}
-                              className="text-cyan-600"
+                              className="text-werco-navy-600"
                             />
                             <span className="text-sm">Purchased Part</span>
                           </label>
@@ -896,7 +896,7 @@ export default function POUpload() {
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'raw_material'}
                               onChange={() => setPartType(idx, 'raw_material')}
-                              className="text-cyan-600"
+                              className="text-werco-navy-600"
                             />
                             <span className="text-sm">Raw Material</span>
                           </label>
@@ -906,7 +906,7 @@ export default function POUpload() {
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'hardware'}
                               onChange={() => setPartType(idx, 'hardware')}
-                              className="text-cyan-600"
+                              className="text-werco-navy-600"
                             />
                             <span className="text-sm">Hardware</span>
                           </label>
@@ -916,7 +916,7 @@ export default function POUpload() {
                               name={`part-type-${idx}`}
                               checked={item.new_part_type === 'consumable'}
                               onChange={() => setPartType(idx, 'consumable')}
-                              className="text-cyan-600"
+                              className="text-werco-navy-600"
                             />
                             <span className="text-sm">Consumable</span>
                           </label>

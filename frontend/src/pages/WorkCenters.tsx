@@ -6,13 +6,13 @@ import { PlusIcon, PencilIcon } from '@heroicons/react/24/outline';
 const typeColors: Record<string, string> = {
   fabrication: 'bg-blue-100 text-blue-800',
   cnc_machining: 'bg-purple-100 text-purple-800',
-  laser: 'bg-cyan-100 text-cyan-800',
+  laser: 'bg-blue-100 text-blue-800',
   press_brake: 'bg-indigo-100 text-indigo-800',
   paint: 'bg-yellow-100 text-yellow-800',
   powder_coating: 'bg-orange-100 text-orange-800',
   assembly: 'bg-green-100 text-green-800',
   welding: 'bg-red-100 text-red-800',
-  inspection: 'bg-cyan-100 text-cyan-800',
+  inspection: 'bg-blue-100 text-blue-800',
   shipping: 'bg-gray-100 text-gray-800',
 };
 

@@ -111,7 +111,7 @@ const lineTypeLabels: Record<string, string> = {
 };
 
 const lineTypeBadge: Record<string, string> = {
-  component: 'bg-cyan-100 text-cyan-800',
+  component: 'bg-blue-100 text-blue-800',
   hardware: 'bg-amber-100 text-amber-800',
   consumable: 'bg-orange-100 text-orange-800',
   reference: 'bg-gray-100 text-gray-600',
@@ -637,7 +637,7 @@ export default function RoutingPage() {
                 type="checkbox"
                 checked={showMissingOnly}
                 onChange={(e) => setShowMissingOnly(e.target.checked)}
-                className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+                className="rounded border-gray-300 text-werco-navy-600 focus:ring-werco-navy-600"
               />
               Missing only
             </label>
@@ -646,7 +646,7 @@ export default function RoutingPage() {
                 type="checkbox"
                 checked={includeNonComponentLines}
                 onChange={(e) => setIncludeNonComponentLines(e.target.checked)}
-                className="rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+                className="rounded border-gray-300 text-werco-navy-600 focus:ring-werco-navy-600"
               />
               Include hardware/consumables
             </label>
@@ -1041,7 +1041,7 @@ export default function RoutingPage() {
                             key={part.id}
                             onMouseDown={() => handleSelectRoutingPart(part)}
                             className={`w-full px-3 py-2 text-left hover:bg-gray-50 ${
-                              part.id === newRouting.part_id ? 'bg-cyan-50' : ''
+                              part.id === newRouting.part_id ? 'bg-blue-50' : ''
                             }`}
                           >
                             <div className="flex items-center justify-between gap-3">

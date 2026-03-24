@@ -35,7 +35,7 @@ export function MobileDataCard({
     <div
       className={`
         bg-white rounded-xl border border-slate-200 overflow-hidden
-        ${highlight ? 'ring-2 ring-cyan-500 ring-offset-2' : ''}
+        ${highlight ? 'ring-2 ring-werco-navy-600 ring-offset-2' : ''}
         ${isClickable ? 'cursor-pointer active:bg-slate-50 touch:active:scale-[0.99]' : ''}
         transition-all duration-200
         ${className}

@@ -450,7 +450,7 @@ export default function WorkOrderDetail() {
                       'WELD': 'bg-yellow-100 text-yellow-800',
                       'FINISH': 'bg-purple-100 text-purple-800',
                       'ASSEMBLY': 'bg-green-100 text-green-800',
-                      'INSPECT': 'bg-cyan-100 text-cyan-800',
+                      'INSPECT': 'bg-blue-100 text-blue-800',
                     };
                     
                     return (

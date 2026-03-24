@@ -123,7 +123,7 @@ export default function TourHighlight() {
       {/* Spotlight border/glow */}
       {targetRect && (
         <div
-          className="absolute border-2 border-cyan-400 rounded-xl pointer-events-none"
+          className="absolute border-2 border-blue-400 rounded-xl pointer-events-none"
           style={{
             top: targetRect.top - padding,
             left: targetRect.left - padding,

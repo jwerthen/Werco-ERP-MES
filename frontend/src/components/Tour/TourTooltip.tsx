@@ -112,7 +112,7 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
       }}
     >
       {/* Header */}
-      <div className="bg-gradient-to-r from-cyan-500 to-cyan-600 px-5 py-4 flex items-center justify-between">
+      <div className="bg-gradient-to-r from-werco-navy-600 to-blue-700 px-5 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center text-white font-bold text-sm">
             {stepIndex + 1}
@@ -148,7 +148,7 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
             <div
               key={i}
               className={`w-2 h-2 rounded-full transition-colors ${
-                i === stepIndex ? 'bg-cyan-500' : 'bg-slate-200'
+                i === stepIndex ? 'bg-werco-navy-600' : 'bg-slate-200'
               }`}
             />
           ))}
@@ -167,7 +167,7 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
           )}
           <button
             onClick={nextStep}
-            className="flex items-center gap-1 px-4 py-2 text-sm font-medium text-white bg-cyan-500 hover:bg-cyan-600 rounded-lg transition-colors shadow-sm"
+            className="flex items-center gap-1 px-4 py-2 text-sm font-medium text-white bg-werco-navy-600 hover:bg-werco-navy-700 rounded-lg transition-colors shadow-sm"
           >
             {isLastStep ? 'Finish' : 'Next'}
             {!isLastStep && <ChevronRightIcon className="h-4 w-4" />}

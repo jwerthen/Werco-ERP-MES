@@ -21,8 +21,8 @@
 }
 
 @keyframes glowPulse {
-  0%, 100% { box-shadow: 0 0 20px rgba(6, 182, 212, 0.3), 0 0 40px rgba(6, 182, 212, 0.1); }
-  50% { box-shadow: 0 0 30px rgba(6, 182, 212, 0.5), 0 0 60px rgba(6, 182, 212, 0.2); }
+  0%, 100% { box-shadow: 0 0 20px rgba(27, 77, 156, 0.3), 0 0 40px rgba(27, 77, 156, 0.1); }
+  50% { box-shadow: 0 0 30px rgba(27, 77, 156, 0.5), 0 0 60px rgba(27, 77, 156, 0.2); }
 }
 
 @keyframes subtleFloat {
@@ -36,8 +36,8 @@
 }
 
 @keyframes borderGlow {
-  0%, 100% { border-color: rgba(6, 182, 212, 0.3); }
-  50% { border-color: rgba(6, 182, 212, 0.6); }
+  0%, 100% { border-color: rgba(27, 77, 156, 0.3); }
+  50% { border-color: rgba(27, 77, 156, 0.6); }
 }
 
 /* ============================================
@@ -47,36 +47,35 @@
 @layer base {
   html {
     @apply scroll-smooth;
-    /* Prevent horizontal scroll on mobile */
-    overflow-x: hidden;
-  }
-  
-  body {
-    @apply bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50 text-slate-900 font-sans antialiased;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
-    min-height: 100vh;
-    min-height: 100dvh; /* Dynamic viewport height for mobile browsers */
     overflow-x: hidden;
   }
 
-  /* Better focus states for accessibility */
+  body {
+    @apply bg-gradient-to-br from-slate-50 via-white to-blue-50/40 text-slate-900 font-sans antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
+
+  /* Focus states - Werco blue */
   *:focus-visible {
-    @apply outline-none ring-2 ring-cyan-500 ring-offset-2;
+    @apply outline-none ring-2 ring-werco-navy-600 ring-offset-2;
   }
 
   /* Safe area insets for notched devices */
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
-  
+
   .pt-safe {
     padding-top: env(safe-area-inset-top, 0px);
   }
-  
+
   .pl-safe {
     padding-left: env(safe-area-inset-left, 0px);
   }
-  
+
   .pr-safe {
     padding-right: env(safe-area-inset-right, 0px);
   }
@@ -93,27 +92,27 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Custom scrollbar - modernized */
+  /* Custom scrollbar - Werco branded */
   ::-webkit-scrollbar {
     @apply w-2 h-2;
   }
-  
+
   ::-webkit-scrollbar-track {
     @apply bg-slate-100;
   }
-  
+
   ::-webkit-scrollbar-thumb {
     @apply bg-slate-300 rounded-full;
     transition: background-color 0.2s;
   }
-  
+
   ::-webkit-scrollbar-thumb:hover {
     @apply bg-slate-400;
   }
 
-  /* Selection color - rose accent */
+  /* Selection color - Werco blue accent */
   ::selection {
-    @apply bg-cyan-500/20 text-cyan-900;
+    @apply bg-werco-navy-600/15 text-werco-navy-950;
   }
 }
 
@@ -125,31 +124,32 @@
   /* ------------------------------------
      BUTTONS
      ------------------------------------ */
-  
+
   /* Base button styles */
   .btn {
-    @apply inline-flex items-center justify-center 
-           px-4 py-2.5 
-           text-sm font-semibold 
-           rounded-xl 
-           transition-all duration-300 ease-out
+    @apply inline-flex items-center justify-center
+           px-4 py-2.5
+           text-sm font-semibold
+           rounded-xl
+           transition-all duration-200 ease-out
            focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2
            disabled:opacity-50 disabled:cursor-not-allowed
            active:scale-[0.98];
-    min-height: 44px; /* Touch target */
+    min-height: 44px;
   }
 
   .btn-primary {
     @apply btn text-white;
-    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 50%, #0e7490 100%);
-    box-shadow: 0 4px 15px rgba(6, 182, 212, 0.3);
+    background: linear-gradient(135deg, #1B4D9C 0%, #163d7d 50%, #123266 100%);
+    box-shadow: 0 4px 15px rgba(27, 77, 156, 0.3);
   }
-  
+
   .btn-primary:hover {
-    box-shadow: 0 6px 25px rgba(6, 182, 212, 0.5);
+    box-shadow: 0 6px 25px rgba(27, 77, 156, 0.45);
     transform: translateY(-1px);
+    background: linear-gradient(135deg, #2158ad 0%, #1B4D9C 50%, #163d7d 100%);
   }
-  
+
   .btn-secondary {
     @apply btn
            bg-white text-slate-700 border border-slate-200
@@ -157,26 +157,26 @@
            focus-visible:ring-slate-400
            shadow-sm;
   }
-  
+
   .btn-success {
     @apply btn text-white;
     background: linear-gradient(135deg, #10b981 0%, #059669 100%);
     box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
   }
-  
+
   .btn-success:hover {
     box-shadow: 0 6px 25px rgba(16, 185, 129, 0.5);
     transform: translateY(-1px);
   }
-  
+
   .btn-danger {
     @apply btn text-white;
-    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-    box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
+    background: linear-gradient(135deg, #C8352B 0%, #b91c1c 100%);
+    box-shadow: 0 4px 15px rgba(200, 53, 43, 0.3);
   }
-  
+
   .btn-danger:hover {
-    box-shadow: 0 6px 25px rgba(239, 68, 68, 0.5);
+    box-shadow: 0 6px 25px rgba(200, 53, 43, 0.5);
     transform: translateY(-1px);
   }
 
@@ -185,7 +185,7 @@
     background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
     box-shadow: 0 4px 15px rgba(245, 158, 11, 0.3);
   }
-  
+
   .btn-warning:hover {
     box-shadow: 0 6px 25px rgba(245, 158, 11, 0.5);
     transform: translateY(-1px);
@@ -200,10 +200,10 @@
 
   .btn-outline {
     @apply btn
-           bg-transparent text-cyan-600 
-           border-2 border-cyan-500
-           hover:bg-cyan-50
-           focus-visible:ring-cyan-500;
+           bg-transparent text-werco-navy-600
+           border-2 border-werco-navy-600
+           hover:bg-werco-navy-600 hover:text-white
+           focus-visible:ring-werco-navy-600;
   }
 
   /* Button sizes */
@@ -223,23 +223,22 @@
   }
 
   /* ------------------------------------
-     CARDS - Glassmorphism Style
+     CARDS - Clean Elevated Style
      ------------------------------------ */
 
   .card {
-    @apply bg-white/90 backdrop-blur-sm rounded-2xl p-6
-           border border-white/50
-           transition-all duration-300;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(0, 0, 0, 0.02);
+    @apply bg-white rounded-2xl p-6
+           border border-slate-200/80
+           transition-all duration-200;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
   }
 
   .card-hover {
     @apply card cursor-pointer;
   }
-  
+
   .card-hover:hover {
-    @apply bg-white;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(6, 182, 212, 0.1);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(27, 77, 156, 0.08);
     transform: translateY(-2px);
   }
 
@@ -250,15 +249,15 @@
   .card-flush {
     @apply card p-0;
   }
-  
+
   .card-accent {
     @apply card relative overflow-hidden;
   }
-  
+
   .card-accent::before {
     content: '';
     @apply absolute top-0 left-0 right-0 h-1;
-    background: linear-gradient(90deg, #f43f5e 0%, #e11d48 50%, #be123c 100%);
+    background: linear-gradient(90deg, #1B4D9C 0%, #3366FF 50%, #1B4D9C 100%);
   }
 
   .card-header {
@@ -274,7 +273,7 @@
   }
 
   /* ------------------------------------
-     FORMS - Modern Glow Style
+     FORMS - Clean Professional Style
      ------------------------------------ */
 
   .label {
@@ -284,24 +283,24 @@
   .input {
     @apply w-full px-4 py-2.5
            bg-white
-           border-2 border-slate-200 
+           border-2 border-slate-200
            rounded-xl
            text-slate-800 text-base
            placeholder:text-slate-400
            transition-all duration-200
-           focus:border-cyan-500 focus:outline-none
+           focus:border-werco-navy-600 focus:outline-none
            disabled:bg-slate-100 disabled:cursor-not-allowed;
     min-height: 44px;
   }
-  
+
   .input:focus {
-    box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.15), 0 0 20px rgba(6, 182, 212, 0.1);
+    box-shadow: 0 0 0 3px rgba(27, 77, 156, 0.12), 0 0 20px rgba(27, 77, 156, 0.06);
   }
 
   .input-error {
     @apply input border-red-400 focus:border-red-500;
   }
-  
+
   .input-error:focus {
     box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15), 0 0 20px rgba(239, 68, 68, 0.1);
   }
@@ -330,24 +329,24 @@
   }
 
   .checkbox {
-    @apply h-5 w-5 rounded-md border-slate-300 text-cyan-600 
-           focus:ring-cyan-500 focus:ring-offset-0
+    @apply h-5 w-5 rounded-md border-slate-300 text-werco-navy-600
+           focus:ring-werco-navy-600 focus:ring-offset-0
            cursor-pointer transition-colors;
   }
 
   .radio {
-    @apply h-5 w-5 border-slate-300 text-cyan-600 
-           focus:ring-cyan-500 focus:ring-offset-0
+    @apply h-5 w-5 border-slate-300 text-werco-navy-600
+           focus:ring-werco-navy-600 focus:ring-offset-0
            cursor-pointer transition-colors;
   }
 
   /* ------------------------------------
-     TABLES - Modern Style
+     TABLES - Professional Style
      ------------------------------------ */
 
   .table-container {
-    @apply overflow-x-auto rounded-2xl bg-white/90 backdrop-blur-sm;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    @apply overflow-x-auto rounded-2xl bg-white border border-slate-200/80;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
   }
 
   .table {
@@ -367,11 +366,11 @@
   }
 
   .table tbody tr {
-    @apply transition-all duration-200;
+    @apply transition-all duration-150;
   }
-  
+
   .table tbody tr:hover {
-    @apply bg-cyan-50/30;
+    @apply bg-blue-50/40;
   }
 
   .table tbody tr:last-child td {
@@ -388,17 +387,17 @@
   }
 
   /* ------------------------------------
-     BADGES / STATUS PILLS - Modern Style
+     BADGES / STATUS PILLS
      ------------------------------------ */
 
   .badge {
-    @apply inline-flex items-center px-2.5 py-1 
+    @apply inline-flex items-center px-2.5 py-1
            rounded-lg text-xs font-semibold
            uppercase tracking-wide;
   }
 
   .badge-primary {
-    @apply badge bg-cyan-100 text-cyan-700;
+    @apply badge bg-blue-100 text-werco-navy-600;
   }
 
   .badge-success {
@@ -442,16 +441,16 @@
   }
 
   .status-dot-info {
-    @apply status-dot bg-cyan-500;
-    box-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
+    @apply status-dot bg-blue-500;
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
   }
 
   /* ------------------------------------
-     NAVIGATION - Premium Dark Style
+     NAVIGATION - Werco Dark Navy Style
      ------------------------------------ */
 
   .nav-link {
-    @apply flex items-center gap-3 px-4 py-3 
+    @apply flex items-center gap-3 px-4 py-3
            text-sm font-medium rounded-xl
            transition-all duration-200
            hover:bg-white/10;
@@ -460,12 +459,12 @@
 
   .nav-link-active {
     @apply nav-link text-white;
-    background: linear-gradient(135deg, rgba(244, 63, 94, 0.2) 0%, rgba(225, 29, 72, 0.2) 100%);
-    box-shadow: 0 0 20px rgba(244, 63, 94, 0.15);
+    background: linear-gradient(135deg, rgba(51, 102, 255, 0.2) 0%, rgba(27, 77, 156, 0.25) 100%);
+    box-shadow: 0 0 20px rgba(51, 102, 255, 0.1);
   }
 
   /* ------------------------------------
-     ALERTS - Modern Rounded Style
+     ALERTS
      ------------------------------------ */
 
   .alert {
@@ -485,11 +484,11 @@
   }
 
   .alert-info {
-    @apply alert bg-cyan-50 border-cyan-200 text-cyan-800;
+    @apply alert bg-blue-50 border-blue-200 text-blue-800;
   }
 
   /* ------------------------------------
-     MODALS - Glassmorphism Style
+     MODALS - Clean Elevated Style
      ------------------------------------ */
 
   .modal-overlay {
@@ -498,10 +497,10 @@
   }
 
   .modal {
-    @apply bg-white/95 backdrop-blur-xl rounded-3xl shadow-2xl max-w-lg w-full
+    @apply bg-white rounded-3xl shadow-2xl max-w-lg w-full
            max-h-[90vh] overflow-hidden
            animate-scale-in;
-    border: 1px solid rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(226, 232, 240, 0.8);
   }
 
   .modal-lg {
@@ -525,13 +524,13 @@
   }
 
   /* ------------------------------------
-     STATS / KPI CARDS - Enhanced Style
+     STATS / KPI CARDS
      ------------------------------------ */
 
   .stat-card {
     @apply card flex items-center gap-4;
   }
-  
+
   .stat-card:hover {
     transform: translateY(-2px);
   }
@@ -561,7 +560,7 @@
   }
 
   /* ------------------------------------
-     PAGE HEADERS - Modern Style
+     PAGE HEADERS
      ------------------------------------ */
 
   .page-header {
@@ -581,7 +580,7 @@
   }
 
   /* ------------------------------------
-     LOADING STATES - Enhanced
+     LOADING STATES
      ------------------------------------ */
 
   .skeleton {
@@ -604,15 +603,15 @@
 
   .spinner {
     @apply animate-spin rounded-full border-2 border-slate-200;
-    border-top-color: #f43f5e;
+    border-top-color: #1B4D9C;
   }
 
   /* ------------------------------------
-     TOOLTIPS - Modern Style
+     TOOLTIPS
      ------------------------------------ */
 
   .tooltip {
-    @apply absolute z-50 px-3 py-2 text-xs font-medium 
+    @apply absolute z-50 px-3 py-2 text-xs font-medium
            bg-slate-900 text-white rounded-xl shadow-lg
            pointer-events-none opacity-0 transition-opacity
            group-hover:opacity-100;
@@ -631,7 +630,7 @@
   }
 
   /* ------------------------------------
-     PROGRESS BARS - Gradient Style
+     PROGRESS BARS - Werco Branded
      ------------------------------------ */
 
   .progress {
@@ -640,7 +639,7 @@
 
   .progress-bar {
     @apply h-full rounded-full transition-all duration-500;
-    background: linear-gradient(90deg, #f43f5e 0%, #e11d48 100%);
+    background: linear-gradient(90deg, #1B4D9C 0%, #3366FF 100%);
   }
 
   .progress-success .progress-bar {
@@ -652,7 +651,7 @@
   }
 
   .progress-danger .progress-bar {
-    background: linear-gradient(90deg, #ef4444 0%, #dc2626 100%);
+    background: linear-gradient(90deg, #C8352B 0%, #b91c1c 100%);
   }
 
   /* ------------------------------------
@@ -689,7 +688,7 @@
 
   /* Bottom navigation */
   .bottom-nav {
-    @apply fixed bottom-0 left-0 right-0 z-40 
+    @apply fixed bottom-0 left-0 right-0 z-40
            bg-white border-t border-slate-200
            pb-safe;
   }
@@ -700,7 +699,7 @@
   }
 
   .bottom-nav-item-active {
-    @apply bottom-nav-item text-cyan-600;
+    @apply bottom-nav-item text-werco-navy-600;
   }
 
   /* Swipe actions container */
@@ -727,7 +726,7 @@
            w-14 h-14 rounded-full shadow-lg
            text-white transition-all duration-200
            active:scale-95;
-    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+    background: linear-gradient(135deg, #1B4D9C 0%, #163d7d 100%);
     bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
     right: 1rem;
   }
@@ -795,31 +794,36 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Gradient text - Cyan accent */
+  /* Gradient text - Werco brand */
   .text-gradient {
-    @apply bg-gradient-to-r from-cyan-600 to-cyan-500 bg-clip-text text-transparent;
+    @apply bg-gradient-to-r from-werco-navy-600 to-werco-500 bg-clip-text text-transparent;
   }
 
-  /* Glass effect - Enhanced */
+  /* Glass effect */
   .glass {
     @apply bg-white/80 backdrop-blur-xl;
-    border: 1px solid rgba(255, 255, 255, 0.5);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    border: 1px solid rgba(226, 232, 240, 0.8);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
   }
-  
+
   /* Glass card dark */
   .glass-dark {
-    @apply bg-slate-900/80 backdrop-blur-xl text-white;
+    @apply bg-slate-900/90 backdrop-blur-xl text-white;
     border: 1px solid rgba(255, 255, 255, 0.1);
   }
 
-  /* Glow effects */
-  .glow-rose {
-    box-shadow: 0 0 20px rgba(244, 63, 94, 0.3), 0 0 40px rgba(244, 63, 94, 0.1);
+  /* Glow effects - Werco branded */
+  .glow-blue {
+    box-shadow: 0 0 20px rgba(27, 77, 156, 0.3), 0 0 40px rgba(27, 77, 156, 0.1);
   }
-  
+
   .glow-red {
-    box-shadow: 0 0 20px rgba(239, 68, 68, 0.3), 0 0 40px rgba(239, 68, 68, 0.1);
+    box-shadow: 0 0 20px rgba(200, 53, 43, 0.3), 0 0 40px rgba(200, 53, 43, 0.1);
+  }
+
+  /* Legacy alias */
+  .glow-rose {
+    box-shadow: 0 0 20px rgba(27, 77, 156, 0.3), 0 0 40px rgba(27, 77, 156, 0.1);
   }
 
   /* Truncate multi-line */
@@ -847,19 +851,19 @@
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
-  
+
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
   }
-  
-  /* Input focus glow */
+
+  /* Input focus glow - Werco branded */
   .input-glow:focus {
-    box-shadow: 0 0 0 3px rgba(244, 63, 94, 0.2), 0 0 20px rgba(244, 63, 94, 0.1);
+    box-shadow: 0 0 0 3px rgba(27, 77, 156, 0.15), 0 0 20px rgba(27, 77, 156, 0.08);
   }
-  
-  /* Animated gradient background */
+
+  /* Animated gradient background - Werco navy */
   .bg-gradient-animated {
-    background: linear-gradient(-45deg, #0f172a, #1e3a5f, #0f172a, #164e63);
+    background: linear-gradient(-45deg, #0a1628, #1B4D9C, #0a1628, #123266);
     background-size: 400% 400%;
     animation: gradientShift 15s ease infinite;
   }
@@ -884,22 +888,22 @@
 }
 
 @keyframes slideDown {
-  from { 
+  from {
     opacity: 0;
     transform: translateY(-10px);
   }
-  to { 
+  to {
     opacity: 1;
     transform: translateY(0);
   }
 }
 
 @keyframes scaleIn {
-  from { 
+  from {
     opacity: 0;
     transform: scale(0.95);
   }
-  to { 
+  to {
     opacity: 1;
     transform: scale(1);
   }

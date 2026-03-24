@@ -56,7 +56,7 @@ const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
 // Type labels and colors
 const typeConfig: Record<string, { label: string; color: string }> = {
   part: { label: 'Part', color: 'bg-blue-100 text-blue-700 border border-blue-200' },
-  work_order: { label: 'Work Order', color: 'bg-cyan-100 text-cyan-700 border border-cyan-200' },
+  work_order: { label: 'Work Order', color: 'bg-blue-100 text-werco-navy-700 border border-blue-200' },
   customer: { label: 'Customer', color: 'bg-green-100 text-green-700 border border-green-200' },
   bom: { label: 'BOM', color: 'bg-purple-100 text-purple-700 border border-purple-200' },
   routing: { label: 'Routing', color: 'bg-orange-100 text-orange-700 border border-orange-200' },
