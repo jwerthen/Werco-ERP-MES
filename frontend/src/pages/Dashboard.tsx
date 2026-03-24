@@ -29,13 +29,13 @@ import {
 const workCenterTypeColors: Record<string, string> = {
   fabrication: 'bg-blue-500',
   cnc_machining: 'bg-purple-500',
-  laser: 'bg-cyan-500',
+  laser: 'bg-werco-navy-600',
   press_brake: 'bg-indigo-500',
   paint: 'bg-amber-500',
   powder_coating: 'bg-orange-500',
   assembly: 'bg-emerald-500',
   welding: 'bg-red-500',
-  inspection: 'bg-cyan-500',
+  inspection: 'bg-werco-navy-600',
   shipping: 'bg-slate-500',
 };
 
@@ -52,7 +52,7 @@ const roleBadgeClasses: Record<string, string> = {
   supervisor: 'bg-blue-100 text-blue-700',
   operator: 'bg-emerald-100 text-emerald-700',
   quality: 'bg-amber-100 text-amber-700',
-  shipping: 'bg-cyan-100 text-cyan-700',
+  shipping: 'bg-blue-100 text-werco-navy-700',
   viewer: 'bg-slate-100 text-slate-600',
 };
 
@@ -369,8 +369,8 @@ export default function Dashboard() {
         />
         <StatCard
           icon={SignalIcon}
-          iconBg="bg-cyan-100"
-          iconColor="text-cyan-600"
+          iconBg="bg-blue-100"
+          iconColor="text-werco-navy-600"
           label="Signed In Now"
           value={data?.summary.signed_in_users || 0}
           subtitle="Live ERP sessions"

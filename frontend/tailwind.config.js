@@ -20,21 +20,35 @@ module.exports = {
     },
     extend: {
       colors: {
-        // Primary brand colors - deep industrial blue
+        // Werco brand navy - matches wercomfg.com deep navy
+        'werco-navy': {
+          50: '#eef3ff',
+          100: '#dae4ff',
+          200: '#bccfff',
+          300: '#8eafff',
+          400: '#5985ff',
+          500: '#3361ff',
+          600: '#1B4D9C', // Primary brand blue
+          700: '#163d7d',
+          800: '#123266',
+          900: '#0f2952',
+          950: '#0a1628', // Deep navy from website
+        },
+        // Werco brand blue - bright accent from wercomfg.com CTAs
         werco: {
           50: '#eef4ff',
           100: '#d9e6ff',
           200: '#bcd3ff',
           300: '#8eb8ff',
           400: '#5990ff',
-          500: '#3366ff',
+          500: '#3366ff', // Bright blue accent
           600: '#1B4D9C', // Primary brand
           700: '#1a3f7a',
           800: '#1b3664',
           900: '#1c3154',
           950: '#131f35',
         },
-        // Accent - precision red for alerts/actions
+        // Accent - precision red for alerts/critical actions
         accent: {
           50: '#fef2f2',
           100: '#fee2e2',
@@ -47,7 +61,21 @@ module.exports = {
           800: '#7f1d1d',
           900: '#450a0a',
         },
-        // Surface colors - dark mode inspired for industrial feel
+        // Steel gray - body text from wercomfg.com
+        steel: {
+          50: '#f8fafc',
+          100: '#f1f5f9',
+          200: '#e2e8f0',
+          300: '#cbd5e1',
+          400: '#94a3b8',
+          500: '#64748b',
+          600: '#475569',
+          700: '#334155',
+          800: '#1e293b',
+          900: '#0f172a',
+          950: '#020617',
+        },
+        // Surface colors - clean light backgrounds
         surface: {
           50: '#fafafa',
           100: '#f4f4f5',
@@ -130,6 +158,7 @@ module.exports = {
         lg: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)',
         xl: '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
         glow: '0 0 20px rgb(27 77 156 / 0.3)',
+        'glow-blue': '0 0 20px rgb(51 102 255 / 0.3)',
         'glow-accent': '0 0 20px rgb(200 53 43 / 0.3)',
         'inner-glow': 'inset 0 2px 4px 0 rgb(0 0 0 / 0.05)',
         card: '0 2px 8px -2px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.06)',
@@ -186,11 +215,11 @@ module.exports = {
           primary: '#1B4D9C',
           secondary: '#3366FF',
           accent: '#C8352B',
-          neutral: '#27272a',
+          neutral: '#0f172a',
           'base-100': '#ffffff',
-          'base-200': '#f4f4f5',
-          'base-300': '#e4e4e7',
-          'base-content': '#18181b',
+          'base-200': '#f8fafc',
+          'base-300': '#e2e8f0',
+          'base-content': '#0f172a',
           info: '#3b82f6',
           success: '#10b981',
           warning: '#f59e0b',

@@ -144,7 +144,7 @@ export default function PartsInventoryPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-500"></div>
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-navy-600"></div>
       </div>
     );
   }
@@ -164,7 +164,7 @@ export default function PartsInventoryPage() {
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="card">
-          <div className="text-2xl font-bold text-cyan-600">{summary.length}</div>
+          <div className="text-2xl font-bold text-werco-navy-600">{summary.length}</div>
           <div className="text-sm text-gray-500">Unique Parts</div>
         </div>
         <div className="card">
@@ -215,7 +215,7 @@ export default function PartsInventoryPage() {
               onClick={() => setActiveTab(tab.id as TabType)}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
-                  ? 'border-cyan-500 text-cyan-600'
+                  ? 'border-werco-navy-600 text-werco-navy-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
@@ -258,7 +258,7 @@ export default function PartsInventoryPage() {
                         {part && (
                           <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
                             part.part_type === 'manufactured' 
-                              ? 'bg-cyan-100 text-cyan-700' 
+                              ? 'bg-blue-100 text-werco-navy-700' 
                               : 'bg-indigo-100 text-indigo-700'
                           }`}>
                             {getPartTypeIcon(part.part_type)}
@@ -313,7 +313,7 @@ export default function PartsInventoryPage() {
                       {item.part && (
                         <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
                           item.part.part_type === 'manufactured' 
-                            ? 'bg-cyan-100 text-cyan-700' 
+                            ? 'bg-blue-100 text-werco-navy-700' 
                             : 'bg-indigo-100 text-indigo-700'
                         }`}>
                           {getPartTypeLabel(item.part.part_type)}
@@ -332,7 +332,7 @@ export default function PartsInventoryPage() {
                       }`}>{item.status}</span>
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <button onClick={() => openTransfer(item)} className="text-cyan-600 hover:text-cyan-700">
+                      <button onClick={() => openTransfer(item)} className="text-werco-navy-600 hover:text-werco-navy-700">
                         <ArrowsRightLeftIcon className="h-5 w-5" />
                       </button>
                     </td>

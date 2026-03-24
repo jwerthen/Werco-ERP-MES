@@ -66,7 +66,7 @@ export default function BottomNav({ onMenuClick }: BottomNavProps) {
               className={`
                 flex flex-col items-center justify-center flex-1 h-full
                 transition-colors duration-200
-                ${active ? 'text-cyan-600' : 'text-slate-500'}
+                ${active ? 'text-werco-navy-600' : 'text-slate-500'}
               `}
             >
               <Icon className="h-6 w-6" />

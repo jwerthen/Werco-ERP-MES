@@ -191,7 +191,7 @@ export default function RFQQuoting() {
 
       <div className="card space-y-4">
         <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-          <DocumentArrowUpIcon className="h-5 w-5 text-cyan-600" />
+          <DocumentArrowUpIcon className="h-5 w-5 text-werco-navy-600" />
           New RFQ Package
         </h2>
 
@@ -366,9 +366,9 @@ export default function RFQQuoting() {
               <p className="text-xs text-gray-500">Margin</p>
               <p className="font-semibold">${(estimate.totals.margin || 0).toFixed(2)}</p>
             </div>
-            <div className="rounded-lg bg-cyan-50 p-3 border border-cyan-200">
-              <p className="text-xs text-cyan-700">Grand Total</p>
-              <p className="font-bold text-cyan-900">${(estimate.totals.grand_total || 0).toFixed(2)}</p>
+            <div className="rounded-lg bg-blue-50 p-3 border border-blue-200">
+              <p className="text-xs text-werco-navy-700">Grand Total</p>
+              <p className="font-bold text-blue-900">${(estimate.totals.grand_total || 0).toFixed(2)}</p>
             </div>
           </div>
 

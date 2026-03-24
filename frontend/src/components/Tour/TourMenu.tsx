@@ -59,7 +59,7 @@ export default function TourMenu() {
           
           {/* Menu */}
           <div className="absolute right-0 top-full mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-slide-down">
-            <div className="bg-gradient-to-r from-cyan-500 to-cyan-600 px-5 py-4 flex items-center justify-between">
+            <div className="bg-gradient-to-r from-werco-navy-600 to-blue-700 px-5 py-4 flex items-center justify-between">
               <div>
                 <h3 className="text-white font-bold">Help & Tours</h3>
                 <p className="text-white/70 text-sm">Learn how to use the system</p>
@@ -84,7 +84,7 @@ export default function TourMenu() {
                     <div className={`flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center ${
                       isComplete 
                         ? 'bg-emerald-100 text-emerald-600' 
-                        : 'bg-cyan-100 text-cyan-600 group-hover:bg-cyan-200'
+                        : 'bg-blue-100 text-werco-navy-600 group-hover:bg-blue-200'
                     }`}>
                       {isComplete ? (
                         <CheckCircleIcon className="h-5 w-5" />

@@ -96,7 +96,7 @@ interface ImportPreview {
 }
 
 const lineTypeColors: Record<string, string> = {
-  component: 'bg-cyan-100 text-cyan-800',
+  component: 'bg-blue-100 text-blue-800',
   hardware: 'bg-amber-100 text-amber-800',
   consumable: 'bg-orange-100 text-orange-800',
   reference: 'bg-gray-100 text-gray-600',
@@ -119,7 +119,7 @@ const partTypeLabels: Record<string, string> = {
 };
 
 const partTypeBadge: Record<string, string> = {
-  manufactured: 'bg-cyan-100 text-cyan-800',
+  manufactured: 'bg-blue-100 text-blue-800',
   assembly: 'bg-indigo-100 text-indigo-800',
   purchased: 'bg-emerald-100 text-emerald-800',
   raw_material: 'bg-blue-100 text-blue-800',

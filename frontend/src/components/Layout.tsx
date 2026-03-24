@@ -235,21 +235,29 @@ const NavGroup = React.memo(function NavGroup({
     </div>
   );
 });
-// Hexagon grid pattern for sidebar
+
+// Blueprint grid pattern for sidebar - matches wercomfg.com aesthetic
 const SidebarPattern = () => (
   <svg className="absolute inset-0 w-full h-full opacity-[0.03]" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <pattern id="sidebar-hex" width="56" height="100" patternUnits="userSpaceOnUse" patternTransform="scale(1.5)">
+      <pattern id="sidebar-blueprint" width="40" height="40" patternUnits="userSpaceOnUse">
         <path
-          d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100"
+          d="M0 0h40v40H0z"
           fill="none"
           stroke="currentColor"
           strokeWidth="0.5"
-          className="text-cyan-300"
+          className="text-blue-300"
+        />
+        <path
+          d="M20 0v40M0 20h40"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="0.25"
+          className="text-blue-300"
         />
       </pattern>
     </defs>
-    <rect width="100%" height="100%" fill="url(#sidebar-hex)" />
+    <rect width="100%" height="100%" fill="url(#sidebar-blueprint)" />
   </svg>
 );
 
@@ -335,7 +343,7 @@ export default function Layout({ children }: LayoutProps) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50/40">
       {/* Skip to main content link for accessibility */}
       <SkipLink />
 
@@ -347,21 +355,23 @@ export default function Layout({ children }: LayoutProps) {
         />
       )}
 
-      {/* Sidebar - Dark premium style */}
+      {/* Sidebar - Werco Navy */}
       <aside
         className={`
-          fixed inset-y-0 left-0 z-50 w-72 
-          bg-gradient-to-b from-slate-900 via-slate-900 to-blue-950
+          fixed inset-y-0 left-0 z-50 w-72
           transform transition-transform duration-300 ease-out
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
           flex flex-col overflow-hidden
         `}
+        style={{
+          background: 'linear-gradient(180deg, #0a1628 0%, #0f2952 40%, #0a1628 100%)',
+        }}
       >
-        {/* Animated background elements */}
+        {/* Blueprint grid background */}
         <SidebarPattern />
-        <div className="absolute top-1/4 -left-20 w-40 h-40 bg-cyan-500/10 rounded-full blur-3xl" />
-        <div className="absolute bottom-1/4 -right-20 w-60 h-60 bg-blue-500/10 rounded-full blur-3xl" />
+        <div className="absolute top-1/4 -left-20 w-40 h-40 bg-blue-500/8 rounded-full blur-3xl" />
+        <div className="absolute bottom-1/4 -right-20 w-60 h-60 bg-blue-600/6 rounded-full blur-3xl" />
 
         {/* Logo header */}
         <div className="relative flex items-center justify-between h-20 px-4 border-b border-white/10 flex-shrink-0">
@@ -394,11 +404,22 @@ export default function Layout({ children }: LayoutProps) {
           ))}
         </nav>
 
+        {/* Certifications strip */}
+        <div className="relative flex-shrink-0 px-4 py-2 border-t border-white/5">
+          <div className="flex items-center justify-center gap-3 text-[10px] font-mono uppercase tracking-widest text-white/30">
+            <span>AS9100D</span>
+            <span className="text-white/15">|</span>
+            <span>ISO 9001</span>
+            <span className="text-white/15">|</span>
+            <span>ITAR</span>
+          </div>
+        </div>
+
         {/* User section */}
-        <div className="relative flex-shrink-0 p-4 border-t border-white/10 bg-white/5">
+        <div className="relative flex-shrink-0 p-4 border-t border-white/10 bg-white/[0.03]">
           <div className="flex items-center gap-3">
             <div className="flex-shrink-0">
-              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 flex items-center justify-center text-white font-semibold text-sm shadow-lg">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-werco-navy-600 to-blue-700 flex items-center justify-center text-white font-semibold text-sm shadow-lg ring-1 ring-white/10">
                 {user?.first_name?.[0]}
                 {user?.last_name?.[0]}
               </div>
@@ -407,7 +428,7 @@ export default function Layout({ children }: LayoutProps) {
               <p className="text-sm font-medium text-white truncate">
                 {user?.first_name} {user?.last_name}
               </p>
-              <p className="text-xs text-cyan-400/80 truncate capitalize">{user?.role?.replace('_', ' ')}</p>
+              <p className="text-xs text-blue-300/60 truncate capitalize">{user?.role?.replace('_', ' ')}</p>
             </div>
             <button
               onClick={() => {
@@ -428,8 +449,8 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Main content area */}
       <div className="lg:pl-72 flex flex-col min-h-screen">
-        {/* Top bar - Glassmorphism style */}
-        <header className="sticky top-0 z-30 bg-white/80 backdrop-blur-xl border-b border-white/50 shadow-sm">
+        {/* Top bar - Clean white with subtle border */}
+        <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-xl border-b border-slate-200/80 shadow-sm">
           <div className="flex items-center justify-between h-16 px-4 sm:px-6 lg:px-8">
             {/* Mobile menu button */}
             <button
@@ -488,7 +509,7 @@ export default function Layout({ children }: LayoutProps) {
 
               {/* User avatar (mobile) */}
               <div className="lg:hidden flex items-center">
-                <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 flex items-center justify-center text-white font-medium text-sm shadow-md">
+                <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-werco-navy-600 to-blue-700 flex items-center justify-center text-white font-medium text-sm shadow-md">
                   {user?.first_name?.[0]}
                   {user?.last_name?.[0]}
                 </div>
@@ -503,14 +524,18 @@ export default function Layout({ children }: LayoutProps) {
         </main>
 
         {/* Footer - Hidden on mobile, visible on desktop */}
-        <footer className="hidden lg:block flex-shrink-0 py-4 px-6 border-t border-white/50 bg-white/60 backdrop-blur-sm">
+        <footer className="hidden lg:block flex-shrink-0 py-4 px-6 border-t border-slate-200/80 bg-white/60">
           <div className="max-w-7xl mx-auto flex items-center justify-between text-sm text-slate-500">
             <div className="flex items-center gap-2">
-              <span>Werco Manufacturing</span>
+              <span className="font-medium text-slate-700">Werco Manufacturing</span>
               <span className="text-slate-300">|</span>
-              <span className="text-cyan-600 font-medium">MES</span>
+              <span className="text-werco-navy-600 font-semibold">ERP / MES</span>
             </div>
-            <span className="text-slate-400">v1.0.0</span>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400">AS9100D &middot; ISO 9001 &middot; ITAR</span>
+              <span className="text-slate-300">|</span>
+              <span className="text-slate-400">v1.0.0</span>
+            </div>
           </div>
         </footer>
       </div>

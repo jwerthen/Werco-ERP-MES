@@ -238,7 +238,7 @@ export const Spinner: React.FC<{ size?: 'sm' | 'md' | 'lg'; className?: string }
   };
   return (
     <div 
-      className={`animate-spin rounded-full border-gray-300 border-t-cyan-600 ${sizes[size]} ${className}`}
+      className={`animate-spin rounded-full border-gray-300 border-t-werco-navy-600 ${sizes[size]} ${className}`}
       role="status"
       aria-label="Loading"
     />

@@ -3,106 +3,56 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { ShieldCheckIcon, LockClosedIcon, EnvelopeIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
 
-// Animated particle component for background
-const AnimatedParticles = () => {
-  return (
-    <div className="absolute inset-0 overflow-hidden pointer-events-none">
-      {/* Floating particles */}
-      {[...Array(20)].map((_, i) => (
-        <div
-          key={i}
-          className="absolute rounded-full bg-cyan-400/20"
-          style={{
-            width: Math.random() * 4 + 2 + 'px',
-            height: Math.random() * 4 + 2 + 'px',
-            left: Math.random() * 100 + '%',
-            top: Math.random() * 100 + '%',
-            animation: `float ${Math.random() * 10 + 15}s linear infinite`,
-            animationDelay: `-${Math.random() * 10}s`,
-          }}
-        />
-      ))}
-
-      {/* Energy pulses */}
-      <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl animate-pulse" />
-      <div
-        className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse"
-        style={{ animationDelay: '1s' }}
-      />
-      <div
-        className="absolute top-1/2 left-1/2 w-72 h-72 bg-amber-500/5 rounded-full blur-3xl animate-pulse"
-        style={{ animationDelay: '2s' }}
-      />
-    </div>
-  );
-};
-
-// Circuit pattern SVG background
-const CircuitPattern = () => (
-  <svg className="absolute inset-0 w-full h-full opacity-[0.03]" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-      <pattern id="circuit" x="0" y="0" width="100" height="100" patternUnits="userSpaceOnUse">
-        <path
-          d="M10 10h80M10 10v30M90 10v30M10 40h30M60 40h30M40 40v30M60 40v30M10 70h80M10 70v20M90 70v20"
-          stroke="currentColor"
-          strokeWidth="1"
-          fill="none"
-          className="text-cyan-400"
-        />
-        <circle cx="10" cy="10" r="3" className="fill-cyan-400" />
-        <circle cx="90" cy="10" r="3" className="fill-cyan-400" />
-        <circle cx="10" cy="40" r="2" className="fill-cyan-400" />
-        <circle cx="40" cy="40" r="2" className="fill-cyan-400" />
-        <circle cx="60" cy="40" r="2" className="fill-cyan-400" />
-        <circle cx="90" cy="40" r="2" className="fill-cyan-400" />
-        <circle cx="40" cy="70" r="2" className="fill-cyan-400" />
-        <circle cx="60" cy="70" r="2" className="fill-cyan-400" />
-        <circle cx="10" cy="70" r="3" className="fill-cyan-400" />
-        <circle cx="90" cy="70" r="3" className="fill-cyan-400" />
-      </pattern>
-    </defs>
-    <rect width="100%" height="100%" fill="url(#circuit)" />
-  </svg>
-);
-
-// Hexagon grid pattern
-const HexagonGrid = () => (
+// Blueprint grid pattern - matches wercomfg.com aesthetic
+const BlueprintGrid = () => (
   <svg className="absolute inset-0 w-full h-full opacity-[0.04]" xmlns="http://www.w3.org/2000/svg">
     <defs>
-      <pattern id="hexagons" width="56" height="100" patternUnits="userSpaceOnUse" patternTransform="scale(2)">
+      <pattern id="blueprint-grid" width="40" height="40" patternUnits="userSpaceOnUse">
         <path
-          d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100"
+          d="M0 0h40v40H0z"
           fill="none"
           stroke="currentColor"
           strokeWidth="0.5"
-          className="text-cyan-300"
+          className="text-blue-300"
         />
         <path
-          d="M28 0L28 34L0 50L0 84L28 100L56 84L56 50L28 34"
+          d="M20 0v40M0 20h40"
           fill="none"
           stroke="currentColor"
-          strokeWidth="0.5"
-          className="text-cyan-300"
+          strokeWidth="0.25"
+          className="text-blue-300"
         />
       </pattern>
     </defs>
-    <rect width="100%" height="100%" fill="url(#hexagons)" />
+    <rect width="100%" height="100%" fill="url(#blueprint-grid)" />
   </svg>
 );
 
-// Power flow lines animation
-const PowerFlowLines = () => (
+// Subtle animated background elements
+const AnimatedBackground = () => (
   <div className="absolute inset-0 overflow-hidden pointer-events-none">
-    {[...Array(5)].map((_, i) => (
+    {/* Soft gradient orbs */}
+    <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-blue-500/8 rounded-full blur-3xl animate-pulse" />
+    <div
+      className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-600/6 rounded-full blur-3xl animate-pulse"
+      style={{ animationDelay: '1s' }}
+    />
+    <div
+      className="absolute top-1/2 left-1/2 w-72 h-72 bg-blue-400/4 rounded-full blur-3xl animate-pulse"
+      style={{ animationDelay: '2s' }}
+    />
+
+    {/* Power flow lines */}
+    {[...Array(3)].map((_, i) => (
       <div
         key={i}
-        className="absolute h-px bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent"
+        className="absolute h-px bg-gradient-to-r from-transparent via-blue-400/20 to-transparent"
         style={{
           width: '200%',
-          top: `${20 + i * 15}%`,
+          top: `${25 + i * 20}%`,
           left: '-50%',
-          animation: `flowLine ${8 + i * 2}s linear infinite`,
-          animationDelay: `${i * 1.5}s`,
+          animation: `flowLine ${10 + i * 3}s linear infinite`,
+          animationDelay: `${i * 2}s`,
         }}
       />
     ))}
@@ -172,44 +122,33 @@ export default function Login() {
     <div className="min-h-screen flex">
       {/* CSS for custom animations */}
       <style>{`
-        @keyframes float {
-          0%, 100% { transform: translateY(0) translateX(0); opacity: 0; }
-          10% { opacity: 1; }
-          90% { opacity: 1; }
-          100% { transform: translateY(-100vh) translateX(20px); opacity: 0; }
-        }
         @keyframes flowLine {
           0% { transform: translateX(-50%); }
           100% { transform: translateX(50%); }
         }
-        @keyframes gridPulse {
-          0%, 100% { opacity: 0.03; }
-          50% { opacity: 0.06; }
-        }
-        @keyframes glowPulse {
-          0%, 100% { box-shadow: 0 0 20px rgba(6, 182, 212, 0.3), 0 0 40px rgba(6, 182, 212, 0.1); }
-          50% { box-shadow: 0 0 30px rgba(6, 182, 212, 0.5), 0 0 60px rgba(6, 182, 212, 0.2); }
-        }
         .glass-card {
-          background: rgba(255, 255, 255, 0.95);
+          background: rgba(255, 255, 255, 0.97);
           backdrop-filter: blur(20px);
-          border: 1px solid rgba(255, 255, 255, 0.2);
+          border: 1px solid rgba(226, 232, 240, 0.8);
         }
       `}</style>
 
-      {/* Left side - Branding with animated background */}
+      {/* Left side - Werco Branding Panel */}
       <div className="hidden lg:flex lg:w-1/2 relative overflow-hidden">
-        {/* Deep navy gradient background */}
-        <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900" />
+        {/* Deep navy background - matching wercomfg.com */}
+        <div
+          className="absolute inset-0"
+          style={{
+            background: 'linear-gradient(135deg, #0a1628 0%, #0f2952 40%, #123266 60%, #0a1628 100%)',
+          }}
+        />
 
-        {/* Animated elements */}
-        <HexagonGrid />
-        <CircuitPattern />
-        <PowerFlowLines />
-        <AnimatedParticles />
+        {/* Background patterns */}
+        <BlueprintGrid />
+        <AnimatedBackground />
 
-        {/* Radial gradient overlay */}
-        <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-transparent to-slate-900/40" />
+        {/* Gradient overlays for depth */}
+        <div className="absolute inset-0 bg-gradient-to-t from-[#0a1628]/80 via-transparent to-[#0a1628]/40" />
 
         {/* Content */}
         <div className="relative z-10 p-12 flex flex-col justify-between w-full">
@@ -222,31 +161,51 @@ export default function Login() {
           </div>
 
           <div className="space-y-8">
-            {/* Main heading with gradient text */}
+            {/* Main heading */}
             <div>
               <h1 className="text-5xl font-bold leading-tight">
                 <span className="text-white">Manufacturing</span>
                 <br />
-                <span className="bg-gradient-to-r from-cyan-400 via-cyan-500 to-blue-400 bg-clip-text text-transparent">
+                <span className="bg-gradient-to-r from-blue-300 via-blue-400 to-white bg-clip-text text-transparent">
                   Execution System
                 </span>
               </h1>
             </div>
 
-            {/* Tagline */}
+            {/* Tagline from wercomfg.com */}
             <p className="text-lg text-slate-300 max-w-md leading-relaxed">
               Built for What Flies, Fights, and Powers the Future.
             </p>
 
-            {/* Certification badges */}
-            <div className="flex flex-wrap items-center gap-4 pt-4">
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-sm">
-                <ShieldCheckIcon className="h-5 w-5 text-cyan-400" />
-                <span className="text-sm font-medium text-white">AS9100D Compliant</span>
+            {/* Key metrics - matching wercomfg.com */}
+            <div className="grid grid-cols-3 gap-4 pt-2">
+              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+                <div className="text-2xl font-bold text-white">24hr</div>
+                <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">RFQ Response</div>
               </div>
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-sm">
-                <ShieldCheckIcon className="h-5 w-5 text-cyan-400" />
-                <span className="text-sm font-medium text-white">ISO 9001 Certified</span>
+              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+                <div className="text-2xl font-bold text-white">95%+</div>
+                <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">On-Time</div>
+              </div>
+              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+                <div className="text-2xl font-bold text-white">99%+</div>
+                <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">First-Pass</div>
+              </div>
+            </div>
+
+            {/* Certification badges */}
+            <div className="flex flex-wrap items-center gap-3 pt-4">
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
+                <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
+                <span className="text-sm font-medium text-white/90">AS9100D</span>
+              </div>
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
+                <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
+                <span className="text-sm font-medium text-white/90">ISO 9001</span>
+              </div>
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
+                <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
+                <span className="text-sm font-medium text-white/90">ITAR</span>
               </div>
             </div>
           </div>
@@ -256,8 +215,8 @@ export default function Login() {
       </div>
 
       {/* Right side - Login form */}
-      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50 p-8 relative">
-        {/* Subtle background pattern for right side */}
+      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-blue-50/40 p-8 relative">
+        {/* Subtle dot pattern */}
         <div className="absolute inset-0 opacity-[0.02]">
           <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
             <defs>
@@ -276,18 +235,24 @@ export default function Login() {
             <p className="text-slate-500 text-sm">Manufacturing Execution System</p>
           </div>
 
-          {/* Login card with glassmorphism */}
-          <div className="glass-card rounded-3xl shadow-2xl p-10 relative overflow-hidden">
-            {/* Subtle gradient accent at top */}
-            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-cyan-500 via-cyan-600 to-blue-500" />
+          {/* Login card */}
+          <div className="glass-card rounded-3xl shadow-xl p-10 relative overflow-hidden">
+            {/* Top accent bar - Werco blue gradient */}
+            <div
+              className="absolute top-0 left-0 right-0 h-1"
+              style={{ background: 'linear-gradient(90deg, #1B4D9C 0%, #3366FF 50%, #1B4D9C 100%)' }}
+            />
 
             <div className="text-center mb-8">
-              {/* Animated lock icon container */}
+              {/* Lock icon container - Werco navy */}
               <div className="relative w-16 h-16 mx-auto mb-5">
-                <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl rotate-3 opacity-20" />
-                <div className="absolute inset-0 bg-gradient-to-br from-cyan-500 to-cyan-600 rounded-2xl -rotate-3 opacity-20" />
-                <div className="relative w-full h-full bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl flex items-center justify-center shadow-lg">
-                  <LockClosedIcon className="h-8 w-8 text-cyan-400" />
+                <div className="absolute inset-0 bg-gradient-to-br from-werco-navy-600 to-blue-700 rounded-2xl rotate-3 opacity-20" />
+                <div className="absolute inset-0 bg-gradient-to-br from-werco-navy-600 to-blue-700 rounded-2xl -rotate-3 opacity-20" />
+                <div
+                  className="relative w-full h-full rounded-2xl flex items-center justify-center shadow-lg"
+                  style={{ background: 'linear-gradient(135deg, #0a1628 0%, #0f2952 100%)' }}
+                >
+                  <LockClosedIcon className="h-8 w-8 text-blue-300" />
                 </div>
               </div>
               <h2 className="text-2xl font-bold text-slate-800">Welcome back</h2>
@@ -340,7 +305,7 @@ export default function Login() {
                     <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                       <LockClosedIcon
                         className={`h-5 w-5 transition-colors duration-200 ${
-                          focusedField === 'employeeId' ? 'text-cyan-500' : 'text-slate-400'
+                          focusedField === 'employeeId' ? 'text-werco-navy-600' : 'text-slate-400'
                         }`}
                       />
                     </div>
@@ -372,7 +337,7 @@ export default function Login() {
                       <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                         <EnvelopeIcon
                           className={`h-5 w-5 transition-colors duration-200 ${
-                            focusedField === 'email' ? 'text-cyan-500' : 'text-slate-400'
+                            focusedField === 'email' ? 'text-werco-navy-600' : 'text-slate-400'
                           }`}
                         />
                       </div>
@@ -400,7 +365,7 @@ export default function Login() {
                       <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                         <LockClosedIcon
                           className={`h-5 w-5 transition-colors duration-200 ${
-                            focusedField === 'password' ? 'text-cyan-500' : 'text-slate-400'
+                            focusedField === 'password' ? 'text-werco-navy-600' : 'text-slate-400'
                           }`}
                         />
                       </div>
@@ -476,12 +441,16 @@ export default function Login() {
           {/* Mobile compliance badges */}
           <div className="lg:hidden flex flex-wrap items-center justify-center gap-3 mt-8">
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
-              <ShieldCheckIcon className="h-4 w-4 text-cyan-500" />
+              <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">AS9100D</span>
             </div>
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
-              <ShieldCheckIcon className="h-4 w-4 text-cyan-500" />
+              <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">ISO 9001</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
+              <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
+              <span className="text-xs font-medium">ITAR</span>
             </div>
           </div>
 

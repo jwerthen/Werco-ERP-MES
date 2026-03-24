@@ -66,7 +66,7 @@ export function ProtectedRoute({
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div
-          className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-600"
+          className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-navy-600"
           role="status"
           aria-label="Loading"
         ></div>
