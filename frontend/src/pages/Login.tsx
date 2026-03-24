@@ -42,14 +42,14 @@ const AnimatedBackground = () => (
       style={{ animationDelay: '2s' }}
     />
 
-    {/* Power flow lines */}
+    {/* Power flow lines - confined to upper portion to avoid overlapping stat cards */}
     {[...Array(3)].map((_, i) => (
       <div
         key={i}
         className="absolute h-px bg-gradient-to-r from-transparent via-blue-400/20 to-transparent"
         style={{
           width: '200%',
-          top: `${25 + i * 20}%`,
+          top: `${15 + i * 12}%`,
           left: '-50%',
           animation: `flowLine ${10 + i * 3}s linear infinite`,
           animationDelay: `${i * 2}s`,
