@@ -3,7 +3,7 @@ from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, and_
-from app.db.database import get_db
+from app.db.database import get_db, atomic_transaction
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.inventory import (
@@ -249,48 +249,48 @@ def receive_inventory(
         InventoryItem.lot_number == receive_in.lot_number
     ).first()
     
-    if existing:
-        existing.quantity_on_hand += receive_in.quantity
-        existing.quantity_available = existing.quantity_on_hand - existing.quantity_allocated
-        inv_item = existing
-    else:
-        inv_item = InventoryItem(
+    with atomic_transaction(db):
+        if existing:
+            existing.quantity_on_hand += receive_in.quantity
+            existing.quantity_available = existing.quantity_on_hand - existing.quantity_allocated
+            inv_item = existing
+        else:
+            inv_item = InventoryItem(
+                part_id=receive_in.part_id,
+                location=receive_in.location_code,
+                warehouse=location.warehouse,
+                quantity_on_hand=receive_in.quantity,
+                quantity_available=receive_in.quantity,
+                lot_number=receive_in.lot_number,
+                serial_number=receive_in.serial_number,
+                po_number=receive_in.po_number,
+                unit_cost=receive_in.unit_cost,
+                cert_number=receive_in.cert_number,
+                heat_lot=receive_in.heat_lot,
+                received_date=datetime.utcnow()
+            )
+            db.add(inv_item)
+
+        db.flush()
+
+        # Create transaction
+        txn = InventoryTransaction(
+            inventory_item_id=inv_item.id,
             part_id=receive_in.part_id,
-            location=receive_in.location_code,
-            warehouse=location.warehouse,
-            quantity_on_hand=receive_in.quantity,
-            quantity_available=receive_in.quantity,
+            transaction_type=TransactionType.RECEIVE,
+            quantity=receive_in.quantity,
+            to_location=receive_in.location_code,
             lot_number=receive_in.lot_number,
             serial_number=receive_in.serial_number,
-            po_number=receive_in.po_number,
+            reference_type="purchase_order" if receive_in.po_number else None,
+            reference_number=receive_in.po_number,
             unit_cost=receive_in.unit_cost,
-            cert_number=receive_in.cert_number,
-            heat_lot=receive_in.heat_lot,
-            received_date=datetime.utcnow()
+            total_cost=receive_in.quantity * receive_in.unit_cost,
+            notes=receive_in.notes,
+            created_by=current_user.id
         )
-        db.add(inv_item)
-    
-    db.flush()
-    
-    # Create transaction
-    txn = InventoryTransaction(
-        inventory_item_id=inv_item.id,
-        part_id=receive_in.part_id,
-        transaction_type=TransactionType.RECEIVE,
-        quantity=receive_in.quantity,
-        to_location=receive_in.location_code,
-        lot_number=receive_in.lot_number,
-        serial_number=receive_in.serial_number,
-        reference_type="purchase_order" if receive_in.po_number else None,
-        reference_number=receive_in.po_number,
-        unit_cost=receive_in.unit_cost,
-        total_cost=receive_in.quantity * receive_in.unit_cost,
-        notes=receive_in.notes,
-        created_by=current_user.id
-    )
-    db.add(txn)
-    db.commit()
-    
+        db.add(txn)
+
     return {"message": "Inventory received", "inventory_item_id": inv_item.id, "quantity": receive_in.quantity}
 
 
@@ -308,27 +308,27 @@ def issue_inventory(
     if inv_item.quantity_available < issue_in.quantity:
         raise HTTPException(status_code=400, detail=f"Insufficient quantity. Available: {inv_item.quantity_available}")
     
-    inv_item.quantity_on_hand -= issue_in.quantity
-    inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
-    
-    txn = InventoryTransaction(
-        inventory_item_id=inv_item.id,
-        part_id=inv_item.part_id,
-        transaction_type=TransactionType.ISSUE,
-        quantity=-issue_in.quantity,
-        from_location=inv_item.location,
-        lot_number=inv_item.lot_number,
-        serial_number=inv_item.serial_number,
-        reference_type="work_order" if issue_in.work_order_number else None,
-        reference_number=issue_in.work_order_number,
-        unit_cost=inv_item.unit_cost,
-        total_cost=issue_in.quantity * inv_item.unit_cost,
-        notes=issue_in.notes,
-        created_by=current_user.id
-    )
-    db.add(txn)
-    db.commit()
-    
+    with atomic_transaction(db):
+        inv_item.quantity_on_hand -= issue_in.quantity
+        inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
+
+        txn = InventoryTransaction(
+            inventory_item_id=inv_item.id,
+            part_id=inv_item.part_id,
+            transaction_type=TransactionType.ISSUE,
+            quantity=-issue_in.quantity,
+            from_location=inv_item.location,
+            lot_number=inv_item.lot_number,
+            serial_number=inv_item.serial_number,
+            reference_type="work_order" if issue_in.work_order_number else None,
+            reference_number=issue_in.work_order_number,
+            unit_cost=inv_item.unit_cost,
+            total_cost=issue_in.quantity * inv_item.unit_cost,
+            notes=issue_in.notes,
+            created_by=current_user.id
+        )
+        db.add(txn)
+
     return {"message": "Inventory issued", "quantity": issue_in.quantity}
 
 
@@ -351,50 +351,50 @@ def transfer_inventory(
         raise HTTPException(status_code=400, detail="Insufficient quantity")
     
     from_location = inv_item.location
-    
-    # Reduce from source
-    inv_item.quantity_on_hand -= transfer_in.quantity
-    inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
-    
-    # Add to destination (or create new)
-    dest_inv = db.query(InventoryItem).filter(
-        InventoryItem.part_id == inv_item.part_id,
-        InventoryItem.location == transfer_in.to_location_code,
-        InventoryItem.lot_number == inv_item.lot_number
-    ).first()
-    
-    if dest_inv:
-        dest_inv.quantity_on_hand += transfer_in.quantity
-        dest_inv.quantity_available = dest_inv.quantity_on_hand - dest_inv.quantity_allocated
-    else:
-        dest_inv = InventoryItem(
+
+    with atomic_transaction(db):
+        # Reduce from source
+        inv_item.quantity_on_hand -= transfer_in.quantity
+        inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
+
+        # Add to destination (or create new)
+        dest_inv = db.query(InventoryItem).filter(
+            InventoryItem.part_id == inv_item.part_id,
+            InventoryItem.location == transfer_in.to_location_code,
+            InventoryItem.lot_number == inv_item.lot_number
+        ).first()
+
+        if dest_inv:
+            dest_inv.quantity_on_hand += transfer_in.quantity
+            dest_inv.quantity_available = dest_inv.quantity_on_hand - dest_inv.quantity_allocated
+        else:
+            dest_inv = InventoryItem(
+                part_id=inv_item.part_id,
+                location=transfer_in.to_location_code,
+                warehouse=to_location.warehouse,
+                quantity_on_hand=transfer_in.quantity,
+                quantity_available=transfer_in.quantity,
+                lot_number=inv_item.lot_number,
+                serial_number=inv_item.serial_number,
+                unit_cost=inv_item.unit_cost,
+                received_date=inv_item.received_date
+            )
+            db.add(dest_inv)
+
+        # Transaction record
+        txn = InventoryTransaction(
+            inventory_item_id=inv_item.id,
             part_id=inv_item.part_id,
-            location=transfer_in.to_location_code,
-            warehouse=to_location.warehouse,
-            quantity_on_hand=transfer_in.quantity,
-            quantity_available=transfer_in.quantity,
+            transaction_type=TransactionType.TRANSFER,
+            quantity=transfer_in.quantity,
+            from_location=from_location,
+            to_location=transfer_in.to_location_code,
             lot_number=inv_item.lot_number,
-            serial_number=inv_item.serial_number,
-            unit_cost=inv_item.unit_cost,
-            received_date=inv_item.received_date
+            notes=transfer_in.notes,
+            created_by=current_user.id
         )
-        db.add(dest_inv)
-    
-    # Transaction
-    txn = InventoryTransaction(
-        inventory_item_id=inv_item.id,
-        part_id=inv_item.part_id,
-        transaction_type=TransactionType.TRANSFER,
-        quantity=transfer_in.quantity,
-        from_location=from_location,
-        to_location=transfer_in.to_location_code,
-        lot_number=inv_item.lot_number,
-        notes=transfer_in.notes,
-        created_by=current_user.id
-    )
-    db.add(txn)
-    db.commit()
-    
+        db.add(txn)
+
     return {"message": "Transfer complete"}
 
 
@@ -411,27 +411,27 @@ def adjust_inventory(
     
     old_qty = inv_item.quantity_on_hand
     variance = adjust_in.new_quantity - old_qty
-    
-    inv_item.quantity_on_hand = adjust_in.new_quantity
-    inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
-    
-    txn = InventoryTransaction(
-        inventory_item_id=inv_item.id,
-        part_id=inv_item.part_id,
-        transaction_type=TransactionType.ADJUST,
-        quantity=variance,
-        from_location=inv_item.location,
-        to_location=inv_item.location,
-        lot_number=inv_item.lot_number,
-        reason_code=adjust_in.reason_code,
-        notes=f"Adjusted from {old_qty} to {adjust_in.new_quantity}. {adjust_in.notes or ''}",
-        unit_cost=inv_item.unit_cost,
-        total_cost=abs(variance) * inv_item.unit_cost,
-        created_by=current_user.id
-    )
-    db.add(txn)
-    db.commit()
-    
+
+    with atomic_transaction(db):
+        inv_item.quantity_on_hand = adjust_in.new_quantity
+        inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
+
+        txn = InventoryTransaction(
+            inventory_item_id=inv_item.id,
+            part_id=inv_item.part_id,
+            transaction_type=TransactionType.ADJUST,
+            quantity=variance,
+            from_location=inv_item.location,
+            to_location=inv_item.location,
+            lot_number=inv_item.lot_number,
+            reason_code=adjust_in.reason_code,
+            notes=f"Adjusted from {old_qty} to {adjust_in.new_quantity}. {adjust_in.notes or ''}",
+            unit_cost=inv_item.unit_cost,
+            total_cost=abs(variance) * inv_item.unit_cost,
+            created_by=current_user.id
+        )
+        db.add(txn)
+
     return {"message": "Adjustment complete", "old_quantity": old_qty, "new_quantity": adjust_in.new_quantity}
 
 
@@ -574,47 +574,46 @@ def complete_cycle_count(
     if not count:
         raise HTTPException(status_code=404, detail="Cycle count not found")
     
-    # Calculate totals
+    # Calculate totals and apply adjustments atomically
     total_variance = 0
     items_adjusted = 0
-    
-    for item in count.items:
-        if item.is_counted and item.variance != 0:
-            total_variance += item.variance_value
-            
-            if apply_adjustments:
-                # Update inventory
-                inv = db.query(InventoryItem).filter(InventoryItem.id == item.inventory_item_id).first()
-                if inv:
-                    old_qty = inv.quantity_on_hand
-                    inv.quantity_on_hand = item.counted_quantity
-                    inv.quantity_available = inv.quantity_on_hand - inv.quantity_allocated
-                    
-                    # Create adjustment transaction
-                    txn = InventoryTransaction(
-                        inventory_item_id=inv.id,
-                        part_id=inv.part_id,
-                        transaction_type=TransactionType.COUNT,
-                        quantity=item.variance,
-                        from_location=inv.location,
-                        to_location=inv.location,
-                        lot_number=inv.lot_number,
-                        reason_code="cycle_count",
-                        notes=f"Cycle count {count.count_number}. System: {old_qty}, Counted: {item.counted_quantity}",
-                        unit_cost=inv.unit_cost,
-                        total_cost=abs(item.variance) * inv.unit_cost,
-                        created_by=current_user.id
-                    )
-                    db.add(txn)
-                    items_adjusted += 1
-    
-    count.status = CycleCountStatus.COMPLETED
-    count.completed_at = datetime.utcnow()
-    count.completed_by = current_user.id
-    count.items_adjusted = items_adjusted
-    count.total_variance_value = total_variance
-    
-    db.commit()
+
+    with atomic_transaction(db):
+        for item in count.items:
+            if item.is_counted and item.variance != 0:
+                total_variance += item.variance_value
+
+                if apply_adjustments:
+                    # Update inventory
+                    inv = db.query(InventoryItem).filter(InventoryItem.id == item.inventory_item_id).first()
+                    if inv:
+                        old_qty = inv.quantity_on_hand
+                        inv.quantity_on_hand = item.counted_quantity
+                        inv.quantity_available = inv.quantity_on_hand - inv.quantity_allocated
+
+                        # Create adjustment transaction
+                        txn = InventoryTransaction(
+                            inventory_item_id=inv.id,
+                            part_id=inv.part_id,
+                            transaction_type=TransactionType.COUNT,
+                            quantity=item.variance,
+                            from_location=inv.location,
+                            to_location=inv.location,
+                            lot_number=inv.lot_number,
+                            reason_code="cycle_count",
+                            notes=f"Cycle count {count.count_number}. System: {old_qty}, Counted: {item.counted_quantity}",
+                            unit_cost=inv.unit_cost,
+                            total_cost=abs(item.variance) * inv.unit_cost,
+                            created_by=current_user.id
+                        )
+                        db.add(txn)
+                        items_adjusted += 1
+
+        count.status = CycleCountStatus.COMPLETED
+        count.completed_at = datetime.utcnow()
+        count.completed_by = current_user.id
+        count.items_adjusted = items_adjusted
+        count.total_variance_value = total_variance
     
     return {
         "message": "Cycle count completed",

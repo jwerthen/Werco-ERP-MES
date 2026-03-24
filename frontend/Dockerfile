@@ -29,11 +29,22 @@ WORKDIR /app
 # Install serve for static file serving
 RUN npm install -g serve
 
+# Create non-root user for security
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
 # Copy built files from build stage
 COPY --from=build /app/build ./build
+RUN chown -R appuser:appgroup ./build
 
 # Expose port
 EXPOSE 3000
+
+# Run as non-root user
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/ || exit 1
 
 # Start server - Railway provides PORT env var
 CMD serve -s build -l ${PORT:-3000}

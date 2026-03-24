@@ -1,6 +1,6 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import or_, func
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
@@ -36,10 +36,13 @@ def list_parts(
     
     Returns parts ordered by part number.
     """
-    query = db.query(Part)
-    
+    query = db.query(Part).options(
+        selectinload(Part.bom),
+        selectinload(Part.inventory_items)
+    )
+
     # Filter out soft-deleted unless explicitly requested by admin
-    if not include_deleted or current_user.role != UserRole.ADMIN:
+    if not (include_deleted and current_user.role == UserRole.ADMIN):
         query = query.filter(Part.is_deleted == False)
     
     if active_only:

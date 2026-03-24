@@ -1,7 +1,7 @@
 from typing import List, Optional
 from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
@@ -118,7 +118,10 @@ def list_purchase_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(PurchaseOrder).options(joinedload(PurchaseOrder.vendor))
+    query = db.query(PurchaseOrder).options(
+        joinedload(PurchaseOrder.vendor),
+        selectinload(PurchaseOrder.lines)
+    )
     
     if status:
         query = query.filter(PurchaseOrder.status == status)

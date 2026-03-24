@@ -6,8 +6,8 @@ from app.models.bom import BOMItemType, BOMLineType
 
 class BOMItemBase(BaseModel):
     component_part_id: int
-    item_number: int
-    quantity: float = 1.0
+    item_number: int = Field(..., gt=0)
+    quantity: float = Field(default=1.0, gt=0)
     item_type: BOMItemType
     line_type: BOMLineType = BOMLineType.COMPONENT
     unit_of_measure: str = "each"
@@ -17,9 +17,9 @@ class BOMItemBase(BaseModel):
     torque_spec: Optional[str] = None
     installation_notes: Optional[str] = None
     work_center_id: Optional[int] = None
-    operation_sequence: int = 10
-    scrap_factor: float = 0.0
-    lead_time_offset: int = 0
+    operation_sequence: int = Field(default=10, gt=0)
+    scrap_factor: float = Field(default=0.0, ge=0)
+    lead_time_offset: int = Field(default=0, ge=0)
     is_optional: bool = False
     is_alternate: bool = False
     alternate_group: Optional[str] = None
@@ -34,7 +34,7 @@ class BOMItemCreate(BOMItemBase):
 
 
 class BOMItemUpdate(BaseModel):
-    quantity: Optional[float] = None
+    quantity: Optional[float] = Field(None, gt=0)
     item_type: Optional[BOMItemType] = None
     line_type: Optional[BOMLineType] = None
     unit_of_measure: Optional[str] = None
@@ -44,9 +44,9 @@ class BOMItemUpdate(BaseModel):
     torque_spec: Optional[str] = None
     installation_notes: Optional[str] = None
     work_center_id: Optional[int] = None
-    operation_sequence: Optional[int] = None
-    scrap_factor: Optional[float] = None
-    lead_time_offset: Optional[int] = None
+    operation_sequence: Optional[int] = Field(None, gt=0)
+    scrap_factor: Optional[float] = Field(None, ge=0)
+    lead_time_offset: Optional[int] = Field(None, ge=0)
     is_optional: Optional[bool] = None
     is_alternate: Optional[bool] = None
     alternate_group: Optional[str] = None

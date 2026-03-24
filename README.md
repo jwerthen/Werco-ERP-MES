@@ -47,7 +47,8 @@ A custom Enterprise Resource Planning (ERP) and Manufacturing Execution System (
 
 1. Clone the repository:
 ```bash
-cd C:\Users\jmw\Desktop\Werco-ERP
+git clone https://github.com/jwerthen/werco-erp-mes.git
+cd werco-erp-mes
 ```
 
 2. Create environment file:
@@ -70,7 +71,8 @@ docker-compose exec backend python -m scripts.seed_data
 - Frontend: http://localhost:3000
 - API Docs: http://localhost:8000/api/docs
 
-### Default Credentials
+### Default Credentials (Development Only)
+> **WARNING**: Change these immediately in production. Generate secure passwords with: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
 - **Admin**: admin@werco.com / admin123
 - **Users**: (email) / password123
 

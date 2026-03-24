@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional, Set, Dict, Any, Tuple
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
@@ -24,6 +25,8 @@ from app.schemas.bom_import import (
 from app.services.pdf_service import extract_text_from_document, save_uploaded_document, SUPPORTED_EXTENSIONS
 from app.services.llm_service import extract_bom_data_with_llm
 from app.services.part_number_service import generate_werco_part_number
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -62,8 +65,8 @@ def build_bom_item_response(
                 )
             else:
                 component_info = get_component_part_info(item.component_part, db)
-        except Exception:
-            pass  # Silently handle any errors getting component info
+        except Exception as e:
+            logger.warning("Failed to get component part info for BOM item %s: %s", item.id, e)
     
     return BOMItemResponse(
         id=item.id,
