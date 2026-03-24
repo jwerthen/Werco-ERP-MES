@@ -192,7 +192,7 @@ export default function POUpload() {
         const pnRaw = item.part_number || '';
         const pn = pnRaw.trim().toLowerCase();
         const suggested = item.suggested_part_number || '';
-        const looksLikeDescription = pnRaw && (pn.includes(' ') && !pnRaw.includes('-')) || pn.includes('ga') || pn.includes(' x ');
+        const looksLikeDescription = (pnRaw && pn.includes(' ') && !pnRaw.includes('-')) || pn.includes('ga') || pn.includes(' x ');
         const shouldUseSuggested = Boolean(suggested) && (!pn || (desc && pn === desc) || looksLikeDescription);
         return {
           ...item,
