@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE: int = 1800  # Recycle connections after 30 minutes
     DB_POOL_PRE_PING: bool = True  # Test connections before use (handles stale connections)
     
-    # Security - MUST be overridden via environment variables
-    SECRET_KEY: str = "CHANGE-THIS-IN-PRODUCTION"
-    REFRESH_TOKEN_SECRET_KEY: str = "CHANGE-THIS-REFRESH-SECRET"
+    # Security - MUST be overridden via environment variables (no defaults - app fails fast if missing)
+    SECRET_KEY: str
+    REFRESH_TOKEN_SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # Short-lived access tokens
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # Refresh tokens valid for 7 days
@@ -49,12 +49,11 @@ class Settings(BaseSettings):
     @field_validator("SECRET_KEY")
     @classmethod
     def validate_secret_key(cls, v: str) -> str:
-        """Validate SECRET_KEY is secure - reject known insecure defaults."""
+        """Validate SECRET_KEY is secure - reject known insecure values."""
         if v in INSECURE_SECRET_KEYS:
             raise ValueError(
-                "SECRET_KEY is set to an insecure default value. "
-                "Please set a secure SECRET_KEY environment variable. "
-                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+                "SECRET_KEY is set to an insecure value. "
+                "Generate a secure key with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
             )
         if len(v) < 32:
             raise ValueError(
@@ -62,16 +61,15 @@ class Settings(BaseSettings):
                 "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
             )
         return v
-    
+
     @field_validator("REFRESH_TOKEN_SECRET_KEY")
     @classmethod
     def validate_refresh_token_secret_key(cls, v: str) -> str:
-        """Validate REFRESH_TOKEN_SECRET_KEY is secure - reject known insecure defaults."""
+        """Validate REFRESH_TOKEN_SECRET_KEY is secure - reject known insecure values."""
         if v in INSECURE_SECRET_KEYS:
             raise ValueError(
-                "REFRESH_TOKEN_SECRET_KEY is set to an insecure default value. "
-                "Please set a secure REFRESH_TOKEN_SECRET_KEY environment variable. "
-                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+                "REFRESH_TOKEN_SECRET_KEY is set to an insecure value. "
+                "Generate a secure key with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
             )
         if len(v) < 32:
             raise ValueError(

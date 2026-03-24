@@ -1,6 +1,7 @@
+from contextlib import contextmanager
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from app.core.config import settings
 import logging
@@ -27,13 +28,34 @@ Base = declarative_base()
 def get_db():
     """
     Dependency that provides a database session.
-    Automatically closes the session when the request is complete.
+    Automatically rolls back on error and closes the session when the request is complete.
     """
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
+
+
+@contextmanager
+def atomic_transaction(db: Session):
+    """Context manager for atomic multi-step database operations.
+
+    Usage:
+        with atomic_transaction(db):
+            db.add(record1)
+            db.add(record2)
+            # auto-commits on success, auto-rolls-back on exception
+    """
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def get_pool_status() -> dict:

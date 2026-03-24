@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, R
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import or_
 from pydantic import BaseModel, Field
-from app.db.database import get_db
+from app.db.database import get_db, atomic_transaction
 from app.api.deps import get_current_user, require_role, get_audit_service
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
@@ -596,25 +596,27 @@ def update_work_order_priority(
 
     old_priority = work_order.priority
     reason = (priority_in.reason or "").strip() or None
-    work_order.priority = priority_in.priority
-    work_order.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(work_order)
 
-    audit = AuditService(db, current_user, request)
-    audit.log_update(
-        resource_type="work_order",
-        resource_id=work_order.id,
-        resource_identifier=work_order.work_order_number,
-        old_values={"priority": old_priority},
-        new_values={"priority": work_order.priority},
-        description=(
-            f"Updated work_order priority: {work_order.work_order_number}"
-            + (f" (reason: {reason})" if reason else "")
-        ),
-        extra_data={"priority_reason": reason} if reason else None
-    )
-    db.commit()
+    with atomic_transaction(db):
+        work_order.priority = priority_in.priority
+        work_order.updated_at = datetime.utcnow()
+        db.flush()
+
+        audit = AuditService(db, current_user, request)
+        audit.log_update(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            old_values={"priority": old_priority},
+            new_values={"priority": work_order.priority},
+            description=(
+                f"Updated work_order priority: {work_order.work_order_number}"
+                + (f" (reason: {reason})" if reason else "")
+            ),
+            extra_data={"priority_reason": reason} if reason else None
+        )
+
+    db.refresh(work_order)
 
     safe_broadcast(
         broadcast_work_order_update,

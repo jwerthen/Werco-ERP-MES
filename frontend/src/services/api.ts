@@ -24,6 +24,20 @@ interface CacheEntry {
 
 // Global cache for ETag-based conditional requests
 const etagCache = new Map<string, CacheEntry>();
+const ETAG_CACHE_MAX_SIZE = 500;
+
+// Evict oldest entries when cache exceeds max size
+function pruneEtagCache(): void {
+  if (etagCache.size <= ETAG_CACHE_MAX_SIZE) return;
+  // Map iterates in insertion order; delete oldest entries
+  const excess = etagCache.size - ETAG_CACHE_MAX_SIZE;
+  let removed = 0;
+  for (const key of etagCache.keys()) {
+    if (removed >= excess) break;
+    etagCache.delete(key);
+    removed++;
+  }
+}
 
 // Cache TTL in milliseconds (5 minutes)
 const CACHE_TTL = 5 * 60 * 1000;
@@ -193,6 +207,7 @@ class ApiService {
           data: response.data,
           timestamp: Date.now(),
         });
+        pruneEtagCache();
       }
       
       // Check if data actually changed (for UI optimization)

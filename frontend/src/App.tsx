@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { TourProvider } from './context/TourContext';
 import { KeyboardShortcutsProvider } from './context/KeyboardShortcutsContext';
 import { TourHighlight } from './components/Tour';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import Layout from './components/Layout';
 import { SkeletonDashboard, LoadingOverlay } from './components/ui/Skeleton';
 import { isKioskMode, syncKioskMode } from './utils/kiosk';
@@ -53,6 +54,20 @@ const Analytics = lazyWithRetry(() => import('./pages/Analytics'));
 const PageLoader = () => (
   <div className="p-6">
     <SkeletonDashboard />
+  </div>
+);
+
+// 404 Not Found page
+const NotFoundPage = () => (
+  <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50">
+    <h1 className="text-4xl font-bold text-gray-800 mb-4">404 - Page Not Found</h1>
+    <p className="text-gray-600 mb-6">The page you are looking for does not exist.</p>
+    <a
+      href="/"
+      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+    >
+      Back to Dashboard
+    </a>
   </div>
 );
 
@@ -133,6 +148,7 @@ function AppRoutes() {
   syncKioskMode(location.pathname, location.search);
 
   return (
+    <ErrorBoundary level="page" name="AppRoutes">
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/unauthorized" element={<Unauthorized />} />
@@ -471,7 +487,11 @@ function AppRoutes() {
           </Layout>
         </PrivateRoute>
       } />
+
+      {/* Catch-all 404 */}
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
+    </ErrorBoundary>
   );
 }
 

@@ -102,7 +102,6 @@ export default function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [dataChanged, setDataChanged] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const _refreshTimeoutRef = useRef<NodeJS.Timeout | null>(null); // eslint-disable-line @typescript-eslint/no-unused-vars
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
