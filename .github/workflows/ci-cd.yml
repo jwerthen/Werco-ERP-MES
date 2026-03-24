@@ -294,7 +294,7 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway run --service werco-api --environment production python -m scripts.verify_launch
+          railway run --service werco-api --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" python -m scripts.verify_launch
 
       - name: Create GitHub Release
         if: success()
