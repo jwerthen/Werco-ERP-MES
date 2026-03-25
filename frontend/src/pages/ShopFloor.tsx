@@ -417,7 +417,7 @@ export default function ShopFloor() {
       )}
 
       {/* Work Center Selector */}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2" data-tour="sf-clock">
         {workCenters.map((wc) => (
           <button
             key={wc.id}
@@ -437,7 +437,7 @@ export default function ShopFloor() {
 
       {/* Priority Focus Queue */}
       {priorityFocusQueue.length > 0 && (
-        <div className="card">
+        <div className="card" data-tour="sf-complete">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold text-surface-900">Priority Focus Queue</h2>
             <span className="text-sm text-surface-500">Top {priorityFocusQueue.length} to run next</span>
@@ -473,7 +473,7 @@ export default function ShopFloor() {
       )}
 
       {/* Job Queue */}
-      <div className="card card-flush">
+      <div className="card card-flush" data-tour="sf-operations">
         <div className="px-6 py-4 border-b border-surface-200 flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold text-surface-900">

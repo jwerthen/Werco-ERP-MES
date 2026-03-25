@@ -121,7 +121,7 @@ export const tours: Record<string, Tour> = {
     description: 'Learn how operators use the shop floor module',
     category: 'production',
     icon: 'WrenchScrewdriverIcon',
-    startPath: '/shop-floor/operations',
+    startPath: '/shop-floor',
     roles: ['admin', 'manager', 'supervisor', 'operator'],
     roleDescriptions: {
       operator: 'Your primary workspace — clock in, run operations, and record completions',
@@ -132,44 +132,44 @@ export const tours: Record<string, Tour> = {
     roleStepOverrides: {
       0: {
         supervisor: {
-          description: 'Monitor which operators are clocked into which operations. Track labor hours and identify bottlenecks.',
+          description: 'Select a work center to see who is clocked in and which operations are running. Track labor hours and identify bottlenecks.',
         },
         manager: {
-          description: 'View real-time labor tracking across all work centers. Use this data for capacity planning and labor cost analysis.',
+          description: 'Select a work center to view real-time labor tracking. Use this data for capacity planning and labor cost analysis.',
         },
       },
       2: {
         supervisor: {
-          title: 'Review Completions',
-          description: 'Review completed operations from your team. Check quantities, scrap rates, and flag any issues for quality review.',
+          title: 'Priority Focus',
+          description: 'Review the top priority jobs for your work center. Check quantities, scrap rates, and flag any issues for quality review.',
         },
         manager: {
-          title: 'Completion Metrics',
-          description: 'Track completion rates, scrap percentages, and throughput. Operations auto-advance when configured in routing.',
+          title: 'Priority & Completion',
+          description: 'See the highest-priority jobs at a glance. Track completion rates, scrap percentages, and on-time delivery.',
         },
       },
     },
     steps: [
       {
         target: '[data-tour="sf-clock"]',
-        title: 'Time Clock',
-        description: 'Operators clock in/out of operations here. Select a work order and operation, then start the timer to track labor.',
+        title: 'Work Center Selector',
+        description: 'Select a work center to view its job queue. Operators clock in/out of operations from here by clicking Clock In on a queue item.',
         position: 'bottom',
-        path: '/shop-floor/operations',
+        path: '/shop-floor',
       },
       {
         target: '[data-tour="sf-operations"]',
-        title: 'Active Operations',
-        description: 'See all operations assigned to your work center. Color-coded by priority and status.',
-        position: 'bottom',
-        path: '/shop-floor/operations',
+        title: 'Job Queue',
+        description: 'See all operations queued for this work center. Sorted by priority and due date. Click Clock In to start tracking time on a job.',
+        position: 'top',
+        path: '/shop-floor',
       },
       {
         target: '[data-tour="sf-complete"]',
-        title: 'Complete Operation',
-        description: 'When finished, enter the quantity completed and any scrap. The system auto-advances to the next operation if configured.',
-        position: 'top',
-        path: '/shop-floor/operations',
+        title: 'Priority Focus',
+        description: 'The top priority jobs to run next, at a glance. When you clock out, enter quantity completed and any scrap to record production.',
+        position: 'bottom',
+        path: '/shop-floor',
       },
     ],
   },
