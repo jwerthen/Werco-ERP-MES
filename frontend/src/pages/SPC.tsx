@@ -129,7 +129,7 @@ const SPC = () => {
       const [limitsRes, capRes, measRes, chartRes, violRes] = await Promise.all([
         api.getSPCControlLimits(id),
         api.getSPCCapability(id),
-        api.getSPCMeasurements(id, { page_size: 20 }),
+        api.getSPCMeasurements(id, { limit: 20 }),
         api.getSPCChartData(id, {}),
         api.getSPCViolations(id),
       ]);
