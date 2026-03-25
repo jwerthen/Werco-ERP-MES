@@ -482,10 +482,8 @@ export function getToursForRole(
     })
     .map((tour) => {
       // Apply role-specific description
-      const description =
-        role && tour.roleDescriptions?.[role]
-          ? tour.roleDescriptions[role]
-          : tour.description;
+      const description: string =
+        (role && tour.roleDescriptions?.[role]) || tour.description;
 
       // Filter steps by permission and apply role overrides
       const steps = tour.steps
