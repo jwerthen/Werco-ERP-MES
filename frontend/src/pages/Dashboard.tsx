@@ -187,7 +187,7 @@ export default function Dashboard() {
           message: critical > 0 
             ? `${critical} part(s) at critical inventory levels`
             : `${lowStockData.length} part(s) below reorder point`,
-          link: '/inventory?filter=low_stock',
+          link: '/warehouse?tab=inventory&filter=low_stock',
           icon: CubeIcon
         });
       }

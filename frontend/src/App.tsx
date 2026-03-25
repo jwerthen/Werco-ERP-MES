@@ -29,6 +29,7 @@ const PartEdit = lazyWithRetry(() => import('./pages/PartEdit'));
 const BOM = lazyWithRetry(() => import('./pages/BOM'));
 const Routing = lazyWithRetry(() => import('./pages/Routing'));
 const Inventory = lazyWithRetry(() => import('./pages/Inventory'));
+const Warehouse = lazyWithRetry(() => import('./pages/Warehouse'));
 const MRP = lazyWithRetry(() => import('./pages/MRP'));
 const Quality = lazyWithRetry(() => import('./pages/Quality'));
 const CustomFields = lazyWithRetry(() => import('./pages/CustomFields'));
@@ -270,22 +271,28 @@ function AppRoutes() {
         </PrivateRoute>
       } />
       
-      {/* Inventory & MRP */}
-      <Route path="/inventory" element={
+      {/* Warehouse (unified Inventory + Receiving + Shipping) */}
+      <Route path="/warehouse" element={
         <PrivateRoute>
           <Layout>
-            <LazyRoute><Inventory /></LazyRoute>
+            <LazyRoute><Warehouse /></LazyRoute>
           </Layout>
+        </PrivateRoute>
+      } />
+      {/* Legacy redirects */}
+      <Route path="/inventory" element={
+        <PrivateRoute>
+          <Navigate to="/warehouse?tab=inventory" replace />
         </PrivateRoute>
       } />
       <Route path="/inventory/parts" element={
         <PrivateRoute>
-          <Navigate to="/inventory?group=parts" replace />
+          <Navigate to="/warehouse?tab=inventory&group=parts" replace />
         </PrivateRoute>
       } />
       <Route path="/inventory/materials" element={
         <PrivateRoute>
-          <Navigate to="/inventory?group=materials" replace />
+          <Navigate to="/warehouse?tab=inventory&group=materials" replace />
         </PrivateRoute>
       } />
       <Route path="/mrp" element={
@@ -324,9 +331,7 @@ function AppRoutes() {
       } />
       <Route path="/receiving" element={
         <PrivateRoute>
-          <Layout>
-            <LazyRoute><Receiving /></LazyRoute>
-          </Layout>
+          <Navigate to="/warehouse?tab=receiving" replace />
         </PrivateRoute>
       } />
       <Route path="/po-upload" element={
@@ -362,12 +367,10 @@ function AppRoutes() {
         </PrivateRoute>
       } />
       
-      {/* Shipping */}
+      {/* Shipping (redirect to warehouse) */}
       <Route path="/shipping" element={
         <PrivateRoute>
-          <Layout>
-            <LazyRoute><Shipping /></LazyRoute>
-          </Layout>
+          <Navigate to="/warehouse?tab=shipping" replace />
         </PrivateRoute>
       } />
       
