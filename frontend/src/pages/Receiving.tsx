@@ -475,12 +475,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       <div className="card">
         {/* RECEIVE TAB */}
         {activeTab === 'receive' && (
-          <div className="space-y-6">
+          <div className="space-y-4">
             {/* PO Selection Row */}
-            <div className="grid grid-cols-3 gap-4">
-              <div className="col-span-1">
+            <div className="grid grid-cols-3 gap-4" style={{ minHeight: '500px' }}>
+              <div className="col-span-1 flex flex-col">
                 <h2 className="text-lg font-semibold mb-3">Open Purchase Orders</h2>
-                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2">
+                <div className="space-y-2 flex-1 overflow-y-auto pr-2">
                   {openPOs.length === 0 ? (
                     <p className="text-gray-500 text-center py-8">No open POs awaiting receipt</p>
                   ) : (
@@ -515,77 +515,73 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               </div>
 
               {/* PO Detail Panel */}
-              <div className="col-span-2">
+              <div className="col-span-2 flex flex-col">
                 {selectedPO ? (
-                  <div className="bg-gray-50 rounded-xl p-4 h-full">
-                    <div className="flex justify-between items-start mb-4">
-                      <div>
-                        <h3 className="text-xl font-bold text-werco-primary">{selectedPO.po_number}</h3>
-                        <p className="text-gray-600">{selectedPO.vendor_name}</p>
-                        {selectedPO.vendor_code && (
-                          <p className="text-sm text-gray-500">Vendor Code: {selectedPO.vendor_code}</p>
+                  <div className="bg-gray-50 rounded-xl p-4 flex flex-col flex-1 overflow-hidden">
+                    {/* Compact PO Header */}
+                    <div className="flex items-center justify-between gap-4 mb-3 flex-shrink-0">
+                      <div className="flex items-center gap-4 min-w-0">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <h3 className="text-lg font-bold text-werco-primary">{selectedPO.po_number}</h3>
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                              selectedPO.status === 'sent' ? 'bg-blue-100 text-blue-800' :
+                              selectedPO.status === 'partial' ? 'bg-amber-100 text-amber-800' :
+                              'bg-gray-100 text-gray-800'
+                            }`}>
+                              {selectedPO.status.charAt(0).toUpperCase() + selectedPO.status.slice(1)}
+                            </span>
+                            {selectedPO.is_approved_vendor && (
+                              <span className="text-xs text-green-600 font-medium">✓ Approved</span>
+                            )}
+                          </div>
+                          <p className="text-sm text-gray-600 truncate">
+                            {selectedPO.vendor_name}
+                            {selectedPO.vendor_code && <span className="text-gray-400 ml-1">({selectedPO.vendor_code})</span>}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4 text-xs text-gray-500 flex-shrink-0">
+                        {selectedPO.order_date && (
+                          <div className="text-center">
+                            <p className="text-gray-400">Ordered</p>
+                            <p className="font-medium text-gray-700">{formatCentralDate(selectedPO.order_date)}</p>
+                          </div>
                         )}
-                      </div>
-                      <div className="text-right">
-                        <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                          selectedPO.status === 'sent' ? 'bg-blue-100 text-blue-800' :
-                          selectedPO.status === 'partial' ? 'bg-amber-100 text-amber-800' :
-                          'bg-gray-100 text-gray-800'
-                        }`}>
-                          {selectedPO.status.charAt(0).toUpperCase() + selectedPO.status.slice(1)}
-                        </span>
-                        {selectedPO.is_approved_vendor && (
-                          <p className="text-xs text-green-600 mt-1">✓ Approved Vendor</p>
+                        {selectedPO.required_date && (
+                          <div className="text-center">
+                            <p className="text-gray-400">Required</p>
+                            <p className="font-medium text-gray-700">{formatCentralDate(selectedPO.required_date)}</p>
+                          </div>
                         )}
-                      </div>
-                    </div>
-                    
-                    <div className="grid grid-cols-4 gap-4 mb-4 text-sm">
-                      <div>
-                        <p className="text-gray-500">Order Date</p>
-                        <p className="font-medium">
-                          {selectedPO.order_date ? formatCentralDate(selectedPO.order_date) : '-'}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500">Required Date</p>
-                        <p className="font-medium">
-                          {selectedPO.required_date ? formatCentralDate(selectedPO.required_date) : '-'}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500">Expected Date</p>
-                        <p className="font-medium">
-                          {selectedPO.expected_date ? formatCentralDate(selectedPO.expected_date) : '-'}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500">Total Lines</p>
-                        <p className="font-medium">{selectedPO.lines?.length || 0}</p>
+                        {selectedPO.expected_date && (
+                          <div className="text-center">
+                            <p className="text-gray-400">Expected</p>
+                            <p className="font-medium text-gray-700">{formatCentralDate(selectedPO.expected_date)}</p>
+                          </div>
+                        )}
                       </div>
                     </div>
 
                     {selectedPO.notes && (
-                      <div className="mb-4 p-3 bg-white rounded-lg border border-gray-200">
-                        <p className="text-xs text-gray-500 mb-1">PO Notes</p>
-                        <p className="text-sm">{selectedPO.notes}</p>
+                      <div className="mb-3 px-3 py-2 bg-white rounded-lg border border-gray-200 text-sm text-gray-600 flex-shrink-0">
+                        <span className="text-gray-400 font-medium">Notes: </span>{selectedPO.notes}
                       </div>
                     )}
 
-                    {/* All Lines Table */}
-                    <div className="bg-white rounded-lg border border-gray-200 overflow-x-auto">
-                      <table className="w-full divide-y divide-gray-200" style={{ minWidth: '700px' }}>
-                        <thead className="bg-gray-100">
+                    {/* Lines Table — scrollable */}
+                    <div className="flex-1 overflow-y-auto bg-white rounded-lg border border-gray-200">
+                      <table className="w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-100 sticky top-0">
                           <tr>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase whitespace-nowrap w-16">Line</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase whitespace-nowrap">Part Number</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Part Name</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase whitespace-nowrap w-24">Ordered</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase whitespace-nowrap w-24">Received</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase whitespace-nowrap w-24">Remaining</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase whitespace-nowrap w-24">Unit $</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase whitespace-nowrap w-24">Line Total</th>
-                            <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase whitespace-nowrap w-24">Status</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase w-10">#</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Part</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase w-16">Ord</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase w-16">Recv</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase w-16">Rem</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase w-20">Unit $</th>
+                            <th className="px-3 py-2 text-center text-xs font-semibold text-gray-600 uppercase w-20">Status</th>
+                            <th className="px-3 py-2 text-center text-xs font-semibold text-gray-600 uppercase w-20"></th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200">
@@ -600,14 +596,14 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                                     : 'hover:bg-gray-50'
                               }`}
                             >
-                              <td className="px-4 py-3 text-sm font-medium text-center">{line.line_number}</td>
-                              <td className="px-4 py-3">
+                              <td className="px-3 py-2 text-sm text-center">{line.line_number}</td>
+                              <td className="px-3 py-2">
                                 <span className="font-mono font-semibold text-sm">{line.part_number}</span>
+                                <span className="text-xs text-gray-500 ml-2 hidden xl:inline">{line.part_name}</span>
                               </td>
-                              <td className="px-4 py-3 text-sm text-gray-700">{line.part_name}</td>
-                              <td className="px-4 py-3 text-right text-sm font-medium">{line.quantity_ordered}</td>
-                              <td className="px-4 py-3 text-right text-sm">{line.quantity_received}</td>
-                              <td className="px-4 py-3 text-right text-sm font-semibold">
+                              <td className="px-3 py-2 text-right text-sm">{line.quantity_ordered}</td>
+                              <td className="px-3 py-2 text-right text-sm">{line.quantity_received}</td>
+                              <td className="px-3 py-2 text-right text-sm font-semibold">
                                 {line.is_closed ? (
                                   <span className="text-gray-400">-</span>
                                 ) : (
@@ -616,15 +612,24 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                                   </span>
                                 )}
                               </td>
-                              <td className="px-4 py-3 text-right text-sm">${(line.unit_price || 0).toFixed(2)}</td>
-                              <td className="px-4 py-3 text-right text-sm font-medium">${((line.unit_price || 0) * (line.quantity_ordered || 0)).toFixed(2)}</td>
-                              <td className="px-4 py-3 text-center">
+                              <td className="px-3 py-2 text-right text-sm">${(line.unit_price || 0).toFixed(2)}</td>
+                              <td className="px-3 py-2 text-center">
                                 {line.is_closed ? (
-                                  <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800">Complete</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">Done</span>
                                 ) : line.quantity_received > 0 ? (
-                                  <span className="px-2 py-1 rounded text-xs font-medium bg-amber-100 text-amber-800">Partial</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">Partial</span>
                                 ) : (
-                                  <span className="px-2 py-1 rounded text-xs font-medium bg-blue-100 text-blue-800">Open</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">Open</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-center">
+                                {!line.is_closed && line.quantity_remaining > 0 && (
+                                  <button
+                                    onClick={() => handleSelectLine(line)}
+                                    className="btn-primary text-xs px-3 py-1"
+                                  >
+                                    Receive
+                                  </button>
                                 )}
                               </td>
                             </tr>
@@ -632,42 +637,44 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                         </tbody>
                         <tfoot className="bg-gray-100">
                           <tr>
-                            <td colSpan={7} className="px-4 py-3 text-right text-sm font-semibold">PO Total:</td>
-                            <td className="px-4 py-3 text-right text-sm font-bold">
+                            <td colSpan={5} className="px-3 py-2 text-right text-sm font-semibold">PO Total:</td>
+                            <td className="px-3 py-2 text-right text-sm font-bold">
                               ${selectedPO.lines?.reduce((sum: number, l: any) => sum + ((l.unit_price || 0) * (l.quantity_ordered || 0)), 0).toFixed(2)}
                             </td>
-                            <td></td>
+                            <td colSpan={2}></td>
                           </tr>
                         </tfoot>
                       </table>
                     </div>
 
-                    {/* Receipt History for this PO */}
+                    {/* Receipt History for this PO — collapsible */}
                     {selectedPO.lines?.some((l: any) => l.receipts?.length > 0) && (
-                      <div className="mt-4">
-                        <p className="text-sm font-semibold text-gray-700 mb-2">Receipt History</p>
-                        <div className="bg-white rounded-lg border border-gray-200 overflow-x-auto">
-                          <table className="w-full divide-y divide-gray-200" style={{ minWidth: '600px' }}>
-                            <thead className="bg-gray-50">
+                      <details className="mt-3 flex-shrink-0">
+                        <summary className="text-sm font-semibold text-gray-600 cursor-pointer hover:text-gray-800">
+                          Receipt History ({selectedPO.lines?.reduce((c: number, l: any) => c + (l.receipts?.length || 0), 0)} receipts)
+                        </summary>
+                        <div className="mt-2 bg-white rounded-lg border border-gray-200 overflow-x-auto max-h-48 overflow-y-auto">
+                          <table className="w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50 sticky top-0">
                               <tr>
-                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Receipt #</th>
-                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Part</th>
-                                <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 uppercase">Qty</th>
-                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Lot #</th>
-                                <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600 uppercase">Status</th>
-                                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Date</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Receipt #</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Part</th>
+                                <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase">Qty</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Lot #</th>
+                                <th className="px-3 py-2 text-center text-xs font-semibold text-gray-600 uppercase">Status</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Date</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200">
-                              {selectedPO.lines?.flatMap((l: any) => 
+                              {selectedPO.lines?.flatMap((l: any) =>
                                 (l.receipts || []).map((r: any) => (
                                   <tr key={r.receipt_id} className="hover:bg-gray-50">
-                                    <td className="px-4 py-2 font-mono text-sm">{r.receipt_number}</td>
-                                    <td className="px-4 py-2 font-mono text-sm">{l.part_number}</td>
-                                    <td className="px-4 py-2 text-right text-sm font-medium">{r.quantity_received}</td>
-                                    <td className="px-4 py-2 font-mono text-sm">{r.lot_number}</td>
-                                    <td className="px-4 py-2 text-center">
-                                      <span className={`px-2 py-1 rounded text-xs font-medium ${
+                                    <td className="px-3 py-1.5 font-mono text-sm">{r.receipt_number}</td>
+                                    <td className="px-3 py-1.5 font-mono text-sm">{l.part_number}</td>
+                                    <td className="px-3 py-1.5 text-right text-sm font-medium">{r.quantity_received}</td>
+                                    <td className="px-3 py-1.5 font-mono text-sm">{r.lot_number}</td>
+                                    <td className="px-3 py-1.5 text-center">
+                                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
                                         r.status === 'accepted' ? 'bg-green-100 text-green-800' :
                                         r.status === 'pending_inspection' ? 'bg-amber-100 text-amber-800' :
                                         r.status === 'rejected' ? 'bg-red-100 text-red-800' :
@@ -676,7 +683,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                                         {r.status.replace(/_/g, ' ')}
                                       </span>
                                     </td>
-                                    <td className="px-4 py-2 text-sm text-gray-600">
+                                    <td className="px-3 py-1.5 text-sm text-gray-600">
                                       {r.received_at ? formatCentralDate(r.received_at) : '-'}
                                     </td>
                                   </tr>
@@ -685,86 +692,18 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             </tbody>
                           </table>
                         </div>
-                      </div>
+                      </details>
                     )}
                   </div>
                 ) : (
-                  <div className="bg-gray-50 rounded-xl p-8 h-full flex flex-col items-center justify-center text-gray-400">
+                  <div className="bg-gray-50 rounded-xl p-8 flex-1 flex flex-col items-center justify-center text-gray-400">
                     <MagnifyingGlassIcon className="h-16 w-16 mb-4" />
                     <p className="text-lg">Select a purchase order to view details</p>
-                    <p className="text-sm mt-1">Click on a PO from the list to see full order information</p>
+                    <p className="text-sm mt-1">Click on a PO from the list to see lines and receive material</p>
                   </div>
                 )}
               </div>
             </div>
-
-            {/* Lines Available to Receive */}
-            {selectedPO && (
-              <div>
-                <h2 className="text-lg font-semibold mb-3">Lines Available to Receive</h2>
-                <div className="grid grid-cols-2 gap-4">
-                  {selectedPO.lines?.filter((l: any) => l.quantity_remaining > 0 && !l.is_closed).map((line: any) => (
-                    <div
-                      key={line.line_id}
-                      className={`p-4 rounded-xl border-2 transition-all ${
-                        isPartialLine(line)
-                          ? 'border-amber-300 bg-amber-50 hover:border-amber-400'
-                          : 'border-gray-200 hover:border-werco-primary hover:bg-werco-50'
-                      }`}
-                    >
-                      <div className="flex justify-between items-start mb-3">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <p className="font-mono font-bold text-lg">{line.part_number}</p>
-                            {isPartialLine(line) && (
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-200 text-amber-800">
-                                Partial
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-sm text-gray-600">{line.part_name}</p>
-                        </div>
-                        <button
-                          onClick={() => handleSelectLine(line)}
-                          className="btn-primary px-6 py-2"
-                        >
-                          Receive
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-4 gap-4 text-sm">
-                        <div>
-                          <p className="text-gray-500">Ordered</p>
-                          <p className="font-semibold text-lg">{line.quantity_ordered}</p>
-                        </div>
-                        <div>
-                          <p className="text-gray-500">Received</p>
-                          <p className="font-semibold text-lg">{line.quantity_received}</p>
-                        </div>
-                        <div>
-                          <p className="text-gray-500">Remaining</p>
-                          <p className="font-bold text-lg text-amber-600">{line.quantity_remaining}</p>
-                        </div>
-                        <div>
-                          <p className="text-gray-500">Unit Price</p>
-                          <p className="font-semibold text-lg">${line.unit_price?.toFixed(2)}</p>
-                        </div>
-                      </div>
-                      {line.required_date && (
-                        <p className="text-xs text-gray-500 mt-2">
-                          Required: {formatCentralDate(line.required_date)}
-                        </p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                {selectedPO.lines?.filter((l: any) => l.quantity_remaining > 0 && !l.is_closed).length === 0 && (
-                  <div className="text-center py-8 text-gray-500 bg-gray-50 rounded-xl">
-                    <CheckCircleIcon className="h-12 w-12 mx-auto mb-2 text-green-500" />
-                    <p>All lines have been fully received</p>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         )}
 
