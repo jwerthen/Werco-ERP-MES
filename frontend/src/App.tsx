@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'r
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TourProvider } from './context/TourContext';
 import { KeyboardShortcutsProvider } from './context/KeyboardShortcutsContext';
+import { ToastProvider } from './components/ui/Toast';
 import { TourHighlight } from './components/Tour';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import Layout from './components/Layout';
@@ -22,7 +23,9 @@ const WorkOrderDetail = lazyWithRetry(() => import('./pages/WorkOrderDetail'));
 const ShopFloor = lazyWithRetry(() => import('./pages/ShopFloor'));
 const ShopFloorSimple = lazyWithRetry(() => import('./pages/ShopFloorSimple'));
 const WorkCenters = lazyWithRetry(() => import('./pages/WorkCenters'));
-const Parts = lazyWithRetry(() => import('./pages/Parts'));
+const Parts = lazyWithRetry(() => import('./pages/PartsNew'));
+const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
+const PartEdit = lazyWithRetry(() => import('./pages/PartEdit'));
 const BOM = lazyWithRetry(() => import('./pages/BOM'));
 const Routing = lazyWithRetry(() => import('./pages/Routing'));
 const Inventory = lazyWithRetry(() => import('./pages/Inventory'));
@@ -235,6 +238,20 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><Parts /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/parts/:id" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><PartDetail /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/parts/:id/edit" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><PartEdit /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
@@ -598,14 +615,16 @@ function AppRoutes() {
 function App() {
   return (
     <AuthProvider>
-      <TourProvider>
-        <Router>
-          <KeyboardShortcutsProvider>
-            <AppRoutes />
-            <TourHighlight />
-          </KeyboardShortcutsProvider>
-        </Router>
-      </TourProvider>
+      <ToastProvider>
+        <TourProvider>
+          <Router>
+            <KeyboardShortcutsProvider>
+              <AppRoutes />
+              <TourHighlight />
+            </KeyboardShortcutsProvider>
+          </Router>
+        </TourProvider>
+      </ToastProvider>
     </AuthProvider>
   );
 }
