@@ -971,6 +971,33 @@ class ApiService {
     return response.data;
   }
 
+  async unscheduleWorkOrder(workOrderId: number) {
+    const response = await this.api.put(`/scheduling/work-orders/${workOrderId}/unschedule`);
+    return response.data;
+  }
+
+  async getCapacityForDate(workCenterId: number, targetDate: string) {
+    const response = await this.api.post('/scheduling/capacity-for-date', {
+      work_center_id: workCenterId,
+      target_date: targetDate,
+    });
+    return response.data;
+  }
+
+  async bulkScheduleEarliest(workOrderIds: number[], options?: { horizon_days?: number; forward_schedule?: boolean }) {
+    const response = await this.api.post('/scheduling/bulk-schedule-earliest', {
+      work_order_ids: workOrderIds,
+      horizon_days: options?.horizon_days || 90,
+      forward_schedule: options?.forward_schedule || false,
+    });
+    return response.data;
+  }
+
+  async runScheduling(data?: { work_center_ids?: number[]; horizon_days?: number; optimize_setup?: boolean }) {
+    const response = await this.api.post('/scheduling/run', data || {});
+    return response.data;
+  }
+
   // Documents
   async getDocuments(params?: { part_id?: number; work_order_id?: number; vendor_id?: number; document_type?: string; search?: string }) {
     const response = await this.api.get('/documents/', { params });

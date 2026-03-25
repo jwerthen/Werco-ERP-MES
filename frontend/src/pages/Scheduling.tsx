@@ -60,6 +60,23 @@ interface DragState {
   isDragging: boolean;
 }
 
+interface DropTarget {
+  wcId: number;
+  date: string; // ISO date string
+}
+
+interface CapacityForDate {
+  work_center_id: number;
+  work_center_code: string;
+  date: string;
+  capacity_hours: number;
+  used_hours: number;
+  available_hours: number;
+  utilization_pct: number;
+  overloaded: boolean;
+  jobs_on_date: { work_order_id: number; work_order_number: string; operation_name: string; hours: number }[];
+}
+
 interface DispatchQueueJob extends ScheduledJob {
   dispatchScore: number;
 }
@@ -141,8 +158,20 @@ export default function Scheduling() {
   
   // Drag and drop state
   const [dragState, setDragState] = useState<DragState>({ job: null, isDragging: false });
-  const [dropTargetWc, setDropTargetWc] = useState<number | null>(null);
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const canEditPriority = can('work_orders:edit');
+
+  // Enhanced schedule modal state
+  const [capacityPreview, setCapacityPreview] = useState<CapacityForDate | null>(null);
+  const [loadingCapacity, setLoadingCapacity] = useState(false);
+  const [forwardSchedule, setForwardSchedule] = useState(true);
+
+  // Inline date editing
+  const [inlineEditJobId, setInlineEditJobId] = useState<number | null>(null);
+  const [inlineEditDate, setInlineEditDate] = useState('');
+
+  // Auto-schedule state
+  const [runningAutoSchedule, setRunningAutoSchedule] = useState(false);
 
   // Generate days for display: Monday-Saturday only (skip Sundays)
   const days = useMemo(
@@ -346,54 +375,167 @@ export default function Scheduling() {
 
   const handleDragEnd = () => {
     setDragState({ job: null, isDragging: false });
-    setDropTargetWc(null);
+    setDropTarget(null);
   };
 
-  const handleDragOver = (e: React.DragEvent, wcId: number) => {
+  const handleDragOverCell = (e: React.DragEvent, wcId: number, dateStr: string) => {
     e.preventDefault();
+    e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
-    if (dropTargetWc !== wcId) {
-      setDropTargetWc(wcId);
+    if (!dropTarget || dropTarget.wcId !== wcId || dropTarget.date !== dateStr) {
+      setDropTarget({ wcId, date: dateStr });
     }
   };
 
-  const handleDragLeave = () => {
-    setDropTargetWc(null);
+  const handleDragLeaveCell = (e: React.DragEvent) => {
+    // Only clear if leaving the cell entirely (not entering a child)
+    const related = e.relatedTarget as HTMLElement | null;
+    if (!related || !e.currentTarget.contains(related)) {
+      setDropTarget(null);
+    }
   };
 
-  const handleDrop = async (e: React.DragEvent, targetWcId: number) => {
+  const handleDropOnCell = async (e: React.DragEvent, targetWcId: number, targetDate: string) => {
     e.preventDefault();
-    setDropTargetWc(null);
-    
+    e.stopPropagation();
+    setDropTarget(null);
+
+    const job = dragState.job;
+    if (!job) {
+      setDragState({ job: null, isDragging: false });
+      return;
+    }
+
+    try {
+      // If work center changed, move it first
+      if (job.work_center_id !== targetWcId) {
+        await api.updateOperationWorkCenter(job.current_operation_id, targetWcId);
+      }
+      // Schedule to the target date
+      await api.scheduleWorkOrder(job.work_order_id, {
+        scheduled_start: targetDate,
+        work_center_id: targetWcId,
+      });
+      await loadData();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to schedule work order');
+    }
+
+    setDragState({ job: null, isDragging: false });
+  };
+
+  // Drop on work center row header (no specific date - just move work center)
+  const handleDropOnRow = async (e: React.DragEvent, targetWcId: number) => {
+    e.preventDefault();
+    setDropTarget(null);
+
     const job = dragState.job;
     if (!job || job.work_center_id === targetWcId) {
       setDragState({ job: null, isDragging: false });
       return;
     }
-    
+
     try {
       await api.updateOperationWorkCenter(job.current_operation_id, targetWcId);
       await loadData();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to move work order');
     }
-    
+
     setDragState({ job: null, isDragging: false });
   };
 
   const handleSchedule = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedJob) return;
-    
+
     try {
       await api.scheduleWorkOrder(selectedJob.work_order_id, {
         scheduled_start: scheduleForm.scheduled_start,
-        work_center_id: selectedJob.work_center_id
-      });
+        work_center_id: scheduleForm.work_center_id || selectedJob.work_center_id,
+        forward_schedule: forwardSchedule,
+      } as any);
       setShowScheduleModal(false);
+      setCapacityPreview(null);
       await loadData();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to schedule');
+    }
+  };
+
+  const handleUnschedule = async (job: ScheduledJob) => {
+    try {
+      await api.unscheduleWorkOrder(job.work_order_id);
+      setShowScheduleModal(false);
+      setCapacityPreview(null);
+      await loadData();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to unschedule');
+    }
+  };
+
+  const loadCapacityPreview = useCallback(async (workCenterId: number, dateStr: string) => {
+    if (!workCenterId || !dateStr) {
+      setCapacityPreview(null);
+      return;
+    }
+    setLoadingCapacity(true);
+    try {
+      const data = await api.getCapacityForDate(workCenterId, dateStr);
+      setCapacityPreview(data);
+    } catch {
+      setCapacityPreview(null);
+    } finally {
+      setLoadingCapacity(false);
+    }
+  }, []);
+
+  // Load capacity when schedule form changes
+  useEffect(() => {
+    if (showScheduleModal && scheduleForm.scheduled_start && scheduleForm.work_center_id) {
+      loadCapacityPreview(scheduleForm.work_center_id, scheduleForm.scheduled_start);
+    } else {
+      setCapacityPreview(null);
+    }
+  }, [showScheduleModal, scheduleForm.scheduled_start, scheduleForm.work_center_id, loadCapacityPreview]);
+
+  const handleInlineDateSave = async (job: ScheduledJob) => {
+    if (!inlineEditDate) {
+      setInlineEditJobId(null);
+      return;
+    }
+    try {
+      await api.scheduleWorkOrder(job.work_order_id, {
+        scheduled_start: inlineEditDate,
+        work_center_id: job.work_center_id,
+      });
+      setInlineEditJobId(null);
+      setInlineEditDate('');
+      await loadData();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to reschedule');
+    }
+  };
+
+  const handleAutoScheduleAll = async () => {
+    const unscheduledIds = dispatchQueue
+      .filter((job) => !job.scheduled_start)
+      .map((job) => job.work_order_id);
+
+    if (unscheduledIds.length === 0) {
+      alert('No unscheduled work orders to schedule.');
+      return;
+    }
+
+    setRunningAutoSchedule(true);
+    try {
+      const result = await api.bulkScheduleEarliest(unscheduledIds, { forward_schedule: true });
+      await loadData();
+      alert(`Auto-scheduled ${result.scheduled_count} work orders. ${result.error_count} errors.`);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Auto-schedule failed');
+    } finally {
+      setRunningAutoSchedule(false);
     }
   };
 
@@ -515,15 +657,22 @@ export default function Scheduling() {
   };
 
   const handleBulkScheduleEarliest = async () => {
-    await runBulkAction('earliest', async (job) => {
-      if (job.scheduled_start) {
-        return 'skipped';
-      }
-      await api.scheduleWorkOrderEarliest(job.work_order_id, {
-        work_center_id: job.work_center_id,
-      });
-      return 'success';
-    });
+    const unscheduledSelected = selectedQueueJobs.filter((job) => !job.scheduled_start);
+    if (unscheduledSelected.length === 0) {
+      alert('No unscheduled work orders selected.');
+      return;
+    }
+    setBulkActionRunning('earliest');
+    try {
+      const ids = unscheduledSelected.map((job) => job.work_order_id);
+      const result = await api.bulkScheduleEarliest(ids, { forward_schedule: true });
+      await loadData();
+      alert(`Scheduled ${result.scheduled_count} work orders. ${result.error_count} errors.`);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Bulk schedule failed');
+    } finally {
+      setBulkActionRunning(null);
+    }
   };
 
   const toggleRowSelection = (workOrderId: number) => {
@@ -572,18 +721,29 @@ export default function Scheduling() {
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Production Schedule</h1>
-        <div className="flex items-center gap-2">
-          <button onClick={() => navigateWeek(-1)} className="p-2 hover:bg-gray-100 rounded">
-            <ChevronLeftIcon className="h-5 w-5" />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleAutoScheduleAll}
+            disabled={runningAutoSchedule}
+            className="btn-primary flex items-center text-sm disabled:opacity-50"
+            title="Auto-schedule all unscheduled work orders to their earliest available capacity"
+          >
+            <BoltIcon className="h-4 w-4 mr-1" />
+            {runningAutoSchedule ? 'Scheduling...' : 'Auto-Schedule All'}
           </button>
-          <button onClick={goToToday} className="btn-secondary flex items-center text-sm">
-            <CalendarIcon className="h-4 w-4 mr-1" />
-            Today
-          </button>
-          <button onClick={() => navigateWeek(1)} className="p-2 hover:bg-gray-100 rounded">
-            <ChevronRightIcon className="h-5 w-5" />
-          </button>
-          <span className="ml-4 font-medium">
+          <div className="flex items-center gap-1 border-l pl-3">
+            <button onClick={() => navigateWeek(-1)} className="p-2 hover:bg-gray-100 rounded">
+              <ChevronLeftIcon className="h-5 w-5" />
+            </button>
+            <button onClick={goToToday} className="btn-secondary flex items-center text-sm">
+              <CalendarIcon className="h-4 w-4 mr-1" />
+              Today
+            </button>
+            <button onClick={() => navigateWeek(1)} className="p-2 hover:bg-gray-100 rounded">
+              <ChevronRightIcon className="h-5 w-5" />
+            </button>
+          </div>
+          <span className="font-medium">
             {formatCentralDate(visibleStart, { month: 'short', day: 'numeric', year: undefined })} - {formatCentralDate(visibleEnd)}
           </span>
         </div>
@@ -618,21 +778,20 @@ export default function Scheduling() {
             <tbody>
               {workCenters.map((wc) => {
                 const unscheduled = getUnscheduledJobs(wc.id);
-                const isDropTarget = dropTargetWc === wc.id;
+                const isRowDropTarget = dropTarget?.wcId === wc.id;
                 const heatmapRow = heatmapByWorkCenter.get(wc.id);
                 const hasOverload = Boolean(heatmapRow?.days.some((day) => day.overloaded));
-                
+
                 return (
-                  <tr 
-                    key={wc.id} 
-                    className={`border-b transition-colors ${
-                      isDropTarget ? 'bg-blue-100' : 'hover:bg-gray-50'
-                    }`}
-                    onDragOver={(e) => handleDragOver(e, wc.id)}
-                    onDragLeave={handleDragLeave}
-                    onDrop={(e) => handleDrop(e, wc.id)}
+                  <tr
+                    key={wc.id}
+                    className={`border-b transition-colors hover:bg-gray-50`}
                   >
-                    <td className={`sticky left-0 z-10 px-4 py-3 border-r ${isDropTarget ? 'bg-blue-100' : 'bg-white'}`}>
+                    <td
+                      className={`sticky left-0 z-10 px-4 py-3 border-r ${isRowDropTarget ? 'bg-blue-100' : 'bg-white'}`}
+                      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                      onDrop={(e) => handleDropOnRow(e, wc.id)}
+                    >
                       <div className="font-medium text-sm">{wc.code}</div>
                       <div className="text-xs text-gray-500">{wc.name}</div>
                       {unscheduled.length > 0 && (
@@ -646,38 +805,47 @@ export default function Scheduling() {
                           Overloaded
                         </div>
                       )}
-                      {isDropTarget && dragState.job && (
-                        <div className="mt-1 text-xs text-blue-600 font-medium">
-                          Drop to move here
-                        </div>
-                      )}
                     </td>
                     {days.map((day, dayIdx) => {
                       const jobsStartingToday = getJobsStartingOnDay(wc.id, day, dayIdx);
                       const spanningJob = isJobSpanningDay(wc.id, day, dayIdx);
                       const isWeekend = formatInCentralTime(day, { weekday: 'short' }) === 'Sat';
                       const isToday = getCentralDateStamp(day) === todayStamp;
-                      
+                      const cellDateStr = getCentralDateStamp(day);
+                      const isCellDropTarget = dropTarget?.wcId === wc.id && dropTarget?.date === cellDateStr;
+
                       // If a job is spanning through this day (but didn't start here), render empty cell
                       // The bar from the start day will cover this cell via colspan
                       if (spanningJob && jobsStartingToday.length === 0) {
                         return null; // Cell is covered by colspan from previous day
                       }
-                      
+
                       return (
                         <td
                           key={dayIdx}
                           colSpan={jobsStartingToday.length > 0 ? 1 : 1}
-                          className={`px-1 py-1 border-r align-top h-16 relative ${
-                            isToday ? 'bg-blue-50' : isWeekend ? 'bg-gray-50' : ''
-                          } ${isDropTarget ? 'bg-blue-100' : ''}`}
+                          className={`px-1 py-1 border-r align-top h-16 relative transition-colors ${
+                            isCellDropTarget
+                              ? 'bg-blue-200 ring-2 ring-inset ring-blue-400'
+                              : isToday ? 'bg-blue-50' : isWeekend ? 'bg-gray-50' : ''
+                          }`}
+                          onDragOver={(e) => handleDragOverCell(e, wc.id, cellDateStr)}
+                          onDragLeave={handleDragLeaveCell}
+                          onDrop={(e) => handleDropOnCell(e, wc.id, cellDateStr)}
                         >
+                          {isCellDropTarget && dragState.job && (
+                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                              <span className="bg-blue-600 text-white text-[10px] font-medium px-1.5 py-0.5 rounded shadow">
+                                Drop here
+                              </span>
+                            </div>
+                          )}
                           <div className="space-y-1">
                             {jobsStartingToday.map((job) => {
                               const span = getJobSpan(job, day, dayIdx);
                               // Calculate width: span * cell width (96px) - padding
                               const widthPx = span * 96 - 8;
-                              
+
                               return (
                                 <div
                                   key={job.work_order_id}
@@ -696,7 +864,7 @@ export default function Scheduling() {
                                     zIndex: span > 1 ? 5 : 1,
                                     minWidth: '88px'
                                   }}
-                                  title={`${job.work_order_number} - ${job.part_number}\nOp ${job.operations_complete + 1}/${job.total_operations}: ${job.current_operation_name}\n${span > 1 ? `${span} days` : '1 day'}\nDrag to move to another work center`}
+                                  title={`${job.work_order_number} - ${job.part_number}\nOp ${job.operations_complete + 1}/${job.total_operations}: ${job.current_operation_name}\n${span > 1 ? `${span} days` : '1 day'}\nDrag to reschedule or move to another work center`}
                                 >
                                   <div className="font-medium truncate">{job.work_order_number}</div>
                                   <div className="truncate opacity-90">Op {job.operations_complete + 1}/{job.total_operations}</div>
@@ -723,7 +891,7 @@ export default function Scheduling() {
       {/* Drag hint */}
       {dragState.isDragging && (
         <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg text-sm z-50">
-          Dragging: {dragState.job?.work_order_number} - Drop on a work center row to move
+          Dragging: {dragState.job?.work_order_number} - Drop on a date cell to schedule, or row header to move
         </div>
       )}
 
@@ -960,7 +1128,46 @@ export default function Scheduling() {
                     {job.due_date ? formatCentralDate(job.due_date, { year: undefined }) : '-'}
                   </td>
                   <td className="px-4 py-2 text-sm">
-                    {job.scheduled_start ? formatCentralDate(job.scheduled_start, { year: undefined }) : 'Unscheduled'}
+                    {inlineEditJobId === job.work_order_id ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="date"
+                          value={inlineEditDate}
+                          onChange={(e) => setInlineEditDate(e.target.value)}
+                          className="input text-xs w-32 py-0.5"
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleInlineDateSave(job);
+                            if (e.key === 'Escape') setInlineEditJobId(null);
+                          }}
+                        />
+                        <button
+                          onClick={() => handleInlineDateSave(job)}
+                          className="text-green-600 hover:text-green-800 text-xs font-medium"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setInlineEditJobId(null)}
+                          className="text-gray-400 hover:text-gray-600 text-xs"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <span
+                        className={`cursor-pointer hover:underline ${job.scheduled_start ? 'text-gray-900' : 'text-orange-600 italic'}`}
+                        onClick={() => {
+                          setInlineEditJobId(job.work_order_id);
+                          setInlineEditDate(
+                            job.scheduled_start ? getCentralDateStamp(job.scheduled_start) : getCentralTodayISODate()
+                          );
+                        }}
+                        title="Click to edit date"
+                      >
+                        {job.scheduled_start ? formatCentralDate(job.scheduled_start, { year: undefined }) : 'Unscheduled'}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2 text-center">
                     {canEditPriority ? (
@@ -999,6 +1206,15 @@ export default function Scheduling() {
                       >
                         {schedulingEarliestWorkOrderId === job.work_order_id ? '...' : 'Earliest'}
                       </button>
+                      {job.scheduled_start && (
+                        <button
+                          onClick={() => handleUnschedule(job)}
+                          className="text-red-500 hover:underline text-sm"
+                          title="Clear this work order's schedule"
+                        >
+                          Clear
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -1041,50 +1257,155 @@ export default function Scheduling() {
 
       {/* Schedule Modal */}
       {showScheduleModal && selectedJob && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowScheduleModal(false); setCapacityPreview(null); }}>
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-4">Schedule Work Order</h3>
             <div className="bg-gray-50 rounded p-3 mb-4">
-              <p className="font-medium">{selectedJob.work_order_number}</p>
-              <p className="text-sm text-gray-600">{selectedJob.part_number} - {selectedJob.part_name}</p>
-              <p className="text-sm text-gray-500 mt-1">
-                Progress: Op {selectedJob.operations_complete + 1}/{selectedJob.total_operations} |
-                Remaining: {selectedJob.remaining_hours.toFixed(1)}h |
-                Qty: {selectedJob.quantity}
-              </p>
+              <div className="flex justify-between items-start">
+                <div>
+                  <p className="font-medium">{selectedJob.work_order_number}</p>
+                  <p className="text-sm text-gray-600">{selectedJob.part_number} - {selectedJob.part_name}</p>
+                </div>
+                {selectedJob.due_date && (
+                  <div className="text-right">
+                    <span className="text-xs text-gray-500">Due</span>
+                    <p className={`text-sm font-medium ${
+                      selectedJob.due_date < getCentralTodayISODate() ? 'text-red-600' : 'text-gray-900'
+                    }`}>
+                      {formatCentralDate(selectedJob.due_date, { year: undefined })}
+                    </p>
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-4 mt-2 text-sm text-gray-500">
+                <span>Op {selectedJob.operations_complete + 1}/{selectedJob.total_operations}</span>
+                <span>{selectedJob.remaining_hours.toFixed(1)}h remaining</span>
+                <span>Qty: {selectedJob.quantity}</span>
+              </div>
               <p className="text-sm text-werco-primary mt-1">
-                Next Op: {selectedJob.current_operation_name}
+                Next: {selectedJob.current_operation_name}
+                ({selectedJob.setup_hours.toFixed(1)}h setup + {selectedJob.run_hours.toFixed(1)}h run)
               </p>
             </div>
             <form onSubmit={handleSchedule} className="space-y-4">
-              <div>
-                <label className="label">Start Date *</label>
-                <input
-                  type="date"
-                  value={scheduleForm.scheduled_start}
-                  onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_start: e.target.value })}
-                  className="input"
-                  required
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Scheduling this work order will start the first operation. Subsequent operations will auto-advance when each is completed.
-                </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">Start Date *</label>
+                  <input
+                    type="date"
+                    value={scheduleForm.scheduled_start}
+                    onChange={(e) => setScheduleForm({ ...scheduleForm, scheduled_start: e.target.value })}
+                    className="input"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="label">Work Center</label>
+                  <select
+                    value={scheduleForm.work_center_id}
+                    onChange={(e) => setScheduleForm({ ...scheduleForm, work_center_id: parseInt(e.target.value, 10) })}
+                    className="input"
+                  >
+                    {workCenters.map((wc) => (
+                      <option key={wc.id} value={wc.id}>{wc.code} - {wc.name}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
+
+              {/* Capacity Preview */}
+              {scheduleForm.scheduled_start && scheduleForm.work_center_id > 0 && (
+                <div className={`rounded p-3 text-sm ${
+                  loadingCapacity ? 'bg-gray-50 text-gray-500' :
+                  capacityPreview?.overloaded ? 'bg-red-50 border border-red-200' :
+                  capacityPreview ? 'bg-green-50 border border-green-200' : 'bg-gray-50'
+                }`}>
+                  {loadingCapacity ? (
+                    <span>Loading capacity...</span>
+                  ) : capacityPreview ? (
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="font-medium">
+                          Capacity on {formatCentralDate(capacityPreview.date, { year: undefined })}
+                        </span>
+                        <span className={`font-bold ${capacityPreview.overloaded ? 'text-red-600' : 'text-green-700'}`}>
+                          {Math.round(capacityPreview.utilization_pct)}% used
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
+                        <div
+                          className={`h-2 rounded-full ${
+                            capacityPreview.overloaded ? 'bg-red-500' :
+                            capacityPreview.utilization_pct >= 90 ? 'bg-amber-500' :
+                            capacityPreview.utilization_pct >= 70 ? 'bg-yellow-400' : 'bg-green-500'
+                          }`}
+                          style={{ width: `${Math.min(100, capacityPreview.utilization_pct)}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-xs text-gray-600">
+                        <span>{capacityPreview.available_hours.toFixed(1)}h available</span>
+                        <span>{capacityPreview.used_hours.toFixed(1)}h / {capacityPreview.capacity_hours}h</span>
+                      </div>
+                      {capacityPreview.overloaded && (
+                        <p className="text-xs text-red-600 mt-1 flex items-center gap-1">
+                          <ExclamationTriangleIcon className="h-3.5 w-3.5" />
+                          This date is already over capacity
+                        </p>
+                      )}
+                      {capacityPreview.jobs_on_date.length > 0 && (
+                        <div className="mt-2 border-t pt-1">
+                          <span className="text-xs text-gray-500">{capacityPreview.jobs_on_date.length} jobs on this date:</span>
+                          {capacityPreview.jobs_on_date.slice(0, 3).map((j, idx) => (
+                            <div key={idx} className="text-xs text-gray-600">
+                              {j.work_order_number} - {j.operation_name} ({j.hours.toFixed(1)}h)
+                            </div>
+                          ))}
+                          {capacityPreview.jobs_on_date.length > 3 && (
+                            <span className="text-xs text-gray-400">+{capacityPreview.jobs_on_date.length - 3} more</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={forwardSchedule}
+                  onChange={(e) => setForwardSchedule(e.target.checked)}
+                />
+                Forward-schedule all remaining operations
+                <span className="text-xs text-gray-400">(cascades dates through routing)</span>
+              </label>
+
               <div className="flex justify-between gap-3 pt-4 border-t">
-                <button
-                  type="button"
-                  className="btn-secondary flex items-center text-sm"
-                  onClick={() => handleScheduleEarliest(selectedJob)}
-                  disabled={schedulingEarliestWorkOrderId === selectedJob.work_order_id}
-                >
-                  <BoltIcon className="h-4 w-4 mr-1" />
-                  Earliest Slot
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="btn-secondary flex items-center text-sm"
+                    onClick={() => handleScheduleEarliest(selectedJob)}
+                    disabled={schedulingEarliestWorkOrderId === selectedJob.work_order_id}
+                  >
+                    <BoltIcon className="h-4 w-4 mr-1" />
+                    Earliest Slot
+                  </button>
+                  {selectedJob.scheduled_start && (
+                    <button
+                      type="button"
+                      className="text-red-500 hover:text-red-700 text-sm font-medium px-2"
+                      onClick={() => handleUnschedule(selectedJob)}
+                    >
+                      Unschedule
+                    </button>
+                  )}
+                </div>
                 <div className="flex gap-3">
-                  <button type="button" onClick={() => setShowScheduleModal(false)} className="btn-secondary">
+                  <button type="button" onClick={() => { setShowScheduleModal(false); setCapacityPreview(null); }} className="btn-secondary">
                     Cancel
                   </button>
-                  <button type="submit" className="btn-primary">Schedule Work Order</button>
+                  <button type="submit" className="btn-primary">Schedule</button>
                 </div>
               </div>
             </form>

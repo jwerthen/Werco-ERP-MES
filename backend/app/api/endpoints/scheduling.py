@@ -82,6 +82,7 @@ def _apply_work_order_schedule(
     operations: List[WorkOrderOperation],
     current_op: WorkOrderOperation,
     scheduled_start: date,
+    forward_schedule: bool = False,
 ) -> Dict[str, Any]:
     current_op.scheduled_start = scheduled_start
     days_needed = _days_needed_for_operation(current_op)
@@ -91,16 +92,34 @@ def _apply_work_order_schedule(
         if current_op.status == OperationStatus.PENDING:
             current_op.status = OperationStatus.READY
 
-    for op in operations:
-        if op.sequence <= current_op.sequence:
-            continue
-        op.scheduled_start = None
-        op.scheduled_end = None
+    scheduled_ops = [{"operation_id": current_op.id, "scheduled_start": scheduled_start.isoformat(), "scheduled_end": current_op.scheduled_end.isoformat()}]
+
+    if forward_schedule:
+        # Cascade schedule through all subsequent operations
+        prev_end = current_op.scheduled_end
+        for op in operations:
+            if op.sequence <= current_op.sequence:
+                continue
+            if op.status == OperationStatus.COMPLETE:
+                continue
+            op_start = prev_end + timedelta(days=1)
+            op_days = _days_needed_for_operation(op)
+            op.scheduled_start = op_start
+            op.scheduled_end = op_start + timedelta(days=op_days - 1)
+            scheduled_ops.append({"operation_id": op.id, "scheduled_start": op_start.isoformat(), "scheduled_end": op.scheduled_end.isoformat()})
+            prev_end = op.scheduled_end
+    else:
+        for op in operations:
+            if op.sequence <= current_op.sequence:
+                continue
+            op.scheduled_start = None
+            op.scheduled_end = None
 
     work_center_ids = {op.work_center_id for op in operations if op.work_center_id}
     return {
         "days_needed": days_needed,
         "work_center_ids": list(work_center_ids),
+        "scheduled_operations": scheduled_ops,
     }
 
 
@@ -351,12 +370,25 @@ def get_scheduled_jobs(
 class WorkOrderScheduleUpdate(BaseModel):
     scheduled_start: date
     work_center_id: Optional[int] = None  # Override first operation's work center
+    forward_schedule: bool = False  # Cascade schedule through all subsequent operations
 
 
 class EarliestScheduleRequest(BaseModel):
     work_center_id: Optional[int] = None
     start_date: Optional[date] = None
     horizon_days: int = 90
+    forward_schedule: bool = False
+
+
+class BulkScheduleEarliestRequest(BaseModel):
+    work_order_ids: List[int]
+    horizon_days: int = 90
+    forward_schedule: bool = False
+
+
+class CapacityForDateRequest(BaseModel):
+    work_center_id: int
+    target_date: date
 
 
 @router.put("/work-orders/{work_order_id}/schedule")
@@ -382,6 +414,7 @@ def schedule_work_order(
         operations=operations,
         current_op=current_op,
         scheduled_start=schedule.scheduled_start,
+        forward_schedule=schedule.forward_schedule,
     )
     work_center_ids = schedule_result["work_center_ids"]
     db.commit()
@@ -407,6 +440,7 @@ def schedule_work_order(
         "work_center_id": current_op.work_center_id,
         "total_operations": len(operations),
         "days_needed": schedule_result["days_needed"],
+        "scheduled_operations": schedule_result.get("scheduled_operations", []),
     }
 
 
@@ -441,6 +475,7 @@ def schedule_work_order_earliest(
         operations=operations,
         current_op=current_op,
         scheduled_start=earliest_start,
+        forward_schedule=request.forward_schedule,
     )
     work_center_ids = schedule_result["work_center_ids"]
     db.commit()
@@ -466,6 +501,7 @@ def schedule_work_order_earliest(
         "work_center_id": current_op.work_center_id,
         "total_operations": len(operations),
         "days_needed": schedule_result["days_needed"],
+        "scheduled_operations": schedule_result.get("scheduled_operations", []),
     }
 
 
@@ -851,6 +887,175 @@ def get_load_chart(
     )
 
     return load_data
+
+
+@router.put("/work-orders/{work_order_id}/unschedule")
+def unschedule_work_order(
+    work_order_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+):
+    """Clear the schedule for a work order (reset all non-complete operations)."""
+    work_order = _load_work_order_for_scheduling(db, work_order_id)
+    operations = sorted(work_order.operations, key=lambda op: op.sequence)
+
+    cleared_count = 0
+    work_center_ids: Set[int] = set()
+    for op in operations:
+        if op.status == OperationStatus.COMPLETE:
+            continue
+        if op.scheduled_start is not None:
+            cleared_count += 1
+            if op.work_center_id:
+                work_center_ids.add(op.work_center_id)
+        op.scheduled_start = None
+        op.scheduled_end = None
+        if op.status == OperationStatus.READY:
+            op.status = OperationStatus.PENDING
+
+    db.commit()
+
+    if work_center_ids:
+        SchedulingService(db).update_availability_rates(
+            work_center_ids=list(work_center_ids),
+            horizon_days=90
+        )
+
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order_id,
+        {"event": "work_order_unscheduled"}
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {"event": "work_order_unscheduled", "work_order_id": work_order_id}
+    )
+
+    return {
+        "message": f"Cleared schedule for {work_order.work_order_number}",
+        "work_order_id": work_order_id,
+        "operations_cleared": cleared_count,
+    }
+
+
+@router.post("/capacity-for-date")
+def get_capacity_for_date(
+    request: CapacityForDateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get capacity details for a specific work center on a specific date."""
+    wc = _resolve_work_center(db, request.work_center_id)
+    daily_capacity = max(0.1, float(wc.capacity_hours_per_day or 8.0))
+
+    scheduled_ops = db.query(WorkOrderOperation).filter(
+        WorkOrderOperation.work_center_id == request.work_center_id,
+        WorkOrderOperation.status != OperationStatus.COMPLETE,
+        WorkOrderOperation.scheduled_start.isnot(None),
+    ).all()
+
+    daily_load = _build_daily_load_for_work_center(scheduled_ops)
+    used_hours = daily_load.get(request.target_date, 0.0)
+    available_hours = max(0.0, daily_capacity - used_hours)
+    utilization_pct = (used_hours / daily_capacity * 100.0) if daily_capacity > 0 else 0.0
+
+    # Get the jobs scheduled on that date
+    jobs_on_date = []
+    for op in scheduled_ops:
+        op_start = op.scheduled_start.date() if isinstance(op.scheduled_start, datetime) else op.scheduled_start
+        op_end = op_start
+        if op.scheduled_end:
+            op_end = op.scheduled_end.date() if isinstance(op.scheduled_end, datetime) else op.scheduled_end
+        if op_start <= request.target_date <= op_end:
+            wo = op.work_order
+            jobs_on_date.append({
+                "work_order_id": op.work_order_id,
+                "work_order_number": wo.work_order_number if wo else "?",
+                "operation_name": op.name,
+                "hours": _operation_total_hours(op),
+            })
+
+    return {
+        "work_center_id": request.work_center_id,
+        "work_center_code": wc.code,
+        "date": request.target_date.isoformat(),
+        "capacity_hours": round(daily_capacity, 2),
+        "used_hours": round(used_hours, 2),
+        "available_hours": round(available_hours, 2),
+        "utilization_pct": round(utilization_pct, 1),
+        "overloaded": utilization_pct > 100.0,
+        "jobs_on_date": jobs_on_date,
+    }
+
+
+@router.post("/bulk-schedule-earliest")
+def bulk_schedule_earliest(
+    request: BulkScheduleEarliestRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+):
+    """Schedule multiple work orders at their earliest available capacity in one call."""
+    results = []
+    errors = []
+
+    for wo_id in request.work_order_ids:
+        try:
+            work_order = _load_work_order_for_scheduling(db, wo_id)
+            operations, current_op = _get_current_operation(work_order)
+
+            target_wc_id = current_op.work_center_id
+            if not target_wc_id:
+                errors.append({"work_order_id": wo_id, "error": "No work center assigned"})
+                continue
+
+            earliest_start = _find_earliest_capacity_date(
+                db=db,
+                operation=current_op,
+                work_center_id=target_wc_id,
+                start_date=None,
+                horizon_days=request.horizon_days,
+            )
+
+            schedule_result = _apply_work_order_schedule(
+                work_order=work_order,
+                operations=operations,
+                current_op=current_op,
+                scheduled_start=earliest_start,
+                forward_schedule=request.forward_schedule,
+            )
+            results.append({
+                "work_order_id": wo_id,
+                "work_order_number": work_order.work_order_number,
+                "scheduled_start": earliest_start.isoformat(),
+                "scheduled_end": current_op.scheduled_end.isoformat() if current_op.scheduled_end else None,
+                "work_center_id": target_wc_id,
+            })
+        except HTTPException as exc:
+            errors.append({"work_order_id": wo_id, "error": exc.detail})
+        except Exception as exc:
+            errors.append({"work_order_id": wo_id, "error": str(exc)})
+
+    db.commit()
+
+    # Update availability rates for all affected work centers
+    affected_wc_ids = list({r["work_center_id"] for r in results})
+    if affected_wc_ids:
+        SchedulingService(db).update_availability_rates(
+            work_center_ids=affected_wc_ids,
+            horizon_days=90
+        )
+
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {"event": "bulk_schedule_complete", "scheduled_count": len(results)}
+    )
+
+    return {
+        "scheduled_count": len(results),
+        "error_count": len(errors),
+        "results": results,
+        "errors": errors,
+    }
 
 
 @router.post("/run-background")
