@@ -106,9 +106,9 @@ const SupplierScorecards = () => {
     try {
       const [dashRes, scRes, aslRes, audRes] = await Promise.all([
         api.getSupplierScorecardsDashboard(),
-        api.getSupplierScorecards({ search }),
-        api.getApprovedSuppliers({ search }),
-        api.getSupplierAudits({ search }),
+        api.getSupplierScorecards({}),
+        api.getApprovedSuppliers({}),
+        api.getSupplierAudits({}),
       ]);
       setStats(dashRes.data ?? dashRes);
       setScorecards(scRes.data?.results ?? scRes.data ?? scRes);
