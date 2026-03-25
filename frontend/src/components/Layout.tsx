@@ -149,9 +149,11 @@ function isHrefActive(href: string | undefined, location: { pathname: string; se
     if (location.pathname !== path) return false;
     const hrefParams = new URLSearchParams(query);
     const locParams = new URLSearchParams(location.search);
-    for (const [key, value] of hrefParams.entries()) {
-      if (locParams.get(key) !== value) return false;
-    }
+    let match = true;
+    hrefParams.forEach((value, key) => {
+      if (locParams.get(key) !== value) match = false;
+    });
+    if (!match) return false;
     return true;
   }
   return location.pathname === href;
