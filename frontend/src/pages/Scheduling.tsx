@@ -20,6 +20,11 @@ import {
   CalendarIcon,
   BoltIcon,
   ExclamationTriangleIcon,
+  MagnifyingGlassIcon,
+  FunnelIcon,
+  ChevronDownIcon,
+  ClockIcon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline';
 
 interface WorkCenter {
@@ -173,6 +178,11 @@ export default function Scheduling() {
   // Auto-schedule state
   const [runningAutoSchedule, setRunningAutoSchedule] = useState(false);
 
+  // Search and filter
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterWorkCenter, setFilterWorkCenter] = useState<number | ''>('');
+  const [showBulkActions, setShowBulkActions] = useState(false);
+
   // Generate days for display: Monday-Saturday only (skip Sundays)
   const days = useMemo(
     () =>
@@ -214,6 +224,23 @@ export default function Scheduling() {
     [dispatchQueue, showScheduledRows]
   );
 
+  const filteredQueueRows = useMemo(() => {
+    let rows = queueRows;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      rows = rows.filter(
+        (job) =>
+          job.work_order_number.toLowerCase().includes(q) ||
+          job.part_number.toLowerCase().includes(q) ||
+          job.part_name.toLowerCase().includes(q)
+      );
+    }
+    if (filterWorkCenter) {
+      rows = rows.filter((job) => job.work_center_id === filterWorkCenter);
+    }
+    return rows;
+  }, [queueRows, searchQuery, filterWorkCenter]);
+
   const selectedQueueJobs = useMemo(
     () => dispatchQueue.filter((job) => selectedWorkOrderIds.has(job.work_order_id)),
     [dispatchQueue, selectedWorkOrderIds]
@@ -231,6 +258,15 @@ export default function Scheduling() {
     (capacityHeatmap?.work_centers || []).forEach((row) => map.set(row.work_center_id, row));
     return map;
   }, [capacityHeatmap]);
+
+  const stats = useMemo(() => {
+    const unscheduledCount = openJobs.filter((j) => !j.scheduled_start).length;
+    const scheduledCount = openJobs.filter((j) => j.scheduled_start).length;
+    const overdueCount = openJobs.filter((j) => j.due_date && j.due_date < todayStamp).length;
+    const overloadedWcCount = capacityHeatmap?.overloaded_work_centers?.length || 0;
+    const totalHoursRemaining = openJobs.reduce((sum, j) => sum + j.remaining_hours, 0);
+    return { unscheduledCount, scheduledCount, overdueCount, overloadedWcCount, totalHoursRemaining };
+  }, [openJobs, todayStamp, capacityHeatmap]);
 
   const loadData = useCallback(async () => {
     try {
@@ -711,8 +747,17 @@ export default function Scheduling() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      <div className="space-y-4">
+        <div className="page-header">
+          <div className="skeleton-title w-48" />
+          <div className="flex gap-2"><div className="skeleton w-24 h-9" /><div className="skeleton w-32 h-9" /></div>
+        </div>
+        <div className="grid grid-cols-5 gap-3">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="stat-card"><div className="skeleton-text w-20" /><div className="skeleton-title w-12 mt-2" /></div>
+          ))}
+        </div>
+        <div className="card p-0"><div className="skeleton w-full h-96" /></div>
       </div>
     );
   }
