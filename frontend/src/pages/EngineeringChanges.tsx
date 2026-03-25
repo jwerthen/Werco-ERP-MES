@@ -125,64 +125,13 @@ interface ECOCreateForm {
 
 const todayISO = () => new Date().toISOString().split('T')[0];
 
-const typeBadge: Record<ECOType, string> = {
-  design: 'bg-blue-100 text-blue-800',
-  process: 'bg-purple-100 text-purple-800',
-  material: 'bg-amber-100 text-amber-800',
-  documentation: 'bg-gray-100 text-gray-800',
-  other: 'bg-slate-100 text-slate-800',
-};
-
-const typeLabel: Record<ECOType, string> = {
-  design: 'Design',
-  process: 'Process',
-  material: 'Material',
-  documentation: 'Documentation',
-  other: 'Other',
-};
-
-const priorityBadge: Record<ECOPriority, string> = {
-  low: 'bg-gray-100 text-gray-800',
-  medium: 'bg-blue-100 text-blue-800',
-  high: 'bg-orange-100 text-orange-800',
-  critical: 'bg-red-100 text-red-800',
-};
-
-const priorityLabel: Record<ECOPriority, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  critical: 'Critical',
-};
-
-const statusBadge: Record<ECOStatus, string> = {
-  draft: 'bg-gray-100 text-gray-800',
-  submitted: 'bg-blue-100 text-blue-800',
-  under_review: 'bg-purple-100 text-purple-800',
-  approved: 'bg-green-100 text-green-800',
-  rejected: 'bg-red-100 text-red-800',
-  in_implementation: 'bg-yellow-100 text-yellow-800',
-  completed: 'bg-emerald-100 text-emerald-800',
-  cancelled: 'bg-slate-100 text-slate-800',
-};
-
-const statusLabel: Record<ECOStatus, string> = {
-  draft: 'Draft',
-  submitted: 'Submitted',
-  under_review: 'Under Review',
-  approved: 'Approved',
-  rejected: 'Rejected',
-  in_implementation: 'In Implementation',
-  completed: 'Completed',
-  cancelled: 'Cancelled',
-};
-
-const taskStatusLabel: Record<string, string> = {
-  pending: 'Pending',
-  in_progress: 'In Progress',
-  completed: 'Completed',
-  skipped: 'Skipped',
-};
+const typeBadge: Record<ECOType, string> = { design: 'bg-blue-100 text-blue-800', process: 'bg-purple-100 text-purple-800', material: 'bg-amber-100 text-amber-800', documentation: 'bg-gray-100 text-gray-800', other: 'bg-slate-100 text-slate-800' };
+const typeLabel: Record<ECOType, string> = { design: 'Design', process: 'Process', material: 'Material', documentation: 'Documentation', other: 'Other' };
+const priorityBadge: Record<ECOPriority, string> = { low: 'bg-gray-100 text-gray-800', medium: 'bg-blue-100 text-blue-800', high: 'bg-orange-100 text-orange-800', critical: 'bg-red-100 text-red-800' };
+const priorityLabel: Record<ECOPriority, string> = { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical' };
+const statusBadge: Record<ECOStatus, string> = { draft: 'bg-gray-100 text-gray-800', submitted: 'bg-blue-100 text-blue-800', under_review: 'bg-purple-100 text-purple-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', in_implementation: 'bg-yellow-100 text-yellow-800', completed: 'bg-emerald-100 text-emerald-800', cancelled: 'bg-slate-100 text-slate-800' };
+const statusLabel: Record<ECOStatus, string> = { draft: 'Draft', submitted: 'Submitted', under_review: 'Under Review', approved: 'Approved', rejected: 'Rejected', in_implementation: 'In Implementation', completed: 'Completed', cancelled: 'Cancelled' };
+const taskStatusLabel: Record<string, string> = { pending: 'Pending', in_progress: 'In Progress', completed: 'Completed', skipped: 'Skipped' };
 
 const formatDate = (d: string | null) => {
   if (!d) return '-';
