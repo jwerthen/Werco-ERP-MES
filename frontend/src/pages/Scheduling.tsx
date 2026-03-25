@@ -128,12 +128,6 @@ const priorityColors: Record<number, string> = {
   10: 'border-l-gray-300',
 };
 
-const heatmapCellClass = (utilization: number) => {
-  if (utilization > 100) return 'bg-red-200 text-red-900';
-  if (utilization >= 90) return 'bg-amber-200 text-amber-900';
-  if (utilization >= 70) return 'bg-yellow-100 text-yellow-800';
-  return 'bg-emerald-100 text-emerald-900';
-};
 
 export default function Scheduling() {
   const { can } = usePermissions();
@@ -763,34 +757,61 @@ export default function Scheduling() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      {/* Page Header */}
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Production Schedule</h1>
-        <div className="flex items-center gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Production Schedule</h1>
+          <p className="text-sm text-gray-500 mt-0.5">
+            {formatCentralDate(visibleStart, { month: 'short', day: 'numeric', year: undefined })} &ndash; {formatCentralDate(visibleEnd)}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
           <button
             onClick={handleAutoScheduleAll}
             disabled={runningAutoSchedule}
-            className="btn-primary flex items-center text-sm disabled:opacity-50"
+            className="btn-primary btn-sm flex items-center disabled:opacity-50"
             title="Auto-schedule all unscheduled work orders to their earliest available capacity"
           >
             <BoltIcon className="h-4 w-4 mr-1" />
             {runningAutoSchedule ? 'Scheduling...' : 'Auto-Schedule All'}
           </button>
-          <div className="flex items-center gap-1 border-l pl-3">
-            <button onClick={() => navigateWeek(-1)} className="p-2 hover:bg-gray-100 rounded">
-              <ChevronLeftIcon className="h-5 w-5" />
+          <div className="flex items-center gap-0.5 border-l border-gray-200 pl-2 ml-1">
+            <button onClick={() => navigateWeek(-1)} className="p-1.5 hover:bg-gray-100 rounded-md transition-colors">
+              <ChevronLeftIcon className="h-4 w-4 text-gray-600" />
             </button>
-            <button onClick={goToToday} className="btn-secondary flex items-center text-sm">
-              <CalendarIcon className="h-4 w-4 mr-1" />
+            <button onClick={goToToday} className="btn-secondary btn-sm flex items-center">
+              <CalendarIcon className="h-3.5 w-3.5 mr-1" />
               Today
             </button>
-            <button onClick={() => navigateWeek(1)} className="p-2 hover:bg-gray-100 rounded">
-              <ChevronRightIcon className="h-5 w-5" />
+            <button onClick={() => navigateWeek(1)} className="p-1.5 hover:bg-gray-100 rounded-md transition-colors">
+              <ChevronRightIcon className="h-4 w-4 text-gray-600" />
             </button>
           </div>
-          <span className="font-medium">
-            {formatCentralDate(visibleStart, { month: 'short', day: 'numeric', year: undefined })} - {formatCentralDate(visibleEnd)}
-          </span>
+        </div>
+      </div>
+
+      {/* Stats Strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        <div className="stat-card !py-2 !px-3">
+          <div className="stat-label">Unscheduled</div>
+          <div className={`stat-value text-lg ${stats.unscheduledCount > 0 ? 'text-orange-600' : 'text-gray-900'}`}>{stats.unscheduledCount}</div>
+        </div>
+        <div className="stat-card !py-2 !px-3">
+          <div className="stat-label">Scheduled</div>
+          <div className="stat-value text-lg text-green-700">{stats.scheduledCount}</div>
+        </div>
+        <div className="stat-card !py-2 !px-3">
+          <div className="stat-label">Overdue</div>
+          <div className={`stat-value text-lg ${stats.overdueCount > 0 ? 'text-red-600' : 'text-gray-900'}`}>{stats.overdueCount}</div>
+        </div>
+        <div className="stat-card !py-2 !px-3">
+          <div className="stat-label">Overloaded WCs</div>
+          <div className={`stat-value text-lg ${stats.overloadedWcCount > 0 ? 'text-red-600' : 'text-gray-900'}`}>{stats.overloadedWcCount}</div>
+        </div>
+        <div className="stat-card !py-2 !px-3">
+          <div className="stat-label">Hours Remaining</div>
+          <div className="stat-value text-lg">{stats.totalHoursRemaining.toFixed(0)}h</div>
         </div>
       </div>
 
@@ -803,21 +824,44 @@ export default function Scheduling() {
                 <th className="sticky left-0 bg-gray-50 z-10 px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-48 border-r">
                   Work Center
                 </th>
-                {days.map((day, idx) => (
-                  <th
-                    key={idx}
-                    className={`px-2 py-2 text-center text-xs font-medium w-24 border-r ${
-                      getCentralDateStamp(day) === todayStamp
-                        ? 'bg-blue-50 text-blue-700'
-                        : formatInCentralTime(day, { weekday: 'short' }) === 'Sat'
-                        ? 'bg-gray-100 text-gray-500'
-                        : 'text-gray-500'
-                    }`}
-                  >
-                    <div>{formatInCentralTime(day, { weekday: 'short' })}</div>
-                    <div className="text-sm font-bold">{formatInCentralTime(day, { day: 'numeric' })}</div>
-                  </th>
-                ))}
+                {days.map((day, idx) => {
+                  const dateKey = getCentralDateStamp(day);
+                  const isToday = dateKey === todayStamp;
+                  const isSat = formatInCentralTime(day, { weekday: 'short' }) === 'Sat';
+                  // Aggregate utilization across all work centers for this day
+                  let totalUsed = 0;
+                  let totalCapacity = 0;
+                  capacityHeatmap?.work_centers?.forEach((wc) => {
+                    const dayData = wc.days.find((d) => d.date === dateKey);
+                    totalUsed += dayData?.scheduled_hours || 0;
+                    totalCapacity += wc.capacity_hours_per_day || 8;
+                  });
+                  const dayUtil = totalCapacity > 0 ? (totalUsed / totalCapacity) * 100 : 0;
+                  return (
+                    <th
+                      key={idx}
+                      className={`px-2 py-1.5 text-center text-xs font-medium w-28 border-r ${
+                        isToday ? 'bg-blue-50 text-blue-700' : isSat ? 'bg-gray-100 text-gray-500' : 'text-gray-500'
+                      }`}
+                    >
+                      <div className="leading-tight">{formatInCentralTime(day, { weekday: 'short' })}</div>
+                      <div className="text-sm font-bold leading-tight">{formatInCentralTime(day, { day: 'numeric' })}</div>
+                      <div className="mt-1 mx-auto w-full">
+                        <div className="w-full bg-gray-200 rounded-full h-1.5">
+                          <div
+                            className={`h-1.5 rounded-full transition-all ${
+                              dayUtil > 100 ? 'bg-red-500' : dayUtil >= 90 ? 'bg-amber-500' : dayUtil >= 70 ? 'bg-yellow-400' : 'bg-emerald-500'
+                            }`}
+                            style={{ width: `${Math.min(100, dayUtil)}%` }}
+                          />
+                        </div>
+                        <div className={`text-[10px] mt-0.5 ${dayUtil > 100 ? 'text-red-600 font-semibold' : ''}`}>
+                          {Math.round(dayUtil)}%
+                        </div>
+                      </div>
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -940,105 +984,83 @@ export default function Scheduling() {
         </div>
       )}
 
+      {/* Dispatch Queue */}
       <div className="card">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <h2 className="text-lg font-semibold">Capacity Heatmap</h2>
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-600">
-              {capacityHeatmap?.overload_cells || 0} overloaded slot{capacityHeatmap?.overload_cells === 1 ? '' : 's'}
-            </span>
-            {(capacityHeatmap?.overload_cells || 0) > 0 && (
-              <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-700">
-                <ExclamationTriangleIcon className="h-3.5 w-3.5" />
-                Action Needed
-              </span>
+          <div className="flex items-center gap-3">
+            <h2 className="text-lg font-semibold">Dispatch Queue</h2>
+            <span className="badge badge-neutral text-xs">{filteredQueueRows.length} jobs</span>
+            {stats.unscheduledCount > 0 && (
+              <span className="badge badge-warning text-xs">{stats.unscheduledCount} unscheduled</span>
             )}
           </div>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-full border-collapse text-xs">
-            <thead>
-              <tr className="bg-gray-50">
-                <th className="sticky left-0 bg-gray-50 z-10 px-3 py-2 text-left border-r">Work Center</th>
-                {days.map((day) => (
-                  <th key={`hm-${day.toISOString()}`} className="px-2 py-2 text-center border-r min-w-[84px]">
-                    {`${formatInCentralTime(day, { weekday: 'short' })} ${formatInCentralTime(day, { day: 'numeric' })}`}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {workCenters.map((wc) => {
-                const row = heatmapByWorkCenter.get(wc.id);
-                return (
-                  <tr key={`hm-row-${wc.id}`} className="border-t">
-                    <td className="sticky left-0 z-10 bg-white px-3 py-2 border-r">
-                      <div className="font-medium">{wc.code}</div>
-                      <div className="text-[11px] text-gray-500">{wc.capacity_hours_per_day || 8}h/day</div>
-                    </td>
-                    {days.map((day) => {
-                      const key = getCentralDateStamp(day);
-                      const dayData = row?.days.find((entry) => entry.date === key);
-                      const utilization = dayData?.utilization_pct || 0;
-                      return (
-                        <td key={`${wc.id}-${key}`} className="px-1.5 py-1.5 border-r">
-                          <div className={`rounded px-1.5 py-1 text-center font-medium ${heatmapCellClass(utilization)}`}>
-                            {Math.round(utilization)}%
-                          </div>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Dispatch Queue and Bulk Actions */}
-      <div className="card">
-        <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
-          <div>
-            <h2 className="text-lg font-semibold">Dispatch Queue</h2>
-            <p className="text-sm text-gray-600">
-              Sorted by dispatch score. {dispatchQueue.filter((job) => !job.scheduled_start).length} unscheduled.
-            </p>
-          </div>
-          {canEditPriority && (
-            <div className="w-full sm:w-96">
-              <label className="text-xs font-medium text-gray-600 block mb-1">
-                Optional Priority Reason
-              </label>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <MagnifyingGlassIcon className="h-4 w-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
                 type="text"
-                value={priorityReason}
-                onChange={(e) => setPriorityReason(e.target.value)}
-                className="input text-sm"
-                maxLength={500}
-                placeholder="Applied to your next priority update"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="input text-sm pl-8 w-48"
+                placeholder="Search WO#, part..."
               />
+              {searchQuery && (
+                <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                  <XMarkIcon className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
-          )}
-        </div>
-        <div className="border rounded-lg p-3 mb-4 bg-gray-50">
-          <div className="flex flex-wrap items-center gap-2 mb-3">
-            <span className="text-sm font-medium">Bulk Actions</span>
-            <span className="text-sm text-gray-600">Selected: {selectedQueueJobs.length}</span>
-            <button type="button" onClick={selectAllVisibleRows} className="text-xs text-werco-primary hover:underline">
-              Select visible
-            </button>
-            <button type="button" onClick={clearSelections} className="text-xs text-gray-600 hover:underline">
-              Clear
-            </button>
-            <label className="ml-auto text-xs text-gray-600 flex items-center gap-2">
+            <select
+              value={filterWorkCenter}
+              onChange={(e) => setFilterWorkCenter(e.target.value ? parseInt(e.target.value, 10) : '')}
+              className="input text-sm w-40"
+            >
+              <option value="">All Work Centers</option>
+              {workCenters.map((wc) => (
+                <option key={`fwc-${wc.id}`} value={wc.id}>{wc.code}</option>
+              ))}
+            </select>
+            <label className="text-xs text-gray-500 flex items-center gap-1.5 whitespace-nowrap">
               <input
                 type="checkbox"
                 checked={showScheduledRows}
                 onChange={(e) => setShowScheduledRows(e.target.checked)}
               />
-              Include scheduled rows
+              Scheduled
             </label>
+            <button
+              type="button"
+              onClick={() => setShowBulkActions(!showBulkActions)}
+              className={`btn-secondary btn-sm flex items-center gap-1 ${showBulkActions ? 'bg-gray-200' : ''}`}
+            >
+              <FunnelIcon className="h-3.5 w-3.5" />
+              Bulk
+              <ChevronDownIcon className={`h-3 w-3 transition-transform ${showBulkActions ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
+        </div>
+        {showBulkActions && (
+        <div className="border rounded-lg p-3 mb-3 bg-gray-50 animate-fade-in">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <span className="text-xs font-medium text-gray-700">Selected: {selectedQueueJobs.length}</span>
+            <button type="button" onClick={selectAllVisibleRows} className="text-xs text-werco-primary hover:underline">
+              Select visible
+            </button>
+            <button type="button" onClick={clearSelections} className="text-xs text-gray-500 hover:underline">
+              Clear
+            </button>
+            {canEditPriority && (
+              <div className="ml-auto w-full sm:w-64">
+                <input
+                  type="text"
+                  value={priorityReason}
+                  onChange={(e) => setPriorityReason(e.target.value)}
+                  className="input text-xs py-1"
+                  maxLength={500}
+                  placeholder="Priority reason (optional)"
+                />
+              </div>
+            )}
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-4 gap-2">
             {canEditPriority && (
@@ -1115,6 +1137,7 @@ export default function Scheduling() {
             </button>
           </div>
         </div>
+        )}
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
@@ -1122,7 +1145,7 @@ export default function Scheduling() {
                 <th className="px-3 py-2 text-center">
                   <input
                     type="checkbox"
-                    checked={queueRows.length > 0 && queueRows.every((job) => selectedWorkOrderIds.has(job.work_order_id))}
+                    checked={filteredQueueRows.length > 0 && filteredQueueRows.every((job) => selectedWorkOrderIds.has(job.work_order_id))}
                     onChange={(e) => (e.target.checked ? selectAllVisibleRows() : clearSelections())}
                   />
                 </th>
@@ -1140,7 +1163,7 @@ export default function Scheduling() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {queueRows.map((job) => (
+              {filteredQueueRows.map((job) => (
                 <tr key={job.work_order_id} className={`hover:bg-gray-50 ${selectedWorkOrderIds.has(job.work_order_id) ? 'bg-blue-50/50' : ''}`}>
                   <td className="px-3 py-2 text-center">
                     <input
@@ -1266,37 +1289,30 @@ export default function Scheduling() {
               ))}
             </tbody>
           </table>
-          {queueRows.length === 0 && (
-            <p className="text-center text-gray-500 py-4">No work orders match current filter</p>
+          {filteredQueueRows.length === 0 && (
+            <p className="text-center text-gray-500 py-6 text-sm">
+              {searchQuery || filterWorkCenter ? 'No work orders match your search or filter' : 'No work orders to display'}
+            </p>
           )}
         </div>
       </div>
 
-      {/* Legend */}
-      <div className="flex gap-6 text-sm">
-        <div className="flex items-center gap-2">
-          <span className="font-medium">Status:</span>
-          {Object.entries(statusColors).map(([status, color]) => (
-            <span key={status} className="flex items-center gap-1">
-              <span className={`w-3 h-3 rounded ${color}`}></span>
-              <span className="capitalize">{status.replace('_', ' ')}</span>
-            </span>
-          ))}
+      {/* Compact Legend */}
+      <div className="flex flex-wrap gap-4 text-xs text-gray-500 px-1">
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded bg-blue-500" /> Ready
+          <span className="w-2 h-2 rounded bg-green-500 ml-1" /> In Progress
+          <span className="w-2 h-2 rounded bg-yellow-500 ml-1" /> On Hold
         </div>
-        <div className="flex items-center gap-2">
-          <span className="font-medium">Priority:</span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-3 border-l-4 border-red-500"></span>
-            <span>High</span>
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-3 border-l-4 border-blue-500"></span>
-            <span>Normal</span>
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-3 border-l-4 border-gray-400"></span>
-            <span>Low</span>
-          </span>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-0.5 bg-red-500" /> High Priority
+          <span className="w-2 h-0.5 bg-blue-500 ml-1" /> Normal
+          <span className="w-2 h-0.5 bg-gray-400 ml-1" /> Low
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-4 h-1.5 rounded-full bg-emerald-500" /> &lt;70%
+          <span className="w-4 h-1.5 rounded-full bg-yellow-400 ml-1" /> 70-90%
+          <span className="w-4 h-1.5 rounded-full bg-red-500 ml-1" /> &gt;100%
         </div>
       </div>
 
