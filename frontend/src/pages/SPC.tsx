@@ -85,7 +85,7 @@ const capabilityBg = (val: number): string => {
   return 'bg-red-50 border-red-200';
 };
 
-const SPC: React.FC = () => {
+const SPC = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [characteristics, setCharacteristics] = useState<Characteristic[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);

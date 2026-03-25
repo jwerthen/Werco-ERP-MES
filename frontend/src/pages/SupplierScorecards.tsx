@@ -82,7 +82,7 @@ const statusBadge = (status: string) => {
   return 'bg-gray-100 text-gray-800';
 };
 
-const SupplierScorecards: React.FC = () => {
+const SupplierScorecards = () => {
   const [activeTab, setActiveTab] = useState<Tab>('Scorecards');
   const [search, setSearch] = useState('');
   const [stats, setStats] = useState<DashboardStats>({ total_rated: 0, average_score: 0, at_risk_count: 0, audits_due_soon: 0 });
