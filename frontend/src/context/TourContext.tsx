@@ -1,4 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import { UserRole } from '../types';
+import { Permission } from '../utils/permissions';
 
 export interface TourStep {
   target: string;
@@ -6,6 +8,8 @@ export interface TourStep {
   description: string;
   position?: 'top' | 'bottom' | 'left' | 'right' | 'auto';
   path?: string;  // Optional path to navigate to for this step
+  /** If set, this step is only shown to users with ANY of these permissions */
+  requiredPermissions?: Permission[];
 }
 
 export interface Tour {
@@ -14,6 +18,18 @@ export interface Tour {
   description: string;
   startPath?: string;  // Path to navigate to before starting the tour
   steps: TourStep[];
+  /** Category for grouping in the help menu */
+  category?: 'getting-started' | 'production' | 'engineering' | 'quality' | 'admin';
+  /** Icon name hint for the help menu */
+  icon?: string;
+  /** Roles that should see this tour. If empty/undefined, visible to all. */
+  roles?: UserRole[];
+  /** Permission required to see this tour. If set, user needs ANY of these. */
+  requiredPermissions?: Permission[];
+  /** Role-specific description overrides */
+  roleDescriptions?: Partial<Record<UserRole, string>>;
+  /** Role-specific step overrides: tourStepIndex -> role -> partial step fields */
+  roleStepOverrides?: Record<number, Partial<Record<UserRole, Partial<Pick<TourStep, 'title' | 'description'>>>>>;
 }
 
 interface TourContextType {
