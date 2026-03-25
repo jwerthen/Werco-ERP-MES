@@ -42,7 +42,7 @@ type InventoryGroup = 'all' | 'parts' | 'materials';
 const MATERIAL_TYPES = new Set(['raw_material', 'purchased', 'hardware', 'consumable']);
 const PART_TYPES = new Set(['manufactured', 'assembly']);
 
-export default function InventoryPage() {
+export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('summary');
   const [groupFilter, setGroupFilter] = useState<InventoryGroup>(() => {
@@ -228,15 +228,24 @@ export default function InventoryPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
-          <p className="text-sm text-gray-500 mt-1">Parts, materials, hardware, and assemblies in one place</p>
+      {!embedded && (
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
+            <p className="text-sm text-gray-500 mt-1">Parts, materials, hardware, and assemblies in one place</p>
+          </div>
+          <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
+            <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
+          </button>
         </div>
-        <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
-          <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
-        </button>
-      </div>
+      )}
+      {embedded && (
+        <div className="flex justify-end">
+          <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
+            <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
+          </button>
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">

@@ -41,7 +41,7 @@ const statusColors: Record<string, string> = {
   cancelled: 'bg-red-100 text-red-800',
 };
 
-export default function Shipping() {
+export default function Shipping({ embedded }: { embedded?: boolean }) {
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [readyToShip, setReadyToShip] = useState<ReadyToShip[]>([]);
   const [loading, setLoading] = useState(true);
@@ -127,9 +127,11 @@ export default function Shipping() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Shipping</h1>
-      </div>
+      {!embedded && (
+        <div className="flex justify-between items-center">
+          <h1 className="text-2xl font-bold text-gray-900">Shipping</h1>
+        </div>
+      )}
 
       {/* Ready to Ship */}
       <div className="card">

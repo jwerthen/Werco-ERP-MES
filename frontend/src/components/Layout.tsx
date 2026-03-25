@@ -27,6 +27,7 @@ import {
   ShieldCheckIcon,
   ArchiveBoxIcon,
   TruckIcon,
+  InboxArrowDownIcon,
   CalendarDaysIcon,
   DocumentTextIcon,
   ChartBarIcon,
@@ -80,24 +81,30 @@ const navigation: NavItem[] = [
     ],
   },
   {
-    name: 'Inventory & Purchasing',
+    name: 'Warehouse',
     icon: ArchiveBoxIcon,
     children: [
-      { name: 'Inventory', href: '/inventory', icon: ArchiveBoxIcon },
-      { name: 'Purchasing', href: '/purchasing', icon: TruckIcon },
+      { name: 'Inventory', href: '/warehouse?tab=inventory', icon: ArchiveBoxIcon },
+      { name: 'Receiving', href: '/warehouse?tab=receiving', icon: InboxArrowDownIcon },
+      { name: 'Shipping', href: '/warehouse?tab=shipping', icon: PaperAirplaneIcon },
+    ],
+  },
+  {
+    name: 'Purchasing',
+    icon: TruckIcon,
+    children: [
+      { name: 'Purchase Orders', href: '/purchasing', icon: TruckIcon },
       { name: 'Upload PO', href: '/po-upload', icon: DocumentDuplicateIcon },
-      { name: 'Receiving', href: '/receiving', icon: TruckIcon },
       { name: 'MRP', href: '/mrp', icon: CalculatorIcon },
     ],
   },
   {
-    name: 'Sales & Shipping',
-    icon: PaperAirplaneIcon,
+    name: 'Sales & Quoting',
+    icon: CurrencyDollarIcon,
     children: [
       { name: 'AI RFQ Quote', href: '/rfq-packages/new', icon: SparklesIcon },
       { name: 'Quote Calculator', href: '/quote-calculator', icon: CalculatorIcon },
       { name: 'Quotes', href: '/quotes', icon: CurrencyDollarIcon },
-      { name: 'Shipping', href: '/shipping', icon: PaperAirplaneIcon },
       { name: 'Customers', href: '/customers', icon: BuildingOfficeIcon },
     ],
   },
@@ -134,6 +141,22 @@ const navigation: NavItem[] = [
   },
 ];
 
+/** Check if a nav href matches the current location (supports query params in href) */
+function isHrefActive(href: string | undefined, location: { pathname: string; search: string }): boolean {
+  if (!href) return false;
+  if (href.includes('?')) {
+    const [path, query] = href.split('?');
+    if (location.pathname !== path) return false;
+    const hrefParams = new URLSearchParams(query);
+    const locParams = new URLSearchParams(location.search);
+    for (const [key, value] of hrefParams.entries()) {
+      if (locParams.get(key) !== value) return false;
+    }
+    return true;
+  }
+  return location.pathname === href;
+}
+
 const NavGroup = React.memo(function NavGroup({
   item,
   location,
@@ -155,20 +178,20 @@ const NavGroup = React.memo(function NavGroup({
 
   const [isOpen, setIsOpen] = useState(() => {
     if (visibleChildren) {
-      return visibleChildren.some(child => location.pathname === child.href);
+      return visibleChildren.some(child => isHrefActive(child.href, location));
     }
     return false;
   });
 
   // Auto-open when navigating to a child
   useEffect(() => {
-    if (visibleChildren?.some(child => location.pathname === child.href)) {
+    if (visibleChildren?.some(child => isHrefActive(child.href, location))) {
       setIsOpen(true);
     }
-  }, [location.pathname, visibleChildren]);
+  }, [location.pathname, location.search, visibleChildren]);
 
-  const isActive = item.href === location.pathname;
-  const hasActiveChild = visibleChildren?.some(child => location.pathname === child.href);
+  const isActive = isHrefActive(item.href, location);
+  const hasActiveChild = visibleChildren?.some(child => isHrefActive(child.href, location));
 
   if (item.href) {
     return (
@@ -220,7 +243,7 @@ const NavGroup = React.memo(function NavGroup({
       {!collapsed && isOpen && visibleChildren && visibleChildren.length > 0 && (
         <div className="mt-1 ml-3 pl-3 border-l-2 border-white/20 space-y-0.5">
           {visibleChildren.map(child => {
-            const isChildActive = location.pathname === child.href;
+            const isChildActive = isHrefActive(child.href, location);
             return (
               <Link
                 key={child.name}
@@ -311,14 +334,14 @@ export default function Layout({ children }: LayoutProps) {
   // Get current page title
   const pageTitle = useMemo(() => {
     for (const item of navigation) {
-      if (item.href === location.pathname) return item.name;
+      if (isHrefActive(item.href, location)) return item.name;
       if (item.children) {
-        const child = item.children.find(c => c.href === location.pathname);
+        const child = item.children.find(c => isHrefActive(c.href, location));
         if (child) return child.name;
       }
     }
     return 'Werco ERP';
-  }, [location.pathname]);
+  }, [location.pathname, location.search]);
 
   const isShopFloorKiosk = useMemo(
     () =>

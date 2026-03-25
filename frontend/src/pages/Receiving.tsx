@@ -77,7 +77,7 @@ interface ReceiveFormData {
 
 type TabType = 'receive' | 'queue' | 'history';
 
-export default function ReceivingPage() {
+export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>(() => {
     const tab = searchParams.get('tab');
@@ -371,12 +371,14 @@ export default function ReceivingPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Receiving & Inspection</h1>
-          <p className="text-gray-500 mt-1">AS9100D compliant receiving and inspection workflow</p>
+      {!embedded && (
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">Receiving & Inspection</h1>
+            <p className="text-gray-500 mt-1">AS9100D compliant receiving and inspection workflow</p>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Success/Error Messages */}
       {success && (
