@@ -1,6 +1,8 @@
 """
 Reset all data in the database for a fresh go-live.
-Run with: python -m scripts.reset_data
+
+Usage:
+  python -m scripts.reset_data --confirm
 
 WARNING: This will DELETE all data. The database schema (tables) is preserved.
 After running this, the first user to register at /register will become the admin.
@@ -14,6 +16,12 @@ from app.db.database import SessionLocal, engine
 
 
 def reset_database():
+    if "--confirm" not in sys.argv:
+        print("WARNING: This will DELETE ALL DATA in the database.")
+        print("Run with --confirm to proceed:")
+        print("  python -m scripts.reset_data --confirm")
+        sys.exit(1)
+
     db = SessionLocal()
 
     try:
@@ -31,11 +39,6 @@ def reset_database():
         print(f"Found {len(tables)} tables to clear:")
         for t in sorted(tables):
             print(f"  - {t}")
-
-        confirm = input("\nThis will DELETE ALL DATA. Type 'RESET' to confirm: ")
-        if confirm != "RESET":
-            print("Aborted.")
-            return
 
         # Disable FK constraints, truncate all tables, re-enable
         db.execute(text("SET session_replication_role = 'replica'"))
