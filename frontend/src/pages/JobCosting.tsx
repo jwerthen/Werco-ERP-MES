@@ -7,11 +7,9 @@ import {
   CheckCircleIcon,
   PlusIcon,
   TrashIcon,
-  CalculatorIcon,
   ChevronDownIcon,
   ChevronUpIcon,
   XMarkIcon,
-  DocumentChartBarIcon,
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import {
@@ -93,8 +91,6 @@ interface WorkOrderOption {
 
 const fmt = (n: number) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
-
-const pct = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
 
 const varianceColor = (v: number) =>
   v > 0 ? 'text-red-600' : v < 0 ? 'text-green-600' : 'text-gray-600';

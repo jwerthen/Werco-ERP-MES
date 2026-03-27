@@ -123,8 +123,6 @@ interface ECOCreateForm {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-const todayISO = () => new Date().toISOString().split('T')[0];
-
 const typeBadge: Record<ECOType, string> = { design: 'bg-blue-100 text-blue-800', process: 'bg-purple-100 text-purple-800', material: 'bg-amber-100 text-amber-800', documentation: 'bg-gray-100 text-gray-800', other: 'bg-slate-100 text-slate-800' };
 const typeLabel: Record<ECOType, string> = { design: 'Design', process: 'Process', material: 'Material', documentation: 'Documentation', other: 'Other' };
 const priorityBadge: Record<ECOPriority, string> = { low: 'bg-gray-100 text-gray-800', medium: 'bg-blue-100 text-blue-800', high: 'bg-orange-100 text-orange-800', critical: 'bg-red-100 text-red-800' };

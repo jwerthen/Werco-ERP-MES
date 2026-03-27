@@ -1,6 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
-import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
   XMarkIcon,

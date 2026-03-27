@@ -1,14 +1,11 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import {
-  WrenchScrewdriverIcon,
   PlusIcon,
   MagnifyingGlassIcon,
-  ArrowPathIcon,
   XMarkIcon,
   ExclamationTriangleIcon,
   CheckCircleIcon,
-  ClockIcon,
   CalendarDaysIcon,
   PlayIcon,
 } from '@heroicons/react/24/outline';
