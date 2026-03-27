@@ -28,7 +28,7 @@ def _table_exists(name: str) -> bool:
 
 def _create_table_if_not_exists(name: str, *columns, **kwargs):
     if not _table_exists(name):
-        _create_table_if_not_exists(name, *columns, **kwargs)
+        op.create_table(name, *columns, **kwargs)
 
 
 def upgrade() -> None:
