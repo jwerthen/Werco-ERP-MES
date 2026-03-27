@@ -493,3 +493,40 @@ def register_public(
         return {"message": "Admin account created successfully", "is_first_user": True}
     else:
         return {"message": "Account submitted for approval", "is_first_user": False}
+
+
+@router.post("/reset-database")
+def reset_database(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Reset all data in the database. Protected by SECRET_KEY header.
+    Once used, remove this endpoint or set ALLOW_DB_RESET=false.
+    """
+    import os
+    from sqlalchemy import text
+
+    # Must provide the SECRET_KEY as authorization
+    provided_key = request.headers.get("X-Reset-Key", "")
+    actual_key = os.environ.get("SECRET_KEY", "")
+    if not provided_key or provided_key != actual_key:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid reset key")
+
+    # Safety check — can be disabled via env var after go-live
+    if os.environ.get("ALLOW_DB_RESET", "true").lower() != "true":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Database reset is disabled")
+
+    tables_result = db.execute(text(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+        "AND tablename != 'alembic_version'"
+    ))
+    tables = [row[0] for row in tables_result]
+
+    db.execute(text("SET session_replication_role = 'replica'"))
+    for table in tables:
+        db.execute(text(f'TRUNCATE TABLE "{table}" CASCADE'))
+    db.execute(text("SET session_replication_role = 'origin'"))
+    db.commit()
+
+    return {"message": f"All {len(tables)} tables cleared. Visit /register to create admin account."}
