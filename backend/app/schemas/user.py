@@ -8,8 +8,8 @@ import re
 class UserBase(BaseModel):
     email: EmailStr = Field(..., max_length=255, description="Email address")
     employee_id: str = Field(..., min_length=1, max_length=50, pattern=r'^[A-Za-z0-9\-_]+$', description="Employee ID")
-    first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$', description="First name (letters only)")
-    last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$', description="Last name (letters only)")
+    first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="First name (letters only)")
+    last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="Last name (letters only)")
     role: UserRole = Field(default=UserRole.OPERATOR)
     department: Optional[str] = Field(None, max_length=100)
 
@@ -49,8 +49,8 @@ class UserCreate(UserBase):
 
 class PublicRegister(BaseModel):
     email: EmailStr = Field(..., max_length=255, description="Email address")
-    first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$', description="First name")
-    last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$', description="Last name")
+    first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="First name")
+    last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="Last name")
     employee_id: Optional[str] = Field(None, min_length=1, max_length=50, pattern=r'^[A-Za-z0-9\-_]+$', description="Employee ID (auto-generated if not provided)")
     password: str = Field(..., min_length=12, max_length=128, description="Password")
 
@@ -87,8 +87,8 @@ class PublicRegister(BaseModel):
 class UserUpdate(BaseModel):
     version: int  # Required for optimistic locking
     email: Optional[EmailStr] = Field(None, max_length=255)
-    first_name: Optional[str] = Field(None, min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$')
-    last_name: Optional[str] = Field(None, min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$')
+    first_name: Optional[str] = Field(None, min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$')
+    last_name: Optional[str] = Field(None, min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$')
     role: Optional[UserRole] = None
     department: Optional[str] = Field(None, max_length=100)
     is_active: Optional[bool] = None
