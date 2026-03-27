@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Part, PartType } from '../../types';
+import { Part } from '../../types';
 import { partTypeColors, partTypeLabels } from '../../types/engineering';
 import { useToast } from '../ui/Toast';
 import api from '../../services/api';

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState } from 'react';
 import api from '../../services/api';
 import { Part } from '../../types';
 import {

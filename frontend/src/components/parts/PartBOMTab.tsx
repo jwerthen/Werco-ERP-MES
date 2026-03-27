@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import { Part } from '../../types';
 import {
-  BOM, BOMItem, LineType, lineTypeColors, lineTypeLabels, partTypeColors,
+  BOM, BOMItem, LineType, lineTypeColors, lineTypeLabels,
 } from '../../types/engineering';
 import { useToast } from '../ui/Toast';
 import { StatusBadge } from '../ui/StatusBadge';

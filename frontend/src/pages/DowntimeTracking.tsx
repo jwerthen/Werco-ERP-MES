@@ -7,7 +7,6 @@ import {
   ClockIcon,
   ExclamationTriangleIcon,
   CheckCircleIcon,
-  WrenchScrewdriverIcon,
   StopIcon,
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
@@ -100,38 +99,9 @@ const CATEGORIES = [
   { value: 'other', label: 'Other' },
 ];
 
-const categoryColors: Record<string, string> = {
-  mechanical: '#ef4444',
-  electrical: '#f97316',
-  tooling: '#eab308',
-  material: '#84cc16',
-  operator: '#22c55e',
-  quality: '#14b8a6',
-  changeover: '#06b6d4',
-  planned_maintenance: '#3b82f6',
-  break: '#8b5cf6',
-  meeting: '#a855f7',
-  no_work: '#6b7280',
-  other: '#9ca3af',
-};
-
 const categoryLabel = (cat: string) => {
   const found = CATEGORIES.find((c) => c.value === cat);
   return found ? found.label : cat;
-};
-
-const statusColorMap: Record<string, string> = {
-  available: 'bg-green-500',
-  in_use: 'bg-green-400',
-  maintenance: 'bg-red-500',
-  offline: 'bg-gray-500',
-};
-
-const statusLabelMap: Record<string, string> = {
-  available: 'Running',
-  in_use: 'Running',
-  maintenance: 'Down',
-  offline: 'Idle',
 };
 
 function formatDuration(minutes: number): string {
@@ -155,8 +125,10 @@ export default function DowntimeTracking() {
   const [allEvents, setAllEvents] = useState<DowntimeEvent[]>([]);
   const [reasonCodes, setReasonCodes] = useState<ReasonCode[]>([]);
   const [summary, setSummary] = useState<DowntimeSummary | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [wcDowntime, setWcDowntime] = useState<WorkCenterDowntime[]>([]);
   const [loading, setLoading] = useState(true);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [tick, setTick] = useState(0);
 
   // Filters

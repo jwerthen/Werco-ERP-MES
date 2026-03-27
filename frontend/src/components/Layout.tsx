@@ -190,6 +190,7 @@ const NavGroup = React.memo(function NavGroup({
     if (visibleChildren?.some(child => isHrefActive(child.href, location))) {
       setIsOpen(true);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, location.search, visibleChildren]);
 
   const isActive = isHrefActive(item.href, location);
@@ -343,6 +344,7 @@ export default function Layout({ children }: LayoutProps) {
       }
     }
     return 'Werco ERP';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, location.search]);
 
   const isShopFloorKiosk = useMemo(

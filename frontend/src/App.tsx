@@ -131,16 +131,6 @@ function KioskGuard({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function KioskOnly({ children }: { children: React.ReactNode }) {
-  const location = useLocation();
-  const kioskMode = isKioskMode(location.pathname, location.search);
-
-  if (!kioskMode) {
-    return <Navigate to="/shop-floor" replace />;
-  }
-
-  return <>{children}</>;
-}
 
 // Wrapper for lazy-loaded routes with Suspense
 function LazyRoute({ children }: { children: React.ReactNode }) {
