@@ -20,14 +20,19 @@ branch_labels = None
 depends_on = None
 
 
-def _table_exists(name: str) -> bool:
-    conn = op.get_bind()
-    inspector = Inspector.from_engine(conn)
-    return name in inspector.get_table_names()
+_existing_tables = None
+
+def _get_existing_tables():
+    global _existing_tables
+    if _existing_tables is None:
+        conn = op.get_bind()
+        inspector = Inspector.from_engine(conn)
+        _existing_tables = set(inspector.get_table_names())
+    return _existing_tables
 
 
 def _create_table_if_not_exists(name: str, *columns, **kwargs):
-    if not _table_exists(name):
+    if name not in _get_existing_tables():
         op.create_table(name, *columns, **kwargs)
 
 
