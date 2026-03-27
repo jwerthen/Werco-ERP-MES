@@ -1,7 +1,7 @@
 """Add QMS standards, clauses, and evidence tables
 
-Revision ID: 015_add_qms_standards
-Revises: 014b_widen_alembic_version
+Revision ID: 023_add_qms_standards
+Revises: 022_add_ai_quoting_agent_tables
 Create Date: 2026-03-27
 
 Adds tables for QMS (Quality Management System) standard tracking:
@@ -11,14 +11,24 @@ Adds tables for QMS (Quality Management System) standard tracking:
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.engine.reflection import Inspector
 
-revision = '015_add_qms_standards'
-down_revision = '014b_widen_alembic_version'
+revision = '023_add_qms_standards'
+down_revision = '022_add_ai_quoting_agent_tables'
 branch_labels = None
 depends_on = None
 
 
+def _table_exists(name: str) -> bool:
+    conn = op.get_bind()
+    inspector = Inspector.from_engine(conn)
+    return name in inspector.get_table_names()
+
+
 def upgrade() -> None:
+    if _table_exists('qms_standards'):
+        return
+
     # QMS Standards table
     op.create_table(
         'qms_standards',
