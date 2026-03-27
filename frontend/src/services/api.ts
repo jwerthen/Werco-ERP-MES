@@ -302,6 +302,25 @@ class ApiService {
     return response.data;
   }
 
+  async registerPublic(data: {
+    email: string;
+    first_name: string;
+    last_name: string;
+    employee_id: string;
+    password: string;
+  }): Promise<{ message: string; is_first_user: boolean }> {
+    const response = await this.api.post<{ message: string; is_first_user: boolean }>(
+      '/auth/register-public',
+      data,
+    );
+    return response.data;
+  }
+
+  async getSetupStatus(): Promise<{ has_users: boolean; is_setup_required: boolean }> {
+    const response = await this.api.get<{ has_users: boolean; is_setup_required: boolean }>('/auth/setup-status');
+    return response.data;
+  }
+
   // Work Centers
   async getWorkCenters(activeOnly = true): Promise<WorkCenter[]> {
     const response = await this.api.get<WorkCenter[]>('/work-centers/', { params: { active_only: activeOnly } });

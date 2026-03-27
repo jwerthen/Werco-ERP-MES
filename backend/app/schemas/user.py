@@ -47,6 +47,43 @@ class UserCreate(UserBase):
         return v.strip().title() if isinstance(v, str) else v
 
 
+class PublicRegister(BaseModel):
+    email: EmailStr = Field(..., max_length=255, description="Email address")
+    first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$', description="First name")
+    last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$', description="Last name")
+    employee_id: str = Field(..., min_length=1, max_length=50, pattern=r'^[A-Za-z0-9\-_]+$', description="Employee ID")
+    password: str = Field(..., min_length=12, max_length=128, description="Password")
+
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        """Validate password strength - AS9100D compliant"""
+        errors = []
+        if len(v) < 12:
+            errors.append("Password must be at least 12 characters")
+        if not re.search(r'[A-Z]', v):
+            errors.append("Password must contain at least one uppercase letter")
+        if not re.search(r'[a-z]', v):
+            errors.append("Password must contain at least one lowercase letter")
+        if not re.search(r'[0-9]', v):
+            errors.append("Password must contain at least one number")
+        if not re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]', v):
+            errors.append("Password must contain at least one special character (!@#$%^&*()_+-=[]{};\':\"\\|,.<>/?)")
+        # Check for common patterns
+        common_patterns = ['password', '123456', 'qwerty', 'admin', 'letmein', 'welcome']
+        if any(pattern in v.lower() for pattern in common_patterns):
+            errors.append("Password contains a common pattern that is not allowed")
+        if errors:
+            raise ValueError("; ".join(errors))
+        return v
+
+    @field_validator('first_name', 'last_name', mode='before')
+    @classmethod
+    def capitalize_name(cls, v: str) -> str:
+        """Capitalize first letter of names"""
+        return v.strip().title() if isinstance(v, str) else v
+
+
 class UserUpdate(BaseModel):
     version: int  # Required for optimistic locking
     email: Optional[EmailStr] = Field(None, max_length=255)

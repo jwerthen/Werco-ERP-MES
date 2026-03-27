@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { ShieldCheckIcon, LockClosedIcon, EnvelopeIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
 
@@ -423,8 +423,16 @@ export default function Login() {
               </button>
             </form>
 
+            {/* Create account link */}
+            <div className="mt-6 text-center">
+              <p className="text-sm text-slate-500">
+                Don't have an account?{' '}
+                <Link to="/register" className="du-link du-link-primary font-semibold">Create one</Link>
+              </p>
+            </div>
+
             {/* Security badge */}
-            <div className="mt-8 pt-6 border-t border-slate-100">
+            <div className="mt-6 pt-6 border-t border-slate-100">
               <div className="flex items-center justify-center gap-2 text-slate-400">
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                   <path

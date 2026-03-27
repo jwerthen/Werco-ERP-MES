@@ -12,7 +12,7 @@ from app.core.security import (
 )
 from app.core.config import settings
 from app.models.user import User, UserRole
-from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest, EmployeeLoginRequest
+from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest, EmployeeLoginRequest, PublicRegister
 from app.api.deps import get_current_user, require_role
 from app.services.audit_service import AuditService
 
@@ -420,5 +420,76 @@ def register(
     db.refresh(user)
     
     log_auth_event(db, "USER_REGISTERED", user=user, success=True, request=request)
-    
+
     return user
+
+
+@router.get("/setup-status")
+def setup_status(db: Session = Depends(get_db)):
+    """Check whether the system has been set up (i.e., at least one user exists)."""
+    user_count = db.query(User).count()
+    return {"has_users": user_count > 0, "is_setup_required": user_count == 0}
+
+
+@router.post("/register-public")
+def register_public(
+    request: Request,
+    user_in: PublicRegister,
+    db: Session = Depends(get_db),
+):
+    """
+    Public registration endpoint.
+
+    - If no users exist yet this is the initial system setup: the first user
+      is created as an active admin with superuser privileges.
+    - Otherwise the account is created with the VIEWER role, inactive
+      (pending admin approval).
+    """
+    # Check for duplicate email
+    if db.query(User).filter(func.lower(User.email) == user_in.email.lower()).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
+
+    # Check for duplicate employee_id
+    if db.query(User).filter(func.lower(User.employee_id) == user_in.employee_id.lower()).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Employee ID already exists",
+        )
+
+    user_count = db.query(User).count()
+    is_first_user = user_count == 0
+
+    if is_first_user:
+        role = UserRole.ADMIN
+        is_superuser = True
+        is_active = True
+    else:
+        role = UserRole.VIEWER
+        is_superuser = False
+        is_active = False
+
+    user = User(
+        email=user_in.email,
+        employee_id=user_in.employee_id,
+        first_name=user_in.first_name,
+        last_name=user_in.last_name,
+        role=role,
+        is_superuser=is_superuser,
+        is_active=is_active,
+        hashed_password=get_password_hash(user_in.password),
+    )
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    action = "FIRST_USER_REGISTERED" if is_first_user else "PUBLIC_REGISTRATION"
+    log_auth_event(db, action, user=user, success=True, request=request)
+
+    if is_first_user:
+        return {"message": "Admin account created successfully", "is_first_user": True}
+    else:
+        return {"message": "Account submitted for approval", "is_first_user": False}

@@ -13,6 +13,7 @@ import { lazyWithRetry } from './utils/lazyWithRetry';
 
 // Eagerly loaded - critical path
 import Login from './pages/Login';
+import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import Unauthorized from './pages/Unauthorized';
 
@@ -152,6 +153,7 @@ function AppRoutes() {
     <ErrorBoundary level="page" name="AppRoutes">
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/register" element={<Register />} />
       <Route path="/unauthorized" element={<Unauthorized />} />
       
       {/* Dashboard - eagerly loaded */}
