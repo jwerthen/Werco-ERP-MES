@@ -123,7 +123,7 @@ export default function ShopFloor() {
     } finally {
       setLoading(false);
     }
-  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId]);
+  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, setSelectedWorkCenter]);
 
   const checkActiveJob = useCallback(async () => {
     try {

@@ -1,5 +1,3 @@
-import { Part } from './index';
-
 // ── BOM Types ──────────────────────────────────────────────────────────────
 
 export type LineType = 'component' | 'hardware' | 'consumable' | 'reference';
