@@ -56,7 +56,7 @@ def list_standards(
 def create_standard(
     data: QMSStandardCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Create a new QMS standard."""
     standard = QMSStandard(
@@ -95,7 +95,7 @@ def update_standard(
     standard_id: int,
     data: QMSStandardUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Update a QMS standard."""
     standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id).first()
@@ -114,7 +114,7 @@ def update_standard(
 def delete_standard(
     standard_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
 ):
     """Delete a QMS standard and all its clauses/evidence (Admin only)."""
     standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id).first()
@@ -148,7 +148,7 @@ def create_clause(
     standard_id: int,
     data: QMSClauseCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Add a clause to a standard."""
     standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id).first()
@@ -167,7 +167,7 @@ def bulk_create_clauses(
     standard_id: int,
     data: QMSClauseBulkCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Bulk-import clauses for a standard (e.g., from a parsed document)."""
     standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id).first()
@@ -195,7 +195,7 @@ def update_clause(
     clause_id: int,
     data: QMSClauseUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Update a clause, including compliance status assessment."""
     clause = db.query(QMSClause).filter(QMSClause.id == clause_id).first()
@@ -221,7 +221,7 @@ def update_clause(
 def delete_clause(
     clause_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
 ):
     """Delete a clause and its evidence links."""
     clause = db.query(QMSClause).filter(QMSClause.id == clause_id).first()
@@ -238,7 +238,7 @@ def add_evidence(
     clause_id: int,
     data: QMSEvidenceCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Link evidence to a clause."""
     clause = db.query(QMSClause).filter(QMSClause.id == clause_id).first()
@@ -261,7 +261,7 @@ def update_evidence(
     evidence_id: int,
     data: QMSEvidenceUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Update evidence, including verification."""
     evidence = db.query(QMSClauseEvidence).filter(QMSClauseEvidence.id == evidence_id).first()
@@ -287,7 +287,7 @@ def update_evidence(
 def delete_evidence(
     evidence_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY)),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Remove an evidence link."""
     evidence = db.query(QMSClauseEvidence).filter(QMSClauseEvidence.id == evidence_id).first()
