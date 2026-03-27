@@ -69,6 +69,75 @@ def create_standard(
     return standard
 
 
+@router.get("/audit-readiness", response_model=QMSAuditReadinessSummary)
+def get_audit_readiness(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get audit readiness summary across all active standards."""
+    active_standards = db.query(QMSStandard).filter(QMSStandard.is_active == True).count()
+
+    clauses = (
+        db.query(QMSClause)
+        .join(QMSStandard)
+        .filter(QMSStandard.is_active == True)
+        .all()
+    )
+
+    statuses = [c.compliance_status for c in clauses]
+    total = len(clauses)
+    compliant = statuses.count("compliant")
+    partial = statuses.count("partial")
+    non_compliant = statuses.count("non_compliant")
+    not_assessed = statuses.count("not_assessed")
+    not_applicable = statuses.count("not_applicable")
+
+    assessable = total - not_applicable
+    compliance_pct = (compliant / assessable * 100) if assessable > 0 else 0.0
+
+    total_evidence = (
+        db.query(QMSClauseEvidence)
+        .join(QMSClause)
+        .join(QMSStandard)
+        .filter(QMSStandard.is_active == True)
+        .count()
+    )
+    verified_evidence = (
+        db.query(QMSClauseEvidence)
+        .join(QMSClause)
+        .join(QMSStandard)
+        .filter(QMSStandard.is_active == True, QMSClauseEvidence.is_verified == True)
+        .count()
+    )
+
+    now = datetime.utcnow()
+    overdue_reviews = (
+        db.query(QMSClause)
+        .join(QMSStandard)
+        .filter(
+            QMSStandard.is_active == True,
+            QMSClause.next_review_date != None,
+            QMSClause.next_review_date < now,
+        )
+        .count()
+    )
+
+    return QMSAuditReadinessSummary(
+        total_standards=active_standards,
+        total_clauses=total,
+        compliant=compliant,
+        partial=partial,
+        non_compliant=non_compliant,
+        not_assessed=not_assessed,
+        not_applicable=not_applicable,
+        compliance_percentage=round(compliance_pct, 1),
+        total_evidence_links=total_evidence,
+        verified_evidence=verified_evidence,
+        unverified_evidence=total_evidence - verified_evidence,
+        clauses_needing_review=overdue_reviews,
+    )
+
+
 @router.get("/{standard_id}", response_model=QMSStandardResponse)
 def get_standard(
     standard_id: int,
@@ -297,75 +366,3 @@ def delete_evidence(
     db.commit()
 
 
-# ============== Audit Readiness ==============
-
-@router.get("/audit-readiness", response_model=QMSAuditReadinessSummary)
-def get_audit_readiness(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Get audit readiness summary across all active standards."""
-    active_standards = db.query(QMSStandard).filter(QMSStandard.is_active == True).count()
-
-    clauses = (
-        db.query(QMSClause)
-        .join(QMSStandard)
-        .filter(QMSStandard.is_active == True)
-        .all()
-    )
-
-    statuses = [c.compliance_status for c in clauses]
-    total = len(clauses)
-    compliant = statuses.count("compliant")
-    partial = statuses.count("partial")
-    non_compliant = statuses.count("non_compliant")
-    not_assessed = statuses.count("not_assessed")
-    not_applicable = statuses.count("not_applicable")
-
-    # Calculate compliance % (exclude not_applicable from denominator)
-    assessable = total - not_applicable
-    compliance_pct = (compliant / assessable * 100) if assessable > 0 else 0.0
-
-    # Evidence stats
-    total_evidence = (
-        db.query(QMSClauseEvidence)
-        .join(QMSClause)
-        .join(QMSStandard)
-        .filter(QMSStandard.is_active == True)
-        .count()
-    )
-    verified_evidence = (
-        db.query(QMSClauseEvidence)
-        .join(QMSClause)
-        .join(QMSStandard)
-        .filter(QMSStandard.is_active == True, QMSClauseEvidence.is_verified == True)
-        .count()
-    )
-
-    # Clauses past review date
-    now = datetime.utcnow()
-    overdue_reviews = (
-        db.query(QMSClause)
-        .join(QMSStandard)
-        .filter(
-            QMSStandard.is_active == True,
-            QMSClause.next_review_date != None,
-            QMSClause.next_review_date < now,
-        )
-        .count()
-    )
-
-    return QMSAuditReadinessSummary(
-        total_standards=active_standards,
-        total_clauses=total,
-        compliant=compliant,
-        partial=partial,
-        non_compliant=non_compliant,
-        not_assessed=not_assessed,
-        not_applicable=not_applicable,
-        compliance_percentage=round(compliance_pct, 1),
-        total_evidence_links=total_evidence,
-        verified_evidence=verified_evidence,
-        unverified_evidence=total_evidence - verified_evidence,
-        clauses_needing_review=overdue_reviews,
-    )
