@@ -588,6 +588,145 @@ export interface RolePermissions {
   permissions: string[];
 }
 
+// ============ QMS Standards Types ============
+
+export interface QMSStandardCreate {
+  name: string;
+  version?: string;
+  description?: string;
+  standard_body?: string;
+  document_id?: number;
+}
+
+export interface QMSStandardUpdate {
+  name?: string;
+  version?: string;
+  description?: string;
+  standard_body?: string;
+  document_id?: number;
+  is_active?: boolean;
+}
+
+export interface QMSClauseCreate {
+  clause_number: string;
+  title: string;
+  description?: string;
+  parent_clause_id?: number;
+  sort_order?: number;
+}
+
+export interface QMSClauseUpdate {
+  clause_number?: string;
+  title?: string;
+  description?: string;
+  parent_clause_id?: number;
+  sort_order?: number;
+  compliance_status?: 'not_assessed' | 'compliant' | 'partial' | 'non_compliant' | 'not_applicable';
+  compliance_notes?: string;
+  next_review_date?: string;
+}
+
+export interface QMSEvidenceCreate {
+  evidence_type: 'document' | 'module' | 'ncr' | 'car' | 'fai' | 'calibration' | 'training' | 'procedure' | 'spc' | 'other';
+  title: string;
+  description?: string;
+  document_id?: number;
+  module_reference?: string;
+  record_type?: string;
+  record_id?: number;
+}
+
+export interface QMSEvidenceUpdate {
+  title?: string;
+  description?: string;
+  document_id?: number;
+  module_reference?: string;
+  is_verified?: boolean;
+  verification_notes?: string;
+}
+
+export interface QMSEvidenceResponse {
+  id: number;
+  clause_id: number;
+  evidence_type: string;
+  title: string;
+  description?: string;
+  document_id?: number;
+  module_reference?: string;
+  record_type?: string;
+  record_id?: number;
+  is_verified: boolean;
+  verified_by?: number;
+  verified_date?: string;
+  verification_notes?: string;
+  created_by?: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface QMSClauseResponse {
+  id: number;
+  standard_id: number;
+  clause_number: string;
+  title: string;
+  description?: string;
+  parent_clause_id?: number;
+  sort_order: number;
+  compliance_status: string;
+  compliance_notes?: string;
+  last_assessed_date?: string;
+  last_assessed_by?: number;
+  next_review_date?: string;
+  evidence_links: QMSEvidenceResponse[];
+  sub_clauses: QMSClauseResponse[];
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface QMSStandardResponse {
+  id: number;
+  name: string;
+  version?: string;
+  description?: string;
+  standard_body?: string;
+  document_id?: number;
+  is_active: boolean;
+  created_by?: number;
+  created_at: string;
+  updated_at?: string;
+  clauses: QMSClauseResponse[];
+}
+
+export interface QMSStandardListResponse {
+  id: number;
+  name: string;
+  version?: string;
+  description?: string;
+  standard_body?: string;
+  is_active: boolean;
+  total_clauses: number;
+  compliant_clauses: number;
+  partial_clauses: number;
+  non_compliant_clauses: number;
+  not_assessed_clauses: number;
+  created_at: string;
+}
+
+export interface QMSAuditReadinessSummary {
+  total_standards: number;
+  total_clauses: number;
+  compliant: number;
+  partial: number;
+  non_compliant: number;
+  not_assessed: number;
+  not_applicable: number;
+  compliance_percentage: number;
+  total_evidence_links: number;
+  verified_evidence: number;
+  unverified_evidence: number;
+  clauses_needing_review: number;
+}
+
 // ============ Error Handling ============
 
 export interface ApiErrorResponse {

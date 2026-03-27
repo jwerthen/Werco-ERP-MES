@@ -61,6 +61,7 @@ const SPCPage = lazyWithRetry(() => import('./pages/SPC'));
 const CustomerComplaints = lazyWithRetry(() => import('./pages/CustomerComplaints'));
 const ToolManagement = lazyWithRetry(() => import('./pages/ToolManagement'));
 const SupplierScorecards = lazyWithRetry(() => import('./pages/SupplierScorecards'));
+const QMSStandards = lazyWithRetry(() => import('./pages/QMSStandards'));
 
 // Loading fallback for lazy-loaded pages
 const PageLoader = () => (
@@ -582,6 +583,15 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><ToolManagement /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* QMS Standards & Audit Readiness */}
+      <Route path="/qms-standards" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><QMSStandards /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

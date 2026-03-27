@@ -33,6 +33,7 @@ from .engineering_change import EngineeringChangeOrder, ECOApproval, ECOImplemen
 from .spc import SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability, ChartType
 from .customer_complaint import CustomerComplaint, ReturnMaterialAuthorization, ComplaintStatus, ComplaintSeverity, RMAStatus
 from .supplier_scorecard import SupplierScorecard, SupplierAudit, ApprovedSupplierList, ScorecardPeriod
+from .qms_standard import QMSStandard, QMSClause, QMSClauseEvidence
 
 __all__ = [
     "User", "UserRole",
@@ -62,4 +63,5 @@ __all__ = [
     "SPCCharacteristic", "SPCControlLimit", "SPCMeasurement", "SPCProcessCapability", "ChartType",
     "CustomerComplaint", "ReturnMaterialAuthorization", "ComplaintStatus", "ComplaintSeverity", "RMAStatus",
     "SupplierScorecard", "SupplierAudit", "ApprovedSupplierList", "ScorecardPeriod",
+    "QMSStandard", "QMSClause", "QMSClauseEvidence",
 ]

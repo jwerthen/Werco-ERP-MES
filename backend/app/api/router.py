@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.endpoints import auth, work_centers, parts, work_orders, shop_floor, bom, routing, mrp, custom_fields, quality, inventory, purchasing, scheduling, documents, reports, shipping, quotes, users, customers, calibration, scanner, traceability, audit, quote_calculator, dxf_parser, admin_settings, receiving, po_upload, analytics, errors, search, exports, print_reports, rfq_quotes, oee, downtime, job_costing, tool_management, maintenance, operator_certifications, engineering_changes, spc, customer_complaints, supplier_scorecards
+from app.api.endpoints import auth, work_centers, parts, work_orders, shop_floor, bom, routing, mrp, custom_fields, quality, inventory, purchasing, scheduling, documents, reports, shipping, quotes, users, customers, calibration, scanner, traceability, audit, quote_calculator, dxf_parser, admin_settings, receiving, po_upload, analytics, errors, search, exports, print_reports, rfq_quotes, oee, downtime, job_costing, tool_management, maintenance, operator_certifications, engineering_changes, spc, customer_complaints, supplier_scorecards, qms_standards
 
 api_router = APIRouter()
 
@@ -46,4 +46,5 @@ api_router.include_router(engineering_changes.router, prefix="/eco", tags=["Engi
 api_router.include_router(spc.router, prefix="/spc", tags=["Statistical Process Control"])
 api_router.include_router(customer_complaints.router, prefix="/complaints", tags=["Customer Complaints & RMA"])
 api_router.include_router(supplier_scorecards.router, prefix="/supplier-scorecards", tags=["Supplier Scorecards"])
+api_router.include_router(qms_standards.router, prefix="/qms-standards", tags=["QMS Standards & Audit Readiness"])
 api_router.include_router(errors.router, tags=["Error Logging"])

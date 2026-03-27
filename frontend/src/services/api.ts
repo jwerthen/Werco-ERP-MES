@@ -2525,6 +2525,78 @@ class ApiService {
     return response.data;
   }
 
+  // ============ QMS Standards ============
+
+  async getQMSStandards(activeOnly: boolean = true) {
+    const response = await this.api.get('/qms-standards/', { params: { active_only: activeOnly } });
+    return response.data;
+  }
+
+  async getQMSStandard(id: number) {
+    const response = await this.api.get(`/qms-standards/${id}`);
+    return response.data;
+  }
+
+  async createQMSStandard(data: any) {
+    const response = await this.api.post('/qms-standards/', data);
+    return response.data;
+  }
+
+  async updateQMSStandard(id: number, data: any) {
+    const response = await this.api.put(`/qms-standards/${id}`, data);
+    return response.data;
+  }
+
+  async deleteQMSStandard(id: number) {
+    const response = await this.api.delete(`/qms-standards/${id}`);
+    return response.data;
+  }
+
+  async getQMSClauses(standardId: number) {
+    const response = await this.api.get(`/qms-standards/${standardId}/clauses`);
+    return response.data;
+  }
+
+  async createQMSClause(standardId: number, data: any) {
+    const response = await this.api.post(`/qms-standards/${standardId}/clauses`, data);
+    return response.data;
+  }
+
+  async bulkCreateQMSClauses(standardId: number, clauses: any[]) {
+    const response = await this.api.post(`/qms-standards/${standardId}/clauses/bulk`, { clauses });
+    return response.data;
+  }
+
+  async updateQMSClause(clauseId: number, data: any) {
+    const response = await this.api.put(`/qms-standards/clauses/${clauseId}`, data);
+    return response.data;
+  }
+
+  async deleteQMSClause(clauseId: number) {
+    const response = await this.api.delete(`/qms-standards/clauses/${clauseId}`);
+    return response.data;
+  }
+
+  async addQMSEvidence(clauseId: number, data: any) {
+    const response = await this.api.post(`/qms-standards/clauses/${clauseId}/evidence`, data);
+    return response.data;
+  }
+
+  async updateQMSEvidence(evidenceId: number, data: any) {
+    const response = await this.api.put(`/qms-standards/evidence/${evidenceId}`, data);
+    return response.data;
+  }
+
+  async deleteQMSEvidence(evidenceId: number) {
+    const response = await this.api.delete(`/qms-standards/evidence/${evidenceId}`);
+    return response.data;
+  }
+
+  async getQMSAuditReadiness() {
+    const response = await this.api.get('/qms-standards/audit-readiness');
+    return response.data;
+  }
+
   // Generic get method for flexibility
   async get<T = any>(url: string, config?: { params?: Record<string, any> }): Promise<{ data: T }> {
     const response = await this.api.get<T>(url, config);

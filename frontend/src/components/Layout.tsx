@@ -117,6 +117,7 @@ const navigation: NavItem[] = [
       { name: 'Calibration', href: '/calibration', icon: WrenchIcon2 },
       { name: 'Traceability', href: '/traceability', icon: DocumentMagnifyingGlassIcon },
       { name: 'Customer Complaints', href: '/customer-complaints', icon: DocumentTextIcon },
+      { name: 'QMS Standards', href: '/qms-standards', icon: DocumentMagnifyingGlassIcon },
     ],
   },
   { name: 'Maintenance', href: '/maintenance', icon: WrenchIcon2 },
