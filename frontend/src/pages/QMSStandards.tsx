@@ -5,7 +5,6 @@ import {
   QMSStandardResponse,
   QMSClauseResponse,
   QMSAuditReadinessSummary,
-  QMSEvidenceResponse,
 } from '../types/api';
 
 type ComplianceStatus = 'not_assessed' | 'compliant' | 'partial' | 'non_compliant' | 'not_applicable';
@@ -52,7 +51,6 @@ export default function QMSStandards() {
   const [showAddClause, setShowAddClause] = useState(false);
   const [showAddEvidence, setShowAddEvidence] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
-  const [editingClause, setEditingClause] = useState<QMSClauseResponse | null>(null);
   const [evidenceClauseId, setEvidenceClauseId] = useState<number | null>(null);
 
   // Form states
