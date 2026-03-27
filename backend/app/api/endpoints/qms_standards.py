@@ -1,6 +1,9 @@
 from typing import List, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status
+import json
+import logging
+import os
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.db.database import get_db
@@ -14,6 +17,7 @@ from app.schemas.qms_standard import (
     QMSAuditReadinessSummary,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -67,6 +71,145 @@ def create_standard(
     db.commit()
     db.refresh(standard)
     return standard
+
+
+@router.post("/{standard_id}/upload-pdf", response_model=List[QMSClauseResponse])
+async def upload_pdf_and_extract_clauses(
+    standard_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+):
+    """
+    Upload a QMS standard PDF (quality manual, AS9100D, ISO 9001, etc.)
+    and automatically extract all clauses using AI.
+    """
+    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id).first()
+    if not standard:
+        raise HTTPException(status_code=404, detail="QMS standard not found")
+
+    # Validate file
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File too large. Maximum 20MB.")
+
+    # Extract text from PDF
+    try:
+        from pypdf import PdfReader
+        import io
+        reader = PdfReader(io.BytesIO(content))
+        pages_text = []
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                pages_text.append(text)
+        pdf_text = "\n\n".join(pages_text)
+    except Exception as e:
+        logger.error(f"PDF parsing failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {str(e)}")
+
+    if not pdf_text or len(pdf_text.strip()) < 50:
+        raise HTTPException(status_code=400, detail="Could not extract text from PDF. The file may be scanned/image-based or empty.")
+
+    # Use Claude AI to extract clauses
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(status_code=500, detail="AI extraction library not available")
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI extraction not configured (ANTHROPIC_API_KEY missing)")
+
+    clause_schema = """[
+  {
+    "clause_number": "string - e.g. '4.1', '8.5.2'",
+    "title": "string - clause title",
+    "description": "string - full clause text or summary of requirements"
+  }
+]"""
+
+    prompt = f"""You are a QMS standards expert. Extract ALL clauses and sub-clauses from this quality management document.
+
+The document is: {standard.name} {standard.version or ''}
+
+Rules:
+1. Extract EVERY numbered clause and sub-clause (e.g., 4.1, 4.2, 5.1.1, 8.5.2)
+2. Include the clause number, title, and the full requirement text as description
+3. Maintain the hierarchical numbering exactly as shown in the document
+4. Include ALL levels of sub-clauses
+5. For the description, include the actual requirement text — not just a summary
+6. Return a JSON array of objects, nothing else
+
+Schema:
+{clause_schema}
+
+Document text:
+---
+{pdf_text[:100000]}
+---
+
+Return ONLY a valid JSON array. No markdown, no explanations."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=16000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = message.content[0].text.strip()
+
+        # Clean markdown fences
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+
+        extracted = json.loads(response_text.strip())
+
+        if not isinstance(extracted, list):
+            raise ValueError("Expected a JSON array of clauses")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"AI returned invalid JSON: {e}")
+        raise HTTPException(status_code=500, detail="AI extraction returned invalid data. Try again or use manual entry.")
+    except Exception as e:
+        logger.error(f"AI clause extraction failed: {e}")
+        raise HTTPException(status_code=500, detail=f"AI extraction failed: {str(e)}")
+
+    # Create clauses in database
+    clauses = []
+    for i, item in enumerate(extracted):
+        clause_number = str(item.get("clause_number", f"{i+1}")).strip()
+        title = str(item.get("title", "")).strip()
+        description = str(item.get("description", "")).strip()
+
+        if not clause_number or not title:
+            continue
+
+        clause = QMSClause(
+            standard_id=standard_id,
+            clause_number=clause_number,
+            title=title[:500],
+            description=description,
+            sort_order=i,
+        )
+        db.add(clause)
+        clauses.append(clause)
+
+    db.commit()
+    for c in clauses:
+        db.refresh(c)
+
+    logger.info(f"Extracted {len(clauses)} clauses from PDF for standard {standard.name}")
+    return clauses
 
 
 @router.get("/audit-readiness", response_model=QMSAuditReadinessSummary)

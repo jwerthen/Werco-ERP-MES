@@ -2592,6 +2592,14 @@ class ApiService {
     return response.data;
   }
 
+  async uploadQMSPdf(standardId: number, formData: FormData) {
+    const response = await this.api.post(`/qms-standards/${standardId}/upload-pdf`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+    });
+    return response.data;
+  }
+
   async getQMSAuditReadiness() {
     const response = await this.api.get('/qms-standards/audit-readiness');
     return response.data;

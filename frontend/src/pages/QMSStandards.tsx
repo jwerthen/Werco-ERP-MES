@@ -59,6 +59,8 @@ export default function QMSStandards() {
   const [evidenceForm, setEvidenceForm] = useState({ evidence_type: 'document', title: '', description: '', module_reference: '' });
   const [bulkText, setBulkText] = useState('');
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
 
   const fetchData = useCallback(async () => {
     try {
@@ -181,6 +183,35 @@ export default function QMSStandards() {
     }
   };
 
+  const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedStandard) return;
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      setError('Please upload a PDF file');
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress('Uploading PDF and extracting clauses with AI...');
+    setError('');
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      await api.uploadQMSPdf(selectedStandard.id, formData);
+      setUploadProgress('');
+      loadStandardDetail(selectedStandard.id);
+      fetchData();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'Failed to extract clauses from PDF');
+    } finally {
+      setUploading(false);
+      setUploadProgress('');
+      // Reset file input
+      e.target.value = '';
+    }
+  };
+
   const handleDeleteEvidence = async (evidenceId: number) => {
     if (!window.confirm('Remove this evidence link?')) return;
     try {
@@ -241,8 +272,18 @@ export default function QMSStandards() {
         )}
         {view === 'detail' && (
           <div className="flex gap-2">
+            <label className={`btn btn-accent btn-sm ${uploading ? 'loading' : ''}`}>
+              {uploading ? 'Extracting...' : 'Upload PDF'}
+              <input
+                type="file"
+                accept=".pdf"
+                className="hidden"
+                onChange={handlePdfUpload}
+                disabled={uploading}
+              />
+            </label>
             <button onClick={() => setShowBulkImport(true)} className="btn btn-outline btn-sm">
-              Bulk Import Clauses
+              Bulk Import
             </button>
             <button onClick={() => setShowAddClause(true)} className="btn btn-primary btn-sm">
               + Add Clause
@@ -250,6 +291,13 @@ export default function QMSStandards() {
           </div>
         )}
       </div>
+
+      {uploading && uploadProgress && (
+        <div className="alert alert-info mb-4">
+          <span className="loading loading-spinner loading-sm"></span>
+          <span>{uploadProgress}</span>
+        </div>
+      )}
 
       {error && (
         <div className="alert alert-error mb-4">
@@ -364,14 +412,27 @@ export default function QMSStandards() {
           {/* Clauses Table */}
           {selectedStandard.clauses.length === 0 ? (
             <div className="text-center py-12 bg-white rounded-lg border">
-              <p className="text-gray-500 mb-2">No clauses added yet.</p>
-              <p className="text-xs text-gray-400 mb-4">Add clauses individually or use bulk import to paste clause data.</p>
-              <div className="flex gap-2 justify-center">
-                <button onClick={() => setShowBulkImport(true)} className="btn btn-outline btn-sm">
+              <p className="text-lg font-medium text-gray-700 mb-2">No clauses added yet</p>
+              <p className="text-sm text-gray-400 mb-6">Upload a PDF of your quality manual and clauses will be extracted automatically.</p>
+              <div className="flex gap-3 justify-center">
+                <label className={`btn btn-accent ${uploading ? 'loading' : ''}`}>
+                  {uploading ? 'Extracting clauses...' : 'Upload Quality Manual PDF'}
+                  <input
+                    type="file"
+                    accept=".pdf"
+                    className="hidden"
+                    onChange={handlePdfUpload}
+                    disabled={uploading}
+                  />
+                </label>
+              </div>
+              <p className="text-xs text-gray-400 mt-4">Or add clauses manually:</p>
+              <div className="flex gap-2 justify-center mt-2">
+                <button onClick={() => setShowBulkImport(true)} className="btn btn-outline btn-xs">
                   Bulk Import
                 </button>
-                <button onClick={() => setShowAddClause(true)} className="btn btn-primary btn-sm">
-                  Add Clause
+                <button onClick={() => setShowAddClause(true)} className="btn btn-ghost btn-xs">
+                  + Add Single Clause
                 </button>
               </div>
             </div>
