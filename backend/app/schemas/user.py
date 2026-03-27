@@ -51,7 +51,7 @@ class PublicRegister(BaseModel):
     email: EmailStr = Field(..., max_length=255, description="Email address")
     first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$', description="First name")
     last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\']+$', description="Last name")
-    employee_id: str = Field(..., min_length=1, max_length=50, pattern=r'^[A-Za-z0-9\-_]+$', description="Employee ID")
+    employee_id: Optional[str] = Field(None, min_length=1, max_length=50, pattern=r'^[A-Za-z0-9\-_]+$', description="Employee ID (auto-generated if not provided)")
     password: str = Field(..., min_length=12, max_length=128, description="Password")
 
     @field_validator('password')

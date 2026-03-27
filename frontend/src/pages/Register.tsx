@@ -105,7 +105,7 @@ export default function Register() {
         first_name: firstName.trim(),
         last_name: lastName.trim(),
         email: email.trim(),
-        employee_id: employeeId.trim(),
+        ...(employeeId.trim() ? { employee_id: employeeId.trim() } : {}),
         password,
       });
 
@@ -418,10 +418,10 @@ export default function Register() {
                 </div>
               </div>
 
-              {/* Employee ID field */}
+              {/* Employee ID field (optional) */}
               <div className="space-y-2">
                 <label htmlFor="employeeId" className="block text-sm font-medium text-slate-700">
-                  Employee ID
+                  Employee ID <span className="text-slate-400 font-normal">(optional)</span>
                 </label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
@@ -434,13 +434,12 @@ export default function Register() {
                   <input
                     id="employeeId"
                     type="text"
-                    required
                     value={employeeId}
                     onChange={e => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                     onFocus={() => setFocusedField('employeeId')}
                     onBlur={() => setFocusedField(null)}
                     className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-white"
-                    placeholder="EMP-001"
+                    placeholder="Auto-generated if left blank"
                     autoComplete="off"
                   />
                 </div>

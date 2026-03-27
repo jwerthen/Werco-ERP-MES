@@ -306,7 +306,7 @@ class ApiService {
     email: string;
     first_name: string;
     last_name: string;
-    employee_id: string;
+    employee_id?: string;
     password: string;
   }): Promise<{ message: string; is_first_user: boolean }> {
     const response = await this.api.post<{ message: string; is_first_user: boolean }>(

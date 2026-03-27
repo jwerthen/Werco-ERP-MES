@@ -452,12 +452,24 @@ def register_public(
             detail="Email already registered",
         )
 
-    # Check for duplicate employee_id
-    if db.query(User).filter(func.lower(User.employee_id) == user_in.employee_id.lower()).first():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Employee ID already exists",
-        )
+    # Auto-generate employee_id from email if not provided
+    employee_id = user_in.employee_id
+    if not employee_id:
+        # Use email local part as base, e.g. "jmw@wercomfg.com" -> "jmw"
+        base = re.sub(r'[^a-zA-Z0-9\-_]', '', user_in.email.split('@')[0])
+        candidate = base
+        suffix = 2
+        while db.query(User).filter(func.lower(User.employee_id) == candidate.lower()).first():
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        employee_id = candidate
+    else:
+        # Check for duplicate employee_id only if explicitly provided
+        if db.query(User).filter(func.lower(User.employee_id) == employee_id.lower()).first():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Employee ID already exists",
+            )
 
     user_count = db.query(User).count()
     is_first_user = user_count == 0
@@ -473,7 +485,7 @@ def register_public(
 
     user = User(
         email=user_in.email,
-        employee_id=user_in.employee_id,
+        employee_id=employee_id,
         first_name=user_in.first_name,
         last_name=user_in.last_name,
         role=role,
