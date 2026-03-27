@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import {
-  AcademicCapIcon,
   ClockIcon,
   ExclamationTriangleIcon,
   CheckCircleIcon,
@@ -9,7 +8,6 @@ import {
   XMarkIcon,
   MagnifyingGlassIcon,
   CalendarDaysIcon,
-  UserGroupIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 

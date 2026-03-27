@@ -2,10 +2,9 @@ import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { Part, PartType } from '../types';
-import { partTypeColors, partTypeLabels } from '../types/engineering';
+import { partTypeColors } from '../types/engineering';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/Toast';
-import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import {
@@ -15,7 +14,6 @@ import {
   ChevronRightIcon,
   Squares2X2Icon,
   ListBulletIcon as ListIcon,
-  FunnelIcon,
 } from '@heroicons/react/24/outline';
 
 type ViewMode = 'table' | 'grid';

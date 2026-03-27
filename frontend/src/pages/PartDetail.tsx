@@ -15,7 +15,6 @@ import {
   CubeIcon,
   ListBulletIcon,
   WrenchScrewdriverIcon,
-  DocumentDuplicateIcon,
   PencilIcon,
 } from '@heroicons/react/24/outline';
 

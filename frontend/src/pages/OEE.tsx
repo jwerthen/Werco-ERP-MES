@@ -92,11 +92,6 @@ function oeeBgColor(value: number): string {
   return 'bg-red-100 border-red-300';
 }
 
-function oeeBorderColor(value: number): string {
-  if (value >= 85) return 'border-green-500';
-  if (value >= 65) return 'border-yellow-500';
-  return 'border-red-500';
-}
 
 function gaugeArc(pct: number): string {
   const clamp = Math.min(100, Math.max(0, pct));

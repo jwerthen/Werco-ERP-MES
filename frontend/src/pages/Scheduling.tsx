@@ -23,7 +23,6 @@ import {
   MagnifyingGlassIcon,
   FunnelIcon,
   ChevronDownIcon,
-  ClockIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 
