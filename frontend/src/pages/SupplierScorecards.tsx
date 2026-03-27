@@ -3,7 +3,6 @@ import api from '../services/api';
 import {
   ChartBarIcon,
   ShieldCheckIcon,
-  ClipboardDocumentCheckIcon,
   ExclamationTriangleIcon,
   MagnifyingGlassIcon,
   PlusIcon,
@@ -119,7 +118,8 @@ const SupplierScorecards = () => {
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
