@@ -213,11 +213,9 @@ function AppRoutes() {
       <Route path="/shop-floor/operations" element={
         <PrivateRoute>
           <KioskGuard>
-            <KioskOnly>
-              <Layout>
-                <LazyRoute><ShopFloorSimple /></LazyRoute>
-              </Layout>
-            </KioskOnly>
+            <Layout>
+              <LazyRoute><ShopFloorSimple /></LazyRoute>
+            </Layout>
           </KioskGuard>
         </PrivateRoute>
       } />

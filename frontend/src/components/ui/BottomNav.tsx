@@ -1,15 +1,18 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
   CubeIcon,
   Bars3Icon,
+  WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import {
   HomeIcon as HomeIconSolid,
   ClipboardDocumentListIcon as ClipboardDocumentListIconSolid,
   CubeIcon as CubeIconSolid,
+  WrenchScrewdriverIcon as WrenchScrewdriverIconSolid,
 } from '@heroicons/react/24/solid';
 
 interface NavItem {
@@ -19,12 +22,18 @@ interface NavItem {
   activeIcon: React.ComponentType<{ className?: string }>;
 }
 
-const navItems: NavItem[] = [
+const defaultNavItems: NavItem[] = [
   {
     name: 'Home',
     href: '/',
     icon: HomeIcon,
     activeIcon: HomeIconSolid,
+  },
+  {
+    name: 'Shop Floor',
+    href: '/shop-floor',
+    icon: WrenchScrewdriverIcon,
+    activeIcon: WrenchScrewdriverIconSolid,
   },
   {
     name: 'Work Orders',
@@ -40,12 +49,30 @@ const navItems: NavItem[] = [
   },
 ];
 
+const operatorNavItems: NavItem[] = [
+  {
+    name: 'My Jobs',
+    href: '/shop-floor',
+    icon: WrenchScrewdriverIcon,
+    activeIcon: WrenchScrewdriverIconSolid,
+  },
+  {
+    name: 'Operations',
+    href: '/shop-floor/operations',
+    icon: ClipboardDocumentListIcon,
+    activeIcon: ClipboardDocumentListIconSolid,
+  },
+];
+
 interface BottomNavProps {
   onMenuClick: () => void;
 }
 
 export default function BottomNav({ onMenuClick }: BottomNavProps) {
   const location = useLocation();
+  const { user } = useAuth();
+  const isOperator = user?.role === 'operator';
+  const navItems = isOperator ? operatorNavItems : defaultNavItems;
 
   const isActive = (href: string) => {
     if (href === '/') return location.pathname === '/';

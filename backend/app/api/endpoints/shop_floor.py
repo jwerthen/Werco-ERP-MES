@@ -99,6 +99,8 @@ def get_my_active_job(
             "part_name": work_order.part.name if work_order and work_order.part else None,
             "operation_name": operation.name if operation else None,
             "operation_number": operation.operation_number if operation else None,
+            "quantity_ordered": float(work_order.quantity_ordered) if work_order and work_order.quantity_ordered else 0,
+            "quantity_complete": float(operation.quantity_complete) if operation and operation.quantity_complete else 0,
         })
     
     return {
@@ -773,25 +775,26 @@ def start_operation(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Mark operation as in progress (simplified workflow - no time clock).
+    Mark operation as in progress and create a time entry.
     - Sets status to IN_PROGRESS
     - Records actual_start_time
+    - Creates a TimeEntry so the dashboard shows the operator on this job
     - Updates work order status if needed
     """
     operation = db.query(WorkOrderOperation).options(
         joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
     ).filter(WorkOrderOperation.id == operation_id).first()
-    
+
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    
+
     # Validate operation can be started
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Operation is already complete")
-    
+
     if operation.status == OperationStatus.IN_PROGRESS:
         raise HTTPException(status_code=400, detail="Operation is already in progress")
-    
+
     work_order = operation.work_order
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -801,19 +804,40 @@ def start_operation(
             status_code=400,
             detail="Previous operations must be completed first"
         )
-    
+
     # Update operation
     operation.status = OperationStatus.IN_PROGRESS
     operation.actual_start = datetime.utcnow()
     operation.started_by = current_user.id
     operation.updated_at = datetime.utcnow()
-    
+
     # Update work order status if needed
     if work_order.status in [WorkOrderStatus.DRAFT, WorkOrderStatus.RELEASED]:
         work_order.status = WorkOrderStatus.IN_PROGRESS
         if not work_order.actual_start:
             work_order.actual_start = datetime.utcnow()
-    
+
+    # Create a time entry so the dashboard shows this operator on this job
+    existing_entry = db.query(TimeEntry).filter(
+        and_(
+            TimeEntry.user_id == current_user.id,
+            TimeEntry.operation_id == operation_id,
+            TimeEntry.clock_out.is_(None)
+        )
+    ).first()
+
+    time_entry = None
+    if not existing_entry:
+        time_entry = TimeEntry(
+            user_id=current_user.id,
+            work_order_id=work_order.id,
+            operation_id=operation_id,
+            work_center_id=operation.work_center_id,
+            entry_type=TimeEntryType.RUN,
+            clock_in=datetime.utcnow(),
+        )
+        db.add(time_entry)
+
     # Create audit log
     AuditService(db, current_user).log(
         action="START_OPERATION",
@@ -821,7 +845,7 @@ def start_operation(
         resource_id=operation_id,
         description=f"Started operation {operation.operation_number} on WO {work_order.work_order_number}"
     )
-    
+
     db.commit()
     db.refresh(operation)
 
@@ -975,7 +999,22 @@ def complete_operation(
     # Update work order quantity tracking
     work_order.quantity_complete = completion_data.quantity_complete
     work_order.updated_at = datetime.utcnow()
-    
+
+    # Close any open time entries for this operation when fully complete
+    if is_fully_complete:
+        open_entries = db.query(TimeEntry).filter(
+            and_(
+                TimeEntry.operation_id == operation_id,
+                TimeEntry.clock_out.is_(None)
+            )
+        ).all()
+        now = datetime.utcnow()
+        for entry in open_entries:
+            entry.clock_out = now
+            entry.quantity_produced = completion_data.quantity_complete
+            if entry.clock_in:
+                entry.duration_hours = (now - entry.clock_in).total_seconds() / 3600.0
+
     # Create audit log
     AuditService(db, current_user).log(
         action="COMPLETE_OPERATION" if is_fully_complete else "UPDATE_OPERATION_PROGRESS",
@@ -987,7 +1026,7 @@ def complete_operation(
             + (f". Notes: {completion_data.notes}" if completion_data.notes else "")
         )
     )
-    
+
     db.commit()
     db.refresh(operation)
 
@@ -1156,7 +1195,20 @@ def put_operation_on_hold(
     
     operation.status = OperationStatus.ON_HOLD
     operation.updated_at = datetime.utcnow()
-    
+
+    # Close any open time entries for this operation
+    open_entries = db.query(TimeEntry).filter(
+        and_(
+            TimeEntry.operation_id == operation_id,
+            TimeEntry.clock_out.is_(None)
+        )
+    ).all()
+    now = datetime.utcnow()
+    for entry in open_entries:
+        entry.clock_out = now
+        if entry.clock_in:
+            entry.duration_hours = (now - entry.clock_in).total_seconds() / 3600.0
+
     # Create audit log
     AuditService(db, current_user).log(
         action="HOLD_OPERATION",
@@ -1164,7 +1216,7 @@ def put_operation_on_hold(
         resource_id=operation_id,
         description=f"Put operation {operation.operation_number} on hold"
     )
-    
+
     db.commit()
 
     work_order = operation.work_order

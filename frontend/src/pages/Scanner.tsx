@@ -356,7 +356,16 @@ export default function Scanner() {
                 )}
               </div>
 
-              <div className="flex gap-3 pt-4 border-t">
+              <div className="flex flex-wrap gap-3 pt-4 border-t">
+                {(result.work_order_status === 'in_progress' || result.work_order_status === 'released') && (
+                  <button
+                    onClick={() => navigate(`/shop-floor?wo=${result.work_order_number}`)}
+                    className="btn-success flex items-center"
+                  >
+                    <PlayIcon className="h-5 w-5 mr-2" />
+                    Clock In
+                  </button>
+                )}
                 <button
                   onClick={() => goToWorkOrder(result.work_order_id!)}
                   className="btn-primary"

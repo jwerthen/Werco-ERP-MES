@@ -284,4 +284,6 @@ export interface ActiveJob {
   part_name?: string;
   operation_name?: string;
   operation_number?: string;
+  quantity_ordered?: number;
+  quantity_complete?: number;
 }

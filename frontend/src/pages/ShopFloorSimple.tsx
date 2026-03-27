@@ -71,6 +71,8 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> =
   on_hold: { bg: 'bg-red-100', text: 'text-red-700', dot: 'bg-red-500' },
 };
 
+const WORK_CENTER_STORAGE_KEY = 'shop_floor_work_center_id';
+
 export default function ShopFloorSimple() {
   const { can } = usePermissions();
   const navigate = useNavigate();
@@ -79,9 +81,15 @@ export default function ShopFloorSimple() {
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  
+
   // Filters
-  const [workCenterId, setWorkCenterId] = useState<number | ''>('');
+  const [workCenterId, _setWorkCenterId] = useState<number | ''>('');
+  const setWorkCenterId = useCallback((id: number | '') => {
+    _setWorkCenterId(id);
+    if (id) {
+      localStorage.setItem(WORK_CENTER_STORAGE_KEY, String(id));
+    }
+  }, []);
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -171,12 +179,20 @@ export default function ShopFloorSimple() {
         if (matched) {
           setWorkCenterId(matched.id);
           setActionableOnly(true);
+        } else {
+          // Fall back to localStorage-saved work center
+          const storedId = Number(localStorage.getItem(WORK_CENTER_STORAGE_KEY));
+          const storedMatch = storedId ? response.find((wc: WorkCenter) => wc.id === storedId) : null;
+          if (storedMatch) {
+            setWorkCenterId(storedMatch.id);
+            setActionableOnly(true);
+          }
         }
       }
     } catch (err) {
       console.error('Failed to load work centers:', err);
     }
-  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, workCenterId]);
+  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, workCenterId, setWorkCenterId]);
 
   useEffect(() => {
     const init = async () => {

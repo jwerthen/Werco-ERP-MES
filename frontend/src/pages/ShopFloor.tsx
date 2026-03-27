@@ -47,12 +47,21 @@ interface WorkOrderDetails {
   }[];
 }
 
+const WORK_CENTER_STORAGE_KEY = 'shop_floor_work_center_id';
+
 export default function ShopFloor() {
   const { can } = usePermissions();
   const navigate = useNavigate();
   const location = useLocation();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
-  const [selectedWorkCenter, setSelectedWorkCenter] = useState<number | null>(null);
+  const [selectedWorkCenter, _setSelectedWorkCenter] = useState<number | null>(null);
+
+  const setSelectedWorkCenter = useCallback((id: number | null) => {
+    _setSelectedWorkCenter(id);
+    if (id) {
+      localStorage.setItem(WORK_CENTER_STORAGE_KEY, String(id));
+    }
+  }, []);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,6 +69,7 @@ export default function ShopFloor() {
   const [clockOutModal, setClockOutModal] = useState(false);
   const [clockOutJob, setClockOutJob] = useState<ActiveJob | null>(null);
   const [clockOutData, setClockOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
+  const [clockOutShowMore, setClockOutShowMore] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
@@ -72,6 +82,7 @@ export default function ShopFloor() {
       workCenterCode: getKioskWorkCenterCode(location.search),
     };
   }, [location.search]);
+  const highlightWO = useMemo(() => new URLSearchParams(location.search).get('wo'), [location.search]);
   const realtimeUrl = useMemo(() => {
     if (!selectedWorkCenter) return null;
     const token = getAccessToken();
@@ -102,7 +113,10 @@ export default function ShopFloor() {
           }
           return false;
         });
-        setSelectedWorkCenter(matched?.id ?? wcResponse[0].id);
+        // Use URL params > localStorage > first work center
+        const storedId = Number(localStorage.getItem(WORK_CENTER_STORAGE_KEY));
+        const storedMatch = storedId ? wcResponse.find((wc) => wc.id === storedId) : null;
+        setSelectedWorkCenter(matched?.id ?? storedMatch?.id ?? wcResponse[0].id);
       }
     } catch (err) {
       console.error('Failed to load data:', err);
@@ -173,6 +187,18 @@ export default function ShopFloor() {
       loadQueue(selectedWorkCenter);
     }
   }, [selectedWorkCenter, loadQueue]);
+
+  // Auto-expand work order from scanner ?wo= param
+  useEffect(() => {
+    if (highlightWO && queue.length > 0) {
+      const match = queue.find((item) => item.work_order_number === highlightWO);
+      if (match) {
+        toggleRowExpansion(match.work_order_id);
+      }
+    }
+    // Only run when queue first loads with highlight param
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightWO, queue.length]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -258,6 +284,7 @@ export default function ShopFloor() {
     setClockOutModal(false);
     setClockOutJob(null);
     setClockOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
+    setClockOutShowMore(false);
   };
 
   const getPriorityClasses = (priority: number) => {
@@ -401,7 +428,8 @@ export default function ShopFloor() {
                   <button
                     onClick={() => {
                       setClockOutJob(job);
-                      setClockOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
+                      const remaining = Math.max(0, (job.quantity_ordered || 0) - (job.quantity_complete || 0));
+                      setClockOutData({ quantity_produced: remaining, quantity_scrapped: 0, notes: '' });
                       setClockOutModal(true);
                     }}
                     className="btn bg-white text-emerald-700 hover:bg-emerald-50 shadow-lg"
@@ -780,48 +808,63 @@ export default function ShopFloor() {
               </button>
             </div>
             
-            <div className="modal-body space-y-4">
-              <div className="bg-surface-50 rounded-xl p-4 mb-4">
-                <p className="text-sm text-surface-500 mb-1">Completing work on</p>
-                <p className="font-semibold text-surface-900">
-                  {clockOutJob?.work_order_number} â€” {clockOutJob?.operation_name}
+            <div className=”modal-body space-y-4”>
+              <div className=”bg-surface-50 rounded-xl p-4 mb-4”>
+                <p className=”text-sm text-surface-500 mb-1”>Completing work on</p>
+                <p className=”font-semibold text-surface-900”>
+                  {clockOutJob?.work_order_number} — {clockOutJob?.operation_name}
                 </p>
+                {clockOutJob?.quantity_ordered ? (
+                  <p className=”text-xs text-surface-500 mt-1”>
+                    {clockOutJob.quantity_complete || 0} of {clockOutJob.quantity_ordered} previously completed
+                  </p>
+                ) : null}
               </div>
-              
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Quantity Produced</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={clockOutData.quantity_produced}
-                    onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
-                    className="input text-center text-lg font-semibold"
-                  />
-                </div>
-                
-                <div>
-                  <label className="label">Quantity Scrapped</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={clockOutData.quantity_scrapped}
-                    onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
-                    className="input text-center text-lg font-semibold"
-                  />
-                </div>
-              </div>
-              
+
               <div>
-                <label className="label">Notes (optional)</label>
-                <textarea
-                  value={clockOutData.notes}
-                  onChange={(e) => setClockOutData({ ...clockOutData, notes: e.target.value })}
-                  className="input"
-                  rows={3}
-                  placeholder="Any issues, observations, or notes..."
+                <label className=”label”>Quantity Produced</label>
+                <input
+                  type=”number”
+                  min=”0”
+                  value={clockOutData.quantity_produced}
+                  onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
+                  className=”input text-center text-2xl font-semibold h-14”
+                  autoFocus
                 />
               </div>
+
+              {!clockOutShowMore ? (
+                <button
+                  type=”button”
+                  onClick={() => setClockOutShowMore(true)}
+                  className=”text-sm text-werco-600 hover:text-werco-700 font-medium”
+                >
+                  + Add scrap count or notes
+                </button>
+              ) : (
+                <>
+                  <div>
+                    <label className=”label”>Quantity Scrapped</label>
+                    <input
+                      type=”number”
+                      min=”0”
+                      value={clockOutData.quantity_scrapped}
+                      onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
+                      className=”input text-center text-lg font-semibold”
+                    />
+                  </div>
+                  <div>
+                    <label className=”label”>Notes</label>
+                    <textarea
+                      value={clockOutData.notes}
+                      onChange={(e) => setClockOutData({ ...clockOutData, notes: e.target.value })}
+                      className=”input”
+                      rows={2}
+                      placeholder=”Any issues, observations, or notes...”
+                    />
+                  </div>
+                </>
+              )}
             </div>
             
             <div className="modal-footer">

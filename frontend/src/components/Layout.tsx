@@ -353,19 +353,21 @@ export default function Layout({ children }: LayoutProps) {
     [location.pathname, location.search, user?.role]
   );
 
+  const isOperator = user?.role === 'operator';
+
   const visibleNavigation = useMemo(() => {
     if (isKiosk) {
       return navigation.filter(item => item.name === 'Shop Floor');
     }
 
-    return navigation.map(item => {
-      if (item.name !== 'Shop Floor' || !item.children) return item;
-      return {
-        ...item,
-        children: item.children.filter(child => child.href !== '/shop-floor/operations'),
-      };
-    });
-  }, [isKiosk]);
+    // Operators see a streamlined nav: Shop Floor, Quality, and Downtime
+    if (isOperator) {
+      const operatorAllowed = new Set(['Dashboard', 'Shop Floor', 'Quality', 'Maintenance']);
+      return navigation.filter(item => operatorAllowed.has(item.name));
+    }
+
+    return navigation;
+  }, [isKiosk, isOperator]);
 
   const handleLogoutConfirm = async () => {
     setLogoutError('');
