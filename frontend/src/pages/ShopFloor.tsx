@@ -629,7 +629,7 @@ export default function ShopFloor() {
                         </td>
                         <td>
                           <span className={`text-sm font-medium ${isOverdue ? 'text-red-600' : 'text-surface-700'}`}>
-                            {item.due_date ? formatCentralDate(item.due_date, { year: undefined }) : 'â€”'}
+                            {item.due_date ? formatCentralDate(item.due_date, { year: undefined }) : 'â€"'}
                           </span>
                           {isOverdue && (
                             <span className="block text-xs text-red-500 font-medium">OVERDUE</span>
@@ -698,11 +698,11 @@ export default function ShopFloor() {
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                     <div className="bg-white rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer</p>
-                                      <p className="font-semibold text-surface-900">{details.customer_name || 'â€”'}</p>
+                                      <p className="font-semibold text-surface-900">{details.customer_name || 'â€"'}</p>
                                     </div>
                                     <div className="bg-white rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer PO</p>
-                                      <p className="font-semibold text-surface-900">{details.customer_po || 'â€”'}</p>
+                                      <p className="font-semibold text-surface-900">{details.customer_po || 'â€"'}</p>
                                     </div>
                                     <div className="bg-white rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Qty Complete / Ordered</p>
@@ -713,7 +713,7 @@ export default function ShopFloor() {
                                     <div className="bg-white rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Due Date</p>
                                       <p className="font-semibold text-surface-900">
-                                        {details.due_date ? formatCentralDate(details.due_date) : 'â€”'}
+                                        {details.due_date ? formatCentralDate(details.due_date) : 'â€"'}
                                       </p>
                                     </div>
                                   </div>
@@ -764,8 +764,8 @@ export default function ShopFloor() {
                                                   {op.status.replace('_', ' ')}
                                                 </span>
                                               </td>
-                                              <td className="px-4 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || 'â€”'}</td>
-                                              <td className="px-4 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || 'â€”'}</td>
+                                              <td className="px-4 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || 'â€"'}</td>
+                                              <td className="px-4 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || 'â€"'}</td>
                                             </tr>
                                           ))}
                                         </tbody>
@@ -808,59 +808,59 @@ export default function ShopFloor() {
               </button>
             </div>
             
-            <div className=”modal-body space-y-4”>
-              <div className=”bg-surface-50 rounded-xl p-4 mb-4”>
-                <p className=”text-sm text-surface-500 mb-1”>Completing work on</p>
-                <p className=”font-semibold text-surface-900”>
+            <div className="modal-body space-y-4">
+              <div className="bg-surface-50 rounded-xl p-4 mb-4">
+                <p className="text-sm text-surface-500 mb-1">Completing work on</p>
+                <p className="font-semibold text-surface-900">
                   {clockOutJob?.work_order_number} — {clockOutJob?.operation_name}
                 </p>
                 {clockOutJob?.quantity_ordered ? (
-                  <p className=”text-xs text-surface-500 mt-1”>
+                  <p className="text-xs text-surface-500 mt-1">
                     {clockOutJob.quantity_complete || 0} of {clockOutJob.quantity_ordered} previously completed
                   </p>
                 ) : null}
               </div>
 
               <div>
-                <label className=”label”>Quantity Produced</label>
+                <label className="label">Quantity Produced</label>
                 <input
-                  type=”number”
-                  min=”0”
+                  type="number"
+                  min="0"
                   value={clockOutData.quantity_produced}
                   onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
-                  className=”input text-center text-2xl font-semibold h-14”
+                  className="input text-center text-2xl font-semibold h-14"
                   autoFocus
                 />
               </div>
 
               {!clockOutShowMore ? (
                 <button
-                  type=”button”
+                  type="button"
                   onClick={() => setClockOutShowMore(true)}
-                  className=”text-sm text-werco-600 hover:text-werco-700 font-medium”
+                  className="text-sm text-werco-600 hover:text-werco-700 font-medium"
                 >
                   + Add scrap count or notes
                 </button>
               ) : (
                 <>
                   <div>
-                    <label className=”label”>Quantity Scrapped</label>
+                    <label className="label">Quantity Scrapped</label>
                     <input
-                      type=”number”
-                      min=”0”
+                      type="number"
+                      min="0"
                       value={clockOutData.quantity_scrapped}
                       onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
-                      className=”input text-center text-lg font-semibold”
+                      className="input text-center text-lg font-semibold"
                     />
                   </div>
                   <div>
-                    <label className=”label”>Notes</label>
+                    <label className="label">Notes</label>
                     <textarea
                       value={clockOutData.notes}
                       onChange={(e) => setClockOutData({ ...clockOutData, notes: e.target.value })}
-                      className=”input”
+                      className="input"
                       rows={2}
-                      placeholder=”Any issues, observations, or notes...”
+                      placeholder="Any issues, observations, or notes..."
                     />
                   </div>
                 </>
