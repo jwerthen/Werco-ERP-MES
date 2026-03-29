@@ -5,6 +5,9 @@ import {
   QMSStandardResponse,
   QMSClauseResponse,
   QMSAuditReadinessSummary,
+  ClauseAutoEvidenceResponse,
+  AutoEvidenceResult,
+  AutoLinkSummary,
 } from '../types/api';
 
 type ComplianceStatus = 'not_assessed' | 'compliant' | 'partial' | 'non_compliant' | 'not_applicable';
@@ -61,6 +64,11 @@ export default function QMSStandards() {
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
+
+  // Auto-link state
+  const [autoLinking, setAutoLinking] = useState(false);
+  const [autoLinkResult, setAutoLinkResult] = useState<AutoLinkSummary | null>(null);
+  const [showAutoLinkResult, setShowAutoLinkResult] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
@@ -212,6 +220,24 @@ export default function QMSStandards() {
     }
   };
 
+  const handleAutoLinkAll = async () => {
+    if (!selectedStandard) return;
+    setAutoLinking(true);
+    setError('');
+    try {
+      const result = await api.autoLinkStandard(selectedStandard.id);
+      setAutoLinkResult(result);
+      setShowAutoLinkResult(true);
+      // Refresh the standard detail to show new evidence
+      loadStandardDetail(selectedStandard.id);
+      fetchData();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'Failed to auto-link evidence');
+    } finally {
+      setAutoLinking(false);
+    }
+  };
+
   const handleDeleteEvidence = async (evidenceId: number) => {
     if (!window.confirm('Remove this evidence link?')) return;
     try {
@@ -272,6 +298,14 @@ export default function QMSStandards() {
         )}
         {view === 'detail' && (
           <div className="flex gap-2">
+            <button
+              onClick={handleAutoLinkAll}
+              disabled={autoLinking}
+              className={`btn btn-warning btn-sm ${autoLinking ? 'loading' : ''}`}
+              title="Scan ERP/MES records and auto-link evidence to all clauses"
+            >
+              {autoLinking ? 'Scanning...' : '\u26A1 Auto-Link Evidence'}
+            </button>
             <label className={`btn btn-accent btn-sm ${uploading ? 'loading' : ''}`}>
               {uploading ? 'Extracting...' : 'Upload PDF'}
               <input
@@ -614,6 +648,55 @@ export default function QMSStandards() {
         </Modal>
       )}
 
+      {/* Auto-Link Result Modal */}
+      {showAutoLinkResult && autoLinkResult && (
+        <Modal title="Auto-Link Evidence Complete" onClose={() => setShowAutoLinkResult(false)}>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-green-50 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-green-700">{autoLinkResult.clauses_with_evidence}</p>
+                <p className="text-xs text-green-600">Clauses with Evidence</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-gray-500">{autoLinkResult.clauses_without_evidence}</p>
+                <p className="text-xs text-gray-500">Clauses without Match</p>
+              </div>
+              <div className="bg-blue-50 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-blue-700">{autoLinkResult.total_evidence_created}</p>
+                <p className="text-xs text-blue-600">New Evidence Linked</p>
+              </div>
+              <div className="bg-amber-50 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-amber-700">{autoLinkResult.total_evidence_updated}</p>
+                <p className="text-xs text-amber-600">Evidence Updated</p>
+              </div>
+            </div>
+
+            {Object.keys(autoLinkResult.compliance_summary).length > 0 && (
+              <div>
+                <h4 className="text-sm font-semibold mb-2">Suggested Compliance</h4>
+                <div className="flex gap-2 flex-wrap">
+                  {Object.entries(autoLinkResult.compliance_summary).map(([status, count]) => (
+                    <span key={status} className={`badge ${STATUS_COLORS[status] || 'badge-ghost'}`}>
+                      {STATUS_LABELS[status] || status}: {count}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <p className="text-xs text-gray-500">
+              Evidence has been automatically linked from live ERP/MES records. Auto-linked items show a {'\u26A1'} badge and include real-time record counts.
+            </p>
+
+            <div className="flex justify-end">
+              <button className="btn btn-primary btn-sm" onClick={() => setShowAutoLinkResult(false)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       {/* Bulk Import Modal */}
       {showBulkImport && (
         <Modal title="Bulk Import Clauses" onClose={() => setShowBulkImport(false)}>
@@ -703,6 +786,23 @@ function ClauseRow({
   onDeleteEvidence: (evidenceId: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [autoEvidence, setAutoEvidence] = useState<ClauseAutoEvidenceResponse | null>(null);
+  const [discovering, setDiscovering] = useState(false);
+
+  const handleAutoDiscover = async () => {
+    setDiscovering(true);
+    try {
+      const result = await api.getClauseAutoEvidence(clause.id);
+      setAutoEvidence(result);
+    } catch {
+      // silently fail — user can retry
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const autoLinkedCount = clause.evidence_links.filter(e => e.is_auto_linked).length;
+  const manualCount = clause.evidence_links.length - autoLinkedCount;
 
   return (
     <div className="bg-white rounded-lg border">
@@ -728,12 +828,15 @@ function ClauseRow({
           ))}
         </select>
 
-        {/* Evidence count badge */}
-        {clause.evidence_links.length > 0 && (
-          <span className="badge badge-sm badge-info">{clause.evidence_links.length} evidence</span>
+        {/* Evidence count badges */}
+        {autoLinkedCount > 0 && (
+          <span className="badge badge-sm badge-warning gap-1">{'\u26A1'} {autoLinkedCount}</span>
+        )}
+        {manualCount > 0 && (
+          <span className="badge badge-sm badge-info">{manualCount} manual</span>
         )}
 
-        <span className="text-gray-400 text-xs">{expanded ? '▲' : '▼'}</span>
+        <span className="text-gray-400 text-xs">{expanded ? '\u25B2' : '\u25BC'}</span>
       </div>
 
       {/* Expanded Details */}
@@ -747,22 +850,42 @@ function ClauseRow({
           <div>
             <div className="flex items-center justify-between mb-2">
               <h4 className="text-sm font-semibold">Evidence Links</h4>
-              <button
-                className="btn btn-outline btn-xs"
-                onClick={() => onAddEvidence(clause.id)}
-              >
-                + Link Evidence
-              </button>
+              <div className="flex gap-2">
+                <button
+                  className={`btn btn-warning btn-xs ${discovering ? 'loading' : ''}`}
+                  onClick={handleAutoDiscover}
+                  disabled={discovering}
+                  title="Discover live ERP/MES evidence for this clause"
+                >
+                  {discovering ? 'Scanning...' : '\u26A1 Auto-Discover'}
+                </button>
+                <button
+                  className="btn btn-outline btn-xs"
+                  onClick={() => onAddEvidence(clause.id)}
+                >
+                  + Link Evidence
+                </button>
+              </div>
             </div>
 
-            {clause.evidence_links.length === 0 ? (
-              <p className="text-xs text-gray-400 italic">No evidence linked. Add evidence to demonstrate compliance.</p>
+            {clause.evidence_links.length === 0 && !autoEvidence ? (
+              <p className="text-xs text-gray-400 italic">No evidence linked. Click Auto-Discover or add evidence manually.</p>
             ) : (
               <div className="space-y-2">
                 {clause.evidence_links.map(ev => (
-                  <div key={ev.id} className="flex items-center gap-3 bg-white rounded border px-3 py-2 text-sm">
+                  <div key={ev.id} className={`flex items-center gap-3 rounded border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-50 border-amber-200' : 'bg-white'}`}>
+                    {ev.is_auto_linked && (
+                      <span className="text-amber-500 text-xs font-bold" title="Auto-linked from ERP/MES">{'\u26A1'}</span>
+                    )}
                     <span className="badge badge-ghost badge-xs">{ev.evidence_type}</span>
-                    <span className="flex-1">{ev.title}</span>
+                    <span className="flex-1">
+                      {ev.title}
+                      {ev.is_auto_linked && ev.live_count != null && (
+                        <span className="ml-2 text-xs text-amber-600 font-medium">
+                          ({ev.live_count} records{ev.last_refreshed ? ` | Refreshed ${new Date(ev.last_refreshed).toLocaleDateString()}` : ''})
+                        </span>
+                      )}
+                    </span>
                     {ev.module_reference && (
                       <a href={ev.module_reference} className="text-xs text-blue-500 hover:underline">
                         {ev.module_reference}
@@ -790,6 +913,54 @@ function ClauseRow({
             )}
           </div>
 
+          {/* Auto-Discovered Evidence Preview */}
+          {autoEvidence && autoEvidence.discovered_evidence.length > 0 && (
+            <div>
+              <h4 className="text-sm font-semibold mb-2 text-amber-700">
+                {'\u26A1'} Discovered Evidence (Live Preview)
+              </h4>
+              <div className="space-y-2">
+                {autoEvidence.discovered_evidence.map((ev, idx) => (
+                  <div key={idx} className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <HealthDot status={ev.health_status} />
+                      <span className="font-medium text-sm">{ev.title}</span>
+                      <span className="badge badge-sm badge-warning">{ev.total_count} records</span>
+                    </div>
+                    <p className="text-xs text-gray-600 mb-2">{ev.description}</p>
+                    <p className="text-xs text-gray-500 italic">{ev.health_detail}</p>
+                    {ev.examples.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {ev.examples.slice(0, 3).map((ex, exIdx) => (
+                          <a
+                            key={exIdx}
+                            href={ex.module_link}
+                            className="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                          >
+                            <span className="font-mono">{ex.record_identifier}</span>
+                            <span className="text-gray-500">{ex.summary}</span>
+                            <span className={`badge badge-xs ${ex.status === 'closed' ? 'badge-success' : 'badge-ghost'}`}>
+                              {ex.status}
+                            </span>
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-gray-400 mt-2">
+                Suggested compliance: <span className={`font-medium ${STATUS_COLORS[autoEvidence.overall_suggested_compliance] || ''}`}>
+                  {STATUS_LABELS[autoEvidence.overall_suggested_compliance] || autoEvidence.overall_suggested_compliance}
+                </span>
+              </p>
+            </div>
+          )}
+
+          {autoEvidence && autoEvidence.discovered_evidence.length === 0 && (
+            <p className="text-xs text-gray-400 italic">No matching ERP/MES records found for this clause.</p>
+          )}
+
           {clause.compliance_notes && (
             <div className="text-xs text-gray-500">
               <strong>Notes:</strong> {clause.compliance_notes}
@@ -798,5 +969,20 @@ function ClauseRow({
         </div>
       )}
     </div>
+  );
+}
+
+function HealthDot({ status }: { status: string }) {
+  const colors: Record<string, string> = {
+    healthy: 'bg-green-500',
+    warning: 'bg-yellow-500',
+    critical: 'bg-red-500',
+    no_data: 'bg-gray-400',
+  };
+  return (
+    <span
+      className={`inline-block w-2.5 h-2.5 rounded-full ${colors[status] || colors.no_data}`}
+      title={status}
+    />
   );
 }

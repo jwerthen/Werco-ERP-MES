@@ -85,6 +85,10 @@ class QMSEvidenceResponse(BaseModel):
     verified_by: Optional[int]
     verified_date: Optional[datetime]
     verification_notes: Optional[str]
+    is_auto_linked: bool = False
+    auto_link_query: Optional[str] = None
+    last_refreshed: Optional[datetime] = None
+    live_count: Optional[int] = None
     created_by: Optional[int]
     created_at: datetime
     updated_at: Optional[datetime]
@@ -165,3 +169,50 @@ class QMSAuditReadinessSummary(BaseModel):
     verified_evidence: int
     unverified_evidence: int
     clauses_needing_review: int  # Past next_review_date
+
+
+# ============ Auto-Evidence Discovery Schemas ============
+
+class AutoEvidenceExample(BaseModel):
+    """A single real record from the ERP/MES used as evidence"""
+    record_id: int
+    record_identifier: str  # e.g. "NCR-2024-0042"
+    record_type: str  # e.g. "ncr"
+    summary: str  # e.g. "Incoming inspection - dimensional out of spec"
+    status: str  # e.g. "closed"
+    date: datetime
+    module_link: str  # e.g. "/quality/ncr/42"
+
+
+class AutoEvidenceResult(BaseModel):
+    """Discovered evidence from a single ERP/MES module for a clause"""
+    evidence_type: str  # ncr, car, fai, calibration, etc.
+    title: str  # e.g. "Non-Conformance Reports (NCR)"
+    description: str  # e.g. "12 NCRs processed in last 12 months, 2 currently open"
+    module_reference: str  # e.g. "/quality/ncr"
+    total_count: int
+    recent_count: int  # Last 12 months
+    health_status: str  # healthy, warning, critical, no_data
+    health_detail: str  # e.g. "All NCRs resolved within SLA"
+    examples: List[AutoEvidenceExample] = Field(default_factory=list)
+    suggested_compliance: str  # compliant, partial, non_compliant, not_assessed
+
+
+class ClauseAutoEvidenceResponse(BaseModel):
+    """Auto-discovered evidence for a single clause"""
+    clause_id: int
+    clause_number: str
+    discovered_evidence: List[AutoEvidenceResult] = Field(default_factory=list)
+    overall_suggested_compliance: str
+
+
+class AutoLinkSummary(BaseModel):
+    """Summary of auto-link operation across all clauses in a standard"""
+    standard_id: int
+    standard_name: str
+    total_clauses: int
+    clauses_with_evidence: int
+    clauses_without_evidence: int
+    total_evidence_created: int
+    total_evidence_updated: int
+    compliance_summary: dict = Field(default_factory=dict)  # {"compliant": 38, "partial": 5, ...}

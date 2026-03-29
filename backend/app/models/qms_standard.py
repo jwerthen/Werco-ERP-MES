@@ -101,6 +101,12 @@ class QMSClauseEvidence(Base):
     verified_date = Column(DateTime, nullable=True)
     verification_notes = Column(Text)
 
+    # Auto-link fields
+    is_auto_linked = Column(Boolean, default=False)  # Distinguishes auto vs manual evidence
+    auto_link_query = Column(String(255), nullable=True)  # Which mapping rule matched
+    last_refreshed = Column(DateTime, nullable=True)  # When live counts were last updated
+    live_count = Column(Integer, nullable=True)  # Cached count of matching records
+
     # Audit
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

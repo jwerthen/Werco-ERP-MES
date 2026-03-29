@@ -2626,6 +2626,16 @@ class ApiService {
     return response.data;
   }
 
+  async getClauseAutoEvidence(clauseId: number) {
+    const response = await this.api.get(`/qms-standards/clauses/${clauseId}/auto-evidence`);
+    return response.data;
+  }
+
+  async autoLinkStandard(standardId: number) {
+    const response = await this.api.post(`/qms-standards/${standardId}/auto-link`);
+    return response.data;
+  }
+
   // Generic get method for flexibility
   async get<T = any>(url: string, config?: { params?: Record<string, any> }): Promise<{ data: T }> {
     const response = await this.api.get<T>(url, config);

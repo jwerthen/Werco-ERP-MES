@@ -659,6 +659,10 @@ export interface QMSEvidenceResponse {
   verified_by?: number;
   verified_date?: string;
   verification_notes?: string;
+  is_auto_linked: boolean;
+  auto_link_query?: string;
+  last_refreshed?: string;
+  live_count?: number;
   created_by?: number;
   created_at: string;
   updated_at?: string;
@@ -725,6 +729,49 @@ export interface QMSAuditReadinessSummary {
   verified_evidence: number;
   unverified_evidence: number;
   clauses_needing_review: number;
+}
+
+// ============ Auto-Evidence Discovery Types ============
+
+export interface AutoEvidenceExample {
+  record_id: number;
+  record_identifier: string;
+  record_type: string;
+  summary: string;
+  status: string;
+  date: string;
+  module_link: string;
+}
+
+export interface AutoEvidenceResult {
+  evidence_type: string;
+  title: string;
+  description: string;
+  module_reference: string;
+  total_count: number;
+  recent_count: number;
+  health_status: 'healthy' | 'warning' | 'critical' | 'no_data';
+  health_detail: string;
+  examples: AutoEvidenceExample[];
+  suggested_compliance: string;
+}
+
+export interface ClauseAutoEvidenceResponse {
+  clause_id: number;
+  clause_number: string;
+  discovered_evidence: AutoEvidenceResult[];
+  overall_suggested_compliance: string;
+}
+
+export interface AutoLinkSummary {
+  standard_id: number;
+  standard_name: string;
+  total_clauses: number;
+  clauses_with_evidence: number;
+  clauses_without_evidence: number;
+  total_evidence_created: number;
+  total_evidence_updated: number;
+  compliance_summary: Record<string, number>;
 }
 
 // ============ Error Handling ============

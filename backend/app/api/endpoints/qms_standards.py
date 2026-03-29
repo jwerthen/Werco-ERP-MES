@@ -15,6 +15,10 @@ from app.schemas.qms_standard import (
     QMSClauseCreate, QMSClauseUpdate, QMSClauseResponse, QMSClauseBulkCreate,
     QMSEvidenceCreate, QMSEvidenceUpdate, QMSEvidenceResponse,
     QMSAuditReadinessSummary,
+    AutoEvidenceResult, ClauseAutoEvidenceResponse, AutoLinkSummary,
+)
+from app.services.auto_evidence_service import (
+    discover_evidence_for_clause, compute_overall_compliance,
 )
 
 logger = logging.getLogger(__name__)
@@ -441,6 +445,128 @@ def delete_clause(
         raise HTTPException(status_code=404, detail="Clause not found")
     db.delete(clause)
     db.commit()
+
+
+# ============== Auto-Evidence Discovery ==============
+
+@router.get("/clauses/{clause_id}/auto-evidence", response_model=ClauseAutoEvidenceResponse)
+def get_clause_auto_evidence(
+    clause_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Discover live ERP/MES evidence for a single clause."""
+    clause = db.query(QMSClause).filter(QMSClause.id == clause_id).first()
+    if not clause:
+        raise HTTPException(status_code=404, detail="Clause not found")
+
+    results = discover_evidence_for_clause(db, clause)
+    overall = compute_overall_compliance(results)
+
+    # Strip internal _rule_id before returning
+    clean_results = [{k: v for k, v in r.items() if k != "_rule_id"} for r in results]
+
+    return ClauseAutoEvidenceResponse(
+        clause_id=clause.id,
+        clause_number=clause.clause_number,
+        discovered_evidence=clean_results,
+        overall_suggested_compliance=overall,
+    )
+
+
+@router.post("/{standard_id}/auto-link", response_model=AutoLinkSummary)
+def auto_link_standard(
+    standard_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+):
+    """
+    Run auto-discovery for ALL clauses in a standard and persist evidence links.
+    Creates or updates QMSClauseEvidence records with is_auto_linked=True.
+    """
+    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id).first()
+    if not standard:
+        raise HTTPException(status_code=404, detail="QMS standard not found")
+
+    clauses = (
+        db.query(QMSClause)
+        .filter(QMSClause.standard_id == standard_id)
+        .all()
+    )
+
+    now = datetime.utcnow()
+    total_created = 0
+    total_updated = 0
+    clauses_with_evidence = 0
+    compliance_counts = {}
+
+    for clause in clauses:
+        results = discover_evidence_for_clause(db, clause)
+
+        if results:
+            clauses_with_evidence += 1
+
+        overall = compute_overall_compliance(results)
+        compliance_counts[overall] = compliance_counts.get(overall, 0) + 1
+
+        for result in results:
+            rule_id = result.get("_rule_id", result.get("evidence_type", "unknown"))
+
+            # Check for existing auto-linked evidence of this type on this clause
+            existing = (
+                db.query(QMSClauseEvidence)
+                .filter(
+                    QMSClauseEvidence.clause_id == clause.id,
+                    QMSClauseEvidence.is_auto_linked == True,
+                    QMSClauseEvidence.auto_link_query == rule_id,
+                )
+                .first()
+            )
+
+            if existing:
+                # Update existing auto-linked evidence with fresh data
+                existing.title = result["title"]
+                existing.description = result["description"]
+                existing.module_reference = result["module_reference"]
+                existing.live_count = result["total_count"]
+                existing.last_refreshed = now
+                total_updated += 1
+            else:
+                # Create new auto-linked evidence
+                evidence = QMSClauseEvidence(
+                    clause_id=clause.id,
+                    evidence_type=result["evidence_type"],
+                    title=result["title"],
+                    description=result["description"],
+                    module_reference=result["module_reference"],
+                    record_type=result.get("evidence_type"),
+                    is_auto_linked=True,
+                    auto_link_query=rule_id,
+                    live_count=result["total_count"],
+                    last_refreshed=now,
+                    created_by=current_user.id,
+                )
+                db.add(evidence)
+                total_created += 1
+
+    db.commit()
+
+    logger.info(
+        f"Auto-link for standard {standard.name}: "
+        f"{total_created} created, {total_updated} updated, "
+        f"{clauses_with_evidence}/{len(clauses)} clauses with evidence"
+    )
+
+    return AutoLinkSummary(
+        standard_id=standard.id,
+        standard_name=standard.name,
+        total_clauses=len(clauses),
+        clauses_with_evidence=clauses_with_evidence,
+        clauses_without_evidence=len(clauses) - clauses_with_evidence,
+        total_evidence_created=total_created,
+        total_evidence_updated=total_updated,
+        compliance_summary=compliance_counts,
+    )
 
 
 # ============== Evidence Links ==============
