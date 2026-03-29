@@ -8,8 +8,8 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers
-revision = '025'
-down_revision = '024'
+revision = '025_add_auto_evidence_fields'
+down_revision = '024_add_missing_module_tables'
 branch_labels = None
 depends_on = None
 
