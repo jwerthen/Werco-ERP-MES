@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import api from '../services/api';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -6,7 +6,10 @@ import {
   PencilIcon,
   TrashIcon,
   CheckCircleIcon,
-  ArrowPathIcon
+  ArrowPathIcon,
+  DocumentArrowUpIcon,
+  SparklesIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
 
 interface WorkCenter {
@@ -103,6 +106,54 @@ interface BOM {
   items: BOMItem[];
 }
 
+interface DrawingExtractionInfo {
+  material?: string;
+  thickness?: string;
+  finish?: string;
+  tolerances_noted: boolean;
+  weld_required: boolean;
+  assembly_required: boolean;
+  flat_length?: number;
+  flat_width?: number;
+  cut_length?: number;
+  hole_count?: number;
+  bend_count?: number;
+}
+
+interface ProposedOperation {
+  sequence: number;
+  operation_name: string;
+  description?: string;
+  work_center_type: string;
+  work_center_id?: number;
+  work_center_name?: string;
+  setup_hours: number;
+  run_hours_per_unit: number;
+  is_inspection_point: boolean;
+  is_outside_operation: boolean;
+  tooling_requirements?: string;
+  work_instructions?: string;
+  confidence: string;
+}
+
+interface GenerationResult {
+  part_id: number;
+  part_number: string;
+  part_name: string;
+  drawing_info: DrawingExtractionInfo;
+  proposed_operations: ProposedOperation[];
+  extraction_confidence: string;
+  file_type: string;
+  warnings: string[];
+  existing_routing_warning?: string;
+}
+
+const confidenceBadge: Record<string, string> = {
+  high: 'bg-green-100 text-green-800',
+  medium: 'bg-yellow-100 text-yellow-800',
+  low: 'bg-red-100 text-red-800',
+};
+
 const lineTypeLabels: Record<string, string> = {
   component: 'Component',
   hardware: 'Hardware',
@@ -165,6 +216,18 @@ export default function RoutingPage() {
   const [forcedRoutingPart, setForcedRoutingPart] = useState<RoutingPartOption | null>(null);
   const [routingPartSearch, setRoutingPartSearch] = useState('');
   const [routingPartOpen, setRoutingPartOpen] = useState(false);
+
+  // Generate from Drawing state
+  const [showGenerateModal, setShowGenerateModal] = useState(false);
+  const [generatePartId, setGeneratePartId] = useState<number>(0);
+  const [generatePartSearch, setGeneratePartSearch] = useState('');
+  const [generatePartOpen, setGeneratePartOpen] = useState(false);
+  const [generateFile, setGenerateFile] = useState<File | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [generationResult, setGenerationResult] = useState<GenerationResult | null>(null);
+  const [editedOperations, setEditedOperations] = useState<ProposedOperation[]>([]);
+  const [creatingFromGeneration, setCreatingFromGeneration] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadData();
@@ -480,6 +543,96 @@ export default function RoutingPage() {
     setShowAddOperationModal(true);
   };
 
+  // Generate from Drawing handlers
+  const openGenerateModal = () => {
+    setShowGenerateModal(true);
+    setGeneratePartId(0);
+    setGeneratePartSearch('');
+    setGenerateFile(null);
+    setGenerationResult(null);
+    setEditedOperations([]);
+  };
+
+  const handleAnalyzeDrawing = async () => {
+    if (!generateFile || !generatePartId) return;
+    setGenerating(true);
+    try {
+      const result: GenerationResult = await api.generateRoutingFromDrawing(generateFile, generatePartId);
+      setGenerationResult(result);
+      setEditedOperations(result.proposed_operations);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to analyze drawing');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleCreateFromGeneration = async () => {
+    if (!generationResult || editedOperations.length === 0) return;
+    setCreatingFromGeneration(true);
+    try {
+      const operations = editedOperations
+        .filter((op) => op.work_center_id)
+        .map((op) => ({
+          sequence: op.sequence,
+          name: op.operation_name,
+          description: op.description || '',
+          work_center_id: op.work_center_id!,
+          setup_hours: op.setup_hours,
+          run_hours_per_unit: op.run_hours_per_unit,
+          is_inspection_point: op.is_inspection_point,
+          is_outside_operation: op.is_outside_operation,
+          tooling_requirements: op.tooling_requirements || undefined,
+          work_instructions: op.work_instructions || undefined,
+          move_hours: 0,
+          queue_hours: 0,
+        }));
+      if (operations.length === 0) {
+        alert('All operations need a work center assigned before creating the routing.');
+        return;
+      }
+      const created = await api.createRoutingFromGeneration({
+        part_id: generationResult.part_id,
+        revision: 'A',
+        description: `Auto-generated from ${generationResult.file_type.toUpperCase()} drawing`,
+        operations,
+      });
+      setRoutings([created, ...routings]);
+      setSelectedRouting(created);
+      setRoutingByPartId((prev) => ({ ...prev, [created.part_id]: created }));
+      setShowGenerateModal(false);
+      setGenerationResult(null);
+      setEditedOperations([]);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to create routing');
+    } finally {
+      setCreatingFromGeneration(false);
+    }
+  };
+
+  const updateEditedOp = (index: number, field: string, value: any) => {
+    setEditedOperations((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
+  };
+
+  const removeEditedOp = (index: number) => {
+    setEditedOperations((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const filteredGenerateParts = useMemo(() => {
+    const search = generatePartSearch.trim().toLowerCase();
+    const base = parts
+      .filter((p) => ['assembly', 'manufactured'].includes(p.part_type))
+      .sort((a, b) => a.part_number.localeCompare(b.part_number));
+    if (!search) return base.slice(0, 50);
+    return base
+      .filter((p) => p.part_number.toLowerCase().includes(search) || p.name.toLowerCase().includes(search))
+      .slice(0, 50);
+  }, [generatePartSearch, parts]);
+
   const formatHours = (hours: number) => {
     if (hours < 1) {
       return `${Math.round(hours * 60)} min`;
@@ -610,17 +763,26 @@ export default function RoutingPage() {
     <div className="space-y-6" data-tour="eng-routing">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Operations Routing</h1>
-        <button
-          onClick={() => {
-            setNewRouting({ part_id: 0, revision: 'A', description: '' });
-            setForcedRoutingPart(null);
-            setShowCreateModal(true);
-          }}
-          className="btn-primary flex items-center"
-        >
-          <PlusIcon className="h-5 w-5 mr-2" />
-          New Routing
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={openGenerateModal}
+            className="btn-secondary flex items-center"
+          >
+            <SparklesIcon className="h-5 w-5 mr-2" />
+            Generate from Drawing
+          </button>
+          <button
+            onClick={() => {
+              setNewRouting({ part_id: 0, revision: 'A', description: '' });
+              setForcedRoutingPart(null);
+              setShowCreateModal(true);
+            }}
+            className="btn-primary flex items-center"
+          >
+            <PlusIcon className="h-5 w-5 mr-2" />
+            New Routing
+          </button>
+        </div>
       </div>
 
       <div className="card">
@@ -1100,6 +1262,317 @@ export default function RoutingPage() {
                 <button type="submit" className="btn-primary" disabled={!newRouting.part_id}>Create</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Generate from Drawing Modal */}
+      {showGenerateModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => !generating && setShowGenerateModal(false)}>
+          <div className="bg-white rounded-lg p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <SparklesIcon className="h-6 w-6 text-werco-primary" />
+              <h3 className="text-lg font-semibold">Generate Routing from Drawing</h3>
+            </div>
+
+            {!generationResult ? (
+              <div className="space-y-4">
+                <p className="text-sm text-gray-600">
+                  Upload a drawing (PDF, DXF, or STEP) and select a part. The system will analyze the drawing and propose a draft routing with operations mapped to your work centers.
+                </p>
+
+                {/* Part selector */}
+                <div>
+                  <label className="label">Part</label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={generatePartSearch}
+                      onChange={(e) => {
+                        setGeneratePartSearch(e.target.value);
+                        setGeneratePartOpen(true);
+                        if (generatePartId) setGeneratePartId(0);
+                      }}
+                      onFocus={() => setGeneratePartOpen(true)}
+                      onBlur={() => window.setTimeout(() => setGeneratePartOpen(false), 150)}
+                      className="input"
+                      placeholder="Search by part number or name..."
+                    />
+                    {generatePartOpen && (
+                      <div className="absolute z-10 mt-1 w-full rounded-md border border-gray-200 bg-white shadow-lg max-h-48 overflow-y-auto">
+                        {filteredGenerateParts.length === 0 ? (
+                          <div className="px-3 py-2 text-sm text-gray-500">No matching parts found.</div>
+                        ) : (
+                          filteredGenerateParts.map((part) => (
+                            <button
+                              type="button"
+                              key={part.id}
+                              onMouseDown={() => {
+                                setGeneratePartId(part.id);
+                                setGeneratePartSearch(`${part.part_number} - ${part.name}`);
+                                setGeneratePartOpen(false);
+                              }}
+                              className={`w-full px-3 py-2 text-left hover:bg-gray-50 ${part.id === generatePartId ? 'bg-blue-50' : ''}`}
+                            >
+                              <div className="text-sm font-medium">{part.part_number}</div>
+                              <div className="text-xs text-gray-500">{part.name}</div>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* File upload */}
+                <div>
+                  <label className="label">Drawing File</label>
+                  <div
+                    className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center cursor-pointer hover:border-werco-primary transition-colors"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".pdf,.dxf,.step,.stp"
+                      className="hidden"
+                      onChange={(e) => setGenerateFile(e.target.files?.[0] || null)}
+                    />
+                    <DocumentArrowUpIcon className="h-10 w-10 mx-auto text-gray-400 mb-2" />
+                    {generateFile ? (
+                      <p className="text-sm font-medium text-werco-primary">{generateFile.name}</p>
+                    ) : (
+                      <>
+                        <p className="text-sm text-gray-600">Click to select a file</p>
+                        <p className="text-xs text-gray-400 mt-1">Supports PDF, DXF, STEP (.stp)</p>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-3 pt-2">
+                  <button type="button" onClick={() => setShowGenerateModal(false)} className="btn-secondary">
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAnalyzeDrawing}
+                    disabled={!generatePartId || !generateFile || generating}
+                    className="btn-primary flex items-center"
+                  >
+                    {generating ? (
+                      <>
+                        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent mr-2" />
+                        Analyzing...
+                      </>
+                    ) : (
+                      <>
+                        <SparklesIcon className="h-4 w-4 mr-2" />
+                        Analyze Drawing
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Drawing info summary */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="text-xs text-gray-500">Part</div>
+                    <div className="font-semibold text-sm">{generationResult.part_number}</div>
+                    <div className="text-xs text-gray-400">{generationResult.part_name}</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="text-xs text-gray-500">Material</div>
+                    <div className="font-semibold text-sm">{generationResult.drawing_info.material || 'Not detected'}</div>
+                    {generationResult.drawing_info.thickness && (
+                      <div className="text-xs text-gray-400">{generationResult.drawing_info.thickness}</div>
+                    )}
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="text-xs text-gray-500">Finish</div>
+                    <div className="font-semibold text-sm">{generationResult.drawing_info.finish || 'None specified'}</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="text-xs text-gray-500">Confidence</div>
+                    <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${confidenceBadge[generationResult.extraction_confidence] || 'bg-gray-100 text-gray-600'}`}>
+                      {generationResult.extraction_confidence}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Geometry info row */}
+                {(generationResult.drawing_info.cut_length || generationResult.drawing_info.hole_count || generationResult.drawing_info.bend_count) && (
+                  <div className="flex gap-4 text-sm text-gray-600">
+                    {generationResult.drawing_info.cut_length && (
+                      <span>Cut: {generationResult.drawing_info.cut_length.toFixed(1)}"</span>
+                    )}
+                    {generationResult.drawing_info.hole_count != null && generationResult.drawing_info.hole_count > 0 && (
+                      <span>Holes: {generationResult.drawing_info.hole_count}</span>
+                    )}
+                    {generationResult.drawing_info.bend_count != null && generationResult.drawing_info.bend_count > 0 && (
+                      <span>Bends: {generationResult.drawing_info.bend_count}</span>
+                    )}
+                    {generationResult.drawing_info.flat_length && generationResult.drawing_info.flat_width && (
+                      <span>Size: {generationResult.drawing_info.flat_length.toFixed(1)}" x {generationResult.drawing_info.flat_width.toFixed(1)}"</span>
+                    )}
+                  </div>
+                )}
+
+                {/* Warnings */}
+                {(generationResult.warnings.length > 0 || generationResult.existing_routing_warning) && (
+                  <div className="space-y-2">
+                    {generationResult.existing_routing_warning && (
+                      <div className="flex items-start gap-2 bg-amber-50 text-amber-800 text-sm px-3 py-2 rounded-lg">
+                        <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0 mt-0.5" />
+                        {generationResult.existing_routing_warning}
+                      </div>
+                    )}
+                    {generationResult.warnings.map((w, i) => (
+                      <div key={i} className="flex items-start gap-2 bg-yellow-50 text-yellow-800 text-sm px-3 py-2 rounded-lg">
+                        <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                        {w}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Editable operations table */}
+                <div>
+                  <h4 className="font-semibold text-sm mb-2">Proposed Operations ({editedOperations.length})</h4>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Seq</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Setup</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Run/Unit</th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Conf.</th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase w-10"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {editedOperations.map((op, idx) => (
+                          <tr key={idx} className="hover:bg-gray-50">
+                            <td className="px-3 py-2 font-medium">{op.sequence}</td>
+                            <td className="px-3 py-2">
+                              <input
+                                type="text"
+                                value={op.operation_name}
+                                onChange={(e) => updateEditedOp(idx, 'operation_name', e.target.value)}
+                                className="input py-1 text-sm w-full"
+                              />
+                              {op.description && (
+                                <div className="text-xs text-gray-400 mt-0.5">{op.description}</div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2">
+                              <select
+                                value={op.work_center_id || 0}
+                                onChange={(e) => {
+                                  const wcId = parseInt(e.target.value);
+                                  const wc = workCenters.find((w) => w.id === wcId);
+                                  updateEditedOp(idx, 'work_center_id', wcId || undefined);
+                                  updateEditedOp(idx, 'work_center_name', wc?.name || undefined);
+                                }}
+                                className={`input py-1 text-sm w-full ${!op.work_center_id ? 'border-red-300' : ''}`}
+                              >
+                                <option value={0}>Select...</option>
+                                {workCenters.map((wc) => (
+                                  <option key={wc.id} value={wc.id}>
+                                    {wc.code} - {wc.name}
+                                  </option>
+                                ))}
+                              </select>
+                              {!op.work_center_id && (
+                                <div className="text-xs text-red-500 mt-0.5">Required</div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <input
+                                type="number"
+                                value={Math.round(op.setup_hours * 60 * 100) / 100}
+                                onChange={(e) => updateEditedOp(idx, 'setup_hours', (parseFloat(e.target.value) || 0) / 60)}
+                                className="input py-1 text-sm w-20 text-right"
+                                step={1}
+                                min={0}
+                              />
+                              <span className="text-xs text-gray-400 ml-1">min</span>
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <input
+                                type="number"
+                                value={Math.round(op.run_hours_per_unit * 60 * 100) / 100}
+                                onChange={(e) => updateEditedOp(idx, 'run_hours_per_unit', (parseFloat(e.target.value) || 0) / 60)}
+                                className="input py-1 text-sm w-20 text-right"
+                                step={0.1}
+                                min={0}
+                              />
+                              <span className="text-xs text-gray-400 ml-1">min</span>
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${confidenceBadge[op.confidence] || 'bg-gray-100 text-gray-600'}`}>
+                                {op.confidence}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              <button
+                                onClick={() => removeEditedOp(idx)}
+                                className="text-gray-400 hover:text-red-500"
+                                title="Remove operation"
+                              >
+                                <TrashIcon className="h-4 w-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {editedOperations.length === 0 && (
+                    <p className="text-sm text-gray-500 text-center py-4">No operations proposed. The drawing may not have enough information.</p>
+                  )}
+                </div>
+
+                <div className="flex justify-between items-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGenerationResult(null);
+                      setEditedOperations([]);
+                      setGenerateFile(null);
+                    }}
+                    className="text-sm text-gray-500 hover:text-gray-700"
+                  >
+                    Start over
+                  </button>
+                  <div className="flex gap-3">
+                    <button type="button" onClick={() => setShowGenerateModal(false)} className="btn-secondary">
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleCreateFromGeneration}
+                      disabled={creatingFromGeneration || editedOperations.length === 0 || editedOperations.some((op) => !op.work_center_id)}
+                      className="btn-primary flex items-center"
+                    >
+                      {creatingFromGeneration ? (
+                        <>
+                          <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent mr-2" />
+                          Creating...
+                        </>
+                      ) : (
+                        <>
+                          <PlusIcon className="h-4 w-4 mr-2" />
+                          Create Draft Routing
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

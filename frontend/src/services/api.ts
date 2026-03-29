@@ -761,6 +761,27 @@ class ApiService {
     return response.data;
   }
 
+  async generateRoutingFromDrawing(file: File, partId: number) {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('part_id', partId.toString());
+    const response = await this.api.post('/routing/generate-from-drawing', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000,
+    });
+    return response.data;
+  }
+
+  async createRoutingFromGeneration(data: {
+    part_id: number;
+    revision?: string;
+    description?: string;
+    operations: any[];
+  }) {
+    const response = await this.api.post('/routing/create-from-generation', data);
+    return response.data;
+  }
+
   // Quality Management
   async getNCRs(params?: { status?: string; part_id?: number }) {
     const response = await this.api.get('/quality/ncr', { params });

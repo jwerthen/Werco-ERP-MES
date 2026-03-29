@@ -1,6 +1,9 @@
-from typing import List, Optional
+import os
+import logging
+from typing import List, Optional, Dict, Any
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status
+from pathlib import Path
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
@@ -13,6 +16,12 @@ from app.schemas.routing import (
     RoutingOperationCreate, RoutingOperationUpdate, RoutingOperationResponse,
     PartSummary, WorkCenterSummary
 )
+from app.schemas.routing_generation import (
+    RoutingGenerationResult, RoutingCreateFromGeneration,
+    DrawingExtractionInfo, ProposedOperation,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -50,6 +59,255 @@ def calculate_routing_totals(routing: Routing, db: Session):
     routing.total_run_hours_per_unit = total_run
     routing.total_labor_cost = total_labor
     routing.total_overhead_cost = total_overhead
+
+
+ALLOWED_DRAWING_EXTENSIONS = {".pdf", ".dxf", ".step", ".stp"}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+@router.post("/generate-from-drawing", response_model=RoutingGenerationResult)
+async def generate_routing_from_drawing(
+    file: UploadFile = File(...),
+    part_id: int = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+):
+    """
+    Upload a drawing (PDF, DXF, STEP) and get a proposed draft routing.
+    Returns the proposed routing for user review -- does NOT create it yet.
+    """
+    # Validate part exists
+    part = db.query(Part).filter(Part.id == part_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+
+    # Validate file extension
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_DRAWING_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_DRAWING_EXTENSIONS)}",
+        )
+
+    # Read file content
+    file_content = await file.read()
+    if len(file_content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
+    # Save to temp location
+    upload_dir = Path("uploads/routing_generation")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"{part_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{ext}"
+    file_path = upload_dir / safe_name
+    file_path.write_bytes(file_content)
+
+    warnings: List[str] = []
+
+    # Check for existing active routing (warn but don't block)
+    existing_routing_warning = None
+    existing = db.query(Routing).filter(
+        Routing.part_id == part_id, Routing.is_active == True
+    ).first()
+    if existing:
+        existing_routing_warning = (
+            f"Part already has an active routing (Rev {existing.revision}, status: {existing.status}). "
+            "Creating a new routing will require deactivating the existing one first."
+        )
+
+    # Build work_centers_by_type lookup from active work centers
+    active_wcs = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+    work_centers_by_type: Dict[str, List[Dict[str, Any]]] = {}
+    for wc in active_wcs:
+        wc_type = wc.work_center_type
+        if wc_type not in work_centers_by_type:
+            work_centers_by_type[wc_type] = []
+        work_centers_by_type[wc_type].append({"id": wc.id, "name": wc.name, "code": wc.code})
+
+    # Parse file based on type
+    drawing_text = ""
+    geometry = None
+    is_ocr = False
+
+    if ext == ".pdf":
+        from app.services.pdf_service import extract_text_from_pdf
+        result = extract_text_from_pdf(str(file_path))
+        drawing_text = result.text
+        is_ocr = result.is_ocr
+        if not drawing_text or len(drawing_text.strip()) < 20:
+            warnings.append("Very little text extracted from the PDF. The routing may be incomplete.")
+
+    elif ext == ".dxf":
+        from app.services.rfq_parsing_service import parse_dxf_geometry
+        geometry = parse_dxf_geometry(str(file_path), file.filename or safe_name)
+        # Build a text summary from geometry for the LLM
+        parts_desc = []
+        if geometry.get("cut_length"):
+            parts_desc.append(f"Cut length: {geometry['cut_length']:.1f} inches")
+        if geometry.get("hole_count"):
+            parts_desc.append(f"Holes: {geometry['hole_count']}")
+        if geometry.get("bend_count"):
+            parts_desc.append(f"Bends: {geometry['bend_count']}")
+        if geometry.get("flat_area"):
+            parts_desc.append(f"Flat area: {geometry['flat_area']:.1f} sq inches")
+        bbox = geometry.get("bbox", {})
+        if bbox and bbox.get("min_x") is not None:
+            w = (bbox.get("max_x", 0) or 0) - (bbox.get("min_x", 0) or 0)
+            h = (bbox.get("max_y", 0) or 0) - (bbox.get("min_y", 0) or 0)
+            parts_desc.append(f"Bounding box: {w:.1f} x {h:.1f} inches")
+        drawing_text = (
+            f"DXF flat pattern for part {part.part_number} ({part.name}).\n"
+            + "\n".join(parts_desc)
+        )
+
+    elif ext in (".step", ".stp"):
+        from app.services.rfq_parsing_service import parse_step_fallback
+        geometry = parse_step_fallback(str(file_path), file.filename or safe_name)
+        drawing_text = (
+            f"STEP file for part {part.part_number} ({part.name})."
+        )
+        if geometry.get("warning"):
+            warnings.append(geometry["warning"])
+
+    # Generate the draft routing
+    from app.services.routing_generation_service import generate_draft_routing
+    gen_result = generate_draft_routing(
+        drawing_text=drawing_text,
+        geometry=geometry,
+        work_centers_by_type=work_centers_by_type,
+        is_ocr=is_ocr,
+    )
+
+    if gen_result.get("_error"):
+        raise HTTPException(status_code=500, detail=gen_result["_error"])
+
+    # Build response
+    part_info = gen_result.get("part_info", {})
+    drawing_info = DrawingExtractionInfo(
+        material=part_info.get("material"),
+        thickness=part_info.get("thickness"),
+        finish=part_info.get("finish"),
+        tolerances_noted=part_info.get("tolerances_noted", False),
+        weld_required=part_info.get("weld_required", False),
+        assembly_required=part_info.get("assembly_required", False),
+        cut_length=geometry.get("cut_length") if geometry else None,
+        hole_count=geometry.get("hole_count") if geometry else None,
+        bend_count=geometry.get("bend_count") if geometry else None,
+        flat_length=(
+            ((geometry.get("bbox", {}).get("max_x", 0) or 0) - (geometry.get("bbox", {}).get("min_x", 0) or 0))
+            if geometry and geometry.get("bbox") and geometry["bbox"].get("min_x") is not None
+            else None
+        ),
+        flat_width=(
+            ((geometry.get("bbox", {}).get("max_y", 0) or 0) - (geometry.get("bbox", {}).get("min_y", 0) or 0))
+            if geometry and geometry.get("bbox") and geometry["bbox"].get("min_y") is not None
+            else None
+        ),
+    )
+
+    proposed_operations = [
+        ProposedOperation(
+            sequence=op.get("sequence", (i + 1) * 10),
+            operation_name=op.get("operation_name", f"Operation {(i + 1) * 10}"),
+            description=op.get("description"),
+            work_center_type=op.get("work_center_type", "fabrication"),
+            work_center_id=op.get("work_center_id"),
+            work_center_name=op.get("work_center_name"),
+            setup_hours=op.get("setup_hours", 0.0),
+            run_hours_per_unit=op.get("run_hours_per_unit", 0.0),
+            is_inspection_point=op.get("is_inspection_point", False),
+            is_outside_operation=op.get("is_outside_operation", False),
+            tooling_requirements=op.get("tooling_requirements"),
+            work_instructions=op.get("work_instructions"),
+            confidence=op.get("confidence", "medium"),
+        )
+        for i, op in enumerate(gen_result.get("operations", []))
+    ]
+
+    all_warnings = warnings + gen_result.get("warnings", [])
+
+    return RoutingGenerationResult(
+        part_id=part.id,
+        part_number=part.part_number,
+        part_name=part.name,
+        drawing_info=drawing_info,
+        proposed_operations=proposed_operations,
+        extraction_confidence=gen_result.get("extraction_confidence", "medium"),
+        file_type=ext.lstrip("."),
+        warnings=all_warnings,
+        existing_routing_warning=existing_routing_warning,
+    )
+
+
+@router.post("/create-from-generation", response_model=RoutingResponse)
+def create_routing_from_generation(
+    data: RoutingCreateFromGeneration,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+):
+    """
+    Create a routing and its operations from the reviewed/edited generation result.
+    The routing is created in 'draft' status.
+    """
+    # Check part exists
+    part = db.query(Part).filter(Part.id == data.part_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+
+    # Check for existing active routing
+    existing = db.query(Routing).filter(
+        Routing.part_id == data.part_id, Routing.is_active == True
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Part already has an active routing (Rev {existing.revision}). Deactivate it first or create a new revision.",
+        )
+
+    # Validate all work_center_ids exist
+    for op in data.operations:
+        wc = db.query(WorkCenter).filter(WorkCenter.id == op.work_center_id).first()
+        if not wc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Work center ID {op.work_center_id} not found (operation '{op.name}').",
+            )
+
+    # Create routing
+    routing = Routing(
+        part_id=data.part_id,
+        revision=data.revision,
+        description=data.description or f"Auto-generated from drawing for {part.part_number}",
+        status="draft",
+        created_by=current_user.id,
+    )
+    db.add(routing)
+    db.flush()
+
+    # Create operations
+    for op_data in data.operations:
+        op_dict = op_data.model_dump()
+        if not op_dict.get("operation_number"):
+            op_dict["operation_number"] = f"Op {op_dict['sequence']}"
+        operation = RoutingOperation(routing_id=routing.id, **op_dict)
+        db.add(operation)
+
+    db.flush()
+    db.refresh(routing)
+    calculate_routing_totals(routing, db)
+    db.commit()
+
+    # Reload with relationships for response
+    routing = (
+        db.query(Routing)
+        .options(
+            joinedload(Routing.part),
+            joinedload(Routing.operations).joinedload(RoutingOperation.work_center),
+        )
+        .filter(Routing.id == routing.id)
+        .first()
+    )
+
+    return routing
 
 
 @router.get("/", response_model=List[RoutingListResponse])
