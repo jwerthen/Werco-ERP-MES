@@ -288,21 +288,9 @@ export default function JobCosting() {
       return;
     }
     try {
-      await api.get('/job-costs/').then(() => {}); // warm up
-      const response = await fetch(
-        `${process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1'}/job-costs/`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
-          },
-          body: JSON.stringify(createForm),
-        }
-      );
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.detail || 'Failed to create job cost');
+      const response = await api.post('/job-costs/', createForm);
+      if (!response) {
+        throw new Error('Failed to create job cost');
       }
       setShowCreateModal(false);
       loadJobCosts();
@@ -332,21 +320,7 @@ export default function JobCosting() {
     e.preventDefault();
     if (!entryJobCostId) return;
     try {
-      const response = await fetch(
-        `${process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1'}/job-costs/${entryJobCostId}/entries`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
-          },
-          body: JSON.stringify(entryForm),
-        }
-      );
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.detail || 'Failed to add entry');
-      }
+      await api.post(`/job-costs/${entryJobCostId}/entries`, entryForm);
       setShowEntryModal(false);
       loadEntries(entryJobCostId);
       loadJobCosts();
@@ -361,16 +335,7 @@ export default function JobCosting() {
   const handleDeleteEntry = async (jobCostId: number, entryId: number) => {
     if (!window.confirm('Are you sure you want to delete this cost entry?')) return;
     try {
-      const response = await fetch(
-        `${process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1'}/job-costs/${jobCostId}/entries/${entryId}`,
-        {
-          method: 'DELETE',
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
-          },
-        }
-      );
-      if (!response.ok) throw new Error('Failed to delete entry');
+      await api.delete(`/job-costs/${jobCostId}/entries/${entryId}`);
       loadEntries(jobCostId);
       loadJobCosts();
       loadSummary();
@@ -383,16 +348,7 @@ export default function JobCosting() {
 
   const handleRecalculate = async (jobCostId: number) => {
     try {
-      const response = await fetch(
-        `${process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1'}/job-costs/${jobCostId}/calculate`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
-          },
-        }
-      );
-      if (!response.ok) throw new Error('Failed to recalculate');
+      await api.post(`/job-costs/${jobCostId}/calculate`, {});
       loadJobCosts();
       loadSummary();
       if (expandedId === jobCostId) {

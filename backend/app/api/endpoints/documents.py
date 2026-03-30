@@ -103,13 +103,52 @@ async def upload_document(
     current_user: User = Depends(get_current_user)
 ):
     """Upload a new document"""
-    # Generate unique filename
-    file_ext = os.path.splitext(file.filename)[1] if file.filename else ""
+    # Allowed file extensions and MIME types
+    ALLOWED_EXTENSIONS = {
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff",
+        ".txt", ".rtf", ".dwg", ".dxf", ".step", ".stp", ".igs", ".iges",
+    }
+    ALLOWED_MIME_TYPES = {
+        "application/pdf", "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/csv", "text/plain", "application/rtf",
+        "image/png", "image/jpeg", "image/gif", "image/bmp", "image/tiff",
+        "application/octet-stream",  # Common for CAD files
+    }
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
+    # Validate file extension
+    file_ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type '{file_ext}' is not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+        )
+
+    # Validate MIME type
+    if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"MIME type '{file.content_type}' is not allowed."
+        )
+
+    # Read and validate file size
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File size ({len(content)} bytes) exceeds maximum allowed ({MAX_FILE_SIZE} bytes)."
+        )
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Empty files are not allowed.")
+
+    # Generate unique filename and save
     unique_name = f"{uuid.uuid4()}{file_ext}"
     file_path = os.path.join(UPLOAD_DIR, unique_name)
-    
-    # Save file
-    content = await file.read()
+
     with open(file_path, "wb") as f:
         f.write(content)
     

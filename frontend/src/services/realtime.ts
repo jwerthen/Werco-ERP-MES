@@ -6,7 +6,7 @@ const WS_BASE_URL = process.env.REACT_APP_WS_URL || API_BASE_URL.replace(/^http/
 const trimTrailingSlash = (value: string) => value.replace(/\/+$/, '');
 
 export const getAccessToken = (): string | null => {
-  return localStorage.getItem('token');
+  return sessionStorage.getItem('token');
 };
 
 export const buildWsUrl = (path: string, params?: QueryParams): string => {

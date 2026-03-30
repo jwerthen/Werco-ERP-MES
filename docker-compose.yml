@@ -7,12 +7,12 @@ services:
     container_name: werco-db
     environment:
       POSTGRES_USER: werco_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-werco_secure_password}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD environment variable is required}
       POSTGRES_DB: werco_erp
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U werco_user -d werco_erp"]
       interval: 10s
@@ -25,7 +25,7 @@ services:
     image: redis:7-alpine
     container_name: werco-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -33,7 +33,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme}
     restart: unless-stopped
 
   # Backend API
@@ -43,9 +43,9 @@ services:
       dockerfile: Dockerfile
     container_name: werco-backend
     environment:
-      DATABASE_URL: postgresql://werco_user:${DB_PASSWORD:-werco_secure_password}@db:5432/werco_erp
-      SECRET_KEY: ${SECRET_KEY}
-      REFRESH_TOKEN_SECRET_KEY: ${REFRESH_TOKEN_SECRET_KEY}
+      DATABASE_URL: postgresql://werco_user:${DB_PASSWORD:?DB_PASSWORD required}@db:5432/werco_erp
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required}
+      REFRESH_TOKEN_SECRET_KEY: ${REFRESH_TOKEN_SECRET_KEY:?REFRESH_TOKEN_SECRET_KEY required}
       CORS_ORIGINS: http://localhost:3000,http://localhost:3001,http://localhost:8000
       DEBUG: "false"
       ENVIRONMENT: development
@@ -100,9 +100,9 @@ services:
       dockerfile: Dockerfile
     container_name: werco-worker
     environment:
-      DATABASE_URL: postgresql://werco_user:${DB_PASSWORD:-werco_secure_password}@db:5432/werco_erp
-      SECRET_KEY: ${SECRET_KEY}
-      REFRESH_TOKEN_SECRET_KEY: ${REFRESH_TOKEN_SECRET_KEY}
+      DATABASE_URL: postgresql://werco_user:${DB_PASSWORD:?DB_PASSWORD required}@db:5432/werco_erp
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required}
+      REFRESH_TOKEN_SECRET_KEY: ${REFRESH_TOKEN_SECRET_KEY:?REFRESH_TOKEN_SECRET_KEY required}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       REDIS_HOST: redis
       REDIS_PORT: 6379

@@ -78,11 +78,22 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         
         start_time = time.perf_counter()
         
-        # Extract request context
+        # Extract request context with sensitive parameter redaction
+        SENSITIVE_PARAMS = {"password", "token", "secret", "key", "api_key", "refresh_token", "access_token"}
+        query_str = None
+        if request.query_params:
+            redacted_params = []
+            for k, v in request.query_params.items():
+                if k.lower() in SENSITIVE_PARAMS:
+                    redacted_params.append(f"{k}=[REDACTED]")
+                else:
+                    redacted_params.append(f"{k}={v}")
+            query_str = "&".join(redacted_params)
+
         request_context = {
             "method": request.method,
             "path": request.url.path,
-            "query": str(request.query_params) if request.query_params else None,
+            "query": query_str,
             "client_ip": self._get_client_ip(request),
             "user_agent": request.headers.get("user-agent", "")[:100],
         }
@@ -127,21 +138,44 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             raise
     
     def _get_client_ip(self, request: Request) -> str:
-        """Extract client IP, considering proxy headers."""
-        # Check forwarded headers (behind proxy/load balancer)
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        
-        real_ip = request.headers.get("x-real-ip")
-        if real_ip:
-            return real_ip
-        
-        # Direct connection
-        if request.client:
-            return request.client.host
-        
-        return "unknown"
+        """Extract client IP, considering proxy headers.
+
+        Only trusts proxy headers when the direct connection is from a known
+        private/loopback address (i.e. a trusted reverse proxy).
+        """
+        import ipaddress
+
+        direct_ip = request.client.host if request.client else "unknown"
+
+        # Only trust proxy headers if the direct connection is from a private/loopback IP
+        is_trusted_proxy = False
+        try:
+            addr = ipaddress.ip_address(direct_ip)
+            is_trusted_proxy = addr.is_private or addr.is_loopback
+        except ValueError:
+            pass
+
+        if is_trusted_proxy:
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                # Take the first (client) IP from the chain
+                client_ip = forwarded.split(",")[0].strip()
+                # Validate it looks like an IP address
+                try:
+                    ipaddress.ip_address(client_ip)
+                    return client_ip
+                except ValueError:
+                    pass
+
+            real_ip = request.headers.get("x-real-ip")
+            if real_ip:
+                try:
+                    ipaddress.ip_address(real_ip)
+                    return real_ip
+                except ValueError:
+                    pass
+
+        return direct_ip
 
 
 def setup_logging_middleware(app: ASGIApp) -> None:

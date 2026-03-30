@@ -526,7 +526,7 @@ def reset_database(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid reset key")
 
     # Safety check — can be disabled via env var after go-live
-    if os.environ.get("ALLOW_DB_RESET", "true").lower() != "true":
+    if os.environ.get("ALLOW_DB_RESET", "false").lower() != "true":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Database reset is disabled")
 
     tables_result = db.execute(text(

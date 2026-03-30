@@ -210,13 +210,13 @@ jobs:
 
       - name: Run npm audit (Frontend)
         working-directory: ./frontend
-        run: npm audit || true
+        run: npm audit --audit-level=high
 
       - name: Run safety check (Backend)
         working-directory: ./backend
         run: |
           pip install safety
-          safety check || true
+          safety check
 
   deploy-staging:
     name: Deploy to Staging

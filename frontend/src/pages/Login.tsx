@@ -98,7 +98,7 @@ export default function Login() {
 
         await loginWithEmployeeId(employeeLoginId);
         try {
-          const storedUser = localStorage.getItem('user');
+          const storedUser = sessionStorage.getItem('user');
           const signedInUser = storedUser ? JSON.parse(storedUser) : null;
           if (signedInUser?.role === 'operator') {
             navigate('/shop-floor/operations?kiosk=1', { replace: true });

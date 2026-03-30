@@ -46,7 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     api.logout();
     setUser(null);
     setSessionWarning(false);
-    localStorage.removeItem('user');
+    sessionStorage.removeItem('user');
     window.location.href = '/login?reason=idle';
   }, [clearTimers]);
 
@@ -100,15 +100,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // Check for existing token on mount
-    const token = localStorage.getItem('token');
-    const savedUser = localStorage.getItem('user');
+    const token = sessionStorage.getItem('token');
+    const savedUser = sessionStorage.getItem('user');
     
     if (token && savedUser) {
       try {
         setUser(JSON.parse(savedUser));
       } catch {
-        localStorage.removeItem('user');
-        localStorage.removeItem('token');
+        sessionStorage.removeItem('user');
+        sessionStorage.removeItem('token');
       }
     }
     setIsLoading(false);
@@ -123,7 +123,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       api.setToken(response.access_token);
     }
     setUser(response.user);
-    localStorage.setItem('user', JSON.stringify(response.user));
+    sessionStorage.setItem('user', JSON.stringify({ id: response.user.id, role: response.user.role, email: response.user.email }));
     
     // Load custom role permissions from backend (non-blocking)
     try {
@@ -145,7 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       api.setToken(response.access_token);
     }
     setUser(response.user);
-    localStorage.setItem('user', JSON.stringify(response.user));
+    sessionStorage.setItem('user', JSON.stringify({ id: response.user.id, role: response.user.role, email: response.user.email }));
 
     try {
       const permData = await api.getRolePermissions();
@@ -160,7 +160,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = () => {
     api.logout();
     setUser(null);
-    localStorage.removeItem('user');
+    sessionStorage.removeItem('user');
   };
 
   const logoutWithEmployeeId = async (employeeId: string) => {

@@ -17,7 +17,7 @@ engine = create_engine(
     pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_recycle=settings.DB_POOL_RECYCLE,
     pool_pre_ping=settings.DB_POOL_PRE_PING,
-    echo=settings.DEBUG,  # Log SQL queries in debug mode
+    echo=False,  # SQL query logging disabled for security; enable explicitly if needed
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

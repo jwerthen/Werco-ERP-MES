@@ -72,23 +72,36 @@ class DatabaseBackup:
         compressed_file = self.backup_dir / f"werco_erp_backup_{timestamp}.sql.gz"
 
         try:
-            # Execute pg_dump
+            # Execute pg_dump using .pgpass file for credential handling
             logger.info(f"Creating backup: {backup_file}")
-            env = os.environ.copy()
-            env['PGPASSWORD'] = db_config['password']
 
-            cmd = [
-                'pg_dump',
-                '-h', db_config['host'],
-                '-p', db_config['port'],
-                '-U', db_config['user'],
-                '-d', db_config['dbname'],
-                '--no-owner',
-                '--no-acl',
-                '-f', str(backup_file)
-            ]
+            # Create temporary .pgpass file (more secure than PGPASSWORD env var)
+            import tempfile, stat
+            pgpass_file = Path(tempfile.mktemp(prefix='.pgpass_'))
+            try:
+                pgpass_line = f"{db_config['host']}:{db_config['port']}:{db_config['dbname']}:{db_config['user']}:{db_config['password']}"
+                pgpass_file.write_text(pgpass_line + '\n')
+                pgpass_file.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
 
-            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+                env = os.environ.copy()
+                env['PGPASSFILE'] = str(pgpass_file)
+
+                cmd = [
+                    'pg_dump',
+                    '-h', db_config['host'],
+                    '-p', db_config['port'],
+                    '-U', db_config['user'],
+                    '-d', db_config['dbname'],
+                    '--no-owner',
+                    '--no-acl',
+                    '-f', str(backup_file)
+                ]
+
+                result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            finally:
+                # Always clean up the pgpass file
+                if pgpass_file.exists():
+                    pgpass_file.unlink()
 
             if result.returncode != 0:
                 logger.error(f"pg_dump failed: {result.stderr}")

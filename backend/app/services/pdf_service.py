@@ -263,8 +263,14 @@ def _extract_doc_text(doc_path: str) -> DocumentExtractionResult:
     
     logger.info(f"[DOC] Starting legacy .doc extraction from: {doc_path}")
     
-    # Verify file exists and get absolute path
-    abs_path = os.path.abspath(doc_path)
+    # Verify file exists and get resolved path (prevents path traversal)
+    from pathlib import Path
+    abs_path = str(Path(doc_path).resolve())
+    # Ensure the resolved path is within the expected upload directory
+    allowed_dirs = ["/app/uploads", "/tmp"]
+    if not any(abs_path.startswith(d) for d in allowed_dirs):
+        logger.error(f"[DOC] Path traversal attempt blocked: {abs_path}")
+        return DocumentExtractionResult(text="", confidence="low", file_type="doc")
     if not os.path.exists(abs_path):
         logger.error(f"[DOC] File does not exist: {abs_path}")
         return DocumentExtractionResult(text="", confidence="low", file_type="doc")

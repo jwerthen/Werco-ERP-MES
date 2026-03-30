@@ -108,7 +108,17 @@ class Settings(BaseSettings):
     
     @property
     def cors_origins_list(self) -> List[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+        origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        validated = []
+        for origin in origins:
+            # Reject wildcard origins
+            if origin == "*":
+                raise ValueError("Wildcard '*' CORS origin is not allowed. Specify explicit origins.")
+            # Require http:// or https:// scheme
+            if not origin.startswith("http://") and not origin.startswith("https://"):
+                raise ValueError(f"CORS origin must start with http:// or https://: {origin}")
+            validated.append(origin)
+        return validated
     
     # File Storage
     AWS_ACCESS_KEY_ID: str = ""

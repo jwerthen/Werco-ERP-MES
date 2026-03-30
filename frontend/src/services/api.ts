@@ -60,10 +60,10 @@ class ApiService {
       },
     });
 
-    // Load tokens from localStorage
-    this.token = localStorage.getItem('token');
-    this.refreshToken = localStorage.getItem('refreshToken');
-    const expiresAt = localStorage.getItem('tokenExpiresAt');
+    // Load tokens from sessionStorage (more secure than localStorage — scoped per tab)
+    this.token = sessionStorage.getItem('token');
+    this.refreshToken = sessionStorage.getItem('refreshToken');
+    const expiresAt = sessionStorage.getItem('tokenExpiresAt');
     this.tokenExpiresAt = expiresAt ? parseInt(expiresAt, 10) : null;
     
     if (this.token) {
@@ -246,7 +246,7 @@ class ApiService {
 
   setToken(token: string) {
     this.token = token;
-    localStorage.setItem('token', token);
+    sessionStorage.setItem('token', token);
     this.api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
   }
 
@@ -254,11 +254,11 @@ class ApiService {
     this.token = accessToken;
     this.refreshToken = refreshToken;
     this.tokenExpiresAt = Date.now() + (expiresIn * 1000);
-    
-    localStorage.setItem('token', accessToken);
-    localStorage.setItem('refreshToken', refreshToken);
-    localStorage.setItem('tokenExpiresAt', this.tokenExpiresAt.toString());
-    
+
+    sessionStorage.setItem('token', accessToken);
+    sessionStorage.setItem('refreshToken', refreshToken);
+    sessionStorage.setItem('tokenExpiresAt', this.tokenExpiresAt.toString());
+
     this.api.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
   }
 
@@ -266,11 +266,11 @@ class ApiService {
     this.token = null;
     this.refreshToken = null;
     this.tokenExpiresAt = null;
-    
-    localStorage.removeItem('token');
-    localStorage.removeItem('refreshToken');
-    localStorage.removeItem('tokenExpiresAt');
-    
+
+    sessionStorage.removeItem('token');
+    sessionStorage.removeItem('refreshToken');
+    sessionStorage.removeItem('tokenExpiresAt');
+
     delete this.api.defaults.headers.common['Authorization'];
     this.clearCache();
   }

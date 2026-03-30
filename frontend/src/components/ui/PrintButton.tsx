@@ -89,26 +89,46 @@ export function PrintButton({
         return;
       }
 
-      const content = contentSelector 
-        ? document.querySelector(contentSelector)?.innerHTML 
-        : document.body.innerHTML;
+      const sourceElement = contentSelector
+        ? document.querySelector(contentSelector)
+        : document.body;
 
-      printWindow.document.write(`
+      // Clone the DOM node instead of using innerHTML to avoid XSS
+      const clonedContent = sourceElement?.cloneNode(true) as HTMLElement | null;
+
+      const doc = printWindow.document;
+      doc.open();
+      doc.write(`
         <!DOCTYPE html>
         <html>
           <head>
-            <title>${documentTitle || 'Print Preview'}</title>
+            <title>${(documentTitle || 'Print Preview').replace(/[<>"'&]/g, '')}</title>
             <link rel="stylesheet" href="${window.location.origin}/static/css/main.css">
             <style>
               body { padding: 20px; }
               @media print { body { padding: 0; } }
             </style>
           </head>
-          <body class="print-preview">
-            ${content}
-          </body>
+          <body class="print-preview"></body>
         </html>
       `);
+      doc.close();
+
+      if (clonedContent) {
+        // Sanitize: remove script tags and event handlers from cloned content
+        clonedContent.querySelectorAll('script').forEach(el => el.remove());
+        clonedContent.querySelectorAll('*').forEach(el => {
+          Array.from(el.attributes).forEach(attr => {
+            if (attr.name.startsWith('on')) {
+              el.removeAttribute(attr.name);
+            }
+          });
+        });
+        // Append sanitized content via DOM API (not innerHTML)
+        while (clonedContent.firstChild) {
+          doc.body.appendChild(doc.importNode(clonedContent.firstChild, true));
+        }
+      }
       printWindow.document.close();
       
       // Wait for styles to load, then print

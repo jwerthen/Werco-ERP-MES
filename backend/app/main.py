@@ -370,7 +370,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
     # Content Security Policy - restrict resource loading (skip for API docs)
     if request.url.path not in ("/api/docs", "/api/redoc", "/api/openapi.json"):
         response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"

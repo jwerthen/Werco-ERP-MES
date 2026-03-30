@@ -153,7 +153,7 @@ class ErrorLoggingService {
 
   private getCurrentUserId(): string | undefined {
     try {
-      const authData = localStorage.getItem('auth');
+      const authData = sessionStorage.getItem('user');
       if (authData) {
         const parsed = JSON.parse(authData);
         return parsed?.user?.id?.toString();
@@ -167,7 +167,10 @@ class ErrorLoggingService {
   private getSessionId(): string {
     let sessionId = sessionStorage.getItem('errorSessionId');
     if (!sessionId) {
-      sessionId = `session_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+      const randomBytes = new Uint8Array(16);
+      crypto.getRandomValues(randomBytes);
+      const hex = Array.from(randomBytes, b => b.toString(16).padStart(2, '0')).join('');
+      sessionId = `session_${hex}`;
       sessionStorage.setItem('errorSessionId', sessionId);
     }
     return sessionId;

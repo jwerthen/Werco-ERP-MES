@@ -5,9 +5,9 @@
 // Base URL from environment or default
 export const BASE_URL = __ENV.BASE_URL || 'http://localhost:8000';
 
-// Test user credentials
+// Test user credentials - MUST be set via environment variables
 export const TEST_USER = {
-  email: __ENV.TEST_USER_EMAIL || 'admin@werco.com',
+  email: __ENV.TEST_USER_EMAIL || '',
   token: __ENV.TEST_USER_TOKEN || '',
 };
 
