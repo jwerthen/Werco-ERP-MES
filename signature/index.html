@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Werco Email Signature Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            'werco-navy': '#1B4D9C',
+            'werco-blue': '#3366FF',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+        },
+      },
+    }
+  </script>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans">
+
+  <!-- Header -->
+  <header class="bg-werco-navy text-white py-6 shadow-lg">
+    <div class="max-w-3xl mx-auto px-6 flex items-center gap-4">
+      <div>
+        <h1 class="text-2xl font-bold">Werco Manufacturing, Inc.</h1>
+        <p class="text-blue-200 text-sm mt-1">Email Signature Generator</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-3xl mx-auto px-6 py-10">
+
+    <!-- Form -->
+    <div class="bg-white rounded-xl shadow-md p-8 mb-8">
+      <h2 class="text-lg font-semibold text-gray-800 mb-6">Enter Your Information</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
+        <div>
+          <label for="fullName" class="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+          <input type="text" id="fullName" placeholder="Jon Werthen Jr."
+            class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-werco-blue focus:border-werco-blue outline-none transition">
+        </div>
+        <div>
+          <label for="position" class="block text-sm font-medium text-gray-700 mb-1">Position / Title</label>
+          <input type="text" id="position" placeholder="Vice President of Programs"
+            class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-werco-blue focus:border-werco-blue outline-none transition">
+        </div>
+        <div>
+          <label for="phone" class="block text-sm font-medium text-gray-700 mb-1">Phone Number</label>
+          <input type="tel" id="phone" placeholder="(918) 251-6880"
+            class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-werco-blue focus:border-werco-blue outline-none transition">
+        </div>
+        <div>
+          <label for="email" class="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
+          <input type="email" id="email" placeholder="jmw@wercomfg.com"
+            class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-werco-blue focus:border-werco-blue outline-none transition">
+        </div>
+      </div>
+    </div>
+
+    <!-- Preview -->
+    <div class="bg-white rounded-xl shadow-md p-8 mb-8">
+      <div class="flex items-center justify-between mb-6">
+        <h2 class="text-lg font-semibold text-gray-800">Signature Preview</h2>
+        <button onclick="copySignature()"
+          class="inline-flex items-center gap-2 bg-werco-navy hover:bg-blue-800 text-white font-medium px-5 py-2.5 rounded-lg transition shadow-sm">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+          </svg>
+          <span id="copyBtnText">Copy Signature</span>
+        </button>
+      </div>
+
+      <!-- Rendered signature preview area -->
+      <div class="border border-gray-200 rounded-lg p-6 bg-white">
+        <div id="signaturePreview">
+          <!-- Signature renders here -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Instructions -->
+    <div class="bg-white rounded-xl shadow-md p-8">
+      <h2 class="text-lg font-semibold text-gray-800 mb-4">How to Add Your Signature</h2>
+
+      <div class="space-y-6 text-sm text-gray-600">
+        <div>
+          <h3 class="font-semibold text-gray-800 mb-2">Outlook Desktop (Windows)</h3>
+          <ol class="list-decimal list-inside space-y-1">
+            <li>Fill in your information above and click <strong>Copy Signature</strong></li>
+            <li>Open Outlook &rarr; <strong>File</strong> &rarr; <strong>Options</strong> &rarr; <strong>Mail</strong> &rarr; <strong>Signatures</strong></li>
+            <li>Click <strong>New</strong>, name it "Werco", then paste (Ctrl+V) into the edit box</li>
+            <li>Set it as the default for new messages and replies</li>
+            <li>Click <strong>OK</strong> to save</li>
+          </ol>
+        </div>
+
+        <div>
+          <h3 class="font-semibold text-gray-800 mb-2">Outlook on the Web (Office 365)</h3>
+          <ol class="list-decimal list-inside space-y-1">
+            <li>Fill in your information above and click <strong>Copy Signature</strong></li>
+            <li>Click the <strong>Settings gear</strong> (top right) &rarr; <strong>View all Outlook settings</strong></li>
+            <li>Go to <strong>Mail</strong> &rarr; <strong>Compose and reply</strong></li>
+            <li>Under <strong>Email signature</strong>, paste (Ctrl+V) into the editor</li>
+            <li>Check the boxes for new messages and replies, then click <strong>Save</strong></li>
+          </ol>
+        </div>
+
+        <div>
+          <h3 class="font-semibold text-gray-800 mb-2">Outlook for Mac</h3>
+          <ol class="list-decimal list-inside space-y-1">
+            <li>Fill in your information above and click <strong>Copy Signature</strong></li>
+            <li>Open Outlook &rarr; <strong>Outlook</strong> menu &rarr; <strong>Preferences</strong> &rarr; <strong>Signatures</strong></li>
+            <li>Click <strong>+</strong> to add a new signature, name it "Werco"</li>
+            <li>Paste (Cmd+V) into the edit box and set as default</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="text-center text-gray-400 text-xs py-8">
+    &copy; 2026 Werco Manufacturing, Inc. &mdash; Internal Use Only
+  </footer>
+
+  <script>
+    const fields = ['fullName', 'position', 'phone', 'email'];
+    fields.forEach(id => {
+      document.getElementById(id).addEventListener('input', renderSignature);
+    });
+
+    function renderSignature() {
+      const name = document.getElementById('fullName').value.trim() || 'Your Name';
+      const position = document.getElementById('position').value.trim() || 'Your Title';
+      const phone = document.getElementById('phone').value.trim() || '(918) 000-0000';
+      const email = document.getElementById('email').value.trim() || 'you@wercomfg.com';
+
+      const html = buildSignatureHTML(name, position, phone, email);
+      document.getElementById('signaturePreview').innerHTML = html;
+    }
+
+    function buildSignatureHTML(name, position, phone, email) {
+      return `<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,Helvetica,sans-serif;font-size:10pt;color:#333333;line-height:1.5;">
+  <tr>
+    <td style="padding-bottom:4px;">
+      <strong style="font-size:12pt;color:#1B4D9C;">${escapeHtml(name)}</strong>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding-bottom:2px;font-size:10pt;color:#555555;">
+      ${escapeHtml(position)}
+    </td>
+  </tr>
+  <tr>
+    <td style="padding-bottom:6px;font-size:10pt;font-weight:600;color:#1B4D9C;">
+      Werco Manufacturing, Inc.
+    </td>
+  </tr>
+  <tr>
+    <td style="border-top:2px solid #1B4D9C;padding-top:6px;font-size:9pt;color:#555555;">
+      <a href="tel:${escapeHtml(phone.replace(/[^+\d]/g, ''))}" style="color:#333333;text-decoration:none;">${escapeHtml(phone)}</a>
+      <span style="color:#1B4D9C;"> | </span>
+      <a href="mailto:${escapeHtml(email)}" style="color:#1B4D9C;text-decoration:none;">${escapeHtml(email)}</a>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding-top:2px;font-size:9pt;color:#777777;">
+      CAGE: 3E9X5 <span style="color:#1B4D9C;">|</span> UEI: JHVNFDNQYLD5
+    </td>
+  </tr>
+  <tr>
+    <td style="padding-top:2px;font-size:8pt;color:#999999;letter-spacing:0.5px;">
+      AS9100D <span style="color:#1B4D9C;">|</span> ISO9001 <span style="color:#1B4D9C;">|</span> ITAR <span style="color:#1B4D9C;">|</span> HUBZone
+    </td>
+  </tr>
+</table>`;
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function copySignature() {
+      const preview = document.getElementById('signaturePreview');
+      const btnText = document.getElementById('copyBtnText');
+
+      // Select and copy the rendered HTML (preserves formatting when pasted)
+      const range = document.createRange();
+      range.selectNodeContents(preview);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      try {
+        document.execCommand('copy');
+        btnText.textContent = 'Copied!';
+        setTimeout(() => { btnText.textContent = 'Copy Signature'; }, 2000);
+      } catch (err) {
+        // Fallback: clipboard API with HTML blob
+        const html = preview.innerHTML;
+        const blob = new Blob([html], { type: 'text/html' });
+        const item = new ClipboardItem({ 'text/html': blob });
+        navigator.clipboard.write([item]).then(() => {
+          btnText.textContent = 'Copied!';
+          setTimeout(() => { btnText.textContent = 'Copy Signature'; }, 2000);
+        }).catch(() => {
+          btnText.textContent = 'Copy failed - try Ctrl+C';
+          setTimeout(() => { btnText.textContent = 'Copy Signature'; }, 3000);
+        });
+      }
+
+      selection.removeAllRanges();
+    }
+
+    // Render initial placeholder
+    renderSignature();
+  </script>
+
+</body>
+</html>
