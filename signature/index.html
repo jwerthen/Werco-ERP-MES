@@ -29,6 +29,7 @@
   <!-- Header -->
   <header class="bg-werco-navy text-white py-6 shadow-lg">
     <div class="max-w-3xl mx-auto px-6 flex items-center gap-4">
+      <img src="Werco_Logo-PNG.png" alt="Werco Logo" class="h-12 w-auto bg-white rounded p-1">
       <div>
         <h1 class="text-2xl font-bold">Werco Manufacturing, Inc.</h1>
         <p class="text-blue-200 text-sm mt-1">Email Signature Generator</p>
@@ -148,37 +149,47 @@
     }
 
     function buildSignatureHTML(name, position, phone, email) {
+      const logoUrl = window.location.origin + '/Werco_Logo-PNG.png';
       return `<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,Helvetica,sans-serif;font-size:10pt;color:#333333;line-height:1.5;">
   <tr>
-    <td style="padding-bottom:4px;">
-      <strong style="font-size:12pt;color:#1B4D9C;">${escapeHtml(name)}</strong>
+    <td style="padding-right:12px;vertical-align:top;">
+      <img src="${logoUrl}" alt="Werco Manufacturing" width="90" style="display:block;width:90px;height:auto;" />
     </td>
-  </tr>
-  <tr>
-    <td style="padding-bottom:2px;font-size:10pt;color:#555555;">
-      ${escapeHtml(position)}
-    </td>
-  </tr>
-  <tr>
-    <td style="padding-bottom:6px;font-size:10pt;font-weight:600;color:#1B4D9C;">
-      Werco Manufacturing, Inc.
-    </td>
-  </tr>
-  <tr>
-    <td style="border-top:2px solid #1B4D9C;padding-top:6px;font-size:9pt;color:#555555;">
-      <a href="tel:${escapeHtml(phone.replace(/[^+\d]/g, ''))}" style="color:#333333;text-decoration:none;">${escapeHtml(phone)}</a>
-      <span style="color:#1B4D9C;"> | </span>
-      <a href="mailto:${escapeHtml(email)}" style="color:#1B4D9C;text-decoration:none;">${escapeHtml(email)}</a>
-    </td>
-  </tr>
-  <tr>
-    <td style="padding-top:2px;font-size:9pt;color:#777777;">
-      CAGE: 3E9X5 <span style="color:#1B4D9C;">|</span> UEI: JHVNFDNQYLD5
-    </td>
-  </tr>
-  <tr>
-    <td style="padding-top:2px;font-size:8pt;color:#999999;letter-spacing:0.5px;">
-      AS9100D <span style="color:#1B4D9C;">|</span> ISO9001 <span style="color:#1B4D9C;">|</span> ITAR <span style="color:#1B4D9C;">|</span> HUBZone
+    <td style="vertical-align:top;">
+      <table cellpadding="0" cellspacing="0" border="0">
+        <tr>
+          <td style="padding-bottom:4px;">
+            <strong style="font-size:12pt;color:#1B4D9C;">${escapeHtml(name)}</strong>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:2px;font-size:10pt;color:#555555;">
+            ${escapeHtml(position)}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:6px;font-size:10pt;font-weight:600;color:#1B4D9C;">
+            Werco Manufacturing, Inc.
+          </td>
+        </tr>
+        <tr>
+          <td style="border-top:2px solid #1B4D9C;padding-top:6px;font-size:9pt;color:#555555;">
+            <a href="tel:${escapeHtml(phone.replace(/[^+\d]/g, ''))}" style="color:#333333;text-decoration:none;">${escapeHtml(phone)}</a>
+            <span style="color:#1B4D9C;"> | </span>
+            <a href="mailto:${escapeHtml(email)}" style="color:#1B4D9C;text-decoration:none;">${escapeHtml(email)}</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-top:2px;font-size:9pt;color:#777777;">
+            CAGE: 3E9X5 <span style="color:#1B4D9C;">|</span> UEI: JHVNFDNQYLD5
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-top:2px;font-size:8pt;color:#999999;letter-spacing:0.5px;">
+            AS9100D <span style="color:#1B4D9C;">|</span> ISO9001 <span style="color:#1B4D9C;">|</span> ITAR <span style="color:#1B4D9C;">|</span> HUBZone
+          </td>
+        </tr>
+      </table>
     </td>
   </tr>
 </table>`;
