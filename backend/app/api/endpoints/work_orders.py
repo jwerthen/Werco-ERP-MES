@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import or_
 from pydantic import BaseModel, Field
 from app.db.database import get_db, atomic_transaction
-from app.api.deps import get_current_user, require_role, get_audit_service
+from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus

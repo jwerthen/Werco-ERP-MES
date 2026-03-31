@@ -3,7 +3,6 @@ Document Processing Service for Purchase Order Extraction
 Handles PDF (native + OCR) and Word document (.doc, .docx) text extraction.
 """
 import os
-import tempfile
 import logging
 from typing import Optional, Tuple
 from pathlib import Path
@@ -489,11 +488,6 @@ def save_uploaded_document(file_content: bytes, filename: str, po_id: Optional[i
     
     logger.info(f"Saved document to {file_path}")
     return str(file_path)
-
-
-# Alias for backward compatibility
-def save_uploaded_pdf(file_content: bytes, filename: str, po_id: Optional[int] = None) -> str:
-    return save_uploaded_document(file_content, filename, po_id)
 
 
 def move_pdf_to_po(temp_path: str, po_id: int) -> str:

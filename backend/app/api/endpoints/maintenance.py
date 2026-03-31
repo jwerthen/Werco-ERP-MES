@@ -2,7 +2,7 @@ from typing import List, Optional
 from datetime import datetime, date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
+from sqlalchemy import func
 from app.db.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
@@ -13,7 +13,6 @@ from app.models.maintenance import (
     FREQUENCY_DAYS_MAP,
 )
 from pydantic import BaseModel
-import json
 
 router = APIRouter()
 

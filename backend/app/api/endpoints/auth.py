@@ -12,7 +12,7 @@ from app.core.security import (
 )
 from app.core.config import settings
 from app.models.user import User, UserRole
-from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh, RefreshTokenRequest, EmployeeLoginRequest, PublicRegister
+from app.schemas.user import UserCreate, UserResponse, Token, TokenRefresh, RefreshTokenRequest, EmployeeLoginRequest, PublicRegister
 from app.api.deps import get_current_user, require_role
 from app.services.audit_service import AuditService
 

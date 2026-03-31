@@ -174,29 +174,6 @@ export const partSchema = z.object({
   }
 );
 
-export const partUpdateSchema = z.object({
-  version: z.number().int().min(0, 'Version must be 0 or greater'),
-  name: nameSchema.optional(),
-  revision: revisionSchema.optional(),
-  description: descriptionShortSchema,
-  unit_of_measure: z.nativeEnum(UnitOfMeasure).optional(),
-  standard_cost: moneySchema.optional(),
-  material_cost: moneySchema.optional(),
-  labor_cost: moneySchema.optional(),
-  overhead_cost: moneySchema.optional(),
-  lead_time_days: nonNegativeIntegerSchema.max(365).optional(),
-  safety_stock: moneySmallSchema.optional(),
-  reorder_point: moneySmallSchema.optional(),
-  reorder_quantity: moneySmallSchema.optional(),
-  is_critical: z.boolean().optional(),
-  requires_inspection: z.boolean().optional(),
-  inspection_requirements: z.string().max(2000).optional(),
-  customer_part_number: z.string().max(100).optional(),
-  drawing_number: z.string().max(100).optional(),
-  is_active: z.boolean().optional(),
-  status: z.string().max(50).optional(),
-});
-
 // ============================================================================
 // WORK ORDER SCHEMA
 // ============================================================================
@@ -230,36 +207,6 @@ export const workOrderSchema = z.object({
   customer_po: z.string().max(50, 'Must be at most 50 characters').optional(),
   notes: z.string().max(2000, 'Must be at most 2000 characters').optional(),
   special_instructions: z.string().max(2000, 'Must be at most 2000 characters').optional(),
-});
-
-export const workOrderOperationUpdateSchema = z.object({
-  version: z.number().int().min(0),
-  name: nameSchema.optional(),
-  description: descriptionLongSchema,
-  setup_instructions: z.string().max(5000).optional(),
-  run_instructions: z.string().max(5000).optional(),
-  setup_time_hours: z.number().min(0).max(99.99).optional(),
-  run_time_hours: z.number().min(0).max(999.99).optional(),
-  run_time_per_piece: z.number().min(0).optional(),
-  status: z.nativeEnum(OperationStatus).optional(),
-  quantity_complete: z.number().min(0).optional(),
-  quantity_scrapped: z.number().min(0).optional(),
-  requires_inspection: z.boolean().optional(),
-  inspection_complete: z.boolean().optional(),
-});
-
-export const workOrderUpdateSchema = z.object({
-  version: z.number().int().min(0),
-  quantity_ordered: z.number().min(0).positive().max(999999.9999).optional(),
-  priority: z.number().int().min(1).max(10).optional(),
-  status: z.nativeEnum(WorkOrderStatus).optional(),
-  due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  customer_name: z.string().max(255).optional(),
-  customer_po: z.string().max(50).optional(),
-  notes: z.string().max(2000).optional(),
-  special_instructions: z.string().max(2000).optional(),
-  quantity_complete: z.number().min(0).optional(),
-  quantity_scrapped: z.number().min(0).optional(),
 });
 
 // ============================================================================
@@ -353,23 +300,9 @@ export const userSchema = z.object({
   password: passwordStrengthSchema,
 });
 
-export const userUpdateSchema = z.object({
-  email: emailSchema.optional(),
-  first_name: firstNameSchema.optional(),
-  last_name: lastNameSchema.optional(),
-  role: z.nativeEnum(UserRole).optional(),
-  department: z.string().max(100).optional(),
-  is_active: z.boolean().optional(),
-});
-
 export const userLoginSchema = z.object({
   email: emailSchema,
   password: z.string().min(1, 'Password required'),
-});
-
-export const passwordChangeSchema = z.object({
-  current_password: z.string().min(1, 'Current password required'),
-  new_password: passwordStrengthSchema,
 });
 
 // ============================================================================
@@ -402,97 +335,13 @@ export const vendorSchema = z.object({
   notes: z.string().max(2000).optional(),
 });
 
-export const vendorUpdateSchema = z.object({
-  version: z.number().int().min(0),
-  name: nameSchema.optional(),
-  contact_name: z.string().max(100).optional(),
-  email: z.string().max(255).optional(),
-  phone: z.string().max(50).optional(),
-  address_line1: z.string().max(200).optional(),
-  address_line2: z.string().max(200).optional(),
-  city: z.string().max(100).optional(),
-  state: z.string().length(2).regex(/^[A-Z]{2}$/).optional(),
-  postal_code: z.string().max(20).optional(),
-  country: z.string().length(2).regex(/^[A-Z]{2}$/).optional(),
-  payment_terms: z.string().max(100).optional(),
-  is_approved: z.boolean().optional(),
-  is_as9100_certified: z.boolean().optional(),
-  is_iso9001_certified: z.boolean().optional(),
-  is_active: z.boolean().optional(),
-  notes: z.string().max(2000).optional(),
-});
-
-export const poLineSchema = z.object({
-  part_id: positiveIntegerSchema,
-  quantity_ordered: z.number().min(0).positive('Quantity must be greater than 0').max(999999.9999),
-  unit_price: moneySchema,
-  required_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  notes: z.string().max(500).optional(),
-});
-
-export const poSchema = z.object({
-  vendor_id: positiveIntegerSchema,
-  required_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  expected_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  ship_to: z.string().max(255).optional(),
-  shipping_method: z.string().max(100).optional(),
-  notes: z.string().max(2000).optional(),
-  lines: z.array(poLineSchema).default([]),
-}).refine(
-  (data: { required_date?: string; expected_date?: string }) => {
-    if (data.required_date && data.expected_date) {
-      const required = new Date(data.required_date);
-      const expected = new Date(data.expected_date);
-      return expected > required;
-    }
-    return true;
-  },
-  {
-    message: 'Expected date must be after required date',
-    path: ['expected_date']
-  }
-);
-
-export const poUpdateSchema = z.object({
-  version: z.number().int().min(0),
-  required_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  expected_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  ship_to: z.string().max(255).optional(),
-  shipping_method: z.string().max(100).optional(),
-  notes: z.string().max(2000).optional(),
-  status: z.string().optional(),
-});
-
-export const receiptCreateSchema = z.object({
-  po_line_id: positiveIntegerSchema,
-  quantity_received: z.number().min(0).positive('Quantity must be greater than 0').max(999999.9999),
-  lot_number: z.string().min(1, 'Lot number required').max(50),
-  serial_numbers: z.string().max(500).optional(),
-  heat_number: z.string().max(50).optional(),
-  cert_number: z.string().max(50).optional(),
-  coc_attached: z.boolean().default(false),
-  location_id: positiveIntegerSchema.optional(),
-  requires_inspection: z.boolean().default(true),
-  packing_slip_number: z.string().max(50).optional(),
-  carrier: z.string().max(100).optional(),
-  tracking_number: z.string().max(100).optional(),
-  notes: z.string().max(2000).optional(),
-  over_receive_approved: z.boolean().default(false),
-});
-
 // ============================================================================
 // TYPES
 // ============================================================================
 
 export type PartFormData = z.infer<typeof partSchema>;
-export type PartUpdateFormData = z.infer<typeof partUpdateSchema>;
 export type WorkOrderFormData = z.infer<typeof workOrderSchema>;
-export type WorkOrderUpdateFormData = z.infer<typeof workOrderUpdateSchema>;
 export type WorkOrderOperationFormData = z.infer<typeof workOrderOperationSchema>;
 export type UserFormData = z.infer<typeof userSchema>;
-export type UserUpdateFormData = z.infer<typeof userUpdateSchema>;
 export type UserLoginFormData = z.infer<typeof userLoginSchema>;
 export type VendorFormData = z.infer<typeof vendorSchema>;
-export type VendorUpdateFormData = z.infer<typeof vendorUpdateSchema>;
-export type POFormData = z.infer<typeof poSchema>;
-export type POUpdateFormData = z.infer<typeof poUpdateSchema>;

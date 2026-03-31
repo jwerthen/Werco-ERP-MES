@@ -3,9 +3,9 @@
  * These types define the shape of data sent to and received from the API
  */
 
-import { 
-  User, UserRole, PartType, WorkOrderStatus, 
-  WorkCenter, WorkCenterType 
+import {
+  User, UserRole, PartType,
+  WorkCenter, WorkCenterType
 } from './index';
 
 // ============ Generic Types ============
@@ -13,14 +13,6 @@ import {
 export interface ApiError {
   detail: string;
   status?: number;
-}
-
-export interface PaginatedResponse<T> {
-  items: T[];
-  total: number;
-  page: number;
-  page_size: number;
-  total_pages: number;
 }
 
 // ============ Auth Types ============
@@ -33,22 +25,6 @@ export interface LoginResponse {
   user: User;
 }
 
-export interface RefreshTokenResponse {
-  access_token: string;
-  refresh_token: string;
-  expires_in: number;
-}
-
-export interface RegisterRequest {
-  email: string;
-  password: string;
-  first_name: string;
-  last_name: string;
-  employee_id?: string;
-  department?: string;
-  role?: UserRole;
-}
-
 // ============ User Types ============
 
 export interface UserCreate {
@@ -56,16 +32,6 @@ export interface UserCreate {
   password: string;
   first_name: string;
   last_name: string;
-  employee_id?: string;
-  department?: string;
-  role?: UserRole;
-  is_active?: boolean;
-}
-
-export interface UserUpdate {
-  email?: string;
-  first_name?: string;
-  last_name?: string;
   employee_id?: string;
   department?: string;
   role?: UserRole;
@@ -113,43 +79,6 @@ export interface PartListParams {
   offset?: number;
 }
 
-// ============ Work Order Types ============
-
-export interface WorkOrderCreate {
-  part_id: number;
-  quantity_ordered: number;
-  priority?: number;
-  scheduled_start?: string;
-  scheduled_end?: string;
-  due_date?: string;
-  customer_name?: string;
-  customer_po?: string;
-  notes?: string;
-  special_instructions?: string;
-}
-
-export interface WorkOrderUpdate {
-  quantity_ordered?: number;
-  priority?: number;
-  scheduled_start?: string;
-  scheduled_end?: string;
-  due_date?: string;
-  customer_name?: string;
-  customer_po?: string;
-  notes?: string;
-  special_instructions?: string;
-  version?: number; // For optimistic locking
-}
-
-export interface WorkOrderListParams {
-  status?: WorkOrderStatus | WorkOrderStatus[];
-  priority?: number;
-  part_id?: number;
-  search?: string;
-  limit?: number;
-  offset?: number;
-}
-
 // ============ Work Center Types ============
 
 export interface WorkCenterCreate {
@@ -178,58 +107,6 @@ export interface WorkCenterUpdate {
   version?: number; // For optimistic locking
 }
 
-// ============ BOM Types ============
-
-export interface BOMLine {
-  id?: number;
-  component_id: number;
-  quantity: number;
-  unit_of_measure?: string;
-  reference_designator?: string;
-  notes?: string;
-  find_number?: number;
-  is_critical?: boolean;
-  line_type?: 'component' | 'reference' | 'phantom' | 'option';
-}
-
-export interface BOMCreate {
-  parent_part_id: number;
-  revision?: string;
-  effective_date?: string;
-  lines: BOMLine[];
-}
-
-export interface BOMUpdate {
-  revision?: string;
-  effective_date?: string;
-  expiration_date?: string;
-  is_active?: boolean;
-  lines?: BOMLine[];
-  version?: number;
-}
-
-export interface BOMResponse {
-  id: number;
-  parent_part_id: number;
-  parent_part_number: string;
-  parent_part_name: string;
-  revision: string;
-  is_active: boolean;
-  effective_date?: string;
-  expiration_date?: string;
-  lines: BOMLineResponse[];
-  created_at: string;
-  updated_at: string;
-  version: number;
-}
-
-export interface BOMLineResponse extends BOMLine {
-  id: number;
-  component_part_number: string;
-  component_part_name: string;
-  component_part_type: PartType;
-}
-
 // ============ Inventory Types ============
 
 export interface InventoryItem {
@@ -248,35 +125,7 @@ export interface InventoryItem {
   last_count_date?: string;
 }
 
-export interface InventoryTransaction {
-  part_id: number;
-  transaction_type: 'receipt' | 'issue' | 'adjustment' | 'transfer' | 'scrap';
-  quantity: number;
-  location_id?: number;
-  to_location_id?: number;
-  lot_number?: string;
-  serial_number?: string;
-  reference_type?: string;
-  reference_id?: number;
-  notes?: string;
-}
-
 // ============ Quality Types ============
-
-export interface InspectionRecord {
-  id: number;
-  work_order_id?: number;
-  part_id: number;
-  operation_id?: number;
-  inspection_type: string;
-  status: 'pending' | 'in_progress' | 'passed' | 'failed' | 'conditional';
-  inspector_id?: number;
-  inspection_date?: string;
-  quantity_inspected: number;
-  quantity_accepted: number;
-  quantity_rejected: number;
-  notes?: string;
-}
 
 export interface NCR {
   id: number;
@@ -322,12 +171,6 @@ export interface PurchaseOrderLine {
   due_date?: string;
 }
 
-export interface PurchaseOrderCreate {
-  vendor_id: number;
-  expected_date?: string;
-  notes?: string;
-  lines: Omit<PurchaseOrderLine, 'id' | 'part_number' | 'part_name' | 'quantity_received' | 'line_total'>[];
-}
 
 // ============ Quote Types ============
 
@@ -343,20 +186,6 @@ export interface Quote {
   created_at: string;
 }
 
-export interface QuoteCreate {
-  customer_id?: number;
-  customer_name: string;
-  valid_until?: string;
-  notes?: string;
-  lines: QuoteLineCreate[];
-}
-
-export interface QuoteLineCreate {
-  part_id?: number;
-  description: string;
-  quantity: number;
-  unit_price: number;
-}
 
 // ============ Routing Types ============
 
@@ -386,11 +215,6 @@ export interface RoutingOperation {
   inspection_type?: string;
 }
 
-export interface RoutingCreate {
-  part_id: number;
-  revision?: string;
-  operations: Omit<RoutingOperation, 'id' | 'work_center'>[];
-}
 
 // ============ Customer Types ============
 
@@ -495,48 +319,7 @@ export interface Vendor {
   notes?: string;
 }
 
-export interface VendorCreate {
-  name: string;
-  code?: string;
-  contact_name?: string;
-  email?: string;
-  phone?: string;
-  address?: string;
-  notes?: string;
-}
 
-// ============ Report Types ============
-
-export interface ReportParams {
-  start_date?: string;
-  end_date?: string;
-  work_center_id?: number;
-  part_id?: number;
-  status?: string;
-  format?: 'json' | 'csv' | 'pdf';
-}
-
-export interface DashboardMetrics {
-  work_orders: {
-    total: number;
-    in_progress: number;
-    completed_today: number;
-    overdue: number;
-  };
-  quality: {
-    first_pass_yield: number;
-    ncrs_open: number;
-    inspections_pending: number;
-  };
-  inventory: {
-    low_stock_items: number;
-    pending_receipts: number;
-  };
-  production: {
-    efficiency: number;
-    utilization: number;
-  };
-}
 
 // ============ Search Types ============
 
@@ -548,102 +331,8 @@ export interface SearchResult {
   url: string;
 }
 
-export interface GlobalSearchParams {
-  query: string;
-  types?: string[];
-  limit?: number;
-}
 
-// ============ Audit Types ============
 
-export interface AuditLogEntry {
-  id: number;
-  user_id?: number;
-  user_email?: string;
-  action: string;
-  resource_type: string;
-  resource_id?: number;
-  description?: string;
-  changes?: Record<string, { old: unknown; new: unknown }>;
-  ip_address?: string;
-  user_agent?: string;
-  timestamp: string;
-}
-
-// ============ Admin Settings Types ============
-
-export interface SystemSettings {
-  company_name: string;
-  company_logo?: string;
-  timezone: string;
-  date_format: string;
-  currency: string;
-  work_order_prefix: string;
-  po_prefix: string;
-  quote_prefix: string;
-}
-
-export interface RolePermissions {
-  role: UserRole;
-  permissions: string[];
-}
-
-// ============ QMS Standards Types ============
-
-export interface QMSStandardCreate {
-  name: string;
-  version?: string;
-  description?: string;
-  standard_body?: string;
-  document_id?: number;
-}
-
-export interface QMSStandardUpdate {
-  name?: string;
-  version?: string;
-  description?: string;
-  standard_body?: string;
-  document_id?: number;
-  is_active?: boolean;
-}
-
-export interface QMSClauseCreate {
-  clause_number: string;
-  title: string;
-  description?: string;
-  parent_clause_id?: number;
-  sort_order?: number;
-}
-
-export interface QMSClauseUpdate {
-  clause_number?: string;
-  title?: string;
-  description?: string;
-  parent_clause_id?: number;
-  sort_order?: number;
-  compliance_status?: 'not_assessed' | 'compliant' | 'partial' | 'non_compliant' | 'not_applicable';
-  compliance_notes?: string;
-  next_review_date?: string;
-}
-
-export interface QMSEvidenceCreate {
-  evidence_type: 'document' | 'module' | 'ncr' | 'car' | 'fai' | 'calibration' | 'training' | 'procedure' | 'spc' | 'other';
-  title: string;
-  description?: string;
-  document_id?: number;
-  module_reference?: string;
-  record_type?: string;
-  record_id?: number;
-}
-
-export interface QMSEvidenceUpdate {
-  title?: string;
-  description?: string;
-  document_id?: number;
-  module_reference?: string;
-  is_verified?: boolean;
-  verification_notes?: string;
-}
 
 export interface QMSEvidenceResponse {
   id: number;
@@ -774,30 +463,3 @@ export interface AutoLinkSummary {
   compliance_summary: Record<string, number>;
 }
 
-// ============ Error Handling ============
-
-export interface ApiErrorResponse {
-  detail: string;
-  errors?: Record<string, string[]>;
-}
-
-export function isApiError(error: unknown): error is { response: { data: ApiErrorResponse } } {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'response' in error &&
-    typeof (error as { response: unknown }).response === 'object' &&
-    (error as { response: { data: unknown } }).response !== null &&
-    'data' in (error as { response: { data: unknown } }).response
-  );
-}
-
-export function getErrorMessage(error: unknown): string {
-  if (isApiError(error)) {
-    return error.response.data.detail || 'An error occurred';
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return 'An unexpected error occurred';
-}

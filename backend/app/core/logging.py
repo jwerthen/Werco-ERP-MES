@@ -10,12 +10,10 @@ Features:
 import logging
 import sys
 import json
-import time
 import uuid
 from datetime import datetime
 from typing import Optional, Any, Dict
 from contextvars import ContextVar
-from functools import wraps
 
 from app.core.config import settings
 
@@ -176,53 +174,3 @@ def configure_logging() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-def log_execution_time(logger: Optional[CorrelatedLogger] = None):
-    """
-    Decorator to log function execution time.
-    
-    Usage:
-        @log_execution_time()
-        def slow_function():
-            ...
-    """
-    def decorator(func):
-        @wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            nonlocal logger
-            if logger is None:
-                logger = get_logger(func.__module__)
-            
-            start = time.perf_counter()
-            try:
-                result = await func(*args, **kwargs)
-                duration = (time.perf_counter() - start) * 1000
-                logger.debug(f"{func.__name__} completed", data={"duration_ms": round(duration, 2)})
-                return result
-            except Exception as e:
-                duration = (time.perf_counter() - start) * 1000
-                logger.error(f"{func.__name__} failed", data={"duration_ms": round(duration, 2), "error": str(e)})
-                raise
-        
-        @wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            nonlocal logger
-            if logger is None:
-                logger = get_logger(func.__module__)
-            
-            start = time.perf_counter()
-            try:
-                result = func(*args, **kwargs)
-                duration = (time.perf_counter() - start) * 1000
-                logger.debug(f"{func.__name__} completed", data={"duration_ms": round(duration, 2)})
-                return result
-            except Exception as e:
-                duration = (time.perf_counter() - start) * 1000
-                logger.error(f"{func.__name__} failed", data={"duration_ms": round(duration, 2), "error": str(e)})
-                raise
-        
-        import asyncio
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        return sync_wrapper
-    
-    return decorator

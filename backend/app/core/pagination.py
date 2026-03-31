@@ -4,15 +4,9 @@ Pagination utilities for API endpoints.
 Provides reusable pagination logic with consistent response format.
 """
 from math import ceil
-from typing import TypeVar, Generic, List, Any, Optional
-from pydantic import BaseModel, Field
+from typing import List, Any
+from pydantic import BaseModel
 from sqlalchemy.orm import Query
-
-
-class PaginationParams(BaseModel):
-    """Query parameters for pagination."""
-    page: int = Field(default=1, ge=1, description="Page number (1-indexed)")
-    page_size: int = Field(default=50, ge=1, le=200, description="Items per page (max 200)")
 
 
 class PaginationMeta(BaseModel):
@@ -26,15 +20,6 @@ class PaginationMeta(BaseModel):
 
 
 T = TypeVar('T')
-
-
-class PaginatedResponse(BaseModel, Generic[T]):
-    """Generic paginated response wrapper."""
-    data: List[Any]
-    pagination: PaginationMeta
-    
-    class Config:
-        arbitrary_types_allowed = True
 
 
 def paginate_query(
@@ -91,37 +76,3 @@ def paginate_query(
     return paginated_query, meta
 
 
-def create_paginated_response(
-    items: List[Any],
-    page: int,
-    page_size: int,
-    total_count: int
-) -> dict:
-    """
-    Create a paginated response dictionary.
-    
-    Useful when you already have the items and total count
-    (e.g., after manual processing).
-    
-    Args:
-        items: List of items for the current page
-        page: Current page number
-        page_size: Items per page
-        total_count: Total number of items across all pages
-        
-    Returns:
-        Dictionary with 'data' and 'pagination' keys
-    """
-    total_pages = ceil(total_count / page_size) if total_count > 0 else 1
-    
-    return {
-        "data": items,
-        "pagination": {
-            "page": page,
-            "page_size": page_size,
-            "total_count": total_count,
-            "total_pages": total_pages,
-            "has_next": page < total_pages,
-            "has_previous": page > 1
-        }
-    }

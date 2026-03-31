@@ -6,9 +6,6 @@ import { renderHook, act } from '@testing-library/react';
 import axios from 'axios';
 import {
   useFormErrorMapping,
-  useAsyncValidation,
-  isApiValidationError,
-  ApiValidationError,
 } from './useFormErrorHandling';
 
 // Mock axios
@@ -17,48 +14,6 @@ jest.mock('axios', () => ({
 }));
 
 const mockIsAxiosError = axios.isAxiosError as jest.MockedFunction<typeof axios.isAxiosError>;
-
-describe('isApiValidationError', () => {
-  it('returns true for valid validation error object', () => {
-    const error: ApiValidationError = {
-      error: 'VALIDATION_ERROR',
-      message: 'Validation failed',
-      details: [{ field: 'name', message: 'Name is required', type: 'required' }],
-    };
-
-    expect(isApiValidationError(error)).toBe(true);
-  });
-
-  it('returns true for business validation error', () => {
-    const error: ApiValidationError = {
-      error: 'BUSINESS_VALIDATION_ERROR',
-      message: 'Business rule violated',
-      details: [{ field: 'quantity', message: 'Quantity exceeds limit', type: 'business' }],
-    };
-
-    expect(isApiValidationError(error)).toBe(true);
-  });
-
-  it('returns false for null', () => {
-    expect(isApiValidationError(null)).toBe(false);
-  });
-
-  it('returns false for undefined', () => {
-    expect(isApiValidationError(undefined)).toBe(false);
-  });
-
-  it('returns false for object without error field', () => {
-    expect(isApiValidationError({ message: 'Error', details: [] })).toBe(false);
-  });
-
-  it('returns false for object without details array', () => {
-    expect(isApiValidationError({ error: 'ERROR', message: 'Error' })).toBe(false);
-  });
-
-  it('returns false for object with non-array details', () => {
-    expect(isApiValidationError({ error: 'ERROR', message: 'Error', details: 'not array' })).toBe(false);
-  });
-});
 
 describe('useFormErrorMapping', () => {
   const createMockSetError = () => jest.fn();

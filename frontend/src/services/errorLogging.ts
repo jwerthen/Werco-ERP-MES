@@ -187,7 +187,7 @@ class ErrorLoggingService {
 }
 
 // Singleton instance
-export const errorLoggingService = new ErrorLoggingService();
+const errorLoggingService = new ErrorLoggingService();
 
 // Convenience function for logging
 export const logError = (payload: ErrorLogPayload): void => {
@@ -199,4 +199,3 @@ if (typeof window !== 'undefined') {
   errorLoggingService.initialize();
 }
 
-export default errorLoggingService;

@@ -9,9 +9,7 @@ Features:
 - Cached decorator for easy caching of functions
 """
 from typing import Optional, Any, Callable, TypeVar, List
-from functools import wraps
 import json
-import hashlib
 from datetime import datetime
 from app.core.logging import get_logger
 
@@ -268,103 +266,6 @@ def init_cache(redis_url: Optional[str] = None):
     cache.init(redis_url)
 
 
-def close_cache():
-    """Close global cache instance."""
-    cache.close()
-
-
-def make_cache_key(*args, **kwargs) -> str:
-    """Generate a cache key from arguments."""
-    key_parts = [str(arg) for arg in args]
-    key_parts.extend(f"{k}={v}" for k, v in sorted(kwargs.items()))
-    key_str = ":".join(key_parts)
-    # Use hash for very long keys
-    if len(key_str) > 200:
-        return hashlib.md5(key_str.encode()).hexdigest()
-    return key_str
-
-
-def cached(
-    prefix: str,
-    ttl: int = CacheTTL.MEDIUM,
-    key_builder: Optional[Callable[..., str]] = None
-):
-    """
-    Decorator to cache function results.
-    
-    Usage:
-        @cached(CacheKeys.PARTS_LIST, ttl=CacheTTL.PARTS_LIST)
-        def list_parts(skip: int, limit: int):
-            return db.query(Part).offset(skip).limit(limit).all()
-    """
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @wraps(func)
-        def wrapper(*args, **kwargs) -> T:
-            if not cache.enabled:
-                return func(*args, **kwargs)
-            
-            # Build cache key
-            if key_builder:
-                cache_key = f"{prefix}:{key_builder(*args, **kwargs)}"
-            else:
-                cache_key = f"{prefix}:{make_cache_key(*args, **kwargs)}"
-            
-            # Try to get from cache
-            cached_value = cache.get(cache_key)
-            if cached_value is not None:
-                return cached_value
-            
-            # Compute value
-            result = func(*args, **kwargs)
-            
-            # Cache the result
-            cache.set(cache_key, result, ttl)
-            
-            return result
-        
-        return wrapper
-    return decorator
-
-
-def invalidate_on_change(entity_type: str):
-    """
-    Decorator to invalidate cache after a function that modifies data.
-    
-    Usage:
-        @invalidate_on_change(CacheKeys.PARTS)
-        def create_part(part_data):
-            ...
-    """
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @wraps(func)
-        def wrapper(*args, **kwargs) -> T:
-            result = func(*args, **kwargs)
-            
-            # Invalidate cache after successful operation
-            if cache.enabled:
-                # Extract entity_id if result has an id attribute
-                entity_id = getattr(result, 'id', None) if result else None
-                cache.invalidate_entity(entity_type, entity_id)
-            
-            return result
-        
-        return wrapper
-    return decorator
-
-
-# Convenience functions for common cache operations
-def cache_parts_list(parts_data: List[dict], skip: int, limit: int, filters: str = ""):
-    """Cache parts list."""
-    key = f"{CacheKeys.PARTS_LIST}:{skip}:{limit}:{filters}"
-    cache.set(key, parts_data, CacheTTL.PARTS_LIST)
-
-
-def get_cached_parts_list(skip: int, limit: int, filters: str = "") -> Optional[List[dict]]:
-    """Get cached parts list."""
-    key = f"{CacheKeys.PARTS_LIST}:{skip}:{limit}:{filters}"
-    return cache.get(key)
-
-
 def cache_work_centers_list(wc_data: List[dict]):
     """Cache work centers list."""
     cache.set(CacheKeys.WORK_CENTERS_LIST, wc_data, CacheTTL.WORK_CENTERS_LIST)
@@ -375,28 +276,8 @@ def get_cached_work_centers_list() -> Optional[List[dict]]:
     return cache.get(CacheKeys.WORK_CENTERS_LIST)
 
 
-def cache_customers_list(customers_data: List[dict], skip: int, limit: int):
-    """Cache customers list."""
-    key = f"{CacheKeys.CUSTOMERS_LIST}:{skip}:{limit}"
-    cache.set(key, customers_data, CacheTTL.CUSTOMERS_LIST)
-
-
-def get_cached_customers_list(skip: int, limit: int) -> Optional[List[dict]]:
-    """Get cached customers list."""
-    key = f"{CacheKeys.CUSTOMERS_LIST}:{skip}:{limit}"
-    return cache.get(key)
-
-
-def invalidate_parts_cache(part_id: Optional[int] = None):
-    """Invalidate parts cache."""
-    cache.invalidate_entity(CacheKeys.PARTS, part_id)
-
-
 def invalidate_work_centers_cache(wc_id: Optional[int] = None):
     """Invalidate work centers cache."""
     cache.invalidate_entity(CacheKeys.WORK_CENTERS, wc_id)
 
 
-def invalidate_customers_cache(customer_id: Optional[int] = None):
-    """Invalidate customers cache."""
-    cache.invalidate_entity(CacheKeys.CUSTOMERS, customer_id)

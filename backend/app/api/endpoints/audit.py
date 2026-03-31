@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import require_role
 from app.models.user import User, UserRole
 from app.models.audit_log import AuditLog
 from app.services.audit_integrity_service import AuditIntegrityService

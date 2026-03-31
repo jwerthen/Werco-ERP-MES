@@ -14,7 +14,7 @@ export interface ConflictData<T = Record<string, unknown>> {
   message: string;
 }
 
-export interface ConflictResponse<T = Record<string, unknown>> {
+interface ConflictResponse<T = Record<string, unknown>> {
   error: 'CONFLICT';
   message: string;
   conflict: ConflictData<T>;
@@ -48,38 +48,6 @@ export class ConflictError<T = Record<string, unknown>> extends Error {
   get submittedChanges(): Partial<T> {
     return this.conflict.submitted_changes;
   }
-}
-
-/**
- * Check if an error response is a conflict error
- */
-export function isConflictError(error: unknown): error is ConflictError {
-  return error instanceof ConflictError;
-}
-
-/**
- * Check if an API response indicates a conflict
- */
-export function isConflictResponse(response: unknown): response is ConflictResponse {
-  return (
-    typeof response === 'object' &&
-    response !== null &&
-    'error' in response &&
-    (response as ConflictResponse).error === 'CONFLICT'
-  );
-}
-
-/**
- * Parse an API error and throw ConflictError if applicable
- */
-export function handleApiError(error: unknown): never {
-  if (error && typeof error === 'object' && 'response' in error) {
-    const axiosError = error as { response?: { status?: number; data?: unknown } };
-    if (axiosError.response?.status === 409 && isConflictResponse(axiosError.response.data)) {
-      throw new ConflictError(axiosError.response.data);
-    }
-  }
-  throw error;
 }
 
 /**

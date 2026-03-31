@@ -1,6 +1,6 @@
-export const CENTRAL_TIME_ZONE = 'America/Chicago';
+const CENTRAL_TIME_ZONE = 'America/Chicago';
 
-export type DateInput = string | number | Date | null | undefined;
+type DateInput = string | number | Date | null | undefined;
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const formatterCache = new Map<string, Intl.DateTimeFormat>();

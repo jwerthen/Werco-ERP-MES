@@ -1,16 +1,16 @@
 from typing import Optional
 from datetime import datetime, timedelta, date
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, case
+from sqlalchemy import func
 from app.db.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
+from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.time_entry import TimeEntry
-from app.models.quality import NonConformanceReport, NCRStatus
-from app.models.purchasing import PurchaseOrder, POStatus, POReceipt
-from app.models.inventory import InventoryItem, InventoryTransaction
+from app.models.quality import NonConformanceReport
+from app.models.purchasing import PurchaseOrder, POReceipt
+from app.models.inventory import InventoryItem
 
 router = APIRouter()
 

@@ -11,20 +11,6 @@ class JobBase(BaseModel):
     args: Optional[Dict[str, Any]] = None
 
 
-class JobCreate(JobBase):
-    job_id: str
-    created_by: Optional[str] = None
-
-
-class JobUpdate(BaseModel):
-    status: Optional[JobStatus] = None
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    attempts: Optional[int] = None
-
-
 class JobResponse(JobBase):
     id: int
     job_id: str

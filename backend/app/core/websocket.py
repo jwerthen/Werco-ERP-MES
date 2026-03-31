@@ -148,11 +148,3 @@ async def broadcast_shop_floor_update(work_center_id: int, update_data: Dict[str
     await manager.broadcast(message, message_type="shop_floor_update")
 
 
-async def send_notification_to_user(user_id: str, notification: Dict[str, Any]):
-    """Send a notification to a specific user."""
-    await manager.send_to_user(user_id, notification, message_type="notification")
-
-
-async def broadcast_quality_alert(alert_data: Dict[str, Any]):
-    """Broadcast quality alerts to all clients."""
-    await manager.broadcast(alert_data, message_type="quality_alert")

@@ -1,4 +1,4 @@
-export const KIOSK_STORAGE_KEY = 'kiosk_mode';
+const KIOSK_STORAGE_KEY = 'kiosk_mode';
 
 const isKioskEligiblePath = (pathname: string): boolean => {
   return pathname.startsWith('/shop-floor') || pathname === '/login';

@@ -1,14 +1,14 @@
 from typing import List, Optional
 from datetime import datetime, date, timedelta
-from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, and_
+from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POReceipt, POStatus
-from app.models.quality import NonConformanceReport, CorrectiveActionRequest
+from app.models.quality import NonConformanceReport
 from app.models.supplier_scorecard import (
     SupplierScorecard, SupplierAudit, ApprovedSupplierList, ScorecardPeriod
 )

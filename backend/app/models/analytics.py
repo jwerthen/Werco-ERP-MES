@@ -34,15 +34,3 @@ class ReportTemplate(Base):
     creator = relationship("User")
 
 
-class KPITarget(Base):
-    """Configurable KPI targets"""
-    __tablename__ = "kpi_targets"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    kpi_name = Column(String(100), nullable=False, unique=True)
-    target_value = Column(String(100), nullable=False)  # String to support % or absolute
-    target_type = Column(String(20), default="gte")  # gte, lte, eq
-    work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=True)  # Optional per-WC target
-    
-    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

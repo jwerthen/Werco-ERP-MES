@@ -418,61 +418,6 @@ class AuditService:
             extra_data=extra_data
         )
     
-    def log_view(
-        self,
-        resource_type: str,
-        resource_id: int,
-        resource_identifier: str,
-        extra_data: Optional[Dict] = None
-    ) -> AuditLog:
-        """Log a VIEW action (for sensitive data access tracking)."""
-        return self.log(
-            action=self.ACTIONS["VIEW"],
-            resource_type=resource_type,
-            resource_id=resource_id,
-            resource_identifier=resource_identifier,
-            description=f"Viewed {resource_type}: {resource_identifier}",
-            extra_data=extra_data
-        )
-    
-    def log_export(
-        self,
-        resource_type: str,
-        export_format: str,
-        record_count: int,
-        description: Optional[str] = None,
-        extra_data: Optional[Dict] = None
-    ) -> AuditLog:
-        """Log an EXPORT action."""
-        desc = description or f"Exported {record_count} {resource_type} records as {export_format}"
-        
-        return self.log(
-            action=self.ACTIONS["EXPORT"],
-            resource_type=resource_type,
-            description=desc,
-            extra_data={"format": export_format, "count": record_count, **(extra_data or {})}
-        )
-    
-    def log_error(
-        self,
-        action: str,
-        resource_type: str,
-        error_message: str,
-        resource_id: Optional[int] = None,
-        resource_identifier: Optional[str] = None,
-        extra_data: Optional[Dict] = None
-    ) -> AuditLog:
-        """Log a failed action."""
-        return self.log(
-            action=action,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            resource_identifier=resource_identifier,
-            description=f"Failed: {error_message}",
-            success=False,
-            error_message=error_message,
-            extra_data=extra_data
-        )
 
 
 def get_audit_service(

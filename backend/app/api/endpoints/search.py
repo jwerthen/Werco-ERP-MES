@@ -27,7 +27,6 @@ from app.models.bom import BOM
 from app.models.routing import Routing
 from app.models.purchasing import PurchaseOrder, Vendor
 from app.models.quote import Quote
-from app.models.inventory import InventoryItem
 
 router = APIRouter()
 

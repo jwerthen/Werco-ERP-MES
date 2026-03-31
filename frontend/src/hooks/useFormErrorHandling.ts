@@ -1,17 +1,17 @@
-import { useState, useCallback } from 'react';
+import { useCallback } from 'react';
 import axios from 'axios';
 
 // ============================================================================
 // API VALIDATION ERROR TYPES
 // ============================================================================
 
-export interface ValidationErrorDetail {
+interface ValidationErrorDetail {
   field: string;
   message: string;
   type: string;
 }
 
-export interface ApiValidationError {
+interface ApiValidationError {
   error: 'VALIDATION_ERROR' | 'BUSINESS_VALIDATION_ERROR' | string;
   message: string;
   details: ValidationErrorDetail[];
@@ -23,7 +23,7 @@ export interface ApiError {
   details?: ValidationErrorDetail[];
 }
 
-export function isApiValidationError(error: unknown): error is ApiValidationError {
+function isApiValidationError(error: unknown): error is ApiValidationError {
   return (
     typeof error === 'object' &&
     error !== null &&
@@ -81,37 +81,3 @@ export function useFormErrorMapping({
   return { mapApiErrorToForm };
 }
 
-// ============================================================================
-// DEBOUNCED ASYNC VALIDATION HOOK
-// ============================================================================
-
-export function useAsyncValidation<T>(
-  validateFn: (value: T) => Promise<string | null>,
-  debounceMs: number = 500
-) {
-  const [isValidating, setIsValidating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const validate = useCallback(
-    (value: T) => {
-      setIsValidating(true);
-      setError(null);
-
-      const timer = setTimeout(async () => {
-        try {
-          const result = await validateFn(value);
-          setError(result);
-        } catch (err) {
-          setError('Validation failed');
-        } finally {
-          setIsValidating(false);
-        }
-      }, debounceMs);
-
-      return () => clearTimeout(timer);
-    },
-    [validateFn, debounceMs]
-  );
-
-  return { validate, isValidating, error };
-}

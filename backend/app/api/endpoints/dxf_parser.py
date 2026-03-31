@@ -4,8 +4,6 @@ Extracts geometry data: cut length, holes, bends, dimensions
 """
 from typing import Optional, List, Tuple
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from sqlalchemy.orm import Session
-from app.db.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
 from pydantic import BaseModel

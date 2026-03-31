@@ -108,35 +108,6 @@ class EmailService:
         text = re.sub(r'\n\s*\n', '\n\n', text)
         return text.strip()
 
-    async def send_batch(
-        self,
-        emails: List[Dict],
-        max_batch_size: int = 50
-    ) -> Dict[str, int]:
-        """
-        Send batch of emails
-
-        Args:
-            emails: List of email dicts with 'to', 'subject', 'body/template', 'context'
-            max_batch_size: Max emails per batch
-
-        Returns:
-            Dict with success/failure counts
-        """
-        success = 0
-        failed = 0
-
-        for i in range(0, len(emails), max_batch_size):
-            batch = emails[i:i + max_batch_size]
-
-            for email_data in batch:
-                sent = await self.send_email(**email_data)
-                if sent:
-                    success += 1
-                else:
-                    failed += 1
-
-        return {"success": success, "failed": failed}
 
 
 # Singleton instance

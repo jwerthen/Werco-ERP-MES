@@ -63,9 +63,3 @@ async def enqueue_job(
     return job
 
 
-async def close_redis_pool():
-    """Close Redis connection pool"""
-    global _redis_pool
-    if _redis_pool is not None:
-        await _redis_pool.close()
-        _redis_pool = None

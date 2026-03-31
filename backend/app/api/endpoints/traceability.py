@@ -6,12 +6,10 @@ from sqlalchemy import or_
 from app.db.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
-from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.models.inventory import InventoryItem, InventoryTransaction
+from app.models.work_order import WorkOrder
 from app.models.purchasing import POReceipt, PurchaseOrderLine, PurchaseOrder
 from app.models.quality import NonConformanceReport
-from app.models.shipping import Shipment
-from app.models.part import Part
 from pydantic import BaseModel
 
 router = APIRouter()

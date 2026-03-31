@@ -380,7 +380,7 @@ export const tours: Record<string, Tour> = {
 // ─── Help Tips ───────────────────────────────────────────────────────
 // Contextual quick-help tips shown in the help menu, filtered by role.
 
-export interface HelpTip {
+interface HelpTip {
   id: string;
   title: string;
   description: string;
@@ -539,9 +539,3 @@ export const getTour = (tourId: string): Tour | undefined => {
   return tours[tourId];
 };
 
-/**
- * Get all tours (original, not role-filtered).
- */
-export const getAllTours = (): Tour[] => {
-  return Object.values(tours);
-};

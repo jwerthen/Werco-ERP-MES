@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export interface RealtimeMessage {
+interface RealtimeMessage {
   type: string;
   data?: any;
   timestamp?: string | null;

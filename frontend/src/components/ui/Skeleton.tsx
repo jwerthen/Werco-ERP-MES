@@ -32,8 +32,8 @@ export const Skeleton: React.FC<SkeletonProps> = ({
   );
 };
 
-// Text line skeleton
-export const SkeletonText: React.FC<{ lines?: number; className?: string }> = ({ 
+// Text line skeleton (used internally by SkeletonCard)
+const SkeletonText: React.FC<{ lines?: number; className?: string }> = ({
   lines = 1, 
   className = '' 
 }) => (
@@ -47,23 +47,8 @@ export const SkeletonText: React.FC<{ lines?: number; className?: string }> = ({
   </div>
 );
 
-// Avatar/circle skeleton
-export const SkeletonAvatar: React.FC<{ size?: 'sm' | 'md' | 'lg' }> = ({ size = 'md' }) => {
-  const sizes = {
-    sm: 'h-8 w-8',
-    md: 'h-10 w-10',
-    lg: 'h-12 w-12'
-  };
-  return <Skeleton className={`rounded-full ${sizes[size]}`} />;
-};
-
-// Button skeleton
-export const SkeletonButton: React.FC<{ width?: string }> = ({ width = 'w-24' }) => (
-  <Skeleton className={`h-9 ${width} rounded-md`} />
-);
-
-// Badge/tag skeleton
-export const SkeletonBadge: React.FC = () => (
+// Badge/tag skeleton (used internally by SkeletonCard)
+const SkeletonBadge: React.FC = () => (
   <Skeleton className="h-6 w-16 rounded-full" />
 );
 
@@ -81,8 +66,8 @@ export const SkeletonCard: React.FC<{ className?: string }> = ({ className = '' 
   </div>
 );
 
-// Table row skeleton
-export const SkeletonTableRow: React.FC<{ columns: number }> = ({ columns }) => (
+// Table row skeleton (used internally by SkeletonTable)
+const SkeletonTableRow: React.FC<{ columns: number }> = ({ columns }) => (
   <tr className="animate-pulse">
     {Array.from({ length: columns }).map((_, i) => (
       <td key={i} className="px-4 py-4">
@@ -120,8 +105,8 @@ export const SkeletonTable: React.FC<{
   </div>
 );
 
-// Stats card skeleton (for dashboard)
-export const SkeletonStatCard: React.FC = () => (
+// Stats card skeleton (used internally by SkeletonDashboard)
+const SkeletonStatCard: React.FC = () => (
   <div className="bg-white rounded-lg shadow p-6 animate-pulse" data-testid="skeleton-stat-card">
     <div className="flex items-center justify-between">
       <div className="space-y-2">
@@ -159,73 +144,6 @@ export const SkeletonDashboard: React.FC = () => (
   </div>
 );
 
-// Form skeleton
-export const SkeletonForm: React.FC<{ fields?: number }> = ({ fields = 4 }) => (
-  <div className="space-y-6 animate-pulse" data-testid="skeleton-form">
-    {Array.from({ length: fields }).map((_, i) => (
-      <div key={i} className="space-y-2" data-testid="skeleton-form-field">
-        <Skeleton className="h-4 w-24" />
-        <Skeleton className="h-10 w-full rounded-md" />
-      </div>
-    ))}
-    <div className="flex gap-3 pt-4">
-      <SkeletonButton width="w-32" />
-      <SkeletonButton width="w-24" />
-    </div>
-  </div>
-);
-
-// Detail page skeleton
-export const SkeletonDetail: React.FC = () => (
-  <div className="space-y-6" data-testid="skeleton-detail">
-    {/* Header */}
-    <div className="flex items-center justify-between">
-      <div className="space-y-2">
-        <Skeleton className="h-8 w-64" />
-        <Skeleton className="h-4 w-32" />
-      </div>
-      <div className="flex gap-2">
-        <SkeletonButton />
-        <SkeletonButton />
-      </div>
-    </div>
-    
-    {/* Content cards */}
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <div className="lg:col-span-2">
-        <SkeletonCard />
-      </div>
-      <div>
-        <SkeletonCard />
-      </div>
-    </div>
-    
-    {/* Additional section */}
-    <SkeletonCard />
-  </div>
-);
-
-// List item skeleton
-export const SkeletonListItem: React.FC = () => (
-  <div className="flex items-center gap-4 p-4 animate-pulse" data-testid="skeleton-list-item">
-    <SkeletonAvatar />
-    <div className="flex-1 space-y-2">
-      <Skeleton className="h-4 w-1/3" />
-      <Skeleton className="h-3 w-1/2" />
-    </div>
-    <SkeletonBadge />
-  </div>
-);
-
-// List skeleton
-export const SkeletonList: React.FC<{ items?: number }> = ({ items = 5 }) => (
-  <div className="divide-y divide-gray-200">
-    {Array.from({ length: items }).map((_, i) => (
-      <SkeletonListItem key={i} />
-    ))}
-  </div>
-);
-
 // Loading spinner (for inline/button loading)
 export const Spinner: React.FC<{ size?: 'sm' | 'md' | 'lg'; className?: string }> = ({ 
   size = 'md',
@@ -252,14 +170,6 @@ export const LoadingOverlay: React.FC<{ message?: string }> = ({ message = 'Load
       <Spinner size="lg" className="mx-auto" />
       <p className="text-gray-600 font-medium">{message}</p>
     </div>
-  </div>
-);
-
-// Inline loading state
-export const LoadingInline: React.FC<{ message?: string }> = ({ message = 'Loading...' }) => (
-  <div className="flex items-center justify-center py-8" data-testid="loading-inline">
-    <Spinner size="md" className="mr-3" />
-    <span className="text-gray-600">{message}</span>
   </div>
 );
 

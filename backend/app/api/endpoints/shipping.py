@@ -3,8 +3,8 @@ from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
-from app.models.user import User, UserRole
+from app.api.deps import get_current_user
+from app.models.user import User
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from pydantic import BaseModel

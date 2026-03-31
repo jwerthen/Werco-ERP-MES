@@ -4,18 +4,14 @@
 
 import {
   ConflictError,
-  isConflictError,
-  isConflictResponse,
-  handleApiError,
   getChangedFields,
   autoMerge,
   formatFieldName,
   formatValue,
-  ConflictResponse,
 } from './optimisticLock';
 
 describe('ConflictError', () => {
-  const createConflictResponse = (): ConflictResponse => ({
+  const createConflictResponse = () => ({
     error: 'CONFLICT',
     message: 'Version conflict detected',
     conflict: {
@@ -59,157 +55,6 @@ describe('ConflictError', () => {
   });
 });
 
-describe('isConflictError', () => {
-  it('identifies ConflictError by name and properties', () => {
-    const error = new ConflictError({
-      error: 'CONFLICT',
-      message: 'Conflict',
-      conflict: {
-        current_version: 2,
-        submitted_version: 1,
-        current_data: {},
-        submitted_changes: {},
-        message: 'Conflict',
-      },
-    });
-
-    // Verify the error has correct properties
-    expect(error.name).toBe('ConflictError');
-    expect(error.conflict).toBeDefined();
-    expect(error.statusCode).toBe(409);
-  });
-
-  it('returns false for regular Error', () => {
-    const error = new Error('Regular error');
-    expect(isConflictError(error)).toBe(false);
-  });
-
-  it('returns false for null', () => {
-    expect(isConflictError(null)).toBe(false);
-  });
-
-  it('returns false for undefined', () => {
-    expect(isConflictError(undefined)).toBe(false);
-  });
-
-  it('returns false for plain object', () => {
-    expect(isConflictError({ error: 'CONFLICT' })).toBe(false);
-  });
-});
-
-describe('isConflictResponse', () => {
-  it('returns true for valid conflict response', () => {
-    const response = {
-      error: 'CONFLICT',
-      message: 'Conflict',
-      conflict: {
-        current_version: 2,
-        submitted_version: 1,
-        current_data: {},
-        submitted_changes: {},
-        message: 'Conflict',
-      },
-    };
-
-    expect(isConflictResponse(response)).toBe(true);
-  });
-
-  it('returns false for non-conflict error response', () => {
-    const response = {
-      error: 'VALIDATION_ERROR',
-      message: 'Validation failed',
-    };
-
-    expect(isConflictResponse(response)).toBe(false);
-  });
-
-  it('returns false for null', () => {
-    expect(isConflictResponse(null)).toBe(false);
-  });
-
-  it('returns false for undefined', () => {
-    expect(isConflictResponse(undefined)).toBe(false);
-  });
-
-  it('returns false for string', () => {
-    expect(isConflictResponse('CONFLICT')).toBe(false);
-  });
-
-  it('returns false for object without error field', () => {
-    expect(isConflictResponse({ message: 'Error' })).toBe(false);
-  });
-});
-
-describe('handleApiError', () => {
-  it('throws error with ConflictError properties for 409 status', () => {
-    const error = {
-      response: {
-        status: 409,
-        data: {
-          error: 'CONFLICT',
-          message: 'Conflict',
-          conflict: {
-            current_version: 2,
-            submitted_version: 1,
-            current_data: {},
-            submitted_changes: {},
-            message: 'Conflict',
-          },
-        },
-      },
-    };
-
-    let thrown: any;
-    try {
-      handleApiError(error);
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeDefined();
-    expect(thrown.name).toBe('ConflictError');
-    expect(thrown.conflict).toBeDefined();
-  });
-
-  it('re-throws original error for non-409 status', () => {
-    const error = {
-      response: {
-        status: 400,
-        data: { error: 'BAD_REQUEST' },
-      },
-    };
-
-    let thrown: any;
-    try {
-      handleApiError(error);
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBe(error);
-  });
-
-  it('re-throws original error for 409 without conflict response format', () => {
-    const error = {
-      response: {
-        status: 409,
-        data: { message: 'Generic conflict' },
-      },
-    };
-
-    let thrown: any;
-    try {
-      handleApiError(error);
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBe(error);
-  });
-
-  it('re-throws original error without response', () => {
-    const error = new Error('Network error');
-
-    expect(() => handleApiError(error)).toThrow('Network error');
-  });
-});
 
 describe('getChangedFields', () => {
   it('returns empty array when no fields changed', () => {

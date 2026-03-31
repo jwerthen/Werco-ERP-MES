@@ -2,10 +2,9 @@
 from typing import Optional, List
 from datetime import datetime, date
 from enum import Enum
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_
 import io
 
 from app.db.database import get_db
@@ -15,7 +14,7 @@ from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.models.part import Part, PartType
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.purchasing import PurchaseOrder, PurchaseOrderLine, POStatus
-from app.models.quote import Quote, QuoteLine, QuoteStatus
+from app.models.quote import Quote, QuoteStatus
 from app.services.export_service import generate_csv, generate_excel
 
 router = APIRouter()

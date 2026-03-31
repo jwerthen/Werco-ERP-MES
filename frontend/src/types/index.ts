@@ -145,25 +145,6 @@ export interface WorkOrderSummary {
   current_operation?: string;
 }
 
-export interface TimeEntry {
-  id: number;
-  user_id: number;
-  work_order_id?: number;
-  operation_id?: number;
-  work_center_id?: number;
-  entry_type: TimeEntryType;
-  clock_in: string;
-  clock_out?: string;
-  duration_hours?: number;
-  quantity_produced: number;
-  quantity_scrapped: number;
-  notes?: string;
-  scrap_reason?: string;
-  downtime_reason?: string;
-  created_at: string;
-  updated_at: string;
-}
-
 export type TimeEntryType = 'setup' | 'run' | 'rework' | 'inspection' | 'downtime' | 'break';
 
 export interface DashboardData {
