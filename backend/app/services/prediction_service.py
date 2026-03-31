@@ -5,12 +5,12 @@ import logging
 from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func
 from collections import defaultdict
 
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
 from app.models.work_center import WorkCenter
-from app.models.time_entry import TimeEntry, TimeEntryType
+from app.models.time_entry import TimeEntry
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.purchasing import PurchaseOrder, PurchaseOrderLine, POStatus
 from app.models.part import Part

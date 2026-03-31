@@ -4,14 +4,14 @@ Report Builder Service - Dynamic query execution for custom reports
 import logging
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_, asc, desc
+from sqlalchemy import func, or_, asc, desc
 
-from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.models.work_order import WorkOrder
 from app.models.part import Part
-from app.models.inventory import InventoryItem, InventoryTransaction
+from app.models.inventory import InventoryItem
 from app.models.quality import NonConformanceReport
-from app.models.purchasing import PurchaseOrder, PurchaseOrderLine, Vendor
-from app.models.quote import Quote, QuoteLine
+from app.models.purchasing import PurchaseOrder
+from app.models.quote import Quote
 from app.schemas.analytics import (
     CustomReportRequest, ReportDataSource, ReportFilter,
     ReportColumn, ReportGroupBy, ReportSort, AggregateFunction

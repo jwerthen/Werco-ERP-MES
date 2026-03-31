@@ -3,7 +3,6 @@ from datetime import datetime, date, timedelta
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
 from app.api.deps import get_current_user, require_role
 from app.models.user import User, UserRole

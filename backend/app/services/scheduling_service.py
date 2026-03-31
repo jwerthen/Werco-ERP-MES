@@ -10,13 +10,12 @@ Schedules work order operations considering:
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func
+from sqlalchemy import func
 from dataclasses import dataclass
 import logging
 
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
 from app.models.work_center import WorkCenter
-from app.models.part import Part
 from app.core.cache import invalidate_work_centers_cache
 
 logger = logging.getLogger(__name__)
