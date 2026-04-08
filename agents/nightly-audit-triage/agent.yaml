@@ -1,0 +1,190 @@
+# Starter Claude Managed Agent definition for Werco ERP-MES.
+#
+# Purpose: runs nightly, triages the audit log for anomalies relevant to
+# CMMC L2 / AS9100D / ISO 9001 controls, and produces a human-readable
+# summary plus a machine-readable findings payload.
+#
+# This is a declarative template that follows the concepts described in
+# https://claude.com/blog/claude-managed-agents (tools, scoped permissions,
+# long-running sessions, tracing, self-evaluation). Adjust the field names
+# to match the final Managed Agents schema in the Claude Console before
+# deployment.
+
+name: nightly-audit-triage
+version: 0.1.0
+description: >
+  Nightly audit-log triage agent for Werco ERP-MES. Scans the previous 24h
+  of audit activity, flags anomalies against CMMC L2 controls, and posts a
+  summary to the operations channel.
+
+model: claude-opus-4-6
+
+# ---------------------------------------------------------------------------
+# Trigger: long-running scheduled session. The managed harness wakes the
+# agent, hydrates prior state, runs one pass, then persists state and sleeps.
+# ---------------------------------------------------------------------------
+trigger:
+  type: schedule
+  cron: "0 6 * * *"        # 06:00 UTC daily
+  timezone: UTC
+  max_duration_minutes: 30
+
+# ---------------------------------------------------------------------------
+# Tools: minimum-viable set. Each tool is scoped tightly — the managed
+# runtime enforces the permissions, not the model.
+# ---------------------------------------------------------------------------
+tools:
+  - name: list_audit_logs
+    description: >
+      Fetch audit log entries from the Werco ERP-MES backend. Returns up to
+      `limit` rows matching the filter. Read-only.
+    kind: http
+    request:
+      method: GET
+      url: ${WERCO_API_BASE_URL}/api/audit/
+      auth: bearer:${WERCO_AUDIT_READER_TOKEN}
+    params:
+      since: iso8601
+      until: iso8601
+      action: string?
+      user_id: int?
+      limit: int
+
+  - name: get_audit_summary
+    description: >
+      Pre-aggregated audit summary (actions per resource, per user, failed
+      logins). Read-only. Backed by /api/audit/summary.
+    kind: http
+    request:
+      method: GET
+      url: ${WERCO_API_BASE_URL}/api/audit/summary
+      auth: bearer:${WERCO_AUDIT_READER_TOKEN}
+    params:
+      days: int
+
+  - name: verify_audit_integrity
+    description: >
+      Verify the hash chain of the most recent audit records (CMMC AU-3.3.8).
+      Returns ok=true/false plus any broken-link indices. Read-only.
+    kind: http
+    request:
+      method: GET
+      url: ${WERCO_API_BASE_URL}/api/audit/integrity/verify-recent
+      auth: bearer:${WERCO_AUDIT_READER_TOKEN}
+
+  - name: post_triage_report
+    description: >
+      Post the final triage summary to the operations Slack channel.
+      Side-effecting. The runtime rate-limits this to 1 call per session.
+    kind: http
+    request:
+      method: POST
+      url: https://slack.com/api/chat.postMessage
+      auth: bearer:${SLACK_BOT_TOKEN}
+    rate_limit:
+      per_session: 1
+
+# ---------------------------------------------------------------------------
+# Permissions: what the agent is allowed to touch. The managed runtime
+# rejects any call outside these scopes.
+# ---------------------------------------------------------------------------
+permissions:
+  network:
+    allowed_hosts:
+      - ${WERCO_API_HOST}
+      - slack.com
+  filesystem: none
+  secrets:
+    - WERCO_AUDIT_READER_TOKEN
+    - SLACK_BOT_TOKEN
+
+# ---------------------------------------------------------------------------
+# Success criteria: used by the self-evaluation loop (research preview).
+# The agent iterates until all criteria return true or max_iterations is hit.
+# ---------------------------------------------------------------------------
+success_criteria:
+  - id: integrity_checked
+    description: verify_audit_integrity was called exactly once
+  - id: summary_posted
+    description: post_triage_report was called with a non-empty summary
+  - id: anomalies_classified
+    description: Every flagged event has a severity (low|medium|high|critical)
+
+max_iterations: 3
+
+# ---------------------------------------------------------------------------
+# Guardrails: hard limits enforced by the harness regardless of model output.
+# ---------------------------------------------------------------------------
+guardrails:
+  - no_pii_in_logs: true
+  - max_tool_calls_per_session: 25
+  - max_output_tokens: 8000
+  - deny_if:
+      - tool: post_triage_report
+        when: anomaly_count == 0 AND integrity_ok == true AND previous_24h_nominal == true
+        # Skip the Slack post on fully-nominal nights; log to tracing instead.
+
+# ---------------------------------------------------------------------------
+# Observability: everything routes into the Claude Console trace view.
+# ---------------------------------------------------------------------------
+observability:
+  trace: full
+  redact_fields:
+    - request.headers.authorization
+    - response.body.email
+    - response.body.ip_address
+
+# ---------------------------------------------------------------------------
+# System prompt. Kept inline so the agent is defined by exactly one file.
+# ---------------------------------------------------------------------------
+system_prompt: |
+  You are the Werco ERP-MES nightly audit triage agent. You run once per
+  day and your job is to give the operations team a trustworthy, compact
+  picture of what happened in the last 24 hours of audit activity.
+
+  ## Operating procedure
+
+  1. Call `verify_audit_integrity` first. If the hash chain is broken,
+     classify the run as CRITICAL, skip further analysis, and post a
+     single alert naming the broken sequence numbers. Do not attempt to
+     remediate.
+
+  2. Call `get_audit_summary` with days=1 to get aggregate counts.
+
+  3. Call `list_audit_logs` to pull the raw events for the last 24h. Page
+     using `since`/`until` if the result is truncated.
+
+  4. Classify each event into one of:
+     - nominal        — expected activity
+     - noteworthy     — unusual but explainable (e.g. admin action)
+     - anomaly        — warrants human review
+     - critical       — immediate response required
+
+     Anomaly heuristics (non-exhaustive):
+     - > 5 failed logins for the same user within 10 minutes
+     - Any login from a user whose last login was > 60 days ago
+     - Role changes or permission grants performed outside business hours
+     - Deletes against work orders, parts, or lots
+     - Any audit record with `integrity_ok=false`
+     - Bulk exports (> 1000 rows) of parts, BOMs, or customer data
+
+  5. Build a report with this shape:
+
+     - headline: one sentence ("12 events, 1 anomaly, chain OK")
+     - chain_status: ok | broken
+     - counts: {nominal, noteworthy, anomaly, critical}
+     - findings: [ {severity, actor, action, resource, timestamp, why} ]
+     - recommended_next_actions: [ short bullet strings ]
+
+  6. Call `post_triage_report` exactly once with the report. Use Slack
+     mrkdwn. Put critical findings at the top with a :rotating_light: prefix.
+
+  ## Rules
+
+  - Do not invent audit events. If the API returns nothing, say so.
+  - Do not include raw PII (emails, IPs) in the Slack message. Refer to
+    users by user_id only. Full detail stays in the trace.
+  - If you are uncertain whether something is an anomaly, mark it
+    `noteworthy` and explain your reasoning in `why`.
+  - Stop after one pass unless the self-evaluation loop tells you a
+    success criterion is not yet met.
