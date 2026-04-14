@@ -133,9 +133,9 @@ interface RMACreateForm {
 const todayISO = () => new Date().toISOString().split('T')[0];
 
 const severityBadge: Record<ComplaintSeverity, string> = {
-  minor: 'bg-yellow-100 text-yellow-800',
-  major: 'bg-orange-100 text-orange-800',
-  critical: 'bg-red-100 text-red-800',
+  minor: 'bg-yellow-500/20 text-yellow-300',
+  major: 'bg-orange-500/20 text-orange-300',
+  critical: 'bg-red-500/20 text-red-300',
 };
 
 const severityLabel: Record<ComplaintSeverity, string> = {
@@ -145,12 +145,12 @@ const severityLabel: Record<ComplaintSeverity, string> = {
 };
 
 const statusBadge: Record<ComplaintStatus, string> = {
-  received: 'bg-blue-100 text-blue-800',
-  under_investigation: 'bg-purple-100 text-purple-800',
-  pending_resolution: 'bg-yellow-100 text-yellow-800',
-  resolved: 'bg-green-100 text-green-800',
-  closed: 'bg-gray-100 text-gray-800',
-  rejected: 'bg-red-100 text-red-800',
+  received: 'bg-blue-500/20 text-blue-300',
+  under_investigation: 'bg-purple-500/20 text-purple-300',
+  pending_resolution: 'bg-yellow-500/20 text-yellow-300',
+  resolved: 'bg-green-500/20 text-green-300',
+  closed: 'bg-slate-800 text-slate-100',
+  rejected: 'bg-red-500/20 text-red-300',
 };
 
 const statusLabel: Record<ComplaintStatus, string> = {
@@ -410,10 +410,10 @@ export default function CustomerComplaints() {
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">
+          <h1 className="text-2xl font-bold text-white">
             Customer Complaints & RMA Management
           </h1>
-          <p className="text-sm text-gray-500 mt-1">
+          <p className="text-sm text-slate-400 mt-1">
             Track, investigate, and resolve customer complaints and return material authorizations
           </p>
         </div>
@@ -432,12 +432,12 @@ export default function CustomerComplaints() {
           <div className="du-card bg-base-100 shadow-sm border">
             <div className="du-card-body p-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-red-100">
+                <div className="p-2 rounded-lg bg-red-500/20">
                   <ExclamationTriangleIcon className="h-6 w-6 text-red-600" />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">Open Complaints</p>
-                  <p className="text-xl font-bold text-gray-900">{dashboard.open_complaints}</p>
+                  <p className="text-xs text-slate-400 uppercase tracking-wide">Open Complaints</p>
+                  <p className="text-xl font-bold text-white">{dashboard.open_complaints}</p>
                 </div>
               </div>
             </div>
@@ -446,12 +446,12 @@ export default function CustomerComplaints() {
           <div className="du-card bg-base-100 shadow-sm border">
             <div className="du-card-body p-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-blue-100">
+                <div className="p-2 rounded-lg bg-blue-500/20">
                   <ClockIcon className="h-6 w-6 text-blue-600" />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">Avg Resolution Time</p>
-                  <p className="text-xl font-bold text-gray-900">
+                  <p className="text-xs text-slate-400 uppercase tracking-wide">Avg Resolution Time</p>
+                  <p className="text-xl font-bold text-white">
                     {dashboard.avg_resolution_days != null
                       ? `${dashboard.avg_resolution_days} days`
                       : 'N/A'}
@@ -464,12 +464,12 @@ export default function CustomerComplaints() {
           <div className="du-card bg-base-100 shadow-sm border">
             <div className="du-card-body p-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-purple-100">
+                <div className="p-2 rounded-lg bg-purple-500/20">
                   <TruckIcon className="h-6 w-6 text-purple-600" />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">Open RMAs</p>
-                  <p className="text-xl font-bold text-gray-900">{dashboard.open_rmas}</p>
+                  <p className="text-xs text-slate-400 uppercase tracking-wide">Open RMAs</p>
+                  <p className="text-xl font-bold text-white">{dashboard.open_rmas}</p>
                 </div>
               </div>
             </div>
@@ -478,12 +478,12 @@ export default function CustomerComplaints() {
           <div className="du-card bg-base-100 shadow-sm border">
             <div className="du-card-body p-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-green-100">
+                <div className="p-2 rounded-lg bg-green-500/20">
                   <CheckCircleIcon className="h-6 w-6 text-green-600" />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">Satisfaction Rate</p>
-                  <p className="text-xl font-bold text-gray-900">
+                  <p className="text-xs text-slate-400 uppercase tracking-wide">Satisfaction Rate</p>
+                  <p className="text-xl font-bold text-white">
                     {dashboard.satisfaction_rate != null
                       ? `${dashboard.satisfaction_rate}%`
                       : 'N/A'}
@@ -498,7 +498,7 @@ export default function CustomerComplaints() {
       {/* Filters */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-4">
         <div className="relative flex-1 max-w-sm">
-          <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
           <input
             type="text"
             placeholder="Search complaints..."
@@ -509,7 +509,7 @@ export default function CustomerComplaints() {
         </div>
 
         <div className="flex items-center gap-2">
-          <FunnelIcon className="h-4 w-4 text-gray-400" />
+          <FunnelIcon className="h-4 w-4 text-slate-500" />
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
@@ -584,7 +584,7 @@ export default function CustomerComplaints() {
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={9} className="text-center py-8 text-gray-500">
+                <td colSpan={9} className="text-center py-8 text-slate-400">
                   {error
                     ? 'Failed to load complaints.'
                     : 'No complaints found. Click "New Complaint" to create one.'}
@@ -610,7 +610,7 @@ export default function CustomerComplaints() {
                     <td>
                       <div className="text-sm font-medium">{c.customer_name}</div>
                       {c.customer_contact && (
-                        <div className="text-xs text-gray-500">{c.customer_contact}</div>
+                        <div className="text-xs text-slate-400">{c.customer_contact}</div>
                       )}
                     </td>
                     <td className="text-sm">{formatDate(c.date_received)}</td>
@@ -634,7 +634,7 @@ export default function CustomerComplaints() {
                     </td>
                     <td className="max-w-xs">
                       <div className="text-sm font-medium truncate">{c.title}</div>
-                      <div className="text-xs text-gray-500 truncate">{c.description}</div>
+                      <div className="text-xs text-slate-400 truncate">{c.description}</div>
                     </td>
                     <td className="text-center text-sm">{c.rmas.length}</td>
                     <td className="text-right font-mono text-sm">{fmt(c.estimated_cost)}</td>
@@ -648,82 +648,82 @@ export default function CustomerComplaints() {
                           {/* Detail grid */}
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <div className="space-y-2">
-                              <h4 className="font-semibold text-sm text-gray-700">Complaint Details</h4>
+                              <h4 className="font-semibold text-sm text-slate-300">Complaint Details</h4>
                               <dl className="text-sm space-y-1">
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">PO Number:</dt>
+                                  <dt className="text-slate-400">PO Number:</dt>
                                   <dd>{c.customer_po_number || '-'}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Part:</dt>
+                                  <dt className="text-slate-400">Part:</dt>
                                   <dd>{c.part ? `${c.part.part_number} - ${c.part.name}` : '-'}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Lot #:</dt>
+                                  <dt className="text-slate-400">Lot #:</dt>
                                   <dd>{c.lot_number || '-'}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Serial #:</dt>
+                                  <dt className="text-slate-400">Serial #:</dt>
                                   <dd>{c.serial_number || '-'}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Qty Affected:</dt>
+                                  <dt className="text-slate-400">Qty Affected:</dt>
                                   <dd>{c.quantity_affected}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Occurrence Date:</dt>
+                                  <dt className="text-slate-400">Occurrence Date:</dt>
                                   <dd>{formatDate(c.date_of_occurrence)}</dd>
                                 </div>
                               </dl>
                             </div>
 
                             <div className="space-y-2">
-                              <h4 className="font-semibold text-sm text-gray-700">Investigation & Resolution</h4>
+                              <h4 className="font-semibold text-sm text-slate-300">Investigation & Resolution</h4>
                               <dl className="text-sm space-y-1">
                                 <div>
-                                  <dt className="text-gray-500">Investigation Findings:</dt>
+                                  <dt className="text-slate-400">Investigation Findings:</dt>
                                   <dd className="mt-0.5">{c.investigation_findings || '-'}</dd>
                                 </div>
                                 <div>
-                                  <dt className="text-gray-500">Root Cause:</dt>
+                                  <dt className="text-slate-400">Root Cause:</dt>
                                   <dd className="mt-0.5">{c.root_cause || '-'}</dd>
                                 </div>
                                 <div>
-                                  <dt className="text-gray-500">Containment Action:</dt>
+                                  <dt className="text-slate-400">Containment Action:</dt>
                                   <dd className="mt-0.5">{c.containment_action || '-'}</dd>
                                 </div>
                                 <div>
-                                  <dt className="text-gray-500">Corrective Action:</dt>
+                                  <dt className="text-slate-400">Corrective Action:</dt>
                                   <dd className="mt-0.5">{c.corrective_action || '-'}</dd>
                                 </div>
                                 <div>
-                                  <dt className="text-gray-500">Resolution:</dt>
+                                  <dt className="text-slate-400">Resolution:</dt>
                                   <dd className="mt-0.5">{c.resolution_description || '-'}</dd>
                                 </div>
                               </dl>
                             </div>
 
                             <div className="space-y-2">
-                              <h4 className="font-semibold text-sm text-gray-700">Financial & Status</h4>
+                              <h4 className="font-semibold text-sm text-slate-300">Financial & Status</h4>
                               <dl className="text-sm space-y-1">
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Estimated Cost:</dt>
+                                  <dt className="text-slate-400">Estimated Cost:</dt>
                                   <dd className="font-mono">{fmt(c.estimated_cost)}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Actual Cost:</dt>
+                                  <dt className="text-slate-400">Actual Cost:</dt>
                                   <dd className="font-mono">{fmt(c.actual_cost)}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Resolved Date:</dt>
+                                  <dt className="text-slate-400">Resolved Date:</dt>
                                   <dd>{formatDate(c.resolved_date)}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Closed Date:</dt>
+                                  <dt className="text-slate-400">Closed Date:</dt>
                                   <dd>{formatDate(c.closed_date)}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">Customer Satisfied:</dt>
+                                  <dt className="text-slate-400">Customer Satisfied:</dt>
                                   <dd>
                                     {c.customer_satisfied === null
                                       ? '-'
@@ -734,16 +734,16 @@ export default function CustomerComplaints() {
                                 </div>
                                 {c.satisfaction_notes && (
                                   <div>
-                                    <dt className="text-gray-500">Satisfaction Notes:</dt>
+                                    <dt className="text-slate-400">Satisfaction Notes:</dt>
                                     <dd className="mt-0.5">{c.satisfaction_notes}</dd>
                                   </div>
                                 )}
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">NCR ID:</dt>
+                                  <dt className="text-slate-400">NCR ID:</dt>
                                   <dd>{c.ncr_id || '-'}</dd>
                                 </div>
                                 <div className="flex justify-between">
-                                  <dt className="text-gray-500">CAR ID:</dt>
+                                  <dt className="text-slate-400">CAR ID:</dt>
                                   <dd>{c.car_id || '-'}</dd>
                                 </div>
                               </dl>
@@ -753,7 +753,7 @@ export default function CustomerComplaints() {
                           {/* RMAs table */}
                           {c.rmas.length > 0 && (
                             <div>
-                              <h4 className="font-semibold text-sm text-gray-700 mb-2">
+                              <h4 className="font-semibold text-sm text-slate-300 mb-2">
                                 Return Material Authorizations
                               </h4>
                               <table className="du-table du-table-sm w-full">
@@ -770,7 +770,7 @@ export default function CustomerComplaints() {
                                     <tr key={rma.id}>
                                       <td className="font-medium text-sm">{rma.rma_number}</td>
                                       <td>
-                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-500/20 text-blue-300">
                                           {rmaStatusLabel[rma.status] || rma.status}
                                         </span>
                                       </td>
@@ -819,7 +819,7 @@ export default function CustomerComplaints() {
 
       {/* Results count */}
       {!loading && (
-        <div className="text-sm text-gray-500">
+        <div className="text-sm text-slate-400">
           Showing {filtered.length} of {complaints.length} complaints
         </div>
       )}

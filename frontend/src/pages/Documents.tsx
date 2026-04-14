@@ -173,7 +173,7 @@ export default function Documents() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Documents</h1>
+        <h1 className="text-2xl font-bold text-white">Documents</h1>
         <button onClick={() => setShowUploadModal(true)} className="btn-primary flex items-center">
           <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
           Upload Document
@@ -183,7 +183,7 @@ export default function Documents() {
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-4">
         <div className="relative flex-1">
-          <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+          <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" />
           <input
             type="text"
             placeholder="Search documents..."
@@ -203,37 +203,37 @@ export default function Documents() {
           ))}
         </select>
       </div>
-      <div className="flex items-center gap-2 text-sm text-gray-600">
+      <div className="flex items-center gap-2 text-sm text-slate-400">
         <span>Showing</span>
-        <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">{filteredCount}</span>
+        <span className="px-2 py-1 rounded-full bg-slate-800/50 text-slate-300 font-medium">{filteredCount}</span>
         <span>of</span>
-        <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">{documents.length}</span>
+        <span className="px-2 py-1 rounded-full bg-slate-800/50 text-slate-300 font-medium">{documents.length}</span>
         <span>documents</span>
       </div>
 
       {/* Documents Table */}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Document</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">File</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Uploaded</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Document</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">File</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Uploaded</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="bg-[#151b28] divide-y divide-slate-700">
               {filteredDocs.map((doc) => (
-                <tr key={doc.id} className="hover:bg-gray-50">
+                <tr key={doc.id} className="hover:bg-slate-800">
                   <td className="px-4 py-3">
                     <div className="flex items-center">
                       <span className="text-2xl mr-3">{typeIcons[doc.document_type] || '📄'}</span>
                       <div>
                         <div className="font-medium">{doc.title}</div>
-                        <div className="text-sm text-gray-500">{doc.document_number} Rev {doc.revision}</div>
+                        <div className="text-sm text-slate-400">{doc.document_number} Rev {doc.revision}</div>
                       </div>
                     </div>
                   </td>
@@ -242,7 +242,7 @@ export default function Documents() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="text-sm">{doc.file_name || '-'}</div>
-                    <div className="text-xs text-gray-500">{formatFileSize(doc.file_size)}</div>
+                    <div className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</div>
                   </td>
                   <td className="px-4 py-3 text-sm">
                     {doc.part_id ? partsById.get(doc.part_id)?.part_number || '-' : '-'}
@@ -254,14 +254,14 @@ export default function Documents() {
                     <div className="flex justify-center gap-2">
                       <button
                         onClick={() => handleDownload(doc)}
-                        className="text-werco-primary hover:text-blue-700"
+                        className="text-werco-primary hover:text-blue-400"
                         title="Download"
                       >
                         <ArrowDownTrayIcon className="h-5 w-5" />
                       </button>
                       <button
                         onClick={() => handleDelete(doc.id)}
-                        className="text-red-500 hover:text-red-700"
+                        className="text-red-500 hover:text-red-400"
                         title="Delete"
                       >
                         <TrashIcon className="h-5 w-5" />
@@ -273,7 +273,7 @@ export default function Documents() {
             </tbody>
           </table>
           {filteredDocs.length === 0 && (
-            <p className="text-center text-gray-500 py-8">No documents found</p>
+            <p className="text-center text-slate-400 py-8">No documents found</p>
           )}
         </div>
       </div>
@@ -281,7 +281,7 @@ export default function Documents() {
       {/* Upload Modal */}
       {showUploadModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Upload Document</h3>
             <form onSubmit={handleUpload} className="space-y-4">
               <div>

@@ -55,16 +55,16 @@ const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
 
 // Type labels and colors
 const typeConfig: Record<string, { label: string; color: string }> = {
-  part: { label: 'Part', color: 'bg-blue-100 text-blue-700 border border-blue-200' },
-  work_order: { label: 'Work Order', color: 'bg-blue-100 text-werco-navy-700 border border-blue-200' },
-  customer: { label: 'Customer', color: 'bg-green-100 text-green-700 border border-green-200' },
-  bom: { label: 'BOM', color: 'bg-purple-100 text-purple-700 border border-purple-200' },
-  routing: { label: 'Routing', color: 'bg-orange-100 text-orange-700 border border-orange-200' },
-  user: { label: 'User', color: 'bg-pink-100 text-pink-700 border border-pink-200' },
-  vendor: { label: 'Vendor', color: 'bg-yellow-100 text-yellow-700 border border-yellow-200' },
-  purchase_order: { label: 'PO', color: 'bg-red-100 text-red-700 border border-red-200' },
-  quote: { label: 'Quote', color: 'bg-emerald-100 text-emerald-700 border border-emerald-200' },
-  inventory: { label: 'Inventory', color: 'bg-indigo-100 text-indigo-700 border border-indigo-200' },
+  part: { label: 'Part', color: 'bg-blue-500/20 text-blue-300 border border-blue-500/30' },
+  work_order: { label: 'Work Order', color: 'bg-blue-500/20 text-blue-300 border border-blue-500/30' },
+  customer: { label: 'Customer', color: 'bg-green-500/20 text-green-300 border border-green-500/30' },
+  bom: { label: 'BOM', color: 'bg-purple-500/20 text-purple-300 border border-purple-500/30' },
+  routing: { label: 'Routing', color: 'bg-orange-500/20 text-orange-300 border border-orange-500/30' },
+  user: { label: 'User', color: 'bg-pink-500/20 text-pink-300 border border-pink-500/30' },
+  vendor: { label: 'Vendor', color: 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/30' },
+  purchase_order: { label: 'PO', color: 'bg-red-500/20 text-red-300 border border-red-500/30' },
+  quote: { label: 'Quote', color: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' },
+  inventory: { label: 'Inventory', color: 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' },
 };
 
 // Navigation items for quick access

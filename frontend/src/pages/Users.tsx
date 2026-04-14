@@ -33,13 +33,13 @@ interface UserCsvImportResult {
 }
 
 const roleColors: Record<UserRole, string> = {
-  admin: 'bg-red-100 text-red-800',
-  manager: 'bg-purple-100 text-purple-800',
-  supervisor: 'bg-blue-100 text-blue-800',
-  operator: 'bg-green-100 text-green-800',
-  quality: 'bg-yellow-100 text-yellow-800',
-  shipping: 'bg-blue-100 text-blue-800',
-  viewer: 'bg-gray-100 text-gray-800',
+  admin: 'bg-red-500/20 text-red-300',
+  manager: 'bg-purple-500/20 text-purple-800',
+  supervisor: 'bg-blue-500/20 text-blue-300',
+  operator: 'bg-green-500/20 text-emerald-300',
+  quality: 'bg-yellow-500/20 text-yellow-300',
+  shipping: 'bg-blue-500/20 text-blue-300',
+  viewer: 'bg-slate-800/50 text-slate-100',
 };
 
 const roleLabels: Record<UserRole, string> = {
@@ -209,7 +209,7 @@ export default function Users() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">User Management</h1>
+        <h1 className="text-2xl font-bold text-white">User Management</h1>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowImportModal(true)}
@@ -234,29 +234,29 @@ export default function Users() {
             type="checkbox"
             checked={showInactive}
             onChange={(e) => setShowInactive(e.target.checked)}
-            className="mr-2 rounded border-gray-300"
+            className="mr-2 rounded border-slate-600"
           />
-          <span className="text-sm text-gray-700">Show inactive users</span>
+          <span className="text-sm text-slate-300">Show inactive users</span>
         </label>
       </div>
 
       {importResult && (
         <div className="card">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-            <div className="text-sm text-gray-700">
+            <div className="text-sm text-slate-300">
               Imported rows: <span className="font-semibold">{importResult.total_rows}</span>
             </div>
-            <div className="text-sm text-green-700">
+            <div className="text-sm text-emerald-400">
               Created: <span className="font-semibold">{importResult.created_count}</span>
             </div>
-            <div className="text-sm text-amber-700">
+            <div className="text-sm text-amber-400">
               Skipped: <span className="font-semibold">{importResult.skipped_count}</span>
             </div>
           </div>
           {importResult.errors.length > 0 && (
-            <div className="mt-3 border-t border-gray-200 pt-3">
-              <p className="text-sm font-medium text-gray-900 mb-2">Import issues</p>
-              <ul className="space-y-1 text-sm text-gray-700 max-h-40 overflow-auto">
+            <div className="mt-3 border-t border-slate-700 pt-3">
+              <p className="text-sm font-medium text-white mb-2">Import issues</p>
+              <ul className="space-y-1 text-sm text-slate-300 max-h-40 overflow-auto">
                 {importResult.errors.map((error, idx) => (
                   <li key={`${error.row}-${idx}`}>
                     Row {error.row}: {error.reason}
@@ -272,24 +272,24 @@ export default function Users() {
 
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Employee</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Department</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Employee</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Email</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Role</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Department</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="bg-[#151b28] divide-y divide-slate-700">
               {users.map((user) => (
-                <tr key={user.id} className={`hover:bg-gray-50 ${!user.is_active ? 'opacity-60' : ''}`}>
+                <tr key={user.id} className={`hover:bg-slate-800 ${!user.is_active ? 'opacity-60' : ''}`}>
                   <td className="px-4 py-4">
                     <div>
                       <div className="font-medium">{user.first_name} {user.last_name}</div>
-                      <div className="text-sm text-gray-500">ID: {user.employee_id}</div>
+                      <div className="text-sm text-slate-400">ID: {user.employee_id}</div>
                     </div>
                   </td>
                   <td className="px-4 py-4 text-sm">{user.email}</td>
@@ -301,7 +301,7 @@ export default function Users() {
                   <td className="px-4 py-4 text-sm">{user.department || '-'}</td>
                   <td className="px-4 py-4">
                     <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
-                      user.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
+                      user.is_active ? 'bg-green-500/20 text-emerald-300' : 'bg-slate-800/50 text-slate-400'
                     }`}>
                       {user.is_active ? 'Active' : 'Inactive'}
                     </span>
@@ -310,21 +310,21 @@ export default function Users() {
                     <div className="flex justify-center gap-2">
                       <button
                         onClick={() => handleEdit(user)}
-                        className="text-gray-400 hover:text-gray-600"
+                        className="text-slate-400 hover:text-slate-400"
                         title="Edit"
                       >
                         <PencilIcon className="h-5 w-5" />
                       </button>
                       <button
                         onClick={() => openPasswordReset(user.id)}
-                        className="text-gray-400 hover:text-blue-600"
+                        className="text-slate-400 hover:text-blue-600"
                         title="Reset Password"
                       >
                         <KeyIcon className="h-5 w-5" />
                       </button>
                       <button
                         onClick={() => handleToggleActive(user)}
-                        className={user.is_active ? 'text-gray-400 hover:text-red-600' : 'text-gray-400 hover:text-green-600'}
+                        className={user.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
                         title={user.is_active ? 'Deactivate' : 'Activate'}
                       >
                         {user.is_active ? (
@@ -341,14 +341,14 @@ export default function Users() {
           </table>
         </div>
         {users.length === 0 && (
-          <div className="text-center py-8 text-gray-500">No users found</div>
+          <div className="text-center py-8 text-slate-400">No users found</div>
         )}
       </div>
 
       {/* Add/Edit User Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">
               {editingUser ? 'Edit User' : 'Add User'}
             </h3>
@@ -459,7 +459,7 @@ export default function Users() {
       {/* Reset Password Modal */}
       {showPasswordModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-sm w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-sm w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Reset Password</h3>
             <form onSubmit={handleResetPassword} className="space-y-4">
               <div>
@@ -487,7 +487,7 @@ export default function Users() {
       {/* CSV Import Modal */}
       {showImportModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Import Users From CSV</h3>
             <form onSubmit={handleImportCsv} className="space-y-4">
               <div>
@@ -510,8 +510,8 @@ export default function Users() {
                   placeholder="Used when a CSV row does not include password"
                 />
               </div>
-              <div className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded p-3">
-                <p className="font-medium text-gray-800 mb-1">CSV columns</p>
+              <div className="text-xs text-slate-400 bg-slate-800 border border-slate-700 rounded p-3">
+                <p className="font-medium text-slate-100 mb-1">CSV columns</p>
                 <p>Required: employee_id, first_name, last_name</p>
                 <p>Optional: email, password, role, department</p>
                 <p className="mt-1">

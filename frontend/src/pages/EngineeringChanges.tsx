@@ -123,11 +123,11 @@ interface ECOCreateForm {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-const typeBadge: Record<ECOType, string> = { design: 'bg-blue-100 text-blue-800', process: 'bg-purple-100 text-purple-800', material: 'bg-amber-100 text-amber-800', documentation: 'bg-gray-100 text-gray-800', other: 'bg-slate-100 text-slate-800' };
+const typeBadge: Record<ECOType, string> = { design: 'bg-blue-500/20 text-blue-300', process: 'bg-purple-500/20 text-purple-300', material: 'bg-amber-500/20 text-amber-300', documentation: 'bg-slate-800 text-slate-100', other: 'bg-slate-800/50 text-slate-100' };
 const typeLabel: Record<ECOType, string> = { design: 'Design', process: 'Process', material: 'Material', documentation: 'Documentation', other: 'Other' };
-const priorityBadge: Record<ECOPriority, string> = { low: 'bg-gray-100 text-gray-800', medium: 'bg-blue-100 text-blue-800', high: 'bg-orange-100 text-orange-800', critical: 'bg-red-100 text-red-800' };
+const priorityBadge: Record<ECOPriority, string> = { low: 'bg-slate-800 text-slate-100', medium: 'bg-blue-500/20 text-blue-300', high: 'bg-orange-500/20 text-orange-300', critical: 'bg-red-500/20 text-red-300' };
 const priorityLabel: Record<ECOPriority, string> = { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical' };
-const statusBadge: Record<ECOStatus, string> = { draft: 'bg-gray-100 text-gray-800', submitted: 'bg-blue-100 text-blue-800', under_review: 'bg-purple-100 text-purple-800', approved: 'bg-green-100 text-green-800', rejected: 'bg-red-100 text-red-800', in_implementation: 'bg-yellow-100 text-yellow-800', completed: 'bg-emerald-100 text-emerald-800', cancelled: 'bg-slate-100 text-slate-800' };
+const statusBadge: Record<ECOStatus, string> = { draft: 'bg-slate-800 text-slate-100', submitted: 'bg-blue-500/20 text-blue-300', under_review: 'bg-purple-500/20 text-purple-300', approved: 'bg-green-500/20 text-green-300', rejected: 'bg-red-500/20 text-red-300', in_implementation: 'bg-yellow-500/20 text-yellow-300', completed: 'bg-emerald-500/20 text-emerald-300', cancelled: 'bg-slate-800/50 text-slate-100' };
 const statusLabel: Record<ECOStatus, string> = { draft: 'Draft', submitted: 'Submitted', under_review: 'Under Review', approved: 'Approved', rejected: 'Rejected', in_implementation: 'In Implementation', completed: 'Completed', cancelled: 'Cancelled' };
 const taskStatusLabel: Record<string, string> = { pending: 'Pending', in_progress: 'In Progress', completed: 'Completed', skipped: 'Skipped' };
 
@@ -380,12 +380,12 @@ export default function EngineeringChanges() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Engineering Changes</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage Engineering Change Orders (ECO/ECN)</p>
+          <h1 className="text-2xl font-bold text-white">Engineering Changes</h1>
+          <p className="text-sm text-slate-400 mt-1">Manage Engineering Change Orders (ECO/ECN)</p>
         </div>
         <button
           onClick={openCreateModal}
-          className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500"
+          className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500/100"
         >
           <PlusIcon className="h-5 w-5" />
           New ECO
@@ -396,19 +396,19 @@ export default function EngineeringChanges() {
       {dashboard && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
-            { label: 'Total Active', value: dashboard.total_active, icon: DocumentTextIcon, bg: 'bg-blue-100', fg: 'text-blue-600' },
-            { label: 'Pending Review', value: dashboard.pending_review, icon: ClockIcon, bg: 'bg-yellow-100', fg: 'text-yellow-600' },
-            { label: 'In Implementation', value: dashboard.in_implementation, icon: WrenchScrewdriverIcon, bg: 'bg-purple-100', fg: 'text-purple-600' },
-            { label: 'Completed This Month', value: dashboard.completed_this_month, icon: CheckCircleIcon, bg: 'bg-green-100', fg: 'text-green-600' },
+            { label: 'Total Active', value: dashboard.total_active, icon: DocumentTextIcon, bg: 'bg-blue-500/20', fg: 'text-blue-600' },
+            { label: 'Pending Review', value: dashboard.pending_review, icon: ClockIcon, bg: 'bg-yellow-500/20', fg: 'text-yellow-600' },
+            { label: 'In Implementation', value: dashboard.in_implementation, icon: WrenchScrewdriverIcon, bg: 'bg-purple-500/20', fg: 'text-purple-600' },
+            { label: 'Completed This Month', value: dashboard.completed_this_month, icon: CheckCircleIcon, bg: 'bg-green-500/20', fg: 'text-green-600' },
           ].map((card) => (
-            <div key={card.label} className="rounded-lg border bg-white p-4 shadow-sm">
+            <div key={card.label} className="rounded-lg border bg-[#151b28] p-4 shadow-sm">
               <div className="flex items-center gap-3">
                 <div className={`rounded-full ${card.bg} p-2`}><card.icon className={`h-5 w-5 ${card.fg}`} /></div>
                 <div>
-                  <p className="text-sm text-gray-500">{card.label}</p>
-                  <p className="text-2xl font-bold text-gray-900">{card.value}</p>
+                  <p className="text-sm text-slate-400">{card.label}</p>
+                  <p className="text-2xl font-bold text-white">{card.value}</p>
                   {card.label === 'Completed This Month' && dashboard.avg_cycle_time_days != null && (
-                    <p className="text-xs text-gray-400 mt-1">Avg cycle: {dashboard.avg_cycle_time_days}d</p>
+                    <p className="text-xs text-slate-500 mt-1">Avg cycle: {dashboard.avg_cycle_time_days}d</p>
                   )}
                 </div>
               </div>
@@ -420,21 +420,21 @@ export default function EngineeringChanges() {
       {/* Filters & Search */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[200px]">
-          <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+          <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
           <input
             type="text"
             placeholder="Search ECO number, title, requestor..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full rounded-md border border-gray-300 py-2 pl-10 pr-3 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="w-full rounded-md border border-slate-600 py-2 pl-10 pr-3 text-sm focus:border-indigo-500 focus:ring-indigo-500"
           />
         </div>
         <div className="flex items-center gap-2">
-          <FunnelIcon className="h-4 w-4 text-gray-400" />
+          <FunnelIcon className="h-4 w-4 text-slate-500" />
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="rounded-md border border-gray-300 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="rounded-md border border-slate-600 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
           >
             <option value="">All Statuses</option>
             {Object.entries(statusLabel).map(([k, v]) => (
@@ -444,7 +444,7 @@ export default function EngineeringChanges() {
           <select
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
-            className="rounded-md border border-gray-300 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="rounded-md border border-slate-600 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
           >
             <option value="">All Types</option>
             {Object.entries(typeLabel).map(([k, v]) => (
@@ -454,7 +454,7 @@ export default function EngineeringChanges() {
           <select
             value={priorityFilter}
             onChange={(e) => setPriorityFilter(e.target.value)}
-            className="rounded-md border border-gray-300 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="rounded-md border border-slate-600 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
           >
             <option value="">All Priorities</option>
             {Object.entries(priorityLabel).map(([k, v]) => (
@@ -466,10 +466,10 @@ export default function EngineeringChanges() {
 
       {/* Error */}
       {error && (
-        <div className="rounded-md bg-red-50 border border-red-200 p-4">
+        <div className="rounded-md bg-red-500/10 border border-red-500/30 p-4">
           <div className="flex items-center gap-2">
             <ExclamationTriangleIcon className="h-5 w-5 text-red-500" />
-            <p className="text-sm text-red-700">{error}</p>
+            <p className="text-sm text-red-400">{error}</p>
           </div>
         </div>
       )}
@@ -478,25 +478,25 @@ export default function EngineeringChanges() {
       {loading ? (
         <SkeletonTable rows={6} columns={7} />
       ) : (
-        <div className="overflow-x-auto rounded-lg border bg-white shadow-sm">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+        <div className="overflow-x-auto rounded-lg border bg-[#151b28] shadow-sm">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800/50">
               <tr>
                 <th className="w-8 px-3 py-3" />
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">ECO Number</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">Title</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">Priority</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">Requestor</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">Date</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">ECO Number</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Title</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Type</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Priority</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Requestor</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Date</th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
+            <tbody className="divide-y divide-slate-700">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-500">
+                  <td colSpan={9} className="px-4 py-8 text-center text-sm text-slate-400">
                     No engineering change orders found.
                   </td>
                 </tr>
@@ -504,41 +504,41 @@ export default function EngineeringChanges() {
                 filtered.map((eco) => (
                   <React.Fragment key={eco.id}>
                     <tr
-                      className="hover:bg-gray-50 cursor-pointer"
+                      className="hover:bg-slate-800/50 cursor-pointer"
                       onClick={() => toggleExpand(eco.id)}
                     >
                       <td className="px-3 py-3">
                         {expandedId === eco.id ? (
-                          <ChevronUpIcon className="h-4 w-4 text-gray-400" />
+                          <ChevronUpIcon className="h-4 w-4 text-slate-500" />
                         ) : (
-                          <ChevronDownIcon className="h-4 w-4 text-gray-400" />
+                          <ChevronDownIcon className="h-4 w-4 text-slate-500" />
                         )}
                       </td>
                       <td className="px-4 py-3 text-sm font-mono font-medium text-indigo-600">
                         {eco.eco_number}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-900 max-w-[200px] truncate">
+                      <td className="px-4 py-3 text-sm text-white max-w-[200px] truncate">
                         {eco.title}
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${typeBadge[eco.eco_type] || 'bg-gray-100 text-gray-800'}`}>
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${typeBadge[eco.eco_type] || 'bg-slate-800 text-slate-100'}`}>
                           {typeLabel[eco.eco_type] || eco.eco_type}
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${priorityBadge[eco.priority] || 'bg-gray-100 text-gray-800'}`}>
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${priorityBadge[eco.priority] || 'bg-slate-800 text-slate-100'}`}>
                           {priorityLabel[eco.priority] || eco.priority}
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${statusBadge[eco.status] || 'bg-gray-100 text-gray-800'}`}>
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${statusBadge[eco.status] || 'bg-slate-800 text-slate-100'}`}>
                           {statusLabel[eco.status] || eco.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-700">
+                      <td className="px-4 py-3 text-sm text-slate-300">
                         {userName(eco.requester)}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-500">
+                      <td className="px-4 py-3 text-sm text-slate-400">
                         {formatDate(eco.created_at)}
                       </td>
                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
@@ -547,7 +547,7 @@ export default function EngineeringChanges() {
                             <button
                               onClick={() => handleSubmit(eco.id)}
                               disabled={actionLoading === eco.id}
-                              className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                              className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500/100/100 disabled:opacity-50"
                             >
                               Submit
                             </button>
@@ -557,14 +557,14 @@ export default function EngineeringChanges() {
                               <button
                                 onClick={() => handleApprove(eco.id)}
                                 disabled={actionLoading === eco.id}
-                                className="rounded bg-green-600 px-2 py-1 text-xs font-medium text-white hover:bg-green-500 disabled:opacity-50"
+                                className="rounded bg-green-600 px-2 py-1 text-xs font-medium text-white hover:bg-green-500/100 disabled:opacity-50"
                               >
                                 Approve
                               </button>
                               <button
                                 onClick={() => openRejectModal(eco.id)}
                                 disabled={actionLoading === eco.id}
-                                className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+                                className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-500/100/100 disabled:opacity-50"
                               >
                                 Reject
                               </button>
@@ -574,7 +574,7 @@ export default function EngineeringChanges() {
                             <button
                               onClick={() => handleImplement(eco.id)}
                               disabled={actionLoading === eco.id}
-                              className="rounded bg-purple-600 px-2 py-1 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50"
+                              className="rounded bg-purple-600 px-2 py-1 text-xs font-medium text-white hover:bg-purple-500/100 disabled:opacity-50"
                             >
                               Implement
                             </button>
@@ -583,7 +583,7 @@ export default function EngineeringChanges() {
                             <button
                               onClick={() => handleComplete(eco.id)}
                               disabled={actionLoading === eco.id}
-                              className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                              className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500/100/100 disabled:opacity-50"
                             >
                               Complete
                             </button>
@@ -595,46 +595,46 @@ export default function EngineeringChanges() {
                     {/* Expanded detail row */}
                     {expandedId === eco.id && (
                       <tr>
-                        <td colSpan={9} className="bg-gray-50 px-6 py-4">
+                        <td colSpan={9} className="bg-slate-800/50 px-6 py-4">
                           <div className="space-y-4">
                             {/* Description & Reason */}
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                               <div>
-                                <h4 className="text-xs font-semibold uppercase text-gray-500 mb-1">Description</h4>
-                                <p className="text-sm text-gray-700 whitespace-pre-wrap">{eco.description}</p>
+                                <h4 className="text-xs font-semibold uppercase text-slate-400 mb-1">Description</h4>
+                                <p className="text-sm text-slate-300 whitespace-pre-wrap">{eco.description}</p>
                               </div>
                               <div>
-                                <h4 className="text-xs font-semibold uppercase text-gray-500 mb-1">Reason for Change</h4>
-                                <p className="text-sm text-gray-700 whitespace-pre-wrap">{eco.reason_for_change}</p>
+                                <h4 className="text-xs font-semibold uppercase text-slate-400 mb-1">Reason for Change</h4>
+                                <p className="text-sm text-slate-300 whitespace-pre-wrap">{eco.reason_for_change}</p>
                               </div>
                             </div>
 
                             {/* Extra details */}
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                               {eco.proposed_solution && (
-                                <div><span className="text-xs font-semibold uppercase text-gray-500">Proposed Solution</span><p className="text-gray-700 mt-0.5">{eco.proposed_solution}</p></div>
+                                <div><span className="text-xs font-semibold uppercase text-slate-400">Proposed Solution</span><p className="text-slate-300 mt-0.5">{eco.proposed_solution}</p></div>
                               )}
-                              <div><span className="text-xs font-semibold uppercase text-gray-500">Est. Cost</span><p className="text-gray-700 mt-0.5">{fmt(eco.estimated_cost)}</p></div>
-                              {eco.actual_cost > 0 && <div><span className="text-xs font-semibold uppercase text-gray-500">Actual Cost</span><p className="text-gray-700 mt-0.5">{fmt(eco.actual_cost)}</p></div>}
-                              {eco.target_date && <div><span className="text-xs font-semibold uppercase text-gray-500">Target Date</span><p className="text-gray-700 mt-0.5">{formatDate(eco.target_date)}</p></div>}
-                              {eco.assignee && <div><span className="text-xs font-semibold uppercase text-gray-500">Assigned To</span><p className="text-gray-700 mt-0.5">{userName(eco.assignee)}</p></div>}
-                              {eco.completed_date && <div><span className="text-xs font-semibold uppercase text-gray-500">Completed</span><p className="text-gray-700 mt-0.5">{formatDate(eco.completed_date)}</p></div>}
+                              <div><span className="text-xs font-semibold uppercase text-slate-400">Est. Cost</span><p className="text-slate-300 mt-0.5">{fmt(eco.estimated_cost)}</p></div>
+                              {eco.actual_cost > 0 && <div><span className="text-xs font-semibold uppercase text-slate-400">Actual Cost</span><p className="text-slate-300 mt-0.5">{fmt(eco.actual_cost)}</p></div>}
+                              {eco.target_date && <div><span className="text-xs font-semibold uppercase text-slate-400">Target Date</span><p className="text-slate-300 mt-0.5">{formatDate(eco.target_date)}</p></div>}
+                              {eco.assignee && <div><span className="text-xs font-semibold uppercase text-slate-400">Assigned To</span><p className="text-slate-300 mt-0.5">{userName(eco.assignee)}</p></div>}
+                              {eco.completed_date && <div><span className="text-xs font-semibold uppercase text-slate-400">Completed</span><p className="text-slate-300 mt-0.5">{formatDate(eco.completed_date)}</p></div>}
                             </div>
 
                             {/* Approval Workflow */}
                             {eco.approvals.length > 0 && (
                               <div>
-                                <h4 className="text-xs font-semibold uppercase text-gray-500 mb-2">Approval Workflow</h4>
-                                <div className="rounded border bg-white divide-y">
+                                <h4 className="text-xs font-semibold uppercase text-slate-400 mb-2">Approval Workflow</h4>
+                                <div className="rounded border bg-[#151b28] divide-y">
                                   {eco.approvals.map((a) => (
                                     <div key={a.id} className="flex items-center justify-between px-4 py-2 text-sm">
-                                      <div><span className="font-medium text-gray-900">{userName(a.approver)}</span><span className="ml-2 text-gray-500">({a.role})</span></div>
+                                      <div><span className="font-medium text-white">{userName(a.approver)}</span><span className="ml-2 text-slate-400">({a.role})</span></div>
                                       <div className="flex items-center gap-3">
-                                        {a.comments && <span className="text-gray-500 italic text-xs max-w-[200px] truncate">{a.comments}</span>}
-                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${a.status === 'approved' ? 'bg-green-100 text-green-800' : a.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                        {a.comments && <span className="text-slate-400 italic text-xs max-w-[200px] truncate">{a.comments}</span>}
+                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${a.status === 'approved' ? 'bg-green-500/20 text-green-300' : a.status === 'rejected' ? 'bg-red-500/20 text-red-300' : 'bg-yellow-500/20 text-yellow-300'}`}>
                                           {a.status === 'approved' ? 'Approved' : a.status === 'rejected' ? 'Rejected' : 'Pending'}
                                         </span>
-                                        {a.decision_date && <span className="text-xs text-gray-400">{formatDate(a.decision_date)}</span>}
+                                        {a.decision_date && <span className="text-xs text-slate-500">{formatDate(a.decision_date)}</span>}
                                       </div>
                                     </div>
                                   ))}
@@ -644,19 +644,19 @@ export default function EngineeringChanges() {
                             {/* Implementation Tasks */}
                             {eco.implementation_tasks.length > 0 && (
                               <div>
-                                <h4 className="text-xs font-semibold uppercase text-gray-500 mb-2">Implementation Tasks</h4>
-                                <div className="rounded border bg-white divide-y">
+                                <h4 className="text-xs font-semibold uppercase text-slate-400 mb-2">Implementation Tasks</h4>
+                                <div className="rounded border bg-[#151b28] divide-y">
                                   {eco.implementation_tasks.map((t) => (
                                     <div key={t.id} className="flex items-center justify-between px-4 py-2 text-sm">
                                       <div className="flex items-center gap-2">
-                                        <span className="text-gray-400 font-mono text-xs">#{t.task_number}</span>
-                                        <span className="text-gray-900">{t.description}</span>
-                                        {t.department && <span className="text-xs text-gray-500 bg-gray-100 rounded px-1.5 py-0.5">{t.department}</span>}
+                                        <span className="text-slate-500 font-mono text-xs">#{t.task_number}</span>
+                                        <span className="text-white">{t.description}</span>
+                                        {t.department && <span className="text-xs text-slate-400 bg-slate-800 rounded px-1.5 py-0.5">{t.department}</span>}
                                       </div>
                                       <div className="flex items-center gap-3">
-                                        {t.assignee && <span className="text-xs text-gray-500">{userName(t.assignee)}</span>}
-                                        {t.due_date && <span className="text-xs text-gray-400">Due: {formatDate(t.due_date)}</span>}
-                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${t.status === 'completed' ? 'bg-green-100 text-green-800' : t.status === 'in_progress' ? 'bg-blue-100 text-blue-800' : t.status === 'skipped' ? 'bg-gray-100 text-gray-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                        {t.assignee && <span className="text-xs text-slate-400">{userName(t.assignee)}</span>}
+                                        {t.due_date && <span className="text-xs text-slate-500">Due: {formatDate(t.due_date)}</span>}
+                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${t.status === 'completed' ? 'bg-green-500/20 text-green-300' : t.status === 'in_progress' ? 'bg-blue-500/20 text-blue-300' : t.status === 'skipped' ? 'bg-slate-800 text-slate-100' : 'bg-yellow-500/20 text-yellow-300'}`}>
                                           {taskStatusLabel[t.status] || t.status}
                                         </span>
                                       </div>
@@ -679,7 +679,7 @@ export default function EngineeringChanges() {
 
       {/* Results count */}
       {!loading && (
-        <p className="text-xs text-gray-400">
+        <p className="text-xs text-slate-500">
           Showing {filtered.length} of {ecos.length} record{ecos.length !== 1 ? 's' : ''}
         </p>
       )}
@@ -687,31 +687,31 @@ export default function EngineeringChanges() {
       {/* ── Create ECO Modal ──────────────────────────────────────── */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-lg rounded-lg bg-white shadow-xl">
+          <div className="w-full max-w-lg rounded-lg bg-[#151b28] shadow-xl">
             <div className="flex items-center justify-between border-b px-6 py-4">
-              <h2 className="text-lg font-semibold text-gray-900">New Engineering Change Order</h2>
+              <h2 className="text-lg font-semibold text-white">New Engineering Change Order</h2>
               <button onClick={() => setShowCreateModal(false)}>
-                <XMarkIcon className="h-5 w-5 text-gray-400 hover:text-gray-600" />
+                <XMarkIcon className="h-5 w-5 text-slate-500 hover:text-slate-400" />
               </button>
             </div>
             <form onSubmit={handleCreate} className="space-y-4 px-6 py-4 max-h-[70vh] overflow-y-auto">
               <div>
-                <label className="block text-sm font-medium text-gray-700">Title *</label>
+                <label className="block text-sm font-medium text-slate-300">Title *</label>
                 <input
                   type="text"
                   required
                   value={createForm.title}
                   onChange={(e) => setCreateForm((f) => ({ ...f, title: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                 />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">Type *</label>
+                  <label className="block text-sm font-medium text-slate-300">Type *</label>
                   <select
                     value={createForm.eco_type}
                     onChange={(e) => setCreateForm((f) => ({ ...f, eco_type: e.target.value as ECOType }))}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                   >
                     {Object.entries(typeLabel).map(([k, v]) => (
                       <option key={k} value={k}>{v}</option>
@@ -719,11 +719,11 @@ export default function EngineeringChanges() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">Priority</label>
+                  <label className="block text-sm font-medium text-slate-300">Priority</label>
                   <select
                     value={createForm.priority}
                     onChange={(e) => setCreateForm((f) => ({ ...f, priority: e.target.value as ECOPriority }))}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                   >
                     {Object.entries(priorityLabel).map(([k, v]) => (
                       <option key={k} value={k}>{v}</option>
@@ -732,64 +732,64 @@ export default function EngineeringChanges() {
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700">Description *</label>
+                <label className="block text-sm font-medium text-slate-300">Description *</label>
                 <textarea
                   required
                   rows={3}
                   value={createForm.description}
                   onChange={(e) => setCreateForm((f) => ({ ...f, description: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700">Reason for Change *</label>
+                <label className="block text-sm font-medium text-slate-300">Reason for Change *</label>
                 <textarea
                   required
                   rows={2}
                   value={createForm.reason_for_change}
                   onChange={(e) => setCreateForm((f) => ({ ...f, reason_for_change: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700">Proposed Solution</label>
+                <label className="block text-sm font-medium text-slate-300">Proposed Solution</label>
                 <textarea
                   rows={2}
                   value={createForm.proposed_solution}
                   onChange={(e) => setCreateForm((f) => ({ ...f, proposed_solution: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700">Affected Part IDs</label>
+                <label className="block text-sm font-medium text-slate-300">Affected Part IDs</label>
                 <input
                   type="text"
                   placeholder="e.g. 1, 2, 3"
                   value={createForm.affected_parts}
                   onChange={(e) => setCreateForm((f) => ({ ...f, affected_parts: e.target.value }))}
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                 />
-                <p className="mt-1 text-xs text-gray-400">Comma-separated part IDs</p>
+                <p className="mt-1 text-xs text-slate-500">Comma-separated part IDs</p>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">Estimated Cost</label>
+                  <label className="block text-sm font-medium text-slate-300">Estimated Cost</label>
                   <input
                     type="number"
                     step="0.01"
                     min="0"
                     value={createForm.estimated_cost}
                     onChange={(e) => setCreateForm((f) => ({ ...f, estimated_cost: parseFloat(e.target.value) || 0 }))}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">Target Date</label>
+                  <label className="block text-sm font-medium text-slate-300">Target Date</label>
                   <input
                     type="date"
                     value={createForm.target_date}
                     onChange={(e) => setCreateForm((f) => ({ ...f, target_date: e.target.value }))}
-                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                   />
                 </div>
               </div>
@@ -797,14 +797,14 @@ export default function EngineeringChanges() {
                 <button
                   type="button"
                   onClick={() => setShowCreateModal(false)}
-                  className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  className="rounded-md border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800/50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={createLoading}
-                  className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+                  className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500/100 disabled:opacity-50"
                 >
                   {createLoading && <ArrowPathIcon className="h-4 w-4 animate-spin" />}
                   Create ECO
@@ -818,35 +818,35 @@ export default function EngineeringChanges() {
       {/* ── Reject Modal ──────────────────────────────────────────── */}
       {showRejectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-md rounded-lg bg-white shadow-xl">
+          <div className="w-full max-w-md rounded-lg bg-[#151b28] shadow-xl">
             <div className="flex items-center justify-between border-b px-6 py-4">
-              <h2 className="text-lg font-semibold text-gray-900">Reject ECO</h2>
+              <h2 className="text-lg font-semibold text-white">Reject ECO</h2>
               <button onClick={() => setShowRejectModal(false)}>
-                <XMarkIcon className="h-5 w-5 text-gray-400 hover:text-gray-600" />
+                <XMarkIcon className="h-5 w-5 text-slate-500 hover:text-slate-400" />
               </button>
             </div>
             <div className="space-y-4 px-6 py-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700">Rejection Comments</label>
+                <label className="block text-sm font-medium text-slate-300">Rejection Comments</label>
                 <textarea
                   rows={3}
                   value={rejectComments}
                   onChange={(e) => setRejectComments(e.target.value)}
                   placeholder="Reason for rejection..."
-                  className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  className="mt-1 block w-full rounded-md border border-slate-600 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                 />
               </div>
               <div className="flex justify-end gap-3">
                 <button
                   onClick={() => setShowRejectModal(false)}
-                  className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  className="rounded-md border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800/50"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleReject}
                   disabled={actionLoading !== null}
-                  className="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+                  className="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500/100/100 disabled:opacity-50"
                 >
                   Reject ECO
                 </button>

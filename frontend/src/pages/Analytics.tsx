@@ -384,7 +384,7 @@ export default function Analytics() {
         ? <ArrowTrendingDownIcon className="h-4 w-4 text-red-500" />
         : <ArrowTrendingDownIcon className="h-4 w-4 text-green-500" />;
     }
-    return <MinusIcon className="h-4 w-4 text-gray-400" />;
+    return <MinusIcon className="h-4 w-4 text-slate-400" />;
   };
 
   const formatKPIValue = (value: number, type: string) => {
@@ -445,11 +445,11 @@ export default function Analytics() {
       >
         <div className="flex justify-between items-start mb-2">
           <div className="flex items-center gap-2">
-            <Icon className="h-5 w-5 text-gray-500" />
-            <span className="text-sm font-medium text-gray-600">{title}</span>
+            <Icon className="h-5 w-5 text-slate-400" />
+            <span className="text-sm font-medium text-slate-400">{title}</span>
           </div>
           {kpi.target !== null && (
-            <span className={`text-xs px-2 py-0.5 rounded-full ${isOnTarget ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+            <span className={`text-xs px-2 py-0.5 rounded-full ${isOnTarget ? 'bg-green-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
               Target: {formatKPIValue(kpi.target, type)}
             </span>
           )}
@@ -457,7 +457,7 @@ export default function Analytics() {
         
         <div className="flex items-end justify-between">
           <div>
-            <p className="text-3xl font-bold text-gray-900">{formatKPIValue(kpi.value, type)}</p>
+            <p className="text-3xl font-bold text-white">{formatKPIValue(kpi.value, type)}</p>
             {kpi.change_pct !== null && (
               <div className="flex items-center gap-1 mt-1">
                 {getTrendIcon(kpi.trend, isGoodUp)}
@@ -465,7 +465,7 @@ export default function Analytics() {
                   (isGoodUp && kpi.trend === 'up') || (!isGoodUp && kpi.trend === 'down')
                     ? 'text-green-600' 
                     : kpi.trend === 'flat' 
-                      ? 'text-gray-500' 
+                      ? 'text-slate-400' 
                       : 'text-red-600'
                 }`}>
                   {Math.abs(kpi.change_pct).toFixed(1)}% vs prior
@@ -515,8 +515,8 @@ export default function Analytics() {
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">{viewMeta.title}</h1>
-          <p className="text-gray-500 mt-1">{viewMeta.subtitle}</p>
+          <h1 className="text-3xl font-bold text-white">{viewMeta.title}</h1>
+          <p className="text-slate-400 mt-1">{viewMeta.subtitle}</p>
         </div>
         <div className="flex items-center gap-4">
           {showPeriodSelector && (
@@ -538,9 +538,9 @@ export default function Analytics() {
       </div>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
           <ExclamationTriangleIcon className="h-5 w-5 text-red-600" />
-          <span className="text-red-800">{error}</span>
+          <span className="text-red-300">{error}</span>
         </div>
       )}
 
@@ -621,14 +621,15 @@ export default function Analytics() {
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={productionTrends}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                     <XAxis 
                       dataKey="date" 
-                      tick={{ fontSize: 12 }}
+                      tick={{ fontSize: 12, fill: '#94a3b8' }}
                       tickFormatter={formatChartDate}
                     />
-                    <YAxis tick={{ fontSize: 12 }} />
-                    <Tooltip 
+                    <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
                       formatter={(value: number) => [value.toLocaleString(), '']}
                       labelFormatter={(label) => formatCentralDate(String(label))}
                     />
@@ -670,15 +671,15 @@ export default function Analytics() {
                     <div key={wc.work_center_id}>
                       <div className="flex justify-between text-sm mb-1">
                         <span className="font-medium">{wc.work_center_name}</span>
-                        <span className={wc.is_overloaded ? 'text-red-600 font-semibold' : 'text-gray-600'}>
+                        <span className={wc.is_overloaded ? 'text-red-600 font-semibold' : 'text-slate-400'}>
                           {wc.utilization_pct.toFixed(0)}%
                         </span>
                       </div>
                       <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
                         <div 
                           className={`h-full rounded-full transition-all ${
-                            wc.utilization_pct > 90 ? 'bg-red-500' :
-                            wc.utilization_pct > 75 ? 'bg-amber-500' : 'bg-green-500'
+                            wc.utilization_pct > 90 ? 'bg-red-500/100' :
+                            wc.utilization_pct > 75 ? 'bg-amber-500/100' : 'bg-green-500/100'
                           }`}
                           style={{ width: `${Math.min(wc.utilization_pct, 100)}%` }}
                         />
@@ -698,7 +699,7 @@ export default function Analytics() {
             >
               <ChartBarIcon className="h-8 w-8 text-werco-primary mb-2" />
               <h4 className="font-semibold">Production Analytics</h4>
-              <p className="text-sm text-gray-500">OEE, trends, utilization</p>
+              <p className="text-sm text-slate-400">OEE, trends, utilization</p>
             </button>
             <button
               onClick={() => navigate('/analytics/costs')}
@@ -706,7 +707,7 @@ export default function Analytics() {
             >
               <CurrencyDollarIcon className="h-8 w-8 text-werco-primary mb-2" />
               <h4 className="font-semibold">Cost Analysis</h4>
-              <p className="text-sm text-gray-500">Job costs, margins</p>
+              <p className="text-sm text-slate-400">Job costs, margins</p>
             </button>
             <button
               onClick={() => navigate('/analytics/quality')}
@@ -714,7 +715,7 @@ export default function Analytics() {
             >
               <BeakerIcon className="h-8 w-8 text-werco-primary mb-2" />
               <h4 className="font-semibold">Quality Metrics</h4>
-              <p className="text-sm text-gray-500">Defects, NCRs, yield</p>
+              <p className="text-sm text-slate-400">Defects, NCRs, yield</p>
             </button>
             <button
               onClick={() => navigate('/analytics/reports')}
@@ -722,7 +723,7 @@ export default function Analytics() {
             >
               <ClockIcon className="h-8 w-8 text-werco-primary mb-2" />
               <h4 className="font-semibold">Custom Reports</h4>
-              <p className="text-sm text-gray-500">Build & export reports</p>
+              <p className="text-sm text-slate-400">Build & export reports</p>
             </button>
           </div>
         </>
@@ -734,19 +735,19 @@ export default function Analytics() {
             <>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="card">
-                  <p className="text-sm text-gray-500">Availability</p>
+                  <p className="text-sm text-slate-400">Availability</p>
                   <p className="text-2xl font-semibold">{formatMetric(oeeDetails.summary.availability, '%')}</p>
                 </div>
                 <div className="card">
-                  <p className="text-sm text-gray-500">Performance</p>
+                  <p className="text-sm text-slate-400">Performance</p>
                   <p className="text-2xl font-semibold">{formatMetric(oeeDetails.summary.performance, '%')}</p>
                 </div>
                 <div className="card">
-                  <p className="text-sm text-gray-500">Quality</p>
+                  <p className="text-sm text-slate-400">Quality</p>
                   <p className="text-2xl font-semibold">{formatMetric(oeeDetails.summary.quality, '%')}</p>
                 </div>
                 <div className="card">
-                  <p className="text-sm text-gray-500">OEE</p>
+                  <p className="text-sm text-slate-400">OEE</p>
                   <p className="text-2xl font-semibold text-werco-primary">{formatMetric(oeeDetails.summary.oee, '%')}</p>
                 </div>
               </div>
@@ -757,14 +758,15 @@ export default function Analytics() {
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={oeeDetails.time_series || []}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                         <XAxis
                           dataKey="date"
-                          tick={{ fontSize: 12 }}
+                          tick={{ fontSize: 12, fill: '#94a3b8' }}
                           tickFormatter={formatChartDate}
                         />
-                        <YAxis tick={{ fontSize: 12 }} />
+                        <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
+                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
                           formatter={(value: number) => [`${value.toFixed(1)}%`, '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
@@ -782,14 +784,15 @@ export default function Analytics() {
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={productionDetail?.time_series || []}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                         <XAxis
                           dataKey="date"
-                          tick={{ fontSize: 12 }}
+                          tick={{ fontSize: 12, fill: '#94a3b8' }}
                           tickFormatter={formatChartDate}
                         />
-                        <YAxis tick={{ fontSize: 12 }} />
+                        <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
+                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
                           formatter={(value: number) => [value.toLocaleString(), '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
@@ -805,14 +808,14 @@ export default function Analytics() {
                 <h3 className="text-lg font-semibold mb-4">OEE by Work Center</h3>
                 {oeeDetails.by_work_center?.length ? (
                   <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200 text-sm">
-                      <thead className="bg-gray-50">
+                    <table className="min-w-full divide-y divide-slate-700 text-sm">
+                      <thead className="bg-slate-800">
                         <tr>
-                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Work Center</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Availability</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Performance</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Quality</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">OEE</th>
+                          <th className="px-4 py-2 text-left font-medium text-slate-400 uppercase">Work Center</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Availability</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Performance</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Quality</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">OEE</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -829,13 +832,13 @@ export default function Analytics() {
                     </table>
                   </div>
                 ) : (
-                  <p className="text-sm text-gray-500">No work center data for this period.</p>
+                  <p className="text-sm text-slate-400">No work center data for this period.</p>
                 )}
               </div>
             </>
           ) : (
             <div className="card">
-              <p className="text-sm text-gray-500">No production analytics available.</p>
+              <p className="text-sm text-slate-400">No production analytics available.</p>
             </div>
           )}
         </div>
@@ -848,7 +851,7 @@ export default function Analytics() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 {Object.entries(qualityMetrics.summary || {}).map(([key, value]) => (
                   <div key={key} className="card">
-                    <p className="text-sm text-gray-500 capitalize">{key.replace(/_/g, ' ')}</p>
+                    <p className="text-sm text-slate-400 capitalize">{key.replace(/_/g, ' ')}</p>
                     <p className="text-2xl font-semibold">{formatMetric(value)}</p>
                   </div>
                 ))}
@@ -860,14 +863,15 @@ export default function Analytics() {
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={qualityMetrics.time_series || []}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                         <XAxis
                           dataKey="date"
-                          tick={{ fontSize: 12 }}
+                          tick={{ fontSize: 12, fill: '#94a3b8' }}
                           tickFormatter={formatChartDate}
                         />
-                        <YAxis tick={{ fontSize: 12 }} />
+                        <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
+                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
                           formatter={(value: number) => [value.toLocaleString(), '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
@@ -885,12 +889,12 @@ export default function Analytics() {
                       {qualityMetrics.defect_pareto.slice(0, 8).map((item) => (
                         <div key={item.defect_type} className="flex items-center justify-between text-sm">
                           <span className="font-medium">{item.defect_type}</span>
-                          <span className="text-gray-600">{item.count} ({item.percentage.toFixed(1)}%)</span>
+                          <span className="text-slate-400">{item.count} ({item.percentage.toFixed(1)}%)</span>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-sm text-gray-500">No defect pareto data.</p>
+                    <p className="text-sm text-slate-400">No defect pareto data.</p>
                   )}
                 </div>
               </div>
@@ -899,12 +903,12 @@ export default function Analytics() {
                 <h3 className="text-lg font-semibold mb-4">Vendor Quality</h3>
                 {qualityMetrics.by_vendor?.length ? (
                   <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200 text-sm">
-                      <thead className="bg-gray-50">
+                    <table className="min-w-full divide-y divide-slate-700 text-sm">
+                      <thead className="bg-slate-800">
                         <tr>
-                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Vendor</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Acceptance Rate</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">NCR Count</th>
+                          <th className="px-4 py-2 text-left font-medium text-slate-400 uppercase">Vendor</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Acceptance Rate</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">NCR Count</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -919,13 +923,13 @@ export default function Analytics() {
                     </table>
                   </div>
                 ) : (
-                  <p className="text-sm text-gray-500">No vendor quality data.</p>
+                  <p className="text-sm text-slate-400">No vendor quality data.</p>
                 )}
               </div>
             </>
           ) : (
             <div className="card">
-              <p className="text-sm text-gray-500">No quality analytics available.</p>
+              <p className="text-sm text-slate-400">No quality analytics available.</p>
             </div>
           )}
         </div>
@@ -938,7 +942,7 @@ export default function Analytics() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 {Object.entries(inventoryAnalytics.summary || {}).map(([key, value]) => (
                   <div key={key} className="card">
-                    <p className="text-sm text-gray-500 capitalize">{key.replace(/_/g, ' ')}</p>
+                    <p className="text-sm text-slate-400 capitalize">{key.replace(/_/g, ' ')}</p>
                     <p className="text-2xl font-semibold">{formatMetric(value)}</p>
                   </div>
                 ))}
@@ -949,12 +953,12 @@ export default function Analytics() {
                   <h3 className="text-lg font-semibold mb-4">Turnover by Category</h3>
                   {inventoryAnalytics.turnover_by_category?.length ? (
                     <div className="overflow-x-auto">
-                      <table className="min-w-full divide-y divide-gray-200 text-sm">
-                        <thead className="bg-gray-50">
+                      <table className="min-w-full divide-y divide-slate-700 text-sm">
+                        <thead className="bg-slate-800">
                           <tr>
-                            <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Category</th>
-                            <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Turnover</th>
-                            <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Days on Hand</th>
+                            <th className="px-4 py-2 text-left font-medium text-slate-400 uppercase">Category</th>
+                            <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Turnover</th>
+                            <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Days on Hand</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
@@ -969,7 +973,7 @@ export default function Analytics() {
                       </table>
                     </div>
                   ) : (
-                    <p className="text-sm text-gray-500">No turnover data.</p>
+                    <p className="text-sm text-slate-400">No turnover data.</p>
                   )}
                 </div>
 
@@ -980,19 +984,19 @@ export default function Analytics() {
                       {inventoryAnalytics.low_turnover_items.slice(0, 8).map((item, idx) => (
                         <div key={`${item.part_number || 'part'}-${idx}`} className="flex items-center justify-between text-sm">
                           <span className="font-medium">{item.part_number || 'Unknown Part'}</span>
-                          <span className="text-gray-600">{formatMetric(item.turnover_ratio)} turns</span>
+                          <span className="text-slate-400">{formatMetric(item.turnover_ratio)} turns</span>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-sm text-gray-500">No low-turnover items.</p>
+                    <p className="text-sm text-slate-400">No low-turnover items.</p>
                   )}
                 </div>
               </div>
             </>
           ) : (
             <div className="card">
-              <p className="text-sm text-gray-500">No inventory analytics available.</p>
+              <p className="text-sm text-slate-400">No inventory analytics available.</p>
             </div>
           )}
         </div>
@@ -1011,18 +1015,18 @@ export default function Analytics() {
                         <span className="font-medium">
                           {formatCentralDate(week.week_start)} - {formatCentralDate(week.week_end)}
                         </span>
-                        <span className="text-gray-600">{week.overall_utilization.toFixed(0)}%</span>
+                        <span className="text-slate-400">{week.overall_utilization.toFixed(0)}%</span>
                       </div>
                       <div className="space-y-2">
                         {week.work_centers.slice(0, 5).map((wc) => (
                           <div key={wc.work_center_id}>
-                            <div className="flex justify-between text-xs text-gray-600 mb-1">
+                            <div className="flex justify-between text-xs text-slate-400 mb-1">
                               <span>{wc.work_center_name}</span>
                               <span>{wc.utilization_pct.toFixed(0)}%</span>
                             </div>
                             <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                               <div
-                                className={`h-full rounded-full ${wc.utilization_pct > 90 ? 'bg-red-500' : wc.utilization_pct > 75 ? 'bg-amber-500' : 'bg-green-500'}`}
+                                className={`h-full rounded-full ${wc.utilization_pct > 90 ? 'bg-red-500/100' : wc.utilization_pct > 75 ? 'bg-amber-500/100' : 'bg-green-500/100'}`}
                                 style={{ width: `${Math.min(wc.utilization_pct, 100)}%` }}
                               />
                             </div>
@@ -1033,7 +1037,7 @@ export default function Analytics() {
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-gray-500">No capacity forecast data.</p>
+                <p className="text-sm text-slate-400">No capacity forecast data.</p>
               )}
             </div>
 
@@ -1045,12 +1049,12 @@ export default function Analytics() {
                     <div key={item.part_number} className="flex items-center justify-between text-sm">
                       <div>
                         <div className="font-medium">{item.part_number}</div>
-                        <div className="text-xs text-gray-500">{item.part_name}</div>
+                        <div className="text-xs text-slate-400">{item.part_name}</div>
                       </div>
                       <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                        item.urgency === 'critical' ? 'bg-red-100 text-red-700' :
-                        item.urgency === 'warning' ? 'bg-amber-100 text-amber-700' :
-                        'bg-emerald-100 text-emerald-700'
+                        item.urgency === 'critical' ? 'bg-red-500/20 text-red-400' :
+                        item.urgency === 'warning' ? 'bg-amber-500/20 text-amber-400' :
+                        'bg-emerald-500/20 text-emerald-400'
                       }`}>
                         {item.urgency}
                       </span>
@@ -1058,7 +1062,7 @@ export default function Analytics() {
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-gray-500">No inventory risk data.</p>
+                <p className="text-sm text-slate-400">No inventory risk data.</p>
               )}
             </div>
           </div>
@@ -1071,11 +1075,11 @@ export default function Analytics() {
             <>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="card">
-                  <p className="text-sm text-gray-500">Avg Margin</p>
+                  <p className="text-sm text-slate-400">Avg Margin</p>
                   <p className="text-2xl font-semibold">{formatMetric(costAnalysis.avg_margin, '%')}</p>
                 </div>
                 <div className="card">
-                  <p className="text-sm text-gray-500">Avg Variance</p>
+                  <p className="text-sm text-slate-400">Avg Variance</p>
                   <p className="text-2xl font-semibold">{formatMetric(costAnalysis.avg_variance_pct, '%')}</p>
                 </div>
               </div>
@@ -1084,15 +1088,15 @@ export default function Analytics() {
                 <h3 className="text-lg font-semibold mb-4">Job Cost Summary</h3>
                 {costAnalysis.jobs?.length ? (
                   <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200 text-sm">
-                      <thead className="bg-gray-50">
+                    <table className="min-w-full divide-y divide-slate-700 text-sm">
+                      <thead className="bg-slate-800">
                         <tr>
-                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">WO #</th>
-                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Part</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Estimated</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Actual</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Variance</th>
-                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Margin</th>
+                          <th className="px-4 py-2 text-left font-medium text-slate-400 uppercase">WO #</th>
+                          <th className="px-4 py-2 text-left font-medium text-slate-400 uppercase">Part</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Estimated</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Actual</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Variance</th>
+                          <th className="px-4 py-2 text-right font-medium text-slate-400 uppercase">Margin</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -1112,13 +1116,13 @@ export default function Analytics() {
                     </table>
                   </div>
                 ) : (
-                  <p className="text-sm text-gray-500">No cost analysis data.</p>
+                  <p className="text-sm text-slate-400">No cost analysis data.</p>
                 )}
               </div>
             </>
           ) : (
             <div className="card">
-              <p className="text-sm text-gray-500">No cost analytics available.</p>
+              <p className="text-sm text-slate-400">No cost analytics available.</p>
             </div>
           )}
         </div>
@@ -1131,21 +1135,21 @@ export default function Analytics() {
             {reportTemplates.length ? (
               <div className="space-y-3">
                 {reportTemplates.map((template) => (
-                  <div key={template.id} className="border border-gray-200 rounded-lg p-3">
+                  <div key={template.id} className="border border-slate-700 rounded-lg p-3">
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="font-medium">{template.name}</p>
-                        <p className="text-sm text-gray-500">{template.description || template.data_source}</p>
+                        <p className="text-sm text-slate-400">{template.description || template.data_source}</p>
                       </div>
                       {template.is_shared && (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-werco-50 text-werco-primary">Shared</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-werco-500/10 text-werco-primary">Shared</span>
                       )}
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-gray-500">No report templates available.</p>
+              <p className="text-sm text-slate-400">No report templates available.</p>
             )}
           </div>
 
@@ -1154,14 +1158,14 @@ export default function Analytics() {
             {Object.keys(dataSources).length ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {Object.entries(dataSources).map(([key, info]) => (
-                  <div key={key} className="border border-gray-200 rounded-lg p-3">
+                  <div key={key} className="border border-slate-700 rounded-lg p-3">
                     <p className="font-medium">{info.label}</p>
-                    <p className="text-sm text-gray-500">{info.fields.length} fields</p>
+                    <p className="text-sm text-slate-400">{info.fields.length} fields</p>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-gray-500">No data sources found.</p>
+              <p className="text-sm text-slate-400">No data sources found.</p>
             )}
           </div>
         </div>

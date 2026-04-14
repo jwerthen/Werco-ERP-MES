@@ -64,28 +64,28 @@ interface QualitySummary {
 }
 
 const statusColors: Record<string, string> = {
-  open: 'bg-red-100 text-red-800',
-  under_review: 'bg-yellow-100 text-yellow-800',
-  pending_disposition: 'bg-orange-100 text-orange-800',
-  closed: 'bg-green-100 text-green-800',
-  void: 'bg-gray-100 text-gray-800',
-  root_cause_analysis: 'bg-blue-100 text-blue-800',
-  corrective_action: 'bg-purple-100 text-purple-800',
-  verification: 'bg-indigo-100 text-indigo-800',
-  pending: 'bg-yellow-100 text-yellow-800',
-  in_progress: 'bg-blue-100 text-blue-800',
-  passed: 'bg-green-100 text-green-800',
-  failed: 'bg-red-100 text-red-800',
-  conditional: 'bg-orange-100 text-orange-800',
+  open: 'bg-red-500/20 text-red-300',
+  under_review: 'bg-yellow-500/20 text-yellow-300',
+  pending_disposition: 'bg-orange-500/20 text-orange-300',
+  closed: 'bg-green-500/20 text-green-300',
+  void: 'bg-slate-800 text-slate-100',
+  root_cause_analysis: 'bg-blue-500/20 text-blue-300',
+  corrective_action: 'bg-purple-500/20 text-purple-300',
+  verification: 'bg-indigo-500/20 text-indigo-800',
+  pending: 'bg-yellow-500/20 text-yellow-300',
+  in_progress: 'bg-blue-500/20 text-blue-300',
+  passed: 'bg-green-500/20 text-green-300',
+  failed: 'bg-red-500/20 text-red-300',
+  conditional: 'bg-orange-500/20 text-orange-300',
 };
 
 const dispositionColors: Record<string, string> = {
-  use_as_is: 'bg-green-100 text-green-800',
-  rework: 'bg-blue-100 text-blue-800',
-  repair: 'bg-yellow-100 text-yellow-800',
-  scrap: 'bg-red-100 text-red-800',
-  return_to_vendor: 'bg-purple-100 text-purple-800',
-  pending: 'bg-gray-100 text-gray-800',
+  use_as_is: 'bg-green-500/20 text-green-300',
+  rework: 'bg-blue-500/20 text-blue-300',
+  repair: 'bg-yellow-500/20 text-yellow-300',
+  scrap: 'bg-red-500/20 text-red-300',
+  return_to_vendor: 'bg-purple-500/20 text-purple-300',
+  pending: 'bg-slate-800 text-slate-100',
 };
 
 export default function QualityPage() {
@@ -194,7 +194,7 @@ export default function QualityPage() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Quality Management</h1>
+        <h1 className="text-2xl font-bold text-white">Quality Management</h1>
       </div>
 
       {/* Summary Cards */}
@@ -204,28 +204,28 @@ export default function QualityPage() {
             <ExclamationTriangleIcon className="h-10 w-10 text-red-500 mr-4" />
             <div>
               <div className="text-2xl font-bold">{summary.open_ncrs}</div>
-              <div className="text-sm text-gray-500">Open NCRs</div>
+              <div className="text-sm text-slate-400">Open NCRs</div>
             </div>
           </div>
           <div className={`card flex items-center ${summary.open_cars > 0 ? 'border-l-4 border-yellow-500' : ''}`}>
             <ClipboardDocumentCheckIcon className="h-10 w-10 text-yellow-500 mr-4" />
             <div>
               <div className="text-2xl font-bold">{summary.open_cars}</div>
-              <div className="text-sm text-gray-500">Open CARs</div>
+              <div className="text-sm text-slate-400">Open CARs</div>
             </div>
           </div>
           <div className={`card flex items-center ${summary.pending_fais > 0 ? 'border-l-4 border-blue-500' : ''}`}>
             <DocumentMagnifyingGlassIcon className="h-10 w-10 text-blue-500 mr-4" />
             <div>
               <div className="text-2xl font-bold">{summary.pending_fais}</div>
-              <div className="text-sm text-gray-500">Pending FAIs</div>
+              <div className="text-sm text-slate-400">Pending FAIs</div>
             </div>
           </div>
         </div>
       )}
 
       {/* Tabs */}
-      <div className="border-b border-gray-200">
+      <div className="border-b border-slate-700">
         <nav className="-mb-px flex space-x-8">
           {[
             { id: 'ncr', label: 'NCR', icon: ExclamationTriangleIcon },
@@ -238,7 +238,7 @@ export default function QualityPage() {
               className={`flex items-center py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-600'
               }`}
             >
               <tab.icon className="h-5 w-5 mr-2" />
@@ -292,32 +292,32 @@ export default function QualityPage() {
               </button>
             </div>
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800/50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">NCR #</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Disposition</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">NCR #</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Title</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Source</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Disposition</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Date</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-[#151b28] divide-y divide-slate-700">
                   {(ncrStatusFilter ? ncrs.filter(ncr => ncr.status === ncrStatusFilter) : ncrs).map((ncr) => (
-                    <tr key={ncr.id} className="hover:bg-gray-50 cursor-pointer">
+                    <tr key={ncr.id} className="hover:bg-slate-800/50 cursor-pointer">
                       <td className="px-4 py-3 font-medium">{ncr.ncr_number}</td>
                       <td className="px-4 py-3">{ncr.part?.part_number || '-'}</td>
                       <td className="px-4 py-3">{ncr.title}</td>
                       <td className="px-4 py-3 text-sm">{ncr.source.replace(/_/g, ' ')}</td>
                       <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[ncr.status] || 'bg-gray-100'}`}>
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[ncr.status] || 'bg-slate-800'}`}>
                           {ncr.status.replace(/_/g, ' ')}
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${dispositionColors[ncr.disposition] || 'bg-gray-100'}`}>
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${dispositionColors[ncr.disposition] || 'bg-slate-800'}`}>
                           {ncr.disposition.replace(/_/g, ' ')}
                         </span>
                       </td>
@@ -326,7 +326,7 @@ export default function QualityPage() {
                   ))}
                 </tbody>
               </table>
-              {ncrs.length === 0 && <p className="text-center text-gray-500 py-8">No NCRs found</p>}
+              {ncrs.length === 0 && <p className="text-center text-slate-400 py-8">No NCRs found</p>}
             </div>
           </>
         )}
@@ -341,34 +341,34 @@ export default function QualityPage() {
               </button>
             </div>
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800/50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">CAR #</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Priority</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Due Date</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">CAR #</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Title</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Priority</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due Date</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-[#151b28] divide-y divide-slate-700">
                   {cars.map((car) => (
-                    <tr key={car.id} className="hover:bg-gray-50 cursor-pointer">
+                    <tr key={car.id} className="hover:bg-slate-800/50 cursor-pointer">
                       <td className="px-4 py-3 font-medium">{car.car_number}</td>
                       <td className="px-4 py-3 text-sm capitalize">{car.car_type}</td>
                       <td className="px-4 py-3">{car.title}</td>
                       <td className="px-4 py-3 text-center">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          car.priority === 1 ? 'bg-red-100 text-red-800' :
-                          car.priority === 2 ? 'bg-yellow-100 text-yellow-800' :
-                          'bg-gray-100 text-gray-800'
+                          car.priority === 1 ? 'bg-red-500/20 text-red-300' :
+                          car.priority === 2 ? 'bg-yellow-500/20 text-yellow-300' :
+                          'bg-slate-800 text-slate-100'
                         }`}>
                           {car.priority === 1 ? 'Critical' : car.priority === 2 ? 'Major' : 'Minor'}
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[car.status] || 'bg-gray-100'}`}>
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[car.status] || 'bg-slate-800'}`}>
                           {car.status.replace(/_/g, ' ')}
                         </span>
                       </td>
@@ -377,7 +377,7 @@ export default function QualityPage() {
                   ))}
                 </tbody>
               </table>
-              {cars.length === 0 && <p className="text-center text-gray-500 py-8">No CARs found</p>}
+              {cars.length === 0 && <p className="text-center text-slate-400 py-8">No CARs found</p>}
             </div>
           </>
         )}
@@ -392,28 +392,28 @@ export default function QualityPage() {
               </button>
             </div>
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800/50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">FAI #</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Pass/Fail</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Due Date</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">FAI #</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Pass/Fail</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due Date</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-[#151b28] divide-y divide-slate-700">
                   {fais.map((fai) => (
-                    <tr key={fai.id} className="hover:bg-gray-50 cursor-pointer">
+                    <tr key={fai.id} className="hover:bg-slate-800/50 cursor-pointer">
                       <td className="px-4 py-3 font-medium">{fai.fai_number}</td>
                       <td className="px-4 py-3">
                         {fai.part?.part_number}
-                        {fai.part_revision && <span className="text-gray-400 ml-1">Rev {fai.part_revision}</span>}
+                        {fai.part_revision && <span className="text-slate-500 ml-1">Rev {fai.part_revision}</span>}
                       </td>
                       <td className="px-4 py-3 text-sm capitalize">{fai.fai_type}</td>
                       <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[fai.status] || 'bg-gray-100'}`}>
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[fai.status] || 'bg-slate-800'}`}>
                           {fai.status}
                         </span>
                       </td>
@@ -422,14 +422,14 @@ export default function QualityPage() {
                         {' / '}
                         <span className="text-red-600">{fai.characteristics_failed}</span>
                         {' / '}
-                        <span className="text-gray-500">{fai.total_characteristics}</span>
+                        <span className="text-slate-400">{fai.total_characteristics}</span>
                       </td>
                       <td className="px-4 py-3 text-sm">{fai.due_date ? formatCentralDate(fai.due_date) : '-'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {fais.length === 0 && <p className="text-center text-gray-500 py-8">No FAIs found</p>}
+              {fais.length === 0 && <p className="text-center text-slate-400 py-8">No FAIs found</p>}
             </div>
           </>
         )}
@@ -438,7 +438,7 @@ export default function QualityPage() {
       {/* NCR Modal */}
       {showNCRModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New Non-Conformance Report</h3>
               <button onClick={() => setShowNCRModal(false)}><XMarkIcon className="h-6 w-6" /></button>
@@ -500,7 +500,7 @@ export default function QualityPage() {
       {/* CAR Modal */}
       {showCARModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New Corrective Action Request</h3>
               <button onClick={() => setShowCARModal(false)}><XMarkIcon className="h-6 w-6" /></button>
@@ -544,7 +544,7 @@ export default function QualityPage() {
       {/* FAI Modal */}
       {showFAIModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New First Article Inspection</h3>
               <button onClick={() => setShowFAIModal(false)}><XMarkIcon className="h-6 w-6" /></button>

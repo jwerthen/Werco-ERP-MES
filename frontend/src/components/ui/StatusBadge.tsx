@@ -7,16 +7,16 @@ interface StatusBadgeProps {
 }
 
 const defaultColors: Record<string, string> = {
-  active: 'bg-green-100 text-green-800',
-  draft: 'bg-yellow-100 text-yellow-800',
-  released: 'bg-green-100 text-green-800',
-  obsolete: 'bg-gray-100 text-gray-600',
-  pending_approval: 'bg-amber-100 text-amber-800',
+  active: 'bg-green-500/20 text-green-300',
+  draft: 'bg-yellow-500/20 text-yellow-300',
+  released: 'bg-green-500/20 text-green-300',
+  obsolete: 'bg-slate-700 text-slate-400',
+  pending_approval: 'bg-amber-500/20 text-amber-300',
 };
 
 export function StatusBadge({ status, colorMap, className = '' }: StatusBadgeProps) {
   const colors = colorMap || defaultColors;
-  const colorClass = colors[status] || 'bg-gray-100 text-gray-800';
+  const colorClass = colors[status] || 'bg-slate-700 text-slate-300';
 
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium capitalize ${colorClass} ${className}`}>

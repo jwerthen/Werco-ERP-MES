@@ -32,11 +32,11 @@ interface Equipment {
 }
 
 const statusColors: Record<string, string> = {
-  active: 'bg-green-100 text-green-800',
-  due: 'bg-yellow-100 text-yellow-800',
-  overdue: 'bg-red-100 text-red-800',
-  out_of_service: 'bg-gray-100 text-gray-800',
-  retired: 'bg-gray-100 text-gray-600',
+  active: 'bg-green-500/20 text-green-300',
+  due: 'bg-yellow-500/20 text-yellow-300',
+  overdue: 'bg-red-500/20 text-red-300',
+  out_of_service: 'bg-slate-800 text-slate-100',
+  retired: 'bg-slate-800 text-slate-400',
 };
 
 const equipmentTypes = [
@@ -223,7 +223,7 @@ export default function Calibration() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Calibration Tracking</h1>
+        <h1 className="text-2xl font-bold text-white">Calibration Tracking</h1>
         <button
           onClick={() => { resetForm(); setShowModal(true); }}
           className="btn-primary flex items-center"
@@ -236,29 +236,29 @@ export default function Calibration() {
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4" data-tour="qa-calibration">
         <div className="card flex items-center">
-          <div className="p-3 rounded-full bg-red-100 mr-4">
+          <div className="p-3 rounded-full bg-red-500/20 mr-4">
             <ExclamationTriangleIcon className="h-6 w-6 text-red-600" />
           </div>
           <div>
-            <p className="text-sm text-gray-500">Overdue</p>
+            <p className="text-sm text-slate-400">Overdue</p>
             <p className="text-2xl font-bold text-red-600">{overdueCount}</p>
           </div>
         </div>
         <div className="card flex items-center">
-          <div className="p-3 rounded-full bg-yellow-100 mr-4">
+          <div className="p-3 rounded-full bg-yellow-500/20 mr-4">
             <ClockIcon className="h-6 w-6 text-yellow-600" />
           </div>
           <div>
-            <p className="text-sm text-gray-500">Due Soon (30 days)</p>
+            <p className="text-sm text-slate-400">Due Soon (30 days)</p>
             <p className="text-2xl font-bold text-yellow-600">{dueCount}</p>
           </div>
         </div>
         <div className="card flex items-center">
-          <div className="p-3 rounded-full bg-green-100 mr-4">
+          <div className="p-3 rounded-full bg-green-500/20 mr-4">
             <CheckCircleIcon className="h-6 w-6 text-green-600" />
           </div>
           <div>
-            <p className="text-sm text-gray-500">Current</p>
+            <p className="text-sm text-slate-400">Current</p>
             <p className="text-2xl font-bold text-green-600">{activeCount}</p>
           </div>
         </div>
@@ -301,28 +301,28 @@ export default function Calibration() {
       {/* Equipment Table */}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800/50">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Equipment</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Cal</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Next Due</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">ID</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Equipment</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Location</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Last Cal</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Next Due</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="bg-[#151b28] divide-y divide-slate-700">
               {equipment.map((eq) => (
-                <tr key={eq.id} className="hover:bg-gray-50">
+                <tr key={eq.id} className="hover:bg-slate-800/50">
                   <td className="px-4 py-4 font-mono text-sm">{eq.equipment_id}</td>
                   <td className="px-4 py-4">
                     <div>
                       <div className="font-medium">{eq.name}</div>
                       {eq.manufacturer && (
-                        <div className="text-sm text-gray-500">{eq.manufacturer} {eq.model}</div>
+                        <div className="text-sm text-slate-400">{eq.manufacturer} {eq.model}</div>
                       )}
                     </div>
                   </td>
@@ -336,7 +336,7 @@ export default function Calibration() {
                       <div>
                         <div className="text-sm">{formatCentralDate(eq.next_calibration_date)}</div>
                         {eq.days_until_due !== undefined && (
-                          <div className={`text-xs ${eq.days_until_due < 0 ? 'text-red-600' : eq.days_until_due <= 30 ? 'text-yellow-600' : 'text-gray-500'}`}>
+                          <div className={`text-xs ${eq.days_until_due < 0 ? 'text-red-600' : eq.days_until_due <= 30 ? 'text-yellow-600' : 'text-slate-400'}`}>
                             {eq.days_until_due < 0 ? `${Math.abs(eq.days_until_due)} days overdue` : 
                              eq.days_until_due === 0 ? 'Due today' : 
                              `${eq.days_until_due} days`}
@@ -354,14 +354,14 @@ export default function Calibration() {
                     <div className="flex justify-center gap-2">
                       <button
                         onClick={() => openCalibrationModal(eq)}
-                        className="text-green-600 hover:text-green-800 text-sm font-medium"
+                        className="text-green-600 hover:text-green-300 text-sm font-medium"
                         title="Record Calibration"
                       >
                         <WrenchIcon className="h-5 w-5" />
                       </button>
                       <button
                         onClick={() => handleEdit(eq)}
-                        className="text-gray-400 hover:text-gray-600 text-sm"
+                        className="text-slate-500 hover:text-slate-400 text-sm"
                       >
                         Edit
                       </button>
@@ -373,14 +373,14 @@ export default function Calibration() {
           </table>
         </div>
         {equipment.length === 0 && (
-          <div className="text-center py-8 text-gray-500">No equipment found</div>
+          <div className="text-center py-8 text-slate-400">No equipment found</div>
         )}
       </div>
 
       {/* Add/Edit Equipment Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-semibold mb-4">
               {editingEquipment ? 'Edit Equipment' : 'Add Equipment'}
             </h3>
@@ -506,7 +506,7 @@ export default function Calibration() {
       {/* Record Calibration Modal */}
       {showCalibrationModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Record Calibration</h3>
             <form onSubmit={handleCalibration} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">

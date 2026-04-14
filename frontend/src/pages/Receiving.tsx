@@ -374,23 +374,23 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       {!embedded && (
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">Receiving & Inspection</h1>
-            <p className="text-gray-500 mt-1">AS9100D compliant receiving and inspection workflow</p>
+            <h1 className="text-3xl font-bold text-white">Receiving & Inspection</h1>
+            <p className="text-slate-400 mt-1">AS9100D compliant receiving and inspection workflow</p>
           </div>
         </div>
       )}
 
       {/* Success/Error Messages */}
       {success && (
-        <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-3">
+        <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 flex items-center gap-3">
           <CheckCircleIcon className="h-5 w-5 text-green-600" />
-          <span className="text-green-800">{success}</span>
+          <span className="text-emerald-300">{success}</span>
         </div>
       )}
       {error && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
           <ExclamationTriangleIcon className="h-5 w-5 text-red-600" />
-          <span className="text-red-800">{error}</span>
+          <span className="text-red-300">{error}</span>
           <button onClick={() => setError('')} className="ml-auto">
             <XMarkIcon className="h-5 w-5 text-red-600" />
           </button>
@@ -403,7 +403,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           <div className="stat-card">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Pending Inspection</p>
+                <p className="text-sm font-medium text-slate-400">Pending Inspection</p>
                 <p className="text-2xl font-bold text-amber-600">{stats.pending_inspection}</p>
               </div>
               <ClockIcon className="h-10 w-10 text-amber-200" />
@@ -412,7 +412,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           <div className="stat-card">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Received (30d)</p>
+                <p className="text-sm font-medium text-slate-400">Received (30d)</p>
                 <p className="text-2xl font-bold text-werco-primary">{stats.receipts_in_period}</p>
               </div>
               <InboxArrowDownIcon className="h-10 w-10 text-werco-100" />
@@ -421,7 +421,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           <div className="stat-card">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Acceptance Rate</p>
+                <p className="text-sm font-medium text-slate-400">Acceptance Rate</p>
                 <p className="text-2xl font-bold text-green-600">{stats.acceptance_rate}%</p>
               </div>
               <DocumentCheckIcon className="h-10 w-10 text-green-200" />
@@ -430,7 +430,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           <div className="stat-card">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Rejections (30d)</p>
+                <p className="text-sm font-medium text-slate-400">Rejections (30d)</p>
                 <p className="text-2xl font-bold text-red-600">{stats.rejections_in_period}</p>
               </div>
               <ExclamationTriangleIcon className="h-10 w-10 text-red-200" />
@@ -440,7 +440,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       )}
 
       {/* Tabs */}
-      <div className="border-b border-gray-200">
+      <div className="border-b border-slate-700">
         <nav className="-mb-px flex space-x-8">
           {[
             { id: 'receive', label: 'Receive Material', icon: TruckIcon },
@@ -456,13 +456,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               className={`flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+                  : 'border-transparent text-slate-400 hover:text-slate-300'
               }`}
             >
               <tab.icon className="h-5 w-5" />
               {tab.label}
               {tab.count !== undefined && tab.count > 0 && (
-                <span className="ml-1 px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-800">
+                <span className="ml-1 px-2 py-0.5 rounded-full text-xs bg-amber-500/20 text-amber-300">
                   {tab.count}
                 </span>
               )}
@@ -482,7 +482,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 <h2 className="text-lg font-semibold mb-3">Open Purchase Orders</h2>
                 <div className="space-y-2 flex-1 overflow-y-auto pr-2">
                   {openPOs.length === 0 ? (
-                    <p className="text-gray-500 text-center py-8">No open POs awaiting receipt</p>
+                    <p className="text-slate-400 text-center py-8">No open POs awaiting receipt</p>
                   ) : (
                     openPOs.map((po) => (
                       <div
@@ -490,21 +490,21 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                         onClick={() => handleSelectPO(po)}
                         className={`p-3 rounded-xl border-2 cursor-pointer transition-all ${
                           selectedPO?.po_id === po.po_id
-                            ? 'border-werco-primary bg-werco-50'
-                            : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                            ? 'border-werco-primary bg-werco-500/10'
+                            : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
                         }`}
                       >
                         <div className="flex justify-between items-start">
                           <div>
                             <p className="font-semibold text-werco-primary">{po.po_number}</p>
-                            <p className="text-sm text-gray-600">{po.vendor_name}</p>
+                            <p className="text-sm text-slate-400">{po.vendor_name}</p>
                           </div>
-                          <span className="px-2 py-1 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                          <span className="px-2 py-1 rounded text-xs font-medium bg-blue-500/20 text-blue-300">
                             {po.total_lines} line{po.total_lines !== 1 ? 's' : ''}
                           </span>
                         </div>
                         {po.required_date && (
-                          <p className="text-xs text-gray-500 mt-1">
+                          <p className="text-xs text-slate-400 mt-1">
                             Required: {formatCentralDate(po.required_date)}
                           </p>
                         )}
@@ -517,7 +517,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               {/* PO Detail Panel */}
               <div className="col-span-2 flex flex-col">
                 {selectedPO ? (
-                  <div className="bg-gray-50 rounded-xl p-4 flex flex-col flex-1 overflow-hidden">
+                  <div className="bg-slate-800 rounded-xl p-4 flex flex-col flex-1 overflow-hidden">
                     {/* Compact PO Header */}
                     <div className="flex items-center justify-between gap-4 mb-3 flex-shrink-0">
                       <div className="flex items-center gap-4 min-w-0">
@@ -525,9 +525,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                           <div className="flex items-center gap-2">
                             <h3 className="text-lg font-bold text-werco-primary">{selectedPO.po_number}</h3>
                             <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                              selectedPO.status === 'sent' ? 'bg-blue-100 text-blue-800' :
-                              selectedPO.status === 'partial' ? 'bg-amber-100 text-amber-800' :
-                              'bg-gray-100 text-gray-800'
+                              selectedPO.status === 'sent' ? 'bg-blue-500/20 text-blue-300' :
+                              selectedPO.status === 'partial' ? 'bg-amber-500/20 text-amber-300' :
+                              'bg-slate-800/50 text-slate-100'
                             }`}>
                               {selectedPO.status.charAt(0).toUpperCase() + selectedPO.status.slice(1)}
                             </span>
@@ -535,77 +535,77 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                               <span className="text-xs text-green-600 font-medium">✓ Approved</span>
                             )}
                           </div>
-                          <p className="text-sm text-gray-600 truncate">
+                          <p className="text-sm text-slate-400 truncate">
                             {selectedPO.vendor_name}
-                            {selectedPO.vendor_code && <span className="text-gray-400 ml-1">({selectedPO.vendor_code})</span>}
+                            {selectedPO.vendor_code && <span className="text-slate-400 ml-1">({selectedPO.vendor_code})</span>}
                           </p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-4 text-xs text-gray-500 flex-shrink-0">
+                      <div className="flex items-center gap-4 text-xs text-slate-400 flex-shrink-0">
                         {selectedPO.order_date && (
                           <div className="text-center">
-                            <p className="text-gray-400">Ordered</p>
-                            <p className="font-medium text-gray-700">{formatCentralDate(selectedPO.order_date)}</p>
+                            <p className="text-slate-400">Ordered</p>
+                            <p className="font-medium text-slate-300">{formatCentralDate(selectedPO.order_date)}</p>
                           </div>
                         )}
                         {selectedPO.required_date && (
                           <div className="text-center">
-                            <p className="text-gray-400">Required</p>
-                            <p className="font-medium text-gray-700">{formatCentralDate(selectedPO.required_date)}</p>
+                            <p className="text-slate-400">Required</p>
+                            <p className="font-medium text-slate-300">{formatCentralDate(selectedPO.required_date)}</p>
                           </div>
                         )}
                         {selectedPO.expected_date && (
                           <div className="text-center">
-                            <p className="text-gray-400">Expected</p>
-                            <p className="font-medium text-gray-700">{formatCentralDate(selectedPO.expected_date)}</p>
+                            <p className="text-slate-400">Expected</p>
+                            <p className="font-medium text-slate-300">{formatCentralDate(selectedPO.expected_date)}</p>
                           </div>
                         )}
                       </div>
                     </div>
 
                     {selectedPO.notes && (
-                      <div className="mb-3 px-3 py-2 bg-white rounded-lg border border-gray-200 text-sm text-gray-600 flex-shrink-0">
-                        <span className="text-gray-400 font-medium">Notes: </span>{selectedPO.notes}
+                      <div className="mb-3 px-3 py-2 bg-[#151b28] rounded-lg border border-slate-700 text-sm text-slate-400 flex-shrink-0">
+                        <span className="text-slate-400 font-medium">Notes: </span>{selectedPO.notes}
                       </div>
                     )}
 
                     {/* Lines Table — scrollable */}
-                    <div className="flex-1 overflow-y-auto bg-white rounded-lg border border-gray-200">
-                      <table className="w-full divide-y divide-gray-200">
-                        <thead className="bg-gray-100 sticky top-0">
+                    <div className="flex-1 overflow-y-auto bg-[#151b28] rounded-lg border border-slate-700">
+                      <table className="w-full divide-y divide-slate-700">
+                        <thead className="bg-slate-800/50 sticky top-0">
                           <tr>
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase w-10">#</th>
-                            <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Part</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase w-16">Ord</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase w-16">Recv</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase w-16">Rem</th>
-                            <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase w-20">Unit $</th>
-                            <th className="px-3 py-2 text-center text-xs font-semibold text-gray-600 uppercase w-20">Status</th>
-                            <th className="px-3 py-2 text-center text-xs font-semibold text-gray-600 uppercase w-20"></th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase w-10">#</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Part</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">Ord</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">Recv</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-16">Rem</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase w-20">Unit $</th>
+                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20">Status</th>
+                            <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase w-20"></th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-gray-200">
+                        <tbody className="divide-y divide-slate-700">
                           {selectedPO.lines?.map((line: any) => (
                             <tr
                               key={line.line_id}
                               className={`${
                                 line.is_closed
-                                  ? 'bg-gray-50 text-gray-400'
+                                  ? 'bg-slate-800 text-slate-400'
                                   : isPartialLine(line)
-                                    ? 'bg-amber-50 hover:bg-amber-100'
-                                    : 'hover:bg-gray-50'
+                                    ? 'bg-amber-500/10 hover:bg-amber-500/20'
+                                    : 'hover:bg-slate-800'
                               }`}
                             >
                               <td className="px-3 py-2 text-sm text-center">{line.line_number}</td>
                               <td className="px-3 py-2">
                                 <span className="font-mono font-semibold text-sm">{line.part_number}</span>
-                                <span className="text-xs text-gray-500 ml-2 hidden xl:inline">{line.part_name}</span>
+                                <span className="text-xs text-slate-400 ml-2 hidden xl:inline">{line.part_name}</span>
                               </td>
                               <td className="px-3 py-2 text-right text-sm">{line.quantity_ordered}</td>
                               <td className="px-3 py-2 text-right text-sm">{line.quantity_received}</td>
                               <td className="px-3 py-2 text-right text-sm font-semibold">
                                 {line.is_closed ? (
-                                  <span className="text-gray-400">-</span>
+                                  <span className="text-slate-400">-</span>
                                 ) : (
                                   <span className={line.quantity_remaining > 0 ? 'text-amber-600' : 'text-green-600'}>
                                     {line.quantity_remaining}
@@ -615,11 +615,11 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                               <td className="px-3 py-2 text-right text-sm">${(line.unit_price || 0).toFixed(2)}</td>
                               <td className="px-3 py-2 text-center">
                                 {line.is_closed ? (
-                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">Done</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-500/20 text-emerald-300">Done</span>
                                 ) : line.quantity_received > 0 ? (
-                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">Partial</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-500/20 text-amber-300">Partial</span>
                                 ) : (
-                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">Open</span>
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-500/20 text-blue-300">Open</span>
                                 )}
                               </td>
                               <td className="px-3 py-2 text-center">
@@ -635,7 +635,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             </tr>
                           ))}
                         </tbody>
-                        <tfoot className="bg-gray-100">
+                        <tfoot className="bg-slate-800/50">
                           <tr>
                             <td colSpan={5} className="px-3 py-2 text-right text-sm font-semibold">PO Total:</td>
                             <td className="px-3 py-2 text-right text-sm font-bold">
@@ -650,40 +650,40 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     {/* Receipt History for this PO — collapsible */}
                     {selectedPO.lines?.some((l: any) => l.receipts?.length > 0) && (
                       <details className="mt-3 flex-shrink-0">
-                        <summary className="text-sm font-semibold text-gray-600 cursor-pointer hover:text-gray-800">
+                        <summary className="text-sm font-semibold text-slate-400 cursor-pointer hover:text-slate-100">
                           Receipt History ({selectedPO.lines?.reduce((c: number, l: any) => c + (l.receipts?.length || 0), 0)} receipts)
                         </summary>
-                        <div className="mt-2 bg-white rounded-lg border border-gray-200 overflow-x-auto max-h-48 overflow-y-auto">
-                          <table className="w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50 sticky top-0">
+                        <div className="mt-2 bg-[#151b28] rounded-lg border border-slate-700 overflow-x-auto max-h-48 overflow-y-auto">
+                          <table className="w-full divide-y divide-slate-700">
+                            <thead className="bg-slate-800 sticky top-0">
                               <tr>
-                                <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Receipt #</th>
-                                <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Part</th>
-                                <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase">Qty</th>
-                                <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Lot #</th>
-                                <th className="px-3 py-2 text-center text-xs font-semibold text-gray-600 uppercase">Status</th>
-                                <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase">Date</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Receipt #</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Part</th>
+                                <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase">Qty</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Lot #</th>
+                                <th className="px-3 py-2 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
+                                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Date</th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y divide-gray-200">
+                            <tbody className="divide-y divide-slate-700">
                               {selectedPO.lines?.flatMap((l: any) =>
                                 (l.receipts || []).map((r: any) => (
-                                  <tr key={r.receipt_id} className="hover:bg-gray-50">
+                                  <tr key={r.receipt_id} className="hover:bg-slate-800">
                                     <td className="px-3 py-1.5 font-mono text-sm">{r.receipt_number}</td>
                                     <td className="px-3 py-1.5 font-mono text-sm">{l.part_number}</td>
                                     <td className="px-3 py-1.5 text-right text-sm font-medium">{r.quantity_received}</td>
                                     <td className="px-3 py-1.5 font-mono text-sm">{r.lot_number}</td>
                                     <td className="px-3 py-1.5 text-center">
                                       <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                        r.status === 'accepted' ? 'bg-green-100 text-green-800' :
-                                        r.status === 'pending_inspection' ? 'bg-amber-100 text-amber-800' :
-                                        r.status === 'rejected' ? 'bg-red-100 text-red-800' :
-                                        'bg-gray-100 text-gray-800'
+                                        r.status === 'accepted' ? 'bg-green-500/20 text-emerald-300' :
+                                        r.status === 'pending_inspection' ? 'bg-amber-500/20 text-amber-300' :
+                                        r.status === 'rejected' ? 'bg-red-500/20 text-red-300' :
+                                        'bg-slate-800/50 text-slate-100'
                                       }`}>
                                         {r.status.replace(/_/g, ' ')}
                                       </span>
                                     </td>
-                                    <td className="px-3 py-1.5 text-sm text-gray-600">
+                                    <td className="px-3 py-1.5 text-sm text-slate-400">
                                       {r.received_at ? formatCentralDate(r.received_at) : '-'}
                                     </td>
                                   </tr>
@@ -696,7 +696,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     )}
                   </div>
                 ) : (
-                  <div className="bg-gray-50 rounded-xl p-8 flex-1 flex flex-col items-center justify-center text-gray-400">
+                  <div className="bg-slate-800 rounded-xl p-8 flex-1 flex flex-col items-center justify-center text-slate-400">
                     <MagnifyingGlassIcon className="h-16 w-16 mb-4" />
                     <p className="text-lg">Select a purchase order to view details</p>
                     <p className="text-sm mt-1">Click on a PO from the list to see lines and receive material</p>
@@ -712,31 +712,31 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           <div>
             <h2 className="text-lg font-semibold mb-4">Items Pending Inspection</h2>
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Receipt</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PO / Vendor</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lot #</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">CoC</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Received</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Days</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Receipt</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO / Vendor</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Lot #</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">CoC</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Received</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Days</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Action</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-[#151b28] divide-y divide-slate-700">
                   {inspectionQueue.map((item) => (
-                    <tr key={item.receipt_id} className={`hover:bg-gray-50 ${item.days_pending > 3 ? 'bg-amber-50' : ''}`}>
+                    <tr key={item.receipt_id} className={`hover:bg-slate-800 ${item.days_pending > 3 ? 'bg-amber-500/10' : ''}`}>
                       <td className="px-4 py-3 font-mono text-sm">{item.receipt_number}</td>
                       <td className="px-4 py-3">
                         <p className="font-medium text-sm">{item.po_number}</p>
-                        <p className="text-xs text-gray-500">{item.vendor_name}</p>
+                        <p className="text-xs text-slate-400">{item.vendor_name}</p>
                       </td>
                       <td className="px-4 py-3">
                         <p className="font-mono text-sm">{item.part_number}</p>
-                        <p className="text-xs text-gray-500 truncate max-w-[200px]">{item.part_name}</p>
+                        <p className="text-xs text-slate-400 truncate max-w-[200px]">{item.part_name}</p>
                       </td>
                       <td className="px-4 py-3 text-right font-medium">{item.quantity_received}</td>
                       <td className="px-4 py-3 font-mono text-sm">{item.lot_number}</td>
@@ -757,9 +757,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       </td>
                       <td className="px-4 py-3 text-center">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          item.days_pending > 3 ? 'bg-red-100 text-red-800' :
-                          item.days_pending > 1 ? 'bg-amber-100 text-amber-800' :
-                          'bg-green-100 text-green-800'
+                          item.days_pending > 3 ? 'bg-red-500/20 text-red-300' :
+                          item.days_pending > 1 ? 'bg-amber-500/20 text-amber-300' :
+                          'bg-green-500/20 text-emerald-300'
                         }`}>
                           {item.days_pending}d
                         </span>
@@ -777,7 +777,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 </tbody>
               </table>
               {inspectionQueue.length === 0 && (
-                <p className="text-center text-gray-500 py-8">No items pending inspection</p>
+                <p className="text-center text-slate-400 py-8">No items pending inspection</p>
               )}
             </div>
           </div>
@@ -788,23 +788,23 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           <div>
             <h2 className="text-lg font-semibold mb-4">Receiving History (Last 30 Days)</h2>
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Receipt</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PO</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Recv'd</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Accepted</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Rejected</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lot #</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Receipt</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Recv'd</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Accepted</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Rejected</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Lot #</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Status</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Date</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-[#151b28] divide-y divide-slate-700">
                   {history.map((item) => (
-                    <tr key={item.receipt_id} className="hover:bg-gray-50">
+                    <tr key={item.receipt_id} className="hover:bg-slate-800">
                       <td className="px-4 py-3 font-mono text-sm">{item.receipt_number}</td>
                       <td className="px-4 py-3 text-sm">{item.po_number}</td>
                       <td className="px-4 py-3">
@@ -816,10 +816,10 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       <td className="px-4 py-3 font-mono text-sm">{item.lot_number}</td>
                       <td className="px-4 py-3 text-center">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          item.inspection_status === 'passed' ? 'bg-green-100 text-green-800' :
-                          item.inspection_status === 'failed' ? 'bg-red-100 text-red-800' :
-                          item.inspection_status === 'partial' ? 'bg-amber-100 text-amber-800' :
-                          'bg-gray-100 text-gray-800'
+                          item.inspection_status === 'passed' ? 'bg-green-500/20 text-emerald-300' :
+                          item.inspection_status === 'failed' ? 'bg-red-500/20 text-red-300' :
+                          item.inspection_status === 'partial' ? 'bg-amber-500/20 text-amber-300' :
+                          'bg-slate-800/50 text-slate-100'
                         }`}>
                           {item.inspection_status?.replace(/_/g, ' ') || item.status}
                         </span>
@@ -832,7 +832,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 </tbody>
               </table>
               {history.length === 0 && (
-                <p className="text-center text-gray-500 py-8">No receiving history</p>
+                <p className="text-center text-slate-400 py-8">No receiving history</p>
               )}
             </div>
           </div>
@@ -842,31 +842,31 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       {/* RECEIVE MODAL */}
       {showReceiveModal && selectedLine && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-bold">Receive Material</h2>
               <button onClick={() => setShowReceiveModal(false)}>
-                <XMarkIcon className="h-6 w-6 text-gray-400 hover:text-gray-600" />
+                <XMarkIcon className="h-6 w-6 text-slate-400 hover:text-slate-400" />
               </button>
             </div>
 
             {/* Part Info */}
-            <div className="bg-gray-50 rounded-xl p-4 mb-6">
+            <div className="bg-slate-800 rounded-xl p-4 mb-6">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <p className="text-sm text-gray-500">Part Number</p>
+                  <p className="text-sm text-slate-400">Part Number</p>
                   <p className="font-mono font-semibold">{selectedLine.part_number}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Part Name</p>
+                  <p className="text-sm text-slate-400">Part Name</p>
                   <p>{selectedLine.part_name}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">PO Number</p>
+                  <p className="text-sm text-slate-400">PO Number</p>
                   <p className="font-semibold">{selectedPO?.po_number}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Remaining to Receive</p>
+                  <p className="text-sm text-slate-400">Remaining to Receive</p>
                   <p className="font-semibold text-amber-600">{selectedLine.quantity_remaining}</p>
                 </div>
               </div>
@@ -876,7 +876,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <label className="block text-sm font-medium text-slate-300 mb-1">
                     Quantity Received <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -889,7 +889,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <label className="block text-sm font-medium text-slate-300 mb-1">
                     Lot Number <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -904,7 +904,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Heat Number</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Heat Number</label>
                   <input
                     type="text"
                     value={formData.heat_number}
@@ -914,7 +914,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Cert Number</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Cert Number</label>
                   <input
                     type="text"
                     value={formData.cert_number}
@@ -927,7 +927,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Location</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Location</label>
                   <select
                     value={formData.location_id || ''}
                     onChange={(e) => setFormData({ ...formData, location_id: e.target.value ? parseInt(e.target.value) : null })}
@@ -940,7 +940,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Packing Slip #</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Packing Slip #</label>
                   <input
                     type="text"
                     value={formData.packing_slip_number}
@@ -952,7 +952,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Carrier</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Carrier</label>
                   <input
                     type="text"
                     value={formData.carrier}
@@ -962,7 +962,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tracking Number</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Tracking Number</label>
                   <input
                     type="text"
                     value={formData.tracking_number}
@@ -973,7 +973,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Notes</label>
                 <textarea
                   value={formData.notes}
                   onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
@@ -988,7 +988,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     type="checkbox"
                     checked={formData.requires_inspection}
                     onChange={(e) => setFormData({ ...formData, requires_inspection: e.target.checked })}
-                    className="rounded border-gray-300"
+                    className="rounded border-slate-600"
                   />
                   <span className="text-sm">Requires Inspection</span>
                 </label>
@@ -997,22 +997,22 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     type="checkbox"
                     checked={formData.coc_attached}
                     onChange={(e) => setFormData({ ...formData, coc_attached: e.target.checked })}
-                    className="rounded border-gray-300"
+                    className="rounded border-slate-600"
                   />
                   <span className="text-sm">CoC Attached</span>
                 </label>
               </div>
 
               {formData.quantity_received > selectedLine.quantity_remaining && (
-                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4">
                   <label className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       checked={formData.over_receive_approved}
                       onChange={(e) => setFormData({ ...formData, over_receive_approved: e.target.checked })}
-                      className="rounded border-amber-300"
+                      className="rounded border-amber-500/40"
                     />
-                    <span className="text-sm text-amber-800">
+                    <span className="text-sm text-amber-300">
                       <strong>Approve Over-Receipt:</strong> Receiving {formData.quantity_received - selectedLine.quantity_remaining} more than remaining quantity
                     </span>
                   </label>
@@ -1035,54 +1035,54 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       {/* INSPECT MODAL */}
       {showInspectModal && selectedReceipt && receiptDetail && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-bold">Inspect Receipt</h2>
               <button onClick={() => setShowInspectModal(false)}>
-                <XMarkIcon className="h-6 w-6 text-gray-400 hover:text-gray-600" />
+                <XMarkIcon className="h-6 w-6 text-slate-400 hover:text-slate-400" />
               </button>
             </div>
 
             {/* Receipt Info */}
-            <div className="bg-gray-50 rounded-xl p-4 mb-6">
+            <div className="bg-slate-800 rounded-xl p-4 mb-6">
               <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <p className="text-sm text-gray-500">Receipt #</p>
+                  <p className="text-sm text-slate-400">Receipt #</p>
                   <p className="font-mono font-semibold">{receiptDetail.receipt_number}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">PO #</p>
+                  <p className="text-sm text-slate-400">PO #</p>
                   <p className="font-semibold">{receiptDetail.po_number}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Vendor</p>
+                  <p className="text-sm text-slate-400">Vendor</p>
                   <p>{receiptDetail.vendor_name}</p>
                   {receiptDetail.is_approved_vendor && (
                     <span className="text-xs text-green-600">✓ Approved Vendor</span>
                   )}
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Part Number</p>
+                  <p className="text-sm text-slate-400">Part Number</p>
                   <p className="font-mono">{receiptDetail.part_number}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Part Name</p>
+                  <p className="text-sm text-slate-400">Part Name</p>
                   <p>{receiptDetail.part_name}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Lot Number</p>
+                  <p className="text-sm text-slate-400">Lot Number</p>
                   <p className="font-mono">{receiptDetail.lot_number}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Qty Received</p>
+                  <p className="text-sm text-slate-400">Qty Received</p>
                   <p className="text-xl font-bold">{receiptDetail.quantity_received}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">Cert #</p>
+                  <p className="text-sm text-slate-400">Cert #</p>
                   <p>{receiptDetail.cert_number || '-'}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-gray-500">CoC</p>
+                  <p className="text-sm text-slate-400">CoC</p>
                   <p>{receiptDetail.coc_attached ? '✓ Attached' : 'Not attached'}</p>
                 </div>
               </div>
@@ -1092,7 +1092,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <label className="block text-sm font-medium text-slate-300 mb-1">
                     Quantity Accepted <span className="text-green-600">✓</span>
                   </label>
                   <input
@@ -1112,7 +1112,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <label className="block text-sm font-medium text-slate-300 mb-1">
                     Quantity Rejected <span className="text-red-600">✗</span>
                   </label>
                   <input
@@ -1134,7 +1134,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-slate-300 mb-1">
                   Inspection Method <span className="text-red-500">*</span>
                 </label>
                 <select
@@ -1151,7 +1151,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               {inspectionData.quantity_rejected > 0 && (
                 <>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <label className="block text-sm font-medium text-slate-300 mb-1">
                       Defect Type <span className="text-red-500">*</span>
                     </label>
                     <select
@@ -1165,8 +1165,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       ))}
                     </select>
                   </div>
-                  <div className="bg-red-50 border border-red-200 rounded-xl p-4">
-                    <p className="text-sm text-red-800 mb-2">
+                  <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4">
+                    <p className="text-sm text-red-300 mb-2">
                       <strong>Note:</strong> An NCR will be auto-created for the rejected quantity ({inspectionData.quantity_rejected})
                     </p>
                   </div>
@@ -1174,7 +1174,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               )}
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-slate-300 mb-1">
                   Inspection Notes {inspectionData.quantity_rejected > 0 && <span className="text-red-500">*</span>}
                 </label>
                 <textarea
@@ -1187,8 +1187,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               </div>
 
               {/* Result Preview */}
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                <p className="text-sm font-medium text-blue-800 mb-2">Inspection Result Preview:</p>
+              <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
+                <p className="text-sm font-medium text-blue-300 mb-2">Inspection Result Preview:</p>
                 <div className="flex gap-4 text-sm">
                   {inspectionData.quantity_accepted === receiptDetail.quantity_received && (
                     <span className="text-green-600 font-semibold">✓ Full Pass - Add to Inventory</span>

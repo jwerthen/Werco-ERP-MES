@@ -115,11 +115,11 @@ export default function Traceability() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Lot / Serial Traceability</h1>
+        <h1 className="text-2xl font-bold text-white">Lot / Serial Traceability</h1>
       </div>
 
-      <div className="card bg-blue-50 border-blue-200">
-        <p className="text-sm text-blue-800">
+      <div className="card bg-blue-500/10 border-blue-500/30">
+        <p className="text-sm text-blue-300">
           <strong>AS9100D Compliance:</strong> Track lot numbers, serial numbers, and certificates 
           through the complete production lifecycle - from receiving through shipment.
         </p>
@@ -130,7 +130,7 @@ export default function Traceability() {
         <h2 className="text-lg font-semibold mb-4">Search</h2>
         <div className="flex gap-4">
           <div className="relative flex-1">
-            <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               value={searchQuery}
@@ -153,7 +153,7 @@ export default function Traceability() {
 
       {/* Error */}
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+        <div className="bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-3 rounded-lg">
           {error}
         </div>
       )}
@@ -167,22 +167,22 @@ export default function Traceability() {
               <button
                 key={idx}
                 onClick={() => loadLotTrace(r.number)}
-                className="w-full text-left p-3 border rounded-lg hover:bg-gray-50 flex items-center justify-between"
+                className="w-full text-left p-3 border rounded-lg hover:bg-slate-800 flex items-center justify-between"
               >
                 <div className="flex items-center">
                   <span className={`px-2 py-1 rounded text-xs font-medium mr-3 ${
-                    r.type === 'lot' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
+                    r.type === 'lot' ? 'bg-blue-500/20 text-blue-300' : 'bg-purple-500/20 text-purple-800'
                   }`}>
                     {r.type.toUpperCase()}
                   </span>
                   <div>
                     <span className="font-mono font-medium">{r.number}</span>
                     {r.part_number && (
-                      <span className="text-gray-500 ml-2">- {r.part_number}</span>
+                      <span className="text-slate-400 ml-2">- {r.part_number}</span>
                     )}
                   </div>
                 </div>
-                <div className="text-sm text-gray-500">
+                <div className="text-sm text-slate-400">
                   {r.quantity !== undefined && <span>Qty: {r.quantity}</span>}
                   {r.location && <span className="ml-4">@ {r.location}</span>}
                 </div>
@@ -204,16 +204,16 @@ export default function Traceability() {
                   <div>
                     <h2 className="text-xl font-bold">Lot: {lotTrace.lot_number}</h2>
                     {lotTrace.part_number && (
-                      <p className="text-gray-600">{lotTrace.part_number} - {lotTrace.part_name}</p>
+                      <p className="text-slate-400">{lotTrace.part_number} - {lotTrace.part_name}</p>
                     )}
                   </div>
                 </div>
               </div>
               <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                lotTrace.status === 'available' ? 'bg-green-100 text-green-800' :
-                lotTrace.status === 'quarantine' ? 'bg-yellow-100 text-yellow-800' :
-                lotTrace.status === 'rejected' ? 'bg-red-100 text-red-800' :
-                'bg-gray-100 text-gray-800'
+                lotTrace.status === 'available' ? 'bg-green-500/20 text-emerald-300' :
+                lotTrace.status === 'quarantine' ? 'bg-yellow-500/20 text-yellow-300' :
+                lotTrace.status === 'rejected' ? 'bg-red-500/20 text-red-300' :
+                'bg-slate-800/50 text-slate-100'
               }`}>
                 {lotTrace.status}
               </span>
@@ -221,31 +221,31 @@ export default function Traceability() {
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
               <div>
-                <label className="text-sm text-gray-500">Current Quantity</label>
+                <label className="text-sm text-slate-400">Current Quantity</label>
                 <p className="font-bold text-lg">{lotTrace.current_quantity}</p>
               </div>
               <div>
-                <label className="text-sm text-gray-500">Location</label>
+                <label className="text-sm text-slate-400">Location</label>
                 <p className="font-medium">{lotTrace.current_location || '-'}</p>
               </div>
               <div>
-                <label className="text-sm text-gray-500">Supplier</label>
+                <label className="text-sm text-slate-400">Supplier</label>
                 <p className="font-medium">{lotTrace.supplier_name || '-'}</p>
               </div>
               <div>
-                <label className="text-sm text-gray-500">PO Number</label>
+                <label className="text-sm text-slate-400">PO Number</label>
                 <p className="font-medium">{lotTrace.po_number || '-'}</p>
               </div>
               <div>
-                <label className="text-sm text-gray-500">Cert Number</label>
+                <label className="text-sm text-slate-400">Cert Number</label>
                 <p className="font-mono">{lotTrace.cert_number || '-'}</p>
               </div>
               <div>
-                <label className="text-sm text-gray-500">Heat Lot</label>
+                <label className="text-sm text-slate-400">Heat Lot</label>
                 <p className="font-mono">{lotTrace.heat_lot || '-'}</p>
               </div>
               <div>
-                <label className="text-sm text-gray-500">Received Date</label>
+                <label className="text-sm text-slate-400">Received Date</label>
                 <p className="font-medium">
                   {lotTrace.received_date
                     ? formatCentralDate(lotTrace.received_date, { month: '2-digit', day: '2-digit', year: 'numeric' })
@@ -269,7 +269,7 @@ export default function Traceability() {
                   ))}
                 </ul>
               ) : (
-                <p className="text-sm text-gray-500">Not used in any work orders</p>
+                <p className="text-sm text-slate-400">Not used in any work orders</p>
               )}
             </div>
 
@@ -285,7 +285,7 @@ export default function Traceability() {
                   ))}
                 </ul>
               ) : (
-                <p className="text-sm text-gray-500">Not shipped</p>
+                <p className="text-sm text-slate-400">Not shipped</p>
               )}
             </div>
 
@@ -317,20 +317,20 @@ export default function Traceability() {
               <div className="space-y-4">
                 {lotTrace.history.map((item, idx) => (
                   <div key={idx} className="relative flex items-start pl-10">
-                    <div className="absolute left-2 p-1 bg-white rounded-full border">
-                      {eventTypeIcons[item.event_type] || <CubeIcon className="h-5 w-5 text-gray-400" />}
+                    <div className="absolute left-2 p-1 bg-[#151b28] rounded-full border">
+                      {eventTypeIcons[item.event_type] || <CubeIcon className="h-5 w-5 text-slate-400" />}
                     </div>
-                    <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                    <div className="flex-1 bg-slate-800 rounded-lg p-3">
                       <div className="flex justify-between items-start">
                         <div>
                           <span className="font-medium">{item.description}</span>
                           {item.reference && (
-                            <span className="ml-2 text-sm text-gray-500">
+                            <span className="ml-2 text-sm text-slate-400">
                               Ref: {item.reference}
                             </span>
                           )}
                         </div>
-                        <span className="text-sm text-gray-500">
+                        <span className="text-sm text-slate-400">
                           {formatCentralDateTime(item.timestamp, {
                             month: '2-digit',
                             day: '2-digit',
@@ -339,10 +339,10 @@ export default function Traceability() {
                         </span>
                       </div>
                       {item.user && (
-                        <p className="text-sm text-gray-500 mt-1">By: {item.user}</p>
+                        <p className="text-sm text-slate-400 mt-1">By: {item.user}</p>
                       )}
                       {item.location && (
-                        <p className="text-sm text-gray-500">Location: {item.location}</p>
+                        <p className="text-sm text-slate-400">Location: {item.location}</p>
                       )}
                     </div>
                   </div>
@@ -350,7 +350,7 @@ export default function Traceability() {
               </div>
             </div>
             {lotTrace.history.length === 0 && (
-              <p className="text-center text-gray-500 py-4">No history recorded</p>
+              <p className="text-center text-slate-400 py-4">No history recorded</p>
             )}
           </div>
         </div>

@@ -73,13 +73,13 @@ interface CustomerStats {
 }
 
 const statusColors: Record<string, string> = {
-  draft: 'bg-gray-100 text-gray-800',
-  released: 'bg-blue-100 text-blue-800',
-  in_progress: 'bg-yellow-100 text-yellow-800',
-  complete: 'bg-green-100 text-green-800',
-  on_hold: 'bg-orange-100 text-orange-800',
-  cancelled: 'bg-red-100 text-red-800',
-  closed: 'bg-purple-100 text-purple-800',
+  draft: 'bg-slate-800 text-slate-100',
+  released: 'bg-blue-500/20 text-blue-300',
+  in_progress: 'bg-yellow-500/20 text-yellow-300',
+  complete: 'bg-green-500/20 text-green-300',
+  on_hold: 'bg-orange-500/20 text-orange-300',
+  cancelled: 'bg-red-500/20 text-red-300',
+  closed: 'bg-purple-500/20 text-purple-300',
 };
 
 export default function Customers() {
@@ -235,8 +235,8 @@ export default function Customers() {
     return (
       <div className="space-y-6">
         <div className="flex justify-between items-center">
-          <div className="h-8 w-32 bg-gray-200 rounded animate-pulse" />
-          <div className="h-10 w-36 bg-gray-200 rounded animate-pulse" />
+          <div className="h-8 w-32 bg-slate-700 rounded animate-pulse" />
+          <div className="h-10 w-36 bg-slate-700 rounded animate-pulse" />
         </div>
         <div className="card overflow-hidden">
           <SkeletonTable rows={8} columns={6} />
@@ -248,7 +248,7 @@ export default function Customers() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
+        <h1 className="text-2xl font-bold text-white">Customers</h1>
         <button
           onClick={() => { resetForm(); setShowModal(true); }}
           className="btn-primary flex items-center"
@@ -261,7 +261,7 @@ export default function Customers() {
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-4">
         <div className="relative flex-1">
-          <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+          <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-500" />
           <input
             type="text"
             placeholder="Search customers..."
@@ -275,33 +275,33 @@ export default function Customers() {
             type="checkbox"
             checked={showInactive}
             onChange={(e) => setShowInactive(e.target.checked)}
-            className="mr-2 rounded border-gray-300"
+            className="mr-2 rounded border-slate-600"
           />
-          <span className="text-sm text-gray-700">Show inactive</span>
+          <span className="text-sm text-slate-300">Show inactive</span>
         </label>
       </div>
 
       {/* Customers Table */}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800/50">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Code</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contact</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Terms</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Requirements</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Code</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Contact</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Location</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Terms</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Requirements</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="bg-[#151b28] divide-y divide-slate-700">
               {filteredCustomers.map((customer) => (
                 <tr 
                   key={customer.id} 
-                  className={`hover:bg-gray-50 cursor-pointer ${!customer.is_active ? 'opacity-60' : ''}`}
+                  className={`hover:bg-slate-800/50 cursor-pointer ${!customer.is_active ? 'opacity-60' : ''}`}
                   onClick={() => viewCustomerDetails(customer)}
                 >
                   <td className="px-4 py-4 font-mono text-sm">{customer.code}</td>
@@ -310,7 +310,7 @@ export default function Customers() {
                     <div>
                       <div className="text-sm">{customer.contact_name || '-'}</div>
                       {customer.email && (
-                        <div className="text-xs text-gray-500">{customer.email}</div>
+                        <div className="text-xs text-slate-400">{customer.email}</div>
                       )}
                     </div>
                   </td>
@@ -321,16 +321,16 @@ export default function Customers() {
                   <td className="px-4 py-4">
                     <div className="flex gap-1">
                       {customer.requires_coc && (
-                        <span className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded">COC</span>
+                        <span className="px-2 py-0.5 bg-blue-500/20 text-blue-300 text-xs rounded">COC</span>
                       )}
                       {customer.requires_fai && (
-                        <span className="px-2 py-0.5 bg-purple-100 text-purple-800 text-xs rounded">FAI</span>
+                        <span className="px-2 py-0.5 bg-purple-500/20 text-purple-300 text-xs rounded">FAI</span>
                       )}
                     </div>
                   </td>
                   <td className="px-4 py-4">
                     <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
-                      customer.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
+                      customer.is_active ? 'bg-green-500/20 text-green-300' : 'bg-slate-800 text-slate-400'
                     }`}>
                       {customer.is_active ? 'Active' : 'Inactive'}
                     </span>
@@ -338,7 +338,7 @@ export default function Customers() {
                   <td className="px-4 py-4 text-center">
                     <button
                       onClick={(e) => { e.stopPropagation(); handleEdit(customer); }}
-                      className="text-gray-400 hover:text-gray-600"
+                      className="text-slate-500 hover:text-slate-400"
                     >
                       <PencilIcon className="h-5 w-5" />
                     </button>
@@ -349,14 +349,14 @@ export default function Customers() {
           </table>
         </div>
         {filteredCustomers.length === 0 && (
-          <div className="text-center py-8 text-gray-500">No customers found</div>
+          <div className="text-center py-8 text-slate-400">No customers found</div>
         )}
       </div>
 
       {/* Add/Edit Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-semibold mb-4">
               {editingCustomer ? 'Edit Customer' : 'Add Customer'}
             </h3>
@@ -471,7 +471,7 @@ export default function Customers() {
                       type="checkbox"
                       checked={formData.requires_coc}
                       onChange={(e) => setFormData({ ...formData, requires_coc: e.target.checked })}
-                      className="mr-2 rounded border-gray-300"
+                      className="mr-2 rounded border-slate-600"
                     />
                     <span className="text-sm">Requires COC</span>
                   </label>
@@ -480,7 +480,7 @@ export default function Customers() {
                       type="checkbox"
                       checked={formData.requires_fai}
                       onChange={(e) => setFormData({ ...formData, requires_fai: e.target.checked })}
-                      className="mr-2 rounded border-gray-300"
+                      className="mr-2 rounded border-slate-600"
                     />
                     <span className="text-sm">Requires FAI</span>
                   </label>
@@ -523,19 +523,19 @@ export default function Customers() {
       {/* Customer Detail Modal */}
       {selectedCustomer && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg max-w-3xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+          <div className="bg-[#151b28] rounded-lg max-w-3xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
             {/* Header */}
-            <div className="px-6 py-4 border-b flex items-center justify-between bg-gray-50">
+            <div className="px-6 py-4 border-b flex items-center justify-between bg-slate-800/50">
               <div className="flex items-center gap-3">
-                <button onClick={closeDetails} className="text-gray-500 hover:text-gray-700">
+                <button onClick={closeDetails} className="text-slate-400 hover:text-slate-300">
                   <ArrowLeftIcon className="h-5 w-5" />
                 </button>
                 <div>
                   <h2 className="text-xl font-semibold">{selectedCustomer.name}</h2>
-                  <p className="text-sm text-gray-500">Code: {selectedCustomer.code}</p>
+                  <p className="text-sm text-slate-400">Code: {selectedCustomer.code}</p>
                 </div>
               </div>
-              <button onClick={closeDetails} className="text-gray-400 hover:text-gray-600">
+              <button onClick={closeDetails} className="text-slate-500 hover:text-slate-400">
                 <XMarkIcon className="h-6 w-6" />
               </button>
             </div>
@@ -550,32 +550,32 @@ export default function Customers() {
                 <div className="space-y-6">
                   {/* Stats Cards */}
                   <div className="grid grid-cols-3 gap-4">
-                    <div className="bg-blue-50 rounded-lg p-4">
+                    <div className="bg-blue-500/10 rounded-lg p-4">
                       <div className="text-3xl font-bold text-blue-600">{customerStats.part_count}</div>
-                      <div className="text-sm text-blue-800">Parts</div>
+                      <div className="text-sm text-blue-300">Parts</div>
                     </div>
-                    <div className="bg-green-50 rounded-lg p-4">
+                    <div className="bg-green-500/10 rounded-lg p-4">
                       <div className="text-3xl font-bold text-green-600">{customerStats.work_order_counts.total}</div>
-                      <div className="text-sm text-green-800">Total Work Orders</div>
+                      <div className="text-sm text-green-300">Total Work Orders</div>
                     </div>
-                    <div className="bg-yellow-50 rounded-lg p-4">
+                    <div className="bg-yellow-500/10 rounded-lg p-4">
                       <div className="text-3xl font-bold text-yellow-600">
                         {(customerStats.work_order_counts.by_status['in_progress'] || 0) + 
                          (customerStats.work_order_counts.by_status['released'] || 0)}
                       </div>
-                      <div className="text-sm text-yellow-800">Active WOs</div>
+                      <div className="text-sm text-yellow-300">Active WOs</div>
                     </div>
                   </div>
 
                   {/* Work Order Status Breakdown */}
                   {Object.keys(customerStats.work_order_counts.by_status).length > 0 && (
                     <div>
-                      <h3 className="text-sm font-medium text-gray-700 mb-2">Work Orders by Status</h3>
+                      <h3 className="text-sm font-medium text-slate-300 mb-2">Work Orders by Status</h3>
                       <div className="flex flex-wrap gap-2">
                         {Object.entries(customerStats.work_order_counts.by_status).map(([status, count]) => (
                           <span 
                             key={status} 
-                            className={`px-3 py-1 rounded-full text-sm font-medium ${statusColors[status] || 'bg-gray-100 text-gray-800'}`}
+                            className={`px-3 py-1 rounded-full text-sm font-medium ${statusColors[status] || 'bg-slate-800 text-slate-100'}`}
                           >
                             {status.replace('_', ' ')}: {count}
                           </span>
@@ -587,16 +587,16 @@ export default function Customers() {
                   {/* Contact Info */}
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <h3 className="text-sm font-medium text-gray-700 mb-2">Contact</h3>
+                      <h3 className="text-sm font-medium text-slate-300 mb-2">Contact</h3>
                       <div className="text-sm space-y-1">
                         <p>{selectedCustomer.contact_name || '-'}</p>
-                        <p className="text-gray-500">{selectedCustomer.email || '-'}</p>
-                        <p className="text-gray-500">{selectedCustomer.phone || '-'}</p>
+                        <p className="text-slate-400">{selectedCustomer.email || '-'}</p>
+                        <p className="text-slate-400">{selectedCustomer.phone || '-'}</p>
                       </div>
                     </div>
                     <div>
-                      <h3 className="text-sm font-medium text-gray-700 mb-2">Address</h3>
-                      <div className="text-sm text-gray-600">
+                      <h3 className="text-sm font-medium text-slate-300 mb-2">Address</h3>
+                      <div className="text-sm text-slate-400">
                         {selectedCustomer.address_line1 && <p>{selectedCustomer.address_line1}</p>}
                         {selectedCustomer.city && selectedCustomer.state && (
                           <p>{selectedCustomer.city}, {selectedCustomer.state} {selectedCustomer.zip_code}</p>
@@ -607,104 +607,104 @@ export default function Customers() {
 
                   {/* Customer Menu */}
                   <div>
-                    <h3 className="text-sm font-medium text-gray-700 mb-2">
+                    <h3 className="text-sm font-medium text-slate-300 mb-2">
                       Customer Menu: Parts, Assemblies, Current and Past Work Orders
                     </h3>
                     <div className="grid grid-cols-2 gap-3">
-                      <div className="border rounded-lg bg-white">
-                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                      <div className="border rounded-lg bg-[#151b28]">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-slate-300 flex items-center justify-between">
                           <span>Assemblies</span>
                           <span>{customerStats.assemblies.length}</span>
                         </div>
-                        <div className="max-h-40 overflow-y-auto divide-y divide-gray-100">
+                        <div className="max-h-40 overflow-y-auto divide-y divide-slate-700/30">
                           {customerStats.assemblies.length > 0 ? customerStats.assemblies.map(item => (
                             <div key={item.id} className="px-3 py-2 text-xs">
-                              <div className="font-mono text-gray-900">{item.part_number}</div>
-                              <div className="text-gray-600 truncate">{item.name}</div>
+                              <div className="font-mono text-white">{item.part_number}</div>
+                              <div className="text-slate-400 truncate">{item.name}</div>
                             </div>
                           )) : (
-                            <div className="px-3 py-2 text-xs text-gray-500">No assemblies found</div>
+                            <div className="px-3 py-2 text-xs text-slate-400">No assemblies found</div>
                           )}
                         </div>
                       </div>
 
-                      <div className="border rounded-lg bg-white">
-                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                      <div className="border rounded-lg bg-[#151b28]">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-slate-300 flex items-center justify-between">
                           <span>Parts</span>
                           <span>{customerStats.parts.length}</span>
                         </div>
-                        <div className="max-h-40 overflow-y-auto divide-y divide-gray-100">
+                        <div className="max-h-40 overflow-y-auto divide-y divide-slate-700/30">
                           {customerStats.parts.length > 0 ? customerStats.parts.map(item => (
                             <div key={item.id} className="px-3 py-2 text-xs">
-                              <div className="font-mono text-gray-900">{item.part_number}</div>
-                              <div className="text-gray-600 truncate">{item.name}</div>
+                              <div className="font-mono text-white">{item.part_number}</div>
+                              <div className="text-slate-400 truncate">{item.name}</div>
                             </div>
                           )) : (
-                            <div className="px-3 py-2 text-xs text-gray-500">No parts found</div>
+                            <div className="px-3 py-2 text-xs text-slate-400">No parts found</div>
                           )}
                         </div>
                       </div>
 
-                      <div className="border rounded-lg bg-white">
-                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                      <div className="border rounded-lg bg-[#151b28]">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-slate-300 flex items-center justify-between">
                           <span>Current Work Orders</span>
                           <span>{customerStats.current_work_orders.length}</span>
                         </div>
-                        <div className="max-h-44 overflow-y-auto divide-y divide-gray-100">
+                        <div className="max-h-44 overflow-y-auto divide-y divide-slate-700/30">
                           {customerStats.current_work_orders.length > 0 ? customerStats.current_work_orders.map(wo => (
                             <button
                               type="button"
                               key={wo.id}
-                              className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50"
+                              className="w-full text-left px-3 py-2 text-xs hover:bg-slate-800/50"
                               onClick={() => {
                                 closeDetails();
                                 navigate(`/work-orders/${wo.id}`);
                               }}
                             >
                               <div className="flex items-center justify-between gap-2">
-                                <span className="font-mono text-gray-900">{wo.work_order_number}</span>
-                                <span className={`px-2 py-0.5 rounded ${statusColors[wo.status] || 'bg-gray-100 text-gray-700'}`}>
+                                <span className="font-mono text-white">{wo.work_order_number}</span>
+                                <span className={`px-2 py-0.5 rounded ${statusColors[wo.status] || 'bg-slate-800 text-slate-300'}`}>
                                   {wo.status.replace('_', ' ')}
                                 </span>
                               </div>
-                              <div className="text-gray-500 truncate">
+                              <div className="text-slate-400 truncate">
                                 {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
                               </div>
                             </button>
                           )) : (
-                            <div className="px-3 py-2 text-xs text-gray-500">No current work orders</div>
+                            <div className="px-3 py-2 text-xs text-slate-400">No current work orders</div>
                           )}
                         </div>
                       </div>
 
-                      <div className="border rounded-lg bg-white">
-                        <div className="px-3 py-2 border-b text-xs font-semibold text-gray-700 flex items-center justify-between">
+                      <div className="border rounded-lg bg-[#151b28]">
+                        <div className="px-3 py-2 border-b text-xs font-semibold text-slate-300 flex items-center justify-between">
                           <span>Past Work Orders</span>
                           <span>{customerStats.past_work_orders.length}</span>
                         </div>
-                        <div className="max-h-44 overflow-y-auto divide-y divide-gray-100">
+                        <div className="max-h-44 overflow-y-auto divide-y divide-slate-700/30">
                           {customerStats.past_work_orders.length > 0 ? customerStats.past_work_orders.map(wo => (
                             <button
                               type="button"
                               key={wo.id}
-                              className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50"
+                              className="w-full text-left px-3 py-2 text-xs hover:bg-slate-800/50"
                               onClick={() => {
                                 closeDetails();
                                 navigate(`/work-orders/${wo.id}`);
                               }}
                             >
                               <div className="flex items-center justify-between gap-2">
-                                <span className="font-mono text-gray-900">{wo.work_order_number}</span>
-                                <span className={`px-2 py-0.5 rounded ${statusColors[wo.status] || 'bg-gray-100 text-gray-700'}`}>
+                                <span className="font-mono text-white">{wo.work_order_number}</span>
+                                <span className={`px-2 py-0.5 rounded ${statusColors[wo.status] || 'bg-slate-800 text-slate-300'}`}>
                                   {wo.status.replace('_', ' ')}
                                 </span>
                               </div>
-                              <div className="text-gray-500 truncate">
+                              <div className="text-slate-400 truncate">
                                 {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
                               </div>
                             </button>
                           )) : (
-                            <div className="px-3 py-2 text-xs text-gray-500">No past work orders</div>
+                            <div className="px-3 py-2 text-xs text-slate-400">No past work orders</div>
                           )}
                         </div>
                       </div>
@@ -712,20 +712,20 @@ export default function Customers() {
                   </div>
 
                   {customerStats.work_order_counts.total === 0 && customerStats.part_count === 0 && (
-                    <div className="text-center text-gray-500 py-4">
+                    <div className="text-center text-slate-400 py-4">
                       No parts, assemblies, or work orders found for this customer
                     </div>
                   )}
                 </div>
               ) : (
-                <div className="text-center text-gray-500 py-8">
+                <div className="text-center text-slate-400 py-8">
                   Failed to load customer statistics
                 </div>
               )}
             </div>
 
             {/* Footer */}
-            <div className="px-6 py-4 border-t bg-gray-50 flex justify-end gap-3">
+            <div className="px-6 py-4 border-t bg-slate-800/50 flex justify-end gap-3">
               <button onClick={closeDetails} className="btn-secondary">Close</button>
               <button 
                 onClick={() => { closeDetails(); handleEdit(selectedCustomer); }}

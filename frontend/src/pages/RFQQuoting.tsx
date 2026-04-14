@@ -180,17 +180,17 @@ export default function RFQQuoting() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">AI Quoting Agent (Sheet Metal)</h1>
-          <p className="text-sm text-gray-600 mt-1">
+          <h1 className="text-2xl font-bold text-white">AI Quoting Agent (Sheet Metal)</h1>
+          <p className="text-sm text-slate-400 mt-1">
             Upload RFQ package files (PDF/XLSX/DXF/STEP), generate deterministic estimate, review assumptions, and publish quote.
           </p>
         </div>
       </div>
 
-      {error && <div className="rounded-md border border-red-200 bg-red-50 text-red-700 px-4 py-3 text-sm">{error}</div>}
+      {error && <div className="rounded-md border border-red-500/30 bg-red-500/10 text-red-400 px-4 py-3 text-sm">{error}</div>}
 
       <div className="card space-y-4">
-        <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-white flex items-center gap-2">
           <DocumentArrowUpIcon className="h-5 w-5 text-werco-navy-600" />
           New RFQ Package
         </h2>
@@ -281,21 +281,21 @@ export default function RFQQuoting() {
         </div>
 
         {packageData && (
-          <div className="text-sm text-gray-600 border-t pt-3 space-y-2">
+          <div className="text-sm text-slate-400 border-t pt-3 space-y-2">
             <p>
-              Package <span className="font-semibold text-gray-900">{packageData.rfq_number}</span> with {packageData.file_count} files is ready.
+              Package <span className="font-semibold text-white">{packageData.rfq_number}</span> with {packageData.file_count} files is ready.
             </p>
             {packageData.warnings?.length > 0 && (
-              <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-amber-700">
+              <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-amber-400">
                 {packageData.warnings.map((warning, idx) => (
                   <p key={`warning-${idx}`}>- {warning}</p>
                 ))}
               </div>
             )}
             {packageData.files?.length > 0 && (
-              <div className="rounded-md border border-gray-200 overflow-x-auto">
+              <div className="rounded-md border border-slate-700 overflow-x-auto">
                 <table className="min-w-full text-xs">
-                  <thead className="bg-gray-50 text-gray-600">
+                  <thead className="bg-slate-800/50 text-slate-400">
                     <tr>
                       <th className="text-left px-3 py-2">File</th>
                       <th className="text-left px-3 py-2">Type</th>
@@ -312,16 +312,16 @@ export default function RFQQuoting() {
                           <span
                             className={`px-2 py-0.5 rounded-full ${
                               file.parse_status === 'error'
-                                ? 'bg-red-100 text-red-700'
+                                ? 'bg-red-500/20 text-red-400'
                                 : file.parse_status?.includes('parsed')
-                                  ? 'bg-green-100 text-green-700'
-                                  : 'bg-gray-100 text-gray-700'
+                                  ? 'bg-green-500/20 text-green-400'
+                                  : 'bg-slate-800 text-slate-300'
                             }`}
                           >
                             {file.parse_status || 'pending'}
                           </span>
                         </td>
-                        <td className="px-3 py-2 text-gray-500">
+                        <td className="px-3 py-2 text-slate-400">
                           {file.parse_error || (file.summary ? JSON.stringify(file.summary) : '-')}
                         </td>
                       </tr>
@@ -337,36 +337,36 @@ export default function RFQQuoting() {
       {estimate && (
         <div className="card space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-gray-900">
+            <h2 className="text-lg font-semibold text-white">
               Estimate Review ({estimate.quote_number})
             </h2>
-            <div className="text-sm text-gray-600">
-              Lead Time: <span className="font-medium text-gray-900">{estimate.lead_time.label || 'TBD'}</span>
+            <div className="text-sm text-slate-400">
+              Lead Time: <span className="font-medium text-white">{estimate.lead_time.label || 'TBD'}</span>
             </div>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-            <div className="rounded-lg bg-gray-50 p-3">
-              <p className="text-xs text-gray-500">Material</p>
+            <div className="rounded-lg bg-slate-800/50 p-3">
+              <p className="text-xs text-slate-400">Material</p>
               <p className="font-semibold">${(estimate.totals.material || 0).toFixed(2)}</p>
             </div>
-            <div className="rounded-lg bg-gray-50 p-3">
-              <p className="text-xs text-gray-500">Hardware+Consumables</p>
+            <div className="rounded-lg bg-slate-800/50 p-3">
+              <p className="text-xs text-slate-400">Hardware+Consumables</p>
               <p className="font-semibold">${(estimate.totals.hardware_consumables || 0).toFixed(2)}</p>
             </div>
-            <div className="rounded-lg bg-gray-50 p-3">
-              <p className="text-xs text-gray-500">Outside Services</p>
+            <div className="rounded-lg bg-slate-800/50 p-3">
+              <p className="text-xs text-slate-400">Outside Services</p>
               <p className="font-semibold">${(estimate.totals.outside_services || 0).toFixed(2)}</p>
             </div>
-            <div className="rounded-lg bg-gray-50 p-3">
-              <p className="text-xs text-gray-500">Shop Labor+OH</p>
+            <div className="rounded-lg bg-slate-800/50 p-3">
+              <p className="text-xs text-slate-400">Shop Labor+OH</p>
               <p className="font-semibold">${(estimate.totals.shop_labor_oh || 0).toFixed(2)}</p>
             </div>
-            <div className="rounded-lg bg-gray-50 p-3">
-              <p className="text-xs text-gray-500">Margin</p>
+            <div className="rounded-lg bg-slate-800/50 p-3">
+              <p className="text-xs text-slate-400">Margin</p>
               <p className="font-semibold">${(estimate.totals.margin || 0).toFixed(2)}</p>
             </div>
-            <div className="rounded-lg bg-blue-50 p-3 border border-blue-200">
+            <div className="rounded-lg bg-blue-500/10 p-3 border border-blue-500/30">
               <p className="text-xs text-werco-navy-700">Grand Total</p>
               <p className="font-bold text-blue-900">${(estimate.totals.grand_total || 0).toFixed(2)}</p>
             </div>
@@ -374,7 +374,7 @@ export default function RFQQuoting() {
 
           <div className="overflow-x-auto border rounded-lg">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-gray-600">
+              <thead className="bg-slate-800/50 text-slate-400">
                 <tr>
                   <th className="text-left px-3 py-2">Part</th>
                   <th className="text-right px-3 py-2">Qty</th>
@@ -391,8 +391,8 @@ export default function RFQQuoting() {
                 {estimate.line_summaries.map((line, idx) => (
                   <tr key={`${line.part_number || line.part_name}-${idx}`} className="border-t">
                     <td className="px-3 py-2">
-                      <div className="font-medium text-gray-900">{line.part_number || line.part_name}</div>
-                      <div className="text-xs text-gray-500">{line.part_name}</div>
+                      <div className="font-medium text-white">{line.part_number || line.part_name}</div>
+                      <div className="text-xs text-slate-400">{line.part_name}</div>
                     </td>
                     <td className="px-3 py-2 text-right">{line.quantity}</td>
                     <td className="px-3 py-2">{line.material || 'TBD'}</td>
@@ -410,19 +410,19 @@ export default function RFQQuoting() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="rounded-lg border p-3">
-              <h3 className="font-semibold text-gray-900 mb-2">Assumptions</h3>
-              {estimate.assumptions.length === 0 && <p className="text-sm text-gray-500">No assumptions required.</p>}
+              <h3 className="font-semibold text-white mb-2">Assumptions</h3>
+              {estimate.assumptions.length === 0 && <p className="text-sm text-slate-400">No assumptions required.</p>}
               {estimate.assumptions.map((item, idx) => (
-                <p key={idx} className="text-sm text-gray-700 mb-1">
+                <p key={idx} className="text-sm text-slate-300 mb-1">
                   - {item.field || 'item'}: {item.assumption || 'N/A'}
                 </p>
               ))}
             </div>
             <div className="rounded-lg border p-3">
-              <h3 className="font-semibold text-gray-900 mb-2">Missing / Needs Review</h3>
-              {estimate.missing_specs.length === 0 && <p className="text-sm text-gray-500">No missing specs detected.</p>}
+              <h3 className="font-semibold text-white mb-2">Missing / Needs Review</h3>
+              {estimate.missing_specs.length === 0 && <p className="text-sm text-slate-400">No missing specs detected.</p>}
               {estimate.missing_specs.map((item, idx) => (
-                <p key={idx} className="text-sm text-amber-700 mb-1">
+                <p key={idx} className="text-sm text-amber-400 mb-1">
                   - {item.part_id || 'part'}: {item.field} ({item.message})
                 </p>
               ))}

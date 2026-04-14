@@ -62,12 +62,12 @@ interface ShortagesSummary {
 }
 
 const actionTypeConfig: Record<string, { label: string; color: string; icon: any }> = {
-  order: { label: 'Purchase', color: 'bg-green-100 text-green-800', icon: TruckIcon },
-  manufacture: { label: 'Manufacture', color: 'bg-blue-100 text-blue-800', icon: WrenchScrewdriverIcon },
-  expedite: { label: 'EXPEDITE', color: 'bg-red-100 text-red-800', icon: ExclamationTriangleIcon },
-  reschedule_in: { label: 'Reschedule In', color: 'bg-yellow-100 text-yellow-800', icon: ClockIcon },
-  reschedule_out: { label: 'Reschedule Out', color: 'bg-gray-100 text-gray-800', icon: ClockIcon },
-  cancel: { label: 'Cancel', color: 'bg-gray-100 text-gray-600', icon: ClockIcon },
+  order: { label: 'Purchase', color: 'bg-green-500/20 text-emerald-300', icon: TruckIcon },
+  manufacture: { label: 'Manufacture', color: 'bg-blue-500/20 text-blue-300', icon: WrenchScrewdriverIcon },
+  expedite: { label: 'EXPEDITE', color: 'bg-red-500/20 text-red-300', icon: ExclamationTriangleIcon },
+  reschedule_in: { label: 'Reschedule In', color: 'bg-yellow-500/20 text-yellow-300', icon: ClockIcon },
+  reschedule_out: { label: 'Reschedule Out', color: 'bg-slate-800/50 text-slate-100', icon: ClockIcon },
+  cancel: { label: 'Cancel', color: 'bg-slate-800/50 text-slate-400', icon: ClockIcon },
 };
 
 export default function MRPPage() {
@@ -152,7 +152,7 @@ export default function MRPPage() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Material Requirements Planning</h1>
+        <h1 className="text-2xl font-bold text-white">Material Requirements Planning</h1>
       </div>
 
       {/* Run MRP Panel */}
@@ -209,44 +209,44 @@ export default function MRPPage() {
               <ExclamationTriangleIcon className={`h-6 w-6 mr-2 ${shortages.expedite_count > 0 ? 'text-red-500' : 'text-yellow-500'}`} />
               <h2 className="text-lg font-semibold">Material Shortages</h2>
             </div>
-            <div className="text-sm text-gray-500">
+            <div className="text-sm text-slate-400">
               From run {shortages.mrp_run_number}
             </div>
           </div>
           
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-            <div className="bg-gray-50 rounded-lg p-3">
+            <div className="bg-slate-800 rounded-lg p-3">
               <div className="text-2xl font-bold">{shortages.total_shortages}</div>
-              <div className="text-sm text-gray-500">Total Shortages</div>
+              <div className="text-sm text-slate-400">Total Shortages</div>
             </div>
-            <div className={`rounded-lg p-3 ${shortages.expedite_count > 0 ? 'bg-red-50' : 'bg-gray-50'}`}>
+            <div className={`rounded-lg p-3 ${shortages.expedite_count > 0 ? 'bg-red-500/10' : 'bg-slate-800'}`}>
               <div className={`text-2xl font-bold ${shortages.expedite_count > 0 ? 'text-red-600' : ''}`}>
                 {shortages.expedite_count}
               </div>
-              <div className="text-sm text-gray-500">Need Expedite</div>
+              <div className="text-sm text-slate-400">Need Expedite</div>
             </div>
           </div>
 
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800">
                 <tr>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Needed By</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order By</th>
-                  <th className="px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Action</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Needed By</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Order By</th>
+                  <th className="px-4 py-2 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {shortages.shortages.slice(0, 10).map((shortage) => {
                   const config = actionTypeConfig[shortage.action_type] || actionTypeConfig.order;
                   return (
-                    <tr key={shortage.action_id} className={shortage.is_expedite ? 'bg-red-50' : ''}>
+                    <tr key={shortage.action_id} className={shortage.is_expedite ? 'bg-red-500/10' : ''}>
                       <td className="px-4 py-2">
                         <div className="font-medium">{shortage.part_number}</div>
-                        <div className="text-sm text-gray-500">{shortage.part_name}</div>
+                        <div className="text-sm text-slate-400">{shortage.part_name}</div>
                       </td>
                       <td className="px-4 py-2">
                         <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${config.color}`}>
@@ -259,7 +259,7 @@ export default function MRPPage() {
                       <td className="px-4 py-2 text-center">
                         <button
                           onClick={() => processAction(shortage.action_id)}
-                          className="text-werco-primary hover:text-blue-700 text-sm"
+                          className="text-werco-primary hover:text-blue-400 text-sm"
                         >
                           Process
                         </button>
@@ -271,7 +271,7 @@ export default function MRPPage() {
             </table>
           </div>
           {shortages.shortages.length > 10 && (
-            <p className="text-sm text-gray-500 mt-2">
+            <p className="text-sm text-slate-400 mt-2">
               Showing 10 of {shortages.shortages.length} shortages
             </p>
           )}
@@ -289,29 +289,29 @@ export default function MRPPage() {
                 onClick={() => loadRunActions(run)}
                 className={`p-3 rounded-lg border cursor-pointer transition-colors ${
                   selectedRun?.id === run.id
-                    ? 'border-werco-primary bg-blue-50'
-                    : 'border-gray-200 hover:border-gray-300'
+                    ? 'border-werco-primary bg-blue-500/10'
+                    : 'border-slate-700 hover:border-slate-600'
                 }`}
               >
                 <div className="flex justify-between items-start">
                   <div>
                     <div className="font-medium">{run.run_number}</div>
-                    <div className="text-sm text-gray-500">
+                    <div className="text-sm text-slate-400">
                       {run.completed_at
                         ? formatCentralDateTime(run.completed_at)
                         : 'In progress...'}
                     </div>
                   </div>
                   <span className={`text-xs px-2 py-1 rounded ${
-                    run.status === 'complete' ? 'bg-green-100 text-green-800' :
-                    run.status === 'running' ? 'bg-blue-100 text-blue-800' :
-                    run.status === 'error' ? 'bg-red-100 text-red-800' :
-                    'bg-gray-100 text-gray-800'
+                    run.status === 'complete' ? 'bg-green-500/20 text-emerald-300' :
+                    run.status === 'running' ? 'bg-blue-500/20 text-blue-300' :
+                    run.status === 'error' ? 'bg-red-500/20 text-red-300' :
+                    'bg-slate-800/50 text-slate-100'
                   }`}>
                     {run.status}
                   </span>
                 </div>
-                <div className="flex gap-4 mt-2 text-xs text-gray-500">
+                <div className="flex gap-4 mt-2 text-xs text-slate-400">
                   <span>{run.total_parts_analyzed} parts</span>
                   <span>{run.total_requirements} requirements</span>
                   <span>{run.total_actions} actions</span>
@@ -319,7 +319,7 @@ export default function MRPPage() {
               </div>
             ))}
             {runs.length === 0 && (
-              <p className="text-gray-500 text-center py-4">No MRP runs yet</p>
+              <p className="text-slate-400 text-center py-4">No MRP runs yet</p>
             )}
           </div>
         </div>
@@ -337,14 +337,14 @@ export default function MRPPage() {
                 return (
                   <div
                     key={action.id}
-                    className={`p-3 rounded-lg border ${action.is_processed ? 'bg-gray-50 opacity-60' : 'bg-white'}`}
+                    className={`p-3 rounded-lg border ${action.is_processed ? 'bg-slate-800 opacity-60' : 'bg-[#151b28]'}`}
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex items-start">
-                        <IconComponent className="h-5 w-5 mr-2 mt-0.5 text-gray-400" />
+                        <IconComponent className="h-5 w-5 mr-2 mt-0.5 text-slate-400" />
                         <div>
                           <div className="font-medium">{action.part?.part_number}</div>
-                          <div className="text-sm text-gray-500">{action.part?.name}</div>
+                          <div className="text-sm text-slate-400">{action.part?.name}</div>
                         </div>
                       </div>
                       <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${config.color}`}>
@@ -353,15 +353,15 @@ export default function MRPPage() {
                     </div>
                     <div className="mt-2 flex justify-between items-center text-sm">
                       <div>
-                        <span className="text-gray-500">Qty:</span>
+                        <span className="text-slate-400">Qty:</span>
                         <span className="font-medium ml-1">{action.quantity}</span>
-                        <span className="text-gray-500 ml-3">Order by:</span>
+                        <span className="text-slate-400 ml-3">Order by:</span>
                         <span className="ml-1">{formatCentralDate(action.suggested_order_date, { year: undefined })}</span>
                       </div>
                       {!action.is_processed ? (
                         <button
                           onClick={() => processAction(action.id)}
-                          className="text-werco-primary hover:text-blue-700"
+                          className="text-werco-primary hover:text-blue-400"
                         >
                           Process
                         </button>
@@ -376,11 +376,11 @@ export default function MRPPage() {
                 );
               })}
               {runActions.length === 0 && (
-                <p className="text-gray-500 text-center py-4">No actions in this run</p>
+                <p className="text-slate-400 text-center py-4">No actions in this run</p>
               )}
             </div>
           ) : (
-            <p className="text-gray-500 text-center py-8">Select a run to view details</p>
+            <p className="text-slate-400 text-center py-8">Select a run to view details</p>
           )}
         </div>
       </div>

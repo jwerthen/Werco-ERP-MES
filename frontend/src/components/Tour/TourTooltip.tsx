@@ -102,7 +102,7 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
   return (
     <div
       ref={tooltipRef}
-      className="fixed pointer-events-auto bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-fade-in"
+      className="fixed pointer-events-auto bg-[#151b28] rounded-2xl shadow-2xl border border-slate-700 overflow-hidden animate-fade-in"
       style={{
         top: position.top,
         left: position.left,
@@ -132,10 +132,10 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
 
       {/* Content */}
       <div className="p-5">
-        <h3 className="text-lg font-bold text-slate-800 mb-2">
+        <h3 className="text-lg font-bold text-white mb-2">
           {step.title}
         </h3>
-        <p className="text-slate-600 text-sm leading-relaxed">
+        <p className="text-slate-300 text-sm leading-relaxed">
           {step.description}
         </p>
       </div>
@@ -148,7 +148,7 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
             <div
               key={i}
               className={`w-2 h-2 rounded-full transition-colors ${
-                i === stepIndex ? 'bg-werco-navy-600' : 'bg-slate-200'
+                i === stepIndex ? 'bg-werco-navy-400' : 'bg-slate-600'
               }`}
             />
           ))}
@@ -159,7 +159,7 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
           {!isFirstStep && (
             <button
               onClick={prevStep}
-              className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
+              className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
             >
               <ChevronLeftIcon className="h-4 w-4" />
               Back

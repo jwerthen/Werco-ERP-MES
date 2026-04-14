@@ -32,7 +32,7 @@ const BlueprintGrid = () => (
 const AnimatedBackground = () => (
   <div className="absolute inset-0 overflow-hidden pointer-events-none">
     {/* Soft gradient orbs */}
-    <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-blue-500/8 rounded-full blur-3xl animate-pulse" />
+    <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-blue-500/100/8 rounded-full blur-3xl animate-pulse" />
     <div
       className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-600/6 rounded-full blur-3xl animate-pulse"
       style={{ animationDelay: '1s' }}
@@ -127,9 +127,9 @@ export default function Login() {
           100% { transform: translateX(50%); }
         }
         .glass-card {
-          background: rgba(255, 255, 255, 0.97);
+          background: rgba(21, 27, 40, 0.95);
           backdrop-filter: blur(20px);
-          border: 1px solid rgba(226, 232, 240, 0.8);
+          border: 1px solid rgba(51, 65, 85, 0.5);
         }
       `}</style>
 
@@ -215,7 +215,7 @@ export default function Login() {
       </div>
 
       {/* Right side - Login form */}
-      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-blue-50/40 p-8 relative">
+      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-[#0d1117] via-[#151b28] to-[#1a1f2e] p-8 relative">
         {/* Subtle dot pattern */}
         <div className="absolute inset-0 opacity-[0.02]">
           <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
@@ -255,7 +255,7 @@ export default function Login() {
                   <LockClosedIcon className="h-8 w-8 text-blue-300" />
                 </div>
               </div>
-              <h2 className="text-2xl font-bold text-slate-800">Welcome back</h2>
+              <h2 className="text-2xl font-bold text-slate-100">Welcome back</h2>
               <p className="text-slate-500 mt-2">Sign in to access your dashboard</p>
             </div>
 
@@ -298,7 +298,7 @@ export default function Login() {
 
               {loginMode === 'employee' ? (
                 <div className="space-y-2">
-                  <label htmlFor="employeeId" className="block text-sm font-medium text-slate-700">
+                  <label htmlFor="employeeId" className="block text-sm font-medium text-slate-300">
                     Employee ID
                   </label>
                   <div className="relative">
@@ -319,7 +319,7 @@ export default function Login() {
                       onChange={e => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                       onFocus={() => setFocusedField('employeeId')}
                       onBlur={() => setFocusedField(null)}
-                      className="du-input du-input-bordered w-full h-14 pl-12 pr-4 text-center text-lg bg-white"
+                      className="du-input du-input-bordered w-full h-14 pl-12 pr-4 text-center text-lg bg-[#151b28]"
                       placeholder="0000 or EMP-1001"
                       autoComplete="off"
                     />
@@ -330,7 +330,7 @@ export default function Login() {
                 <>
                   {/* Email field */}
                   <div className="space-y-2">
-                    <label htmlFor="email" className="block text-sm font-medium text-slate-700">
+                    <label htmlFor="email" className="block text-sm font-medium text-slate-300">
                       Email Address
                     </label>
                     <div className="relative">
@@ -349,7 +349,7 @@ export default function Login() {
                         onChange={e => setEmail(e.target.value)}
                         onFocus={() => setFocusedField('email')}
                         onBlur={() => setFocusedField(null)}
-                        className="du-input du-input-bordered w-full h-14 pl-12 pr-4 bg-white"
+                        className="du-input du-input-bordered w-full h-14 pl-12 pr-4 bg-[#151b28]"
                         placeholder="you@werco.com"
                         autoComplete="email"
                       />
@@ -358,7 +358,7 @@ export default function Login() {
 
                   {/* Password field */}
                   <div className="space-y-2">
-                    <label htmlFor="password" className="block text-sm font-medium text-slate-700">
+                    <label htmlFor="password" className="block text-sm font-medium text-slate-300">
                       Password
                     </label>
                     <div className="relative">
@@ -377,14 +377,14 @@ export default function Login() {
                         onChange={e => setPassword(e.target.value)}
                         onFocus={() => setFocusedField('password')}
                         onBlur={() => setFocusedField(null)}
-                        className="du-input du-input-bordered w-full h-14 pl-12 pr-12 bg-white"
+                        className="du-input du-input-bordered w-full h-14 pl-12 pr-12 bg-[#151b28]"
                         placeholder="Enter your password"
                         autoComplete="current-password"
                       />
                       <button
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
-                        className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-600 transition-colors"
+                        className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-400 transition-colors"
                       >
                         {showPassword ? <EyeSlashIcon className="h-5 w-5" /> : <EyeIcon className="h-5 w-5" />}
                       </button>
@@ -432,7 +432,7 @@ export default function Login() {
             </div>
 
             {/* Security badge */}
-            <div className="mt-6 pt-6 border-t border-slate-100">
+            <div className="mt-6 pt-6 border-t border-slate-700/30">
               <div className="flex items-center justify-center gap-2 text-slate-400">
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                   <path
@@ -448,15 +448,15 @@ export default function Login() {
 
           {/* Mobile compliance badges */}
           <div className="lg:hidden flex flex-wrap items-center justify-center gap-3 mt-8">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">AS9100D</span>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">ISO 9001</span>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">ITAR</span>
             </div>

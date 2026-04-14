@@ -29,11 +29,11 @@ function LoadingSpinner({ label = 'Loading...' }: { label?: string }) {
     >
       <div className="relative">
         {/* Outer ring */}
-        <div className="w-12 h-12 border-4 border-blue-200 rounded-full"></div>
+        <div className="w-12 h-12 border-4 border-slate-700 rounded-full"></div>
         {/* Spinning ring */}
         <div className="absolute top-0 left-0 w-12 h-12 border-4 border-transparent border-t-werco-navy-600 rounded-full animate-spin"></div>
       </div>
-      <p className="mt-4 text-sm text-gray-600 font-medium">{label}</p>
+      <p className="mt-4 text-sm text-slate-400 font-medium">{label}</p>
     </div>
   );
 }
@@ -43,18 +43,18 @@ function LoadingSpinner({ label = 'Loading...' }: { label?: string }) {
  */
 export function CardSkeleton() {
   return (
-    <div className="animate-pulse bg-white rounded-xl p-6 shadow-sm">
+    <div className="animate-pulse bg-[#151b28] rounded-xl p-6 shadow-sm">
       <div className="flex items-center gap-4 mb-4">
-        <div className="w-12 h-12 bg-gray-200 rounded-lg"></div>
+        <div className="w-12 h-12 bg-slate-700 rounded-lg"></div>
         <div className="flex-1">
-          <div className="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
-          <div className="h-3 bg-gray-200 rounded w-1/2"></div>
+          <div className="h-4 bg-slate-700 rounded w-3/4 mb-2"></div>
+          <div className="h-3 bg-slate-700 rounded w-1/2"></div>
         </div>
       </div>
       <div className="space-y-3">
-        <div className="h-3 bg-gray-200 rounded"></div>
-        <div className="h-3 bg-gray-200 rounded w-5/6"></div>
-        <div className="h-3 bg-gray-200 rounded w-4/6"></div>
+        <div className="h-3 bg-slate-700 rounded"></div>
+        <div className="h-3 bg-slate-700 rounded w-5/6"></div>
+        <div className="h-3 bg-slate-700 rounded w-4/6"></div>
       </div>
     </div>
   );
@@ -67,19 +67,19 @@ export function TableSkeleton({ rows = 5 }: { rows?: number }) {
   return (
     <div className="animate-pulse">
       {/* Header */}
-      <div className="flex gap-4 p-4 bg-gray-100 rounded-t-xl">
-        <div className="h-4 bg-gray-300 rounded w-1/6"></div>
-        <div className="h-4 bg-gray-300 rounded w-1/4"></div>
-        <div className="h-4 bg-gray-300 rounded w-1/5"></div>
-        <div className="h-4 bg-gray-300 rounded w-1/6"></div>
+      <div className="flex gap-4 p-4 bg-slate-800 rounded-t-xl">
+        <div className="h-4 bg-slate-600 rounded w-1/6"></div>
+        <div className="h-4 bg-slate-600 rounded w-1/4"></div>
+        <div className="h-4 bg-slate-600 rounded w-1/5"></div>
+        <div className="h-4 bg-slate-600 rounded w-1/6"></div>
       </div>
       {/* Rows */}
       {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="flex gap-4 p-4 border-b border-gray-100">
-          <div className="h-4 bg-gray-200 rounded w-1/6"></div>
-          <div className="h-4 bg-gray-200 rounded w-1/4"></div>
-          <div className="h-4 bg-gray-200 rounded w-1/5"></div>
-          <div className="h-4 bg-gray-200 rounded w-1/6"></div>
+        <div key={i} className="flex gap-4 p-4 border-b border-slate-700/30">
+          <div className="h-4 bg-slate-700 rounded w-1/6"></div>
+          <div className="h-4 bg-slate-700 rounded w-1/4"></div>
+          <div className="h-4 bg-slate-700 rounded w-1/5"></div>
+          <div className="h-4 bg-slate-700 rounded w-1/6"></div>
         </div>
       ))}
     </div>
@@ -91,20 +91,20 @@ export function TableSkeleton({ rows = 5 }: { rows?: number }) {
  */
 export function ChartSkeleton() {
   return (
-    <div className="animate-pulse bg-white rounded-xl p-6">
-      <div className="h-5 bg-gray-200 rounded w-1/4 mb-6"></div>
+    <div className="animate-pulse bg-[#151b28] rounded-xl p-6">
+      <div className="h-5 bg-slate-700 rounded w-1/4 mb-6"></div>
       <div className="flex items-end justify-between h-48 gap-2">
         {Array.from({ length: 7 }).map((_, i) => (
           <div 
             key={i} 
-            className="bg-gray-200 rounded-t w-full"
+            className="bg-slate-700 rounded-t w-full"
             style={{ height: `${Math.random() * 60 + 40}%` }}
           ></div>
         ))}
       </div>
       <div className="flex justify-between mt-4">
         {Array.from({ length: 7 }).map((_, i) => (
-          <div key={i} className="h-3 bg-gray-200 rounded w-8"></div>
+          <div key={i} className="h-3 bg-slate-700 rounded w-8"></div>
         ))}
       </div>
     </div>

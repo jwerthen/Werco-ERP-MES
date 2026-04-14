@@ -354,9 +354,9 @@ export default function POUpload() {
 
   const getConfidenceBadge = (confidence: string) => {
     const colors = {
-      high: 'bg-green-100 text-green-800',
-      medium: 'bg-amber-100 text-amber-800',
-      low: 'bg-red-100 text-red-800',
+      high: 'bg-green-500/20 text-emerald-300',
+      medium: 'bg-amber-500/20 text-amber-300',
+      low: 'bg-red-500/20 text-red-300',
     };
     return colors[confidence as keyof typeof colors] || colors.medium;
   };
@@ -366,14 +366,14 @@ export default function POUpload() {
     return (
       <div className="space-y-6">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Upload Purchasing Document</h1>
-          <p className="text-gray-500 mt-1">Upload a PO or Quote (PDF/DOCX) to extract line items</p>
+          <h1 className="text-3xl font-bold text-white">Upload Purchasing Document</h1>
+          <p className="text-slate-400 mt-1">Upload a PO or Quote (PDF/DOCX) to extract line items</p>
         </div>
 
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+          <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
             <ExclamationTriangleIcon className="h-5 w-5 text-red-600" />
-            <span className="text-red-800">{error}</span>
+            <span className="text-red-300">{error}</span>
           </div>
         )}
 
@@ -383,7 +383,7 @@ export default function POUpload() {
               type="button"
               onClick={() => setDocumentType('po')}
               className={`px-4 py-2 rounded-lg text-sm font-semibold ${
-                documentType === 'po' ? 'bg-werco-primary text-white' : 'bg-gray-100 text-gray-600'
+                documentType === 'po' ? 'bg-werco-primary text-white' : 'bg-slate-800/50 text-slate-400'
               }`}
             >
               Purchase Order
@@ -392,7 +392,7 @@ export default function POUpload() {
               type="button"
               onClick={() => setDocumentType('quote')}
               className={`px-4 py-2 rounded-lg text-sm font-semibold ${
-                documentType === 'quote' ? 'bg-werco-primary text-white' : 'bg-gray-100 text-gray-600'
+                documentType === 'quote' ? 'bg-werco-primary text-white' : 'bg-slate-800/50 text-slate-400'
               }`}
             >
               Vendor Quote
@@ -401,10 +401,10 @@ export default function POUpload() {
           <div
             className={`border-2 border-dashed rounded-xl p-12 text-center transition-colors ${
               dragActive 
-                ? 'border-werco-primary bg-werco-50' 
+                ? 'border-werco-primary bg-werco-500/10' 
                 : file 
-                  ? 'border-green-400 bg-green-50' 
-                  : 'border-gray-300 hover:border-gray-400'
+                  ? 'border-green-500/50 bg-green-500/10' 
+                  : 'border-slate-600 hover:border-gray-400'
             }`}
             onDragEnter={handleDrag}
             onDragLeave={handleDrag}
@@ -414,24 +414,24 @@ export default function POUpload() {
             {file ? (
               <div className="flex flex-col items-center">
                 <DocumentIcon className="h-16 w-16 text-green-500 mb-4" />
-                <p className="text-lg font-medium text-gray-900">{file.name}</p>
-                <p className="text-sm text-gray-500 mt-1">
+                <p className="text-lg font-medium text-white">{file.name}</p>
+                <p className="text-sm text-slate-400 mt-1">
                   {(file.size / 1024 / 1024).toFixed(2)} MB
                 </p>
                 <button
                   onClick={() => setFile(null)}
-                  className="mt-4 text-sm text-red-600 hover:text-red-800"
+                  className="mt-4 text-sm text-red-600 hover:text-red-300"
                 >
                   Remove file
                 </button>
               </div>
             ) : (
               <>
-                <CloudArrowUpIcon className="h-16 w-16 text-gray-400 mx-auto mb-4" />
-                <p className="text-lg font-medium text-gray-900">
+                <CloudArrowUpIcon className="h-16 w-16 text-slate-400 mx-auto mb-4" />
+                <p className="text-lg font-medium text-white">
                   Drag and drop your {documentType === 'quote' ? 'quote' : 'PO'} document here
                 </p>
-                <p className="text-sm text-gray-500 mt-1">or</p>
+                <p className="text-sm text-slate-400 mt-1">or</p>
                 <label className="mt-4 inline-block">
                   <span className="btn-primary cursor-pointer">Browse Files</span>
                   <input
@@ -441,7 +441,7 @@ export default function POUpload() {
                     className="hidden"
                   />
                 </label>
-                <p className="text-xs text-gray-400 mt-4">Supported: PDF, DOC, DOCX (max 10MB)</p>
+                <p className="text-xs text-slate-400 mt-4">Supported: PDF, DOC, DOCX (max 10MB)</p>
               </>
             )}
           </div>
@@ -455,9 +455,9 @@ export default function POUpload() {
           )}
         </div>
 
-        <div className="card bg-blue-50 border-blue-200">
-          <h3 className="font-semibold text-blue-800 mb-2">How it works</h3>
-          <ol className="list-decimal list-inside space-y-1 text-sm text-blue-700">
+        <div className="card bg-blue-500/10 border-blue-500/30">
+          <h3 className="font-semibold text-blue-300 mb-2">How it works</h3>
+          <ol className="list-decimal list-inside space-y-1 text-sm text-blue-400">
             <li>Upload your PO or vendor quote (PDF or Word document)</li>
             <li>AI extracts vendor, line items, and order details</li>
             <li>Review and verify the extracted data</li>
@@ -474,8 +474,8 @@ export default function POUpload() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px]">
         <ArrowPathIcon className="h-16 w-16 text-werco-primary animate-spin mb-6" />
-        <h2 className="text-xl font-semibold text-gray-900">Processing PDF...</h2>
-        <p className="text-gray-500 mt-2">Extracting data with AI. This may take a moment.</p>
+        <h2 className="text-xl font-semibold text-white">Processing PDF...</h2>
+        <p className="text-slate-400 mt-2">Extracting data with AI. This may take a moment.</p>
       </div>
     );
   }
@@ -485,8 +485,8 @@ export default function POUpload() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px]">
         <CheckCircleIcon className="h-20 w-20 text-green-500 mb-6" />
-        <h2 className="text-2xl font-bold text-gray-900">Purchase Order Created!</h2>
-        <p className="text-gray-600 mt-2">PO {createdPO.number} has been created successfully</p>
+        <h2 className="text-2xl font-bold text-white">Purchase Order Created!</h2>
+        <p className="text-slate-400 mt-2">PO {createdPO.number} has been created successfully</p>
         <div className="flex gap-4 mt-8">
           <button
             onClick={() => navigate(`/purchasing`)}
@@ -510,12 +510,12 @@ export default function POUpload() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Review Extracted Data</h1>
-          <p className="text-gray-500 mt-1">Verify and edit the extracted information before creating the PO</p>
+          <h1 className="text-3xl font-bold text-white">Review Extracted Data</h1>
+          <p className="text-slate-400 mt-1">Verify and edit the extracted information before creating the PO</p>
         </div>
         <div className="flex items-center gap-3">
           {extractionResult?.pdf_was_ocr && (
-            <span className="px-3 py-1 rounded-full text-sm bg-amber-100 text-amber-800">
+            <span className="px-3 py-1 rounded-full text-sm bg-amber-500/20 text-amber-300">
               OCR Processed
             </span>
           )}
@@ -526,9 +526,9 @@ export default function POUpload() {
       </div>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
           <ExclamationTriangleIcon className="h-5 w-5 text-red-600" />
-          <span className="text-red-800">{error}</span>
+          <span className="text-red-300">{error}</span>
           <button onClick={() => setError('')} className="ml-auto">
             <XMarkIcon className="h-5 w-5 text-red-600" />
           </button>
@@ -537,11 +537,11 @@ export default function POUpload() {
 
       {/* Validation Issues */}
       {extractionResult?.validation_issues && extractionResult.validation_issues.length > 0 && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-          <h3 className="font-semibold text-amber-800 mb-2">Issues to Review</h3>
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4">
+          <h3 className="font-semibold text-amber-300 mb-2">Issues to Review</h3>
           <ul className="space-y-1">
             {extractionResult.validation_issues.map((issue, idx) => (
-              <li key={idx} className={`text-sm ${issue.severity === 'error' ? 'text-red-700' : 'text-amber-700'}`}>
+              <li key={idx} className={`text-sm ${issue.severity === 'error' ? 'text-red-400' : 'text-amber-400'}`}>
                 - {issue.message}
               </li>
             ))}
@@ -554,10 +554,10 @@ export default function POUpload() {
         <div className="col-span-1">
           <div className="card sticky top-4">
             <h3 className="font-semibold mb-4">Source Document</h3>
-            <div className="bg-gray-100 rounded-lg p-4 text-center">
-              <DocumentIcon className="h-12 w-12 text-gray-400 mx-auto mb-2" />
-              <p className="text-sm text-gray-600">{file?.name}</p>
-              <p className="text-xs text-gray-400 mt-1">
+            <div className="bg-slate-800/50 rounded-lg p-4 text-center">
+              <DocumentIcon className="h-12 w-12 text-slate-400 mx-auto mb-2" />
+              <p className="text-sm text-slate-400">{file?.name}</p>
+              <p className="text-xs text-slate-400 mt-1">
                 {extractionResult?.pdf_page_count} page(s)
               </p>
               {extractionResult?.pdf_path && (
@@ -581,24 +581,24 @@ export default function POUpload() {
             <h3 className="font-semibold mb-4">PO Information</h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-slate-300 mb-1">
                   PO Number <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   value={formData.po_number}
                   onChange={(e) => setFormData({ ...formData, po_number: e.target.value })}
-                  className={`input w-full ${extractionResult?.po_number_exists ? 'border-red-300' : ''}`}
+                  className={`input w-full ${extractionResult?.po_number_exists ? 'border-red-500/40' : ''}`}
                 />
                 {extractionResult?.po_number_exists && (
                   <p className="text-xs text-red-600 mt-1">This PO number already exists</p>
                 )}
                 {extractionResult?.document_type === 'quote' && extractionResult?.quote_number && (
-                  <p className="text-xs text-gray-500 mt-1">Quote #: {extractionResult.quote_number}</p>
+                  <p className="text-xs text-slate-400 mt-1">Quote #: {extractionResult.quote_number}</p>
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Order Date</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Order Date</label>
                 <input
                   type="date"
                   value={formData.order_date}
@@ -607,7 +607,7 @@ export default function POUpload() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Required Date</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Required Date</label>
                 <input
                   type="date"
                   value={formData.required_date}
@@ -616,7 +616,7 @@ export default function POUpload() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Expected Delivery</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Expected Delivery</label>
                 <input
                   type="date"
                   value={formData.expected_date}
@@ -632,10 +632,10 @@ export default function POUpload() {
             <h3 className="font-semibold mb-4">Vendor</h3>
             
             {extractionResult?.vendor_match?.matched && !formData.create_vendor ? (
-              <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+              <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4 mb-4">
                 <div className="flex justify-between items-center">
                   <div>
-                    <p className="font-medium text-green-800">
+                    <p className="font-medium text-emerald-300">
                       Matched: {extractionResult.vendor_match.match_name}
                     </p>
                     <p className="text-sm text-green-600">
@@ -644,7 +644,7 @@ export default function POUpload() {
                   </div>
                   <button
                     onClick={() => setFormData({ ...formData, vendor_id: null })}
-                    className="text-sm text-green-700 hover:underline"
+                    className="text-sm text-emerald-400 hover:underline"
                   >
                     Change
                   </button>
@@ -664,11 +664,11 @@ export default function POUpload() {
                       <button
                         key={sug.id}
                         onClick={() => setFormData({ ...formData, vendor_id: sug.id })}
-                        className="block w-full text-left px-3 py-2 rounded-lg border hover:bg-gray-50"
+                        className="block w-full text-left px-3 py-2 rounded-lg border hover:bg-slate-800"
                       >
                         <span className="font-medium">{sug.name}</span>
-                        <span className="text-gray-500 text-sm ml-2">({sug.code})</span>
-                        <span className="text-xs text-gray-400 ml-2">{sug.score}% match</span>
+                        <span className="text-slate-400 text-sm ml-2">({sug.code})</span>
+                        <span className="text-xs text-slate-400 ml-2">{sug.score}% match</span>
                       </button>
                     ))}
                   </div>
@@ -684,7 +684,7 @@ export default function POUpload() {
                     className="input w-full"
                   />
                   {vendorResults.length > 0 && (
-                    <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                    <div className="absolute z-10 w-full mt-1 bg-[#151b28] border rounded-lg shadow-lg max-h-48 overflow-y-auto">
                       {vendorResults.map((v) => (
                         <button
                           key={v.id}
@@ -693,7 +693,7 @@ export default function POUpload() {
                             setVendorSearch('');
                             setVendorResults([]);
                           }}
-                          className="block w-full text-left px-4 py-2 hover:bg-gray-50"
+                          className="block w-full text-left px-4 py-2 hover:bg-slate-800"
                         >
                           {v.name} ({v.code})
                         </button>
@@ -710,19 +710,19 @@ export default function POUpload() {
                 </button>
               </div>
             ) : (
-              <div className="space-y-3 bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div className="space-y-3 bg-blue-500/10 border border-blue-500/30 rounded-lg p-4">
                 <div className="flex justify-between items-center">
-                  <p className="font-medium text-blue-800">Create New Vendor</p>
+                  <p className="font-medium text-blue-300">Create New Vendor</p>
                   <button
                     onClick={() => setFormData({ ...formData, create_vendor: false })}
-                    className="text-sm text-blue-700 hover:underline"
+                    className="text-sm text-blue-400 hover:underline"
                   >
                     Cancel
                   </button>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                    <label className="block text-sm font-medium text-slate-300 mb-1">Name *</label>
                     <input
                       type="text"
                       value={formData.new_vendor_name}
@@ -731,7 +731,7 @@ export default function POUpload() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Code</label>
+                    <label className="block text-sm font-medium text-slate-300 mb-1">Code</label>
                     <input
                       type="text"
                       value={formData.new_vendor_code}
@@ -742,7 +742,7 @@ export default function POUpload() {
                   </div>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Address</label>
                   <input
                     type="text"
                     value={formData.new_vendor_address}
@@ -768,19 +768,19 @@ export default function POUpload() {
                 <div 
                   key={idx} 
                   className={`border rounded-xl p-4 ${
-                    item.confidence === 'low' ? 'border-amber-300 bg-amber-50' : 'border-gray-200'
+                    item.confidence === 'low' ? 'border-amber-500/40 bg-amber-500/10' : 'border-slate-700'
                   }`}
                 >
                   <div className="flex justify-between items-start mb-3">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-gray-500">Line {item.line_number}</span>
+                      <span className="text-sm font-medium text-slate-400">Line {item.line_number}</span>
                       <span className={`px-2 py-0.5 rounded text-xs ${getConfidenceBadge(item.confidence)}`}>
                         {item.confidence}
                       </span>
                     </div>
                     <div className="text-right">
                       <p className="font-semibold">${item.line_total?.toFixed(2) || '0.00'}</p>
-                      <p className="text-xs text-gray-500">
+                      <p className="text-xs text-slate-400">
                         {item.qty_ordered} x ${item.unit_price?.toFixed(2) || '0.00'}
                       </p>
                     </div>
@@ -788,7 +788,7 @@ export default function POUpload() {
                   
                   <div className="grid grid-cols-3 gap-4 mb-3">
                     <div>
-                      <label className="block text-xs text-gray-500 mb-1">Part Number</label>
+                      <label className="block text-xs text-slate-400 mb-1">Part Number</label>
                       <input
                         type="text"
                         value={item.part_number}
@@ -799,7 +799,7 @@ export default function POUpload() {
                       />
                     </div>
                     <div>
-                      <label className="block text-xs text-gray-500 mb-1">Quantity</label>
+                      <label className="block text-xs text-slate-400 mb-1">Quantity</label>
                       <input
                         type="number"
                         value={item.qty_ordered}
@@ -810,7 +810,7 @@ export default function POUpload() {
                       />
                     </div>
                     <div>
-                      <label className="block text-xs text-gray-500 mb-1">Unit Price</label>
+                      <label className="block text-xs text-slate-400 mb-1">Unit Price</label>
                       <input
                         type="number"
                         step="0.01"
@@ -824,7 +824,7 @@ export default function POUpload() {
                   </div>
                   
                   <div className="mb-3">
-                    <label className="block text-xs text-gray-500 mb-1">Description</label>
+                    <label className="block text-xs text-slate-400 mb-1">Description</label>
                     <input
                       type="text"
                       value={item.description}
@@ -836,7 +836,7 @@ export default function POUpload() {
                   </div>
 
                   {/* Part Matching */}
-                  <div className="bg-gray-50 rounded-lg p-3">
+                  <div className="bg-slate-800 rounded-lg p-3">
                     {item.selected_part_id ? (
                       <div className="flex justify-between items-center">
                         <span className="text-sm text-green-600">
@@ -846,7 +846,7 @@ export default function POUpload() {
                           onClick={() => setLineItems(prev => prev.map((it, i) => 
                             i === idx ? { ...it, selected_part_id: null } : it
                           ))}
-                          className="text-xs text-gray-500 hover:underline"
+                          className="text-xs text-slate-400 hover:underline"
                         >
                           Change
                         </button>
@@ -859,13 +859,13 @@ export default function POUpload() {
                           </span>
                           <button
                             onClick={() => toggleCreatePart(idx)}
-                            className="text-xs text-gray-500 hover:underline"
+                            className="text-xs text-slate-400 hover:underline"
                           >
                             Cancel
                           </button>
                         </div>
                         {item.suggested_part_number && item.part_number !== item.suggested_part_number && (
-                          <div className="flex items-center justify-between text-xs text-gray-600">
+                          <div className="flex items-center justify-between text-xs text-slate-400">
                             <span>Suggested Werco #:</span>
                             <button
                               type="button"
@@ -879,7 +879,7 @@ export default function POUpload() {
                           </div>
                         )}
                         <div className="flex items-center gap-4">
-                          <span className="text-xs text-gray-500">Part Type:</span>
+                          <span className="text-xs text-slate-400">Part Type:</span>
                           <label className="flex items-center gap-1.5 cursor-pointer">
                             <input
                               type="radio"
@@ -936,7 +936,7 @@ export default function POUpload() {
                               <button
                                 key={sug.id}
                                 onClick={() => selectPartForLine(idx, sug.id, sug.part_number)}
-                                className="text-xs px-2 py-1 rounded bg-white border hover:bg-gray-50"
+                                className="text-xs px-2 py-1 rounded bg-[#151b28] border hover:bg-slate-800"
                               >
                                 {sug.part_number} ({sug.score}%)
                               </button>
@@ -954,12 +954,12 @@ export default function POUpload() {
                             className="input w-full text-sm"
                           />
                           {partResults[idx]?.length > 0 && (
-                            <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-32 overflow-y-auto">
+                            <div className="absolute z-10 w-full mt-1 bg-[#151b28] border rounded-lg shadow-lg max-h-32 overflow-y-auto">
                               {partResults[idx].map((p: any) => (
                                 <button
                                   key={p.id}
                                   onClick={() => selectPartForLine(idx, p.id, p.part_number)}
-                                  className="block w-full text-left px-3 py-2 text-sm hover:bg-gray-50"
+                                  className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-800"
                                 >
                                   {p.part_number} - {p.name}
                                 </button>

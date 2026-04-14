@@ -259,9 +259,9 @@ export default function DowntimeTracking() {
   };
 
   const wcStatusColor = (st: string) => {
-    if (st === 'down') return 'bg-red-500';
-    if (st === 'idle') return 'bg-gray-400';
-    return 'bg-green-500';
+    if (st === 'down') return 'bg-red-500/100';
+    if (st === 'idle') return 'bg-slate-500';
+    return 'bg-green-500/100';
   };
 
   const wcStatusLabel = (st: string) => {
@@ -289,8 +289,8 @@ export default function DowntimeTracking() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Downtime Tracking</h1>
-          <p className="text-sm text-gray-500 mt-1">Monitor and manage machine downtime events</p>
+          <h1 className="text-2xl font-bold text-white">Downtime Tracking</h1>
+          <p className="text-sm text-slate-400 mt-1">Monitor and manage machine downtime events</p>
         </div>
         <div className="flex gap-2">
           <button
@@ -316,27 +316,27 @@ export default function DowntimeTracking() {
       {/* Summary Stats Cards */}
       {summary && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="bg-white rounded-lg shadow p-4 border-l-4 border-red-500">
-            <div className="text-sm text-gray-500">Total Downtime</div>
-            <div className="text-2xl font-bold text-gray-900">{summary.total_downtime_hours}h</div>
-            <div className="text-xs text-gray-400">{summary.event_count} events</div>
+          <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-red-500">
+            <div className="text-sm text-slate-400">Total Downtime</div>
+            <div className="text-2xl font-bold text-white">{summary.total_downtime_hours}h</div>
+            <div className="text-xs text-slate-500">{summary.event_count} events</div>
           </div>
-          <div className="bg-white rounded-lg shadow p-4 border-l-4 border-blue-500">
-            <div className="text-sm text-gray-500">Planned</div>
-            <div className="text-2xl font-bold text-blue-700">{summary.planned_hours}h</div>
-            <div className="text-xs text-gray-400">{summary.planned_percentage}%</div>
+          <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-blue-500">
+            <div className="text-sm text-slate-400">Planned</div>
+            <div className="text-2xl font-bold text-blue-400">{summary.planned_hours}h</div>
+            <div className="text-xs text-slate-500">{summary.planned_percentage}%</div>
           </div>
-          <div className="bg-white rounded-lg shadow p-4 border-l-4 border-orange-500">
-            <div className="text-sm text-gray-500">Unplanned</div>
-            <div className="text-2xl font-bold text-orange-700">{summary.unplanned_hours}h</div>
-            <div className="text-xs text-gray-400">{summary.unplanned_percentage}%</div>
+          <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-orange-500">
+            <div className="text-sm text-slate-400">Unplanned</div>
+            <div className="text-2xl font-bold text-orange-400">{summary.unplanned_hours}h</div>
+            <div className="text-xs text-slate-500">{summary.unplanned_percentage}%</div>
           </div>
-          <div className="bg-white rounded-lg shadow p-4 border-l-4 border-purple-500">
-            <div className="text-sm text-gray-500">Top Reason</div>
-            <div className="text-lg font-bold text-gray-900 truncate">
+          <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-purple-500">
+            <div className="text-sm text-slate-400">Top Reason</div>
+            <div className="text-lg font-bold text-white truncate">
               {summary.top_reasons?.[0]?.reason || 'N/A'}
             </div>
-            <div className="text-xs text-gray-400">
+            <div className="text-xs text-slate-500">
               {summary.top_reasons?.[0]?.hours ? `${summary.top_reasons[0].hours}h` : ''}
             </div>
           </div>
@@ -344,8 +344,8 @@ export default function DowntimeTracking() {
       )}
 
       {/* Work Center Status Board */}
-      <div className="bg-white rounded-lg shadow p-4">
-        <h2 className="text-lg font-semibold text-gray-900 mb-3">Work Center Status</h2>
+      <div className="bg-[#151b28] rounded-lg shadow p-4">
+        <h2 className="text-lg font-semibold text-white mb-3">Work Center Status</h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
           {workCenters.map((wc) => {
             const st = getWcDisplayStatus(wc);
@@ -353,15 +353,15 @@ export default function DowntimeTracking() {
               <div
                 key={wc.id}
                 className={`rounded-lg p-3 text-center border ${
-                  st === 'down' ? 'border-red-300 bg-red-50' : st === 'idle' ? 'border-gray-300 bg-gray-50' : 'border-green-300 bg-green-50'
+                  st === 'down' ? 'border-red-300 bg-red-500/10' : st === 'idle' ? 'border-slate-600 bg-slate-800/50' : 'border-green-300 bg-green-500/10'
                 }`}
               >
                 <div className="flex items-center justify-center gap-1 mb-1">
                   <span className={`inline-block w-2.5 h-2.5 rounded-full ${wcStatusColor(st)}`}></span>
-                  <span className="text-xs font-medium text-gray-500">{wcStatusLabel(st)}</span>
+                  <span className="text-xs font-medium text-slate-400">{wcStatusLabel(st)}</span>
                 </div>
-                <div className="font-bold text-sm text-gray-900">{wc.code}</div>
-                <div className="text-xs text-gray-500 truncate">{wc.name}</div>
+                <div className="font-bold text-sm text-white">{wc.code}</div>
+                <div className="text-xs text-slate-400 truncate">{wc.name}</div>
               </div>
             );
           })}
@@ -370,8 +370,8 @@ export default function DowntimeTracking() {
 
       {/* Active Downtime Events */}
       {activeEvents.length > 0 && (
-        <div className="bg-white rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-red-700 mb-3 flex items-center gap-2">
+        <div className="bg-[#151b28] rounded-lg shadow p-4">
+          <h2 className="text-lg font-semibold text-red-400 mb-3 flex items-center gap-2">
             <ExclamationTriangleIcon className="h-5 w-5 text-red-500" />
             Active Downtime ({activeEvents.length})
           </h2>
@@ -382,42 +382,42 @@ export default function DowntimeTracking() {
                 <div
                   key={evt.id}
                   className={`rounded-lg border-2 p-4 ${
-                    evt.planned_type === 'planned' ? 'border-blue-300 bg-blue-50' : 'border-red-300 bg-red-50'
+                    evt.planned_type === 'planned' ? 'border-blue-300 bg-blue-500/10' : 'border-red-300 bg-red-500/10'
                   }`}
                 >
                   <div className="flex items-start justify-between">
                     <div>
-                      <div className="font-bold text-gray-900">
+                      <div className="font-bold text-white">
                         {evt.work_center?.code || `WC-${evt.work_center_id}`}
                       </div>
-                      <div className="text-xs text-gray-500">
+                      <div className="text-xs text-slate-400">
                         {evt.work_center?.name}
                       </div>
                     </div>
                     <span
                       className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                         evt.planned_type === 'planned'
-                          ? 'bg-blue-200 text-blue-800'
-                          : 'bg-red-200 text-red-800'
+                          ? 'bg-blue-200 text-blue-300'
+                          : 'bg-red-200 text-red-300'
                       }`}
                     >
                       {evt.planned_type === 'planned' ? 'Planned' : 'Unplanned'}
                     </span>
                   </div>
                   <div className="mt-2 flex items-center gap-2">
-                    <ClockIcon className="h-4 w-4 text-gray-400" />
-                    <span className="text-lg font-mono font-bold text-gray-900">
+                    <ClockIcon className="h-4 w-4 text-slate-500" />
+                    <span className="text-lg font-mono font-bold text-white">
                       {formatDuration(elapsed)}
                     </span>
                   </div>
-                  <div className="mt-1 text-sm text-gray-600">
+                  <div className="mt-1 text-sm text-slate-400">
                     <span className="font-medium">{categoryLabel(evt.category)}</span>
-                    {evt.reason_code && <span className="text-gray-400 ml-1">({evt.reason_code})</span>}
+                    {evt.reason_code && <span className="text-slate-500 ml-1">({evt.reason_code})</span>}
                   </div>
                   {evt.description && (
-                    <div className="mt-1 text-xs text-gray-500 truncate">{evt.description}</div>
+                    <div className="mt-1 text-xs text-slate-400 truncate">{evt.description}</div>
                   )}
-                  <div className="mt-1 text-xs text-gray-400">
+                  <div className="mt-1 text-xs text-slate-500">
                     Started: {formatCentralDate(evt.start_time)}
                   </div>
                   <button
@@ -436,21 +436,22 @@ export default function DowntimeTracking() {
 
       {/* Pareto Chart */}
       {paretoData.length > 0 && (
-        <div className="bg-white rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">Downtime by Reason (Pareto)</h2>
+        <div className="bg-[#151b28] rounded-lg shadow p-4">
+          <h2 className="text-lg font-semibold text-white mb-3">Downtime by Reason (Pareto)</h2>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={paretoData} margin={{ top: 5, right: 20, left: 10, bottom: 60 }}>
-              <CartesianGrid strokeDasharray="3 3" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
               <XAxis
                 dataKey="reason"
                 angle={-35}
                 textAnchor="end"
                 interval={0}
                 height={80}
-                tick={{ fontSize: 11 }}
+                tick={{ fontSize: 11, fill: '#94a3b8' }}
+                stroke="#334155"
               />
-              <YAxis label={{ value: 'Hours', angle: -90, position: 'insideLeft' }} />
-              <Tooltip formatter={(value: number) => [`${value}h`, 'Downtime']} />
+              <YAxis label={{ value: 'Hours', angle: -90, position: 'insideLeft', fill: '#94a3b8' }} tick={{ fill: '#94a3b8' }} stroke="#334155" />
+              <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} formatter={(value: number) => [`${value}h`, 'Downtime']} />
               <Bar dataKey="hours" fill="#ef4444" radius={[4, 4, 0, 0]}>
                 {paretoData.map((entry, index) => (
                   <Cell key={`cell-${index}`} fill={index === 0 ? '#ef4444' : index < 3 ? '#f97316' : '#fbbf24'} />
@@ -462,8 +463,8 @@ export default function DowntimeTracking() {
       )}
 
       {/* Filters */}
-      <div className="bg-white rounded-lg shadow p-4">
-        <h2 className="text-lg font-semibold text-gray-900 mb-3">Downtime Log</h2>
+      <div className="bg-[#151b28] rounded-lg shadow p-4">
+        <h2 className="text-lg font-semibold text-white mb-3">Downtime Log</h2>
         <div className="flex flex-wrap gap-3 mb-4">
           <select
             className="select select-bordered select-sm"
@@ -532,7 +533,7 @@ export default function DowntimeTracking() {
         <div className="overflow-x-auto">
           <table className="table table-sm w-full">
             <thead>
-              <tr className="bg-gray-50">
+              <tr className="bg-slate-800/50">
                 <th>Work Center</th>
                 <th>Start</th>
                 <th>End</th>
@@ -546,7 +547,7 @@ export default function DowntimeTracking() {
             <tbody>
               {allEvents.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center text-gray-400 py-8">
+                  <td colSpan={8} className="text-center text-slate-500 py-8">
                     No downtime events found
                   </td>
                 </tr>
@@ -570,15 +571,15 @@ export default function DowntimeTracking() {
                     <td>
                       <span className="text-xs">{categoryLabel(evt.category)}</span>
                     </td>
-                    <td className="text-sm text-gray-600 max-w-[200px] truncate">
+                    <td className="text-sm text-slate-400 max-w-[200px] truncate">
                       {evt.reason_code || evt.description || '-'}
                     </td>
                     <td>
                       <span
                         className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                           evt.planned_type === 'planned'
-                            ? 'bg-blue-100 text-blue-800'
-                            : 'bg-red-100 text-red-800'
+                            ? 'bg-blue-500/20 text-blue-300'
+                            : 'bg-red-500/20 text-red-300'
                         }`}
                       >
                         {evt.planned_type === 'planned' ? 'Planned' : 'Unplanned'}
@@ -586,13 +587,13 @@ export default function DowntimeTracking() {
                     </td>
                     <td>
                       {evt.end_time ? (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-800">
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-300">
                           Resolved
                         </span>
                       ) : (
                         <button
                           onClick={() => openResolveModal(evt)}
-                          className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-800 hover:bg-red-200 cursor-pointer"
+                          className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 hover:bg-red-200 cursor-pointer"
                         >
                           Active
                         </button>
@@ -708,7 +709,7 @@ export default function DowntimeTracking() {
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
-            <div className="mb-4 p-3 bg-gray-50 rounded-lg text-sm">
+            <div className="mb-4 p-3 bg-slate-800/50 rounded-lg text-sm">
               <div><strong>Work Center:</strong> {resolvingEvent.work_center?.code} - {resolvingEvent.work_center?.name}</div>
               <div><strong>Category:</strong> {categoryLabel(resolvingEvent.category)}</div>
               <div><strong>Started:</strong> {formatCentralDate(resolvingEvent.start_time)}</div>

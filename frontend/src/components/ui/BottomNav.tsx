@@ -80,7 +80,7 @@ export default function BottomNav({ onMenuClick }: BottomNavProps) {
   };
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 pb-safe lg:hidden">
+    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-[#151b28] border-t border-slate-700 pb-safe lg:hidden">
       <div className="flex items-center justify-around h-16">
         {navItems.map((item) => {
           const active = isActive(item.href);
@@ -93,7 +93,7 @@ export default function BottomNav({ onMenuClick }: BottomNavProps) {
               className={`
                 flex flex-col items-center justify-center flex-1 h-full
                 transition-colors duration-200
-                ${active ? 'text-werco-navy-600' : 'text-slate-500'}
+                ${active ? 'text-blue-400' : 'text-slate-400'}
               `}
             >
               <Icon className="h-6 w-6" />
@@ -105,7 +105,7 @@ export default function BottomNav({ onMenuClick }: BottomNavProps) {
         {/* More menu button */}
         <button
           onClick={onMenuClick}
-          className="flex flex-col items-center justify-center flex-1 h-full text-slate-500 active:text-slate-700"
+          className="flex flex-col items-center justify-center flex-1 h-full text-slate-400 active:text-slate-200"
         >
           <Bars3Icon className="h-6 w-6" />
           <span className="text-xs mt-1 font-medium">More</span>

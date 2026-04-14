@@ -104,8 +104,8 @@ export default function PartsPage() {
     return (
       <div className="space-y-6">
         <div className="flex justify-between items-center">
-          <div className="h-8 w-24 bg-gray-200 rounded animate-pulse" />
-          <div className="h-10 w-32 bg-gray-200 rounded animate-pulse" />
+          <div className="h-8 w-24 bg-slate-700 rounded animate-pulse" />
+          <div className="h-10 w-32 bg-slate-700 rounded animate-pulse" />
         </div>
         <div className="card"><SkeletonTable rows={8} columns={8} /></div>
       </div>
@@ -117,8 +117,8 @@ export default function PartsPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Parts</h1>
-          <p className="text-sm text-gray-500 mt-0.5">{stats.total} parts · {stats.active} active · {stats.critical} critical</p>
+          <h1 className="text-2xl font-bold text-white">Parts</h1>
+          <p className="text-sm text-slate-400 mt-0.5">{stats.total} parts · {stats.active} active · {stats.critical} critical</p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => setShowImport(true)} className="btn-secondary flex items-center gap-2">
@@ -135,7 +135,7 @@ export default function PartsPage() {
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
         <div className="relative flex-1 max-w-md">
-          <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
           <input
             type="text"
             placeholder="Search parts, customers, descriptions..."
@@ -161,20 +161,20 @@ export default function PartsPage() {
             <option value="pending_approval">Pending</option>
           </select>
           {/* View toggle */}
-          <div className="flex rounded-lg border border-gray-300 overflow-hidden">
+          <div className="flex rounded-lg border border-slate-600 overflow-hidden">
             <button
               onClick={() => setViewMode('table')}
-              className={`p-2 ${viewMode === 'table' ? 'bg-gray-100' : 'bg-white hover:bg-gray-50'}`}
+              className={`p-2 ${viewMode === 'table' ? 'bg-slate-800' : 'bg-[#151b28] hover:bg-slate-800/50'}`}
               title="Table view"
             >
-              <ListIcon className="h-4 w-4 text-gray-600" />
+              <ListIcon className="h-4 w-4 text-slate-400" />
             </button>
             <button
               onClick={() => setViewMode('grid')}
-              className={`p-2 ${viewMode === 'grid' ? 'bg-gray-100' : 'bg-white hover:bg-gray-50'}`}
+              className={`p-2 ${viewMode === 'grid' ? 'bg-slate-800' : 'bg-[#151b28] hover:bg-slate-800/50'}`}
               title="Grid view"
             >
-              <Squares2X2Icon className="h-4 w-4 text-gray-600" />
+              <Squares2X2Icon className="h-4 w-4 text-slate-400" />
             </button>
           </div>
         </div>
@@ -184,25 +184,25 @@ export default function PartsPage() {
       {viewMode === 'table' && (
         <div className="card overflow-hidden p-0">
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800/50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Rev</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Cost</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part #</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Rev</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Cost</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Status</th>
                   <th className="px-4 py-3 w-10" />
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {filteredParts.map(part => (
                   <tr
                     key={part.id}
                     onClick={() => navigate(`/parts/${part.id}`)}
-                    className="hover:bg-gray-50 cursor-pointer transition-colors"
+                    className="hover:bg-slate-800/50 cursor-pointer transition-colors"
                   >
                     <td className="px-4 py-3">
                       <span className="font-medium text-werco-navy-600">{part.part_number}</span>
@@ -210,10 +210,10 @@ export default function PartsPage() {
                     <td className="px-4 py-3">
                       <div className="text-sm">{part.name}</div>
                       {part.customer_part_number && (
-                        <div className="text-xs text-gray-400">Cust P/N: {part.customer_part_number}</div>
+                        <div className="text-xs text-slate-500">Cust P/N: {part.customer_part_number}</div>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-500">{part.customer_name || '-'}</td>
+                    <td className="px-4 py-3 text-sm text-slate-400">{part.customer_name || '-'}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${partTypeColors[part.part_type]}`}>
                         {part.part_type.replace('_', ' ')}
@@ -225,14 +225,14 @@ export default function PartsPage() {
                       <div className="flex items-center justify-center gap-1.5">
                         <StatusBadge status={part.status} />
                         {part.is_critical && (
-                          <span className="inline-flex px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-semibold">
+                          <span className="inline-flex px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 text-[10px] font-semibold">
                             CRIT
                           </span>
                         )}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <ChevronRightIcon className="h-4 w-4 text-gray-400" />
+                      <ChevronRightIcon className="h-4 w-4 text-slate-500" />
                     </td>
                   </tr>
                 ))}
@@ -240,7 +240,7 @@ export default function PartsPage() {
             </table>
           </div>
           {filteredParts.length === 0 && (
-            <div className="text-center py-12 text-gray-500">
+            <div className="text-center py-12 text-slate-400">
               <p className="text-sm">No parts found matching your filters</p>
             </div>
           )}
@@ -254,25 +254,25 @@ export default function PartsPage() {
             <div
               key={part.id}
               onClick={() => navigate(`/parts/${part.id}`)}
-              className="card cursor-pointer hover:shadow-md hover:border-werco-navy-200 transition-all border border-gray-200 p-4"
+              className="card cursor-pointer hover:shadow-md hover:border-werco-navy-200 transition-all border border-slate-700 p-4"
             >
               <div className="flex items-start justify-between mb-2">
                 <span className="font-semibold text-werco-navy-600 text-sm">{part.part_number}</span>
                 <StatusBadge status={part.status} />
               </div>
-              <h3 className="text-sm font-medium text-gray-900 mb-1 line-clamp-2">{part.name}</h3>
+              <h3 className="text-sm font-medium text-white mb-1 line-clamp-2">{part.name}</h3>
               {part.customer_name && (
-                <p className="text-xs text-gray-500 mb-2">{part.customer_name}</p>
+                <p className="text-xs text-slate-400 mb-2">{part.customer_name}</p>
               )}
-              <div className="flex items-center justify-between mt-auto pt-2 border-t border-gray-100">
+              <div className="flex items-center justify-between mt-auto pt-2 border-t border-slate-700/30">
                 <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${partTypeColors[part.part_type]}`}>
                   {part.part_type.replace('_', ' ')}
                 </span>
-                <span className="text-xs text-gray-500">Rev {part.revision}</span>
+                <span className="text-xs text-slate-400">Rev {part.revision}</span>
               </div>
               {part.is_critical && (
                 <div className="mt-2">
-                  <span className="inline-flex px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-semibold">
+                  <span className="inline-flex px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 text-[10px] font-semibold">
                     Critical
                   </span>
                 </div>
@@ -280,7 +280,7 @@ export default function PartsPage() {
             </div>
           ))}
           {filteredParts.length === 0 && (
-            <div className="col-span-full text-center py-12 text-gray-500">
+            <div className="col-span-full text-center py-12 text-slate-400">
               <p className="text-sm">No parts found matching your filters</p>
             </div>
           )}
@@ -290,7 +290,7 @@ export default function PartsPage() {
       {/* Create Part Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCreateModal(false)}>
-          <div className="bg-white rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
+          <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-4">New Part</h3>
             <form onSubmit={handleCreate} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -396,7 +396,7 @@ export default function PartsPage() {
                     type="checkbox"
                     checked={createForm.is_critical}
                     onChange={e => setCreateForm(p => ({ ...p, is_critical: e.target.checked }))}
-                    className="rounded border-gray-300 text-werco-navy-600"
+                    className="rounded border-slate-600 text-werco-navy-600"
                   />
                   <span className="text-sm">Critical Characteristic</span>
                 </label>
@@ -405,7 +405,7 @@ export default function PartsPage() {
                     type="checkbox"
                     checked={createForm.requires_inspection}
                     onChange={e => setCreateForm(p => ({ ...p, requires_inspection: e.target.checked }))}
-                    className="rounded border-gray-300 text-werco-navy-600"
+                    className="rounded border-slate-600 text-werco-navy-600"
                   />
                   <span className="text-sm">Requires Inspection</span>
                 </label>

@@ -93,10 +93,10 @@ const fmt = (n: number) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
 
 const varianceColor = (v: number) =>
-  v > 0 ? 'text-red-600' : v < 0 ? 'text-green-600' : 'text-gray-600';
+  v > 0 ? 'text-red-600' : v < 0 ? 'text-green-600' : 'text-slate-400';
 
 const varianceBg = (v: number) =>
-  v > 0 ? 'bg-red-50' : v < 0 ? 'bg-green-50' : 'bg-gray-50';
+  v > 0 ? 'bg-red-500/10' : v < 0 ? 'bg-green-500/10' : 'bg-slate-800';
 
 const statusBadge: Record<string, string> = {
   in_progress: 'du-badge du-badge-warning du-badge-sm',
@@ -366,8 +366,8 @@ export default function JobCosting() {
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Job Costing & Financial Integration</h1>
-          <p className="text-sm text-gray-500 mt-1">
+          <h1 className="text-2xl font-bold text-white">Job Costing & Financial Integration</h1>
+          <p className="text-sm text-slate-400 mt-1">
             Track estimated vs. actual costs, margins, and variances across work orders
           </p>
         </div>
@@ -386,12 +386,12 @@ export default function JobCosting() {
           <div className="du-card bg-base-100 shadow-sm border">
             <div className="du-card-body p-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-blue-100">
+                <div className="p-2 rounded-lg bg-blue-500/20">
                   <CurrencyDollarIcon className="h-6 w-6 text-blue-600" />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">Total WIP Value</p>
-                  <p className="text-xl font-bold text-gray-900">{fmt(summary.total_wip_value)}</p>
+                  <p className="text-xs text-slate-400 uppercase tracking-wide">Total WIP Value</p>
+                  <p className="text-xl font-bold text-white">{fmt(summary.total_wip_value)}</p>
                 </div>
               </div>
             </div>
@@ -400,12 +400,12 @@ export default function JobCosting() {
           <div className="du-card bg-base-100 shadow-sm border">
             <div className="du-card-body p-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-green-100">
+                <div className="p-2 rounded-lg bg-green-500/20">
                   <ChartBarIcon className="h-6 w-6 text-green-600" />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">Average Margin</p>
-                  <p className="text-xl font-bold text-gray-900">
+                  <p className="text-xs text-slate-400 uppercase tracking-wide">Average Margin</p>
+                  <p className="text-xl font-bold text-white">
                     {summary.average_margin_percent.toFixed(1)}%
                   </p>
                 </div>
@@ -416,12 +416,12 @@ export default function JobCosting() {
           <div className="du-card bg-base-100 shadow-sm border">
             <div className="du-card-body p-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-red-100">
+                <div className="p-2 rounded-lg bg-red-500/20">
                   <ExclamationTriangleIcon className="h-6 w-6 text-red-600" />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">Over Budget</p>
-                  <p className="text-xl font-bold text-gray-900">{summary.jobs_over_budget}</p>
+                  <p className="text-xs text-slate-400 uppercase tracking-wide">Over Budget</p>
+                  <p className="text-xl font-bold text-white">{summary.jobs_over_budget}</p>
                 </div>
               </div>
             </div>
@@ -430,14 +430,14 @@ export default function JobCosting() {
           <div className="du-card bg-base-100 shadow-sm border">
             <div className="du-card-body p-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-purple-100">
+                <div className="p-2 rounded-lg bg-purple-500/20">
                   <CheckCircleIcon className="h-6 w-6 text-purple-600" />
                 </div>
                 <div>
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">
+                  <p className="text-xs text-slate-400 uppercase tracking-wide">
                     Completed This Month
                   </p>
-                  <p className="text-xl font-bold text-gray-900">
+                  <p className="text-xl font-bold text-white">
                     {summary.jobs_completed_this_month}
                   </p>
                 </div>
@@ -454,10 +454,11 @@ export default function JobCosting() {
             <h2 className="text-lg font-semibold mb-4">Estimated vs Actual Cost</h2>
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" fontSize={12} />
-                <YAxis fontSize={12} tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="name" fontSize={12} tick={{ fill: '#94a3b8' }} />
+                <YAxis fontSize={12} tick={{ fill: '#94a3b8' }} tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} />
                 <Tooltip
+                  contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
                   formatter={(value: number) => fmt(value)}
                   labelStyle={{ fontWeight: 600 }}
                 />
@@ -529,13 +530,13 @@ export default function JobCosting() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={10} className="text-center py-8 text-gray-500">
+                <td colSpan={10} className="text-center py-8 text-slate-400">
                   Loading...
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={10} className="text-center py-8 text-gray-500">
+                <td colSpan={10} className="text-center py-8 text-slate-400">
                   No job costs found. Click "New Job Cost" to create one.
                 </td>
               </tr>
@@ -559,7 +560,7 @@ export default function JobCosting() {
                     <td>
                       <div className="text-sm">{jc.part_number || '-'}</div>
                       {jc.part_name && (
-                        <div className="text-xs text-gray-500">{jc.part_name}</div>
+                        <div className="text-xs text-slate-400">{jc.part_name}</div>
                       )}
                     </td>
                     <td>{jc.customer_name || '-'}</td>
@@ -614,7 +615,7 @@ export default function JobCosting() {
                           {/* Cost breakdown cards */}
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                             <div className={`rounded-lg p-3 ${varianceBg(jc.material_variance)}`}>
-                              <p className="text-xs font-medium text-gray-500 uppercase">Material</p>
+                              <p className="text-xs font-medium text-slate-400 uppercase">Material</p>
                               <div className="flex justify-between mt-1">
                                 <span className="text-sm">Est: {fmt(jc.estimated_material_cost)}</span>
                                 <span className="text-sm">Act: {fmt(jc.actual_material_cost)}</span>
@@ -624,7 +625,7 @@ export default function JobCosting() {
                               </p>
                             </div>
                             <div className={`rounded-lg p-3 ${varianceBg(jc.labor_variance)}`}>
-                              <p className="text-xs font-medium text-gray-500 uppercase">Labor</p>
+                              <p className="text-xs font-medium text-slate-400 uppercase">Labor</p>
                               <div className="flex justify-between mt-1">
                                 <span className="text-sm">Est: {fmt(jc.estimated_labor_cost)}</span>
                                 <span className="text-sm">Act: {fmt(jc.actual_labor_cost)}</span>
@@ -634,7 +635,7 @@ export default function JobCosting() {
                               </p>
                             </div>
                             <div className={`rounded-lg p-3 ${varianceBg(jc.overhead_variance)}`}>
-                              <p className="text-xs font-medium text-gray-500 uppercase">Overhead</p>
+                              <p className="text-xs font-medium text-slate-400 uppercase">Overhead</p>
                               <div className="flex justify-between mt-1">
                                 <span className="text-sm">Est: {fmt(jc.estimated_overhead_cost)}</span>
                                 <span className="text-sm">Act: {fmt(jc.actual_overhead_cost)}</span>
@@ -659,9 +660,9 @@ export default function JobCosting() {
                             </div>
 
                             {entriesLoading ? (
-                              <p className="text-sm text-gray-500 py-2">Loading entries...</p>
+                              <p className="text-sm text-slate-400 py-2">Loading entries...</p>
                             ) : entries.length === 0 ? (
-                              <p className="text-sm text-gray-500 py-2">
+                              <p className="text-sm text-slate-400 py-2">
                                 No cost entries yet. Add one manually or recalculate from time entries.
                               </p>
                             ) : (
@@ -699,7 +700,7 @@ export default function JobCosting() {
                                           </span>
                                         </td>
                                         <td className="text-sm">{entry.description}</td>
-                                        <td className="text-xs text-gray-500">
+                                        <td className="text-xs text-slate-400">
                                           {entry.source}
                                           {entry.reference && ` (${entry.reference})`}
                                         </td>
@@ -978,7 +979,7 @@ export default function JobCosting() {
                   </label>
                   <input
                     type="text"
-                    className="du-input du-input-bordered w-full bg-gray-50"
+                    className="du-input du-input-bordered w-full bg-slate-800"
                     value={fmt(entryForm.quantity * entryForm.unit_cost)}
                     disabled
                   />

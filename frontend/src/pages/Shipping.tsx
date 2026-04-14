@@ -34,11 +34,11 @@ interface ReadyToShip {
 }
 
 const statusColors: Record<string, string> = {
-  pending: 'bg-yellow-100 text-yellow-800',
-  packed: 'bg-blue-100 text-blue-800',
-  shipped: 'bg-green-100 text-green-800',
-  delivered: 'bg-emerald-100 text-emerald-800',
-  cancelled: 'bg-red-100 text-red-800',
+  pending: 'bg-yellow-500/20 text-yellow-300',
+  packed: 'bg-blue-500/20 text-blue-300',
+  shipped: 'bg-green-500/20 text-emerald-300',
+  delivered: 'bg-emerald-500/20 text-emerald-300',
+  cancelled: 'bg-red-500/20 text-red-300',
 };
 
 export default function Shipping({ embedded }: { embedded?: boolean }) {
@@ -129,7 +129,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
     <div className="space-y-6">
       {!embedded && (
         <div className="flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-gray-900">Shipping</h1>
+          <h1 className="text-2xl font-bold text-white">Shipping</h1>
         </div>
       )}
 
@@ -137,24 +137,24 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       <div className="card">
         <h2 className="text-lg font-semibold mb-4">Ready to Ship ({readyToShip.length})</h2>
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">WO #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Due</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
+            <tbody className="divide-y divide-slate-700">
               {readyToShip.map((wo) => (
-                <tr key={wo.work_order_id} className="hover:bg-gray-50">
+                <tr key={wo.work_order_id} className="hover:bg-slate-800">
                   <td className="px-4 py-3 font-medium text-werco-primary">{wo.work_order_number}</td>
                   <td className="px-4 py-3">
                     <div className="font-medium">{wo.part_number}</div>
-                    <div className="text-sm text-gray-500">{wo.part_name}</div>
+                    <div className="text-sm text-slate-400">{wo.part_name}</div>
                   </td>
                   <td className="px-4 py-3">{wo.customer_name || '-'}</td>
                   <td className="px-4 py-3 text-right font-medium">{wo.quantity_complete}</td>
@@ -175,7 +175,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
             </tbody>
           </table>
           {readyToShip.length === 0 && (
-            <p className="text-center text-gray-500 py-8">No work orders ready to ship</p>
+            <p className="text-center text-slate-400 py-8">No work orders ready to ship</p>
           )}
         </div>
       </div>
@@ -184,22 +184,22 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       <div className="card">
         <h2 className="text-lg font-semibold mb-4">Recent Shipments</h2>
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Shipment #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">WO #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Carrier</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tracking</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Shipment #</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Carrier</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Tracking</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
+            <tbody className="divide-y divide-slate-700">
               {shipments.map((s) => (
-                <tr key={s.id} className="hover:bg-gray-50">
+                <tr key={s.id} className="hover:bg-slate-800">
                   <td className="px-4 py-3 font-mono">{s.shipment_number}</td>
                   <td className="px-4 py-3 font-medium">{s.work_order_number}</td>
                   <td className="px-4 py-3">{s.customer_name || s.ship_to_name || '-'}</td>
@@ -215,14 +215,14 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                     {s.status === 'pending' && (
                       <button
                         onClick={() => handleShip(s.id)}
-                        className="text-green-600 hover:text-green-800 text-sm"
+                        className="text-green-600 hover:text-emerald-300 text-sm"
                       >
                         <PaperAirplaneIcon className="h-5 w-5 inline" /> Ship
                       </button>
                     )}
                     <button
                       onClick={() => window.open(`/print/packing-slip/${s.id}`, '_blank')}
-                      className="text-blue-600 hover:text-blue-800 text-sm"
+                      className="text-blue-600 hover:text-blue-300 text-sm"
                       title="Print Packing Slip"
                     >
                       <PrinterIcon className="h-5 w-5 inline" />
@@ -233,7 +233,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
             </tbody>
           </table>
           {shipments.length === 0 && (
-            <p className="text-center text-gray-500 py-8">No shipments yet</p>
+            <p className="text-center text-slate-400 py-8">No shipments yet</p>
           )}
         </div>
       </div>
@@ -241,11 +241,11 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       {/* Create Shipment Modal */}
       {showCreateModal && selectedWO && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Create Shipment</h3>
-            <div className="bg-gray-50 rounded p-3 mb-4">
+            <div className="bg-slate-800 rounded p-3 mb-4">
               <p className="font-medium">{selectedWO.work_order_number}</p>
-              <p className="text-sm text-gray-600">{selectedWO.part_number} - {selectedWO.part_name}</p>
+              <p className="text-sm text-slate-400">{selectedWO.part_number} - {selectedWO.part_name}</p>
             </div>
             <form onSubmit={handleCreate} className="space-y-4">
               <div>

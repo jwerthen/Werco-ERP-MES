@@ -149,7 +149,7 @@ export default function Reports() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Reports & Analytics</h1>
+        <h1 className="text-2xl font-bold text-white">Reports & Analytics</h1>
         <select
           value={period}
           onChange={(e) => setPeriod(parseInt(e.target.value))}
@@ -162,7 +162,7 @@ export default function Reports() {
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-200">
+      <div className="border-b border-slate-700">
         <nav className="flex space-x-8">
           {[
             { id: 'dashboard', label: 'Dashboard' },
@@ -175,7 +175,7 @@ export default function Reports() {
               className={`py-2 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+                  : 'border-transparent text-slate-400 hover:text-slate-300'
               }`}
             >
               {tab.label}
@@ -248,7 +248,7 @@ export default function Reports() {
                 <div key={idx} className="flex-1 flex flex-col items-center">
                   <div className="w-full flex flex-col-reverse" style={{ height: '200px' }}>
                     <div 
-                      className="bg-green-500 rounded-t"
+                      className="bg-green-500/100 rounded-t"
                       style={{ height: `${completedHeight}%` }}
                       title={`Completed: ${day.completed}`}
                     />
@@ -258,7 +258,7 @@ export default function Reports() {
                       title={`Scrapped: ${day.scrapped}`}
                     />
                   </div>
-                  <div className="text-xs text-gray-500 mt-1 transform -rotate-45 origin-top-left">
+                  <div className="text-xs text-slate-400 mt-1 transform -rotate-45 origin-top-left">
                     {formatCentralDate(day.date, { month: 'short', day: 'numeric', year: undefined })}
                   </div>
                 </div>
@@ -267,7 +267,7 @@ export default function Reports() {
           </div>
           <div className="flex gap-4 mt-4 justify-center text-sm">
             <span className="flex items-center gap-1">
-              <span className="w-3 h-3 bg-green-500 rounded"></span> Completed
+              <span className="w-3 h-3 bg-green-500/100 rounded"></span> Completed
             </span>
             <span className="flex items-center gap-1">
               <span className="w-3 h-3 bg-red-400 rounded"></span> Scrapped
@@ -283,14 +283,14 @@ export default function Reports() {
               <div key={wc.work_center_id}>
                 <div className="flex justify-between text-sm mb-1">
                   <span className="font-medium">{wc.work_center_code}</span>
-                  <span className="text-gray-500">{wc.utilization_pct}%</span>
+                  <span className="text-slate-400">{wc.utilization_pct}%</span>
                 </div>
                 <div className="h-4 bg-gray-200 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full ${
-                      wc.utilization_pct > 80 ? 'bg-green-500' :
-                      wc.utilization_pct > 50 ? 'bg-blue-500' :
-                      wc.utilization_pct > 25 ? 'bg-yellow-500' :
+                      wc.utilization_pct > 80 ? 'bg-green-500/100' :
+                      wc.utilization_pct > 50 ? 'bg-blue-500/100' :
+                      wc.utilization_pct > 25 ? 'bg-yellow-500/100' :
                       'bg-red-400'
                     }`}
                     style={{ width: `${Math.min(wc.utilization_pct, 100)}%` }}
@@ -307,29 +307,29 @@ export default function Reports() {
         <div className="card">
           <h2 className="text-lg font-semibold mb-4">Quality Summary</h2>
           <div className="grid grid-cols-2 gap-4">
-            <div className="bg-gray-50 rounded-lg p-4 text-center">
+            <div className="bg-slate-800 rounded-lg p-4 text-center">
               <p className="text-3xl font-bold text-red-600">{quality?.total_ncrs}</p>
-              <p className="text-sm text-gray-600">Total NCRs</p>
+              <p className="text-sm text-slate-400">Total NCRs</p>
             </div>
-            <div className="bg-gray-50 rounded-lg p-4 text-center">
+            <div className="bg-slate-800 rounded-lg p-4 text-center">
               <p className="text-3xl font-bold text-orange-600">{quality?.open_ncrs}</p>
-              <p className="text-sm text-gray-600">Open NCRs</p>
+              <p className="text-sm text-slate-400">Open NCRs</p>
             </div>
-            <div className="bg-gray-50 rounded-lg p-4 text-center">
+            <div className="bg-slate-800 rounded-lg p-4 text-center">
               <p className="text-3xl font-bold text-blue-600">{quality?.receiving_total_qty}</p>
-              <p className="text-sm text-gray-600">Qty Received</p>
+              <p className="text-sm text-slate-400">Qty Received</p>
             </div>
-            <div className="bg-gray-50 rounded-lg p-4 text-center">
+            <div className="bg-slate-800 rounded-lg p-4 text-center">
               <p className="text-3xl font-bold text-purple-600">{quality?.receiving_reject_rate_pct.toFixed(2)}%</p>
-              <p className="text-sm text-gray-600">Receiving Reject Rate</p>
+              <p className="text-sm text-slate-400">Receiving Reject Rate</p>
             </div>
           </div>
           {quality && Object.keys(quality.ncr_by_source).length > 0 && (
             <div className="mt-4">
-              <h3 className="text-sm font-medium text-gray-700 mb-2">NCRs by Source</h3>
+              <h3 className="text-sm font-medium text-slate-300 mb-2">NCRs by Source</h3>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(quality.ncr_by_source).map(([source, count]) => (
-                  <span key={source} className="px-3 py-1 bg-gray-100 rounded-full text-sm">
+                  <span key={source} className="px-3 py-1 bg-slate-800/50 rounded-full text-sm">
                     {source.replace('_', ' ')}: {count}
                   </span>
                 ))}
@@ -371,7 +371,7 @@ export default function Reports() {
               </tbody>
             </table>
             {vendors.length === 0 && (
-              <p className="text-center text-gray-500 py-4">No vendor data available</p>
+              <p className="text-center text-slate-400 py-4">No vendor data available</p>
             )}
           </div>
         </div>
@@ -382,9 +382,9 @@ export default function Reports() {
         <h2 className="text-lg font-semibold mb-4">Work Orders by Status</h2>
         <div className="flex flex-wrap gap-4">
           {production && Object.entries(production.work_orders_by_status).map(([status, count]) => (
-            <div key={status} className="bg-gray-50 rounded-lg px-6 py-4 text-center min-w-24">
+            <div key={status} className="bg-slate-800 rounded-lg px-6 py-4 text-center min-w-24">
               <p className="text-2xl font-bold">{count}</p>
-              <p className="text-sm text-gray-600 capitalize">{status.replace('_', ' ')}</p>
+              <p className="text-sm text-slate-400 capitalize">{status.replace('_', ' ')}</p>
             </div>
           ))}
         </div>
@@ -400,7 +400,7 @@ export default function Reports() {
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
-                  <tr className="border-b bg-gray-50">
+                  <tr className="border-b bg-slate-800">
                     <th className="text-left py-3 px-4">Work Order</th>
                     <th className="text-left py-3 px-4">Part</th>
                     <th className="text-right py-3 px-4">Qty</th>
@@ -413,14 +413,14 @@ export default function Reports() {
                 </thead>
                 <tbody>
                   {costing.map((wo) => (
-                    <tr key={wo.work_order_id} className="border-b hover:bg-gray-50">
+                    <tr key={wo.work_order_id} className="border-b hover:bg-slate-800">
                       <td className="py-3 px-4">
                         <div className="font-medium text-werco-primary">{wo.work_order_number}</div>
-                        <div className="text-xs text-gray-500">{wo.customer_name || '-'}</div>
+                        <div className="text-xs text-slate-400">{wo.customer_name || '-'}</div>
                       </td>
                       <td className="py-3 px-4">
                         <div>{wo.part_number}</div>
-                        <div className="text-xs text-gray-500">{wo.part_name}</div>
+                        <div className="text-xs text-slate-400">{wo.part_name}</div>
                       </td>
                       <td className="py-3 px-4 text-right">{wo.quantity}</td>
                       <td className="py-3 px-4 text-right">{wo.estimated_hours.toFixed(1)}</td>
@@ -438,7 +438,7 @@ export default function Reports() {
                 </tbody>
               </table>
               {costing.length === 0 && (
-                <p className="text-center text-gray-500 py-8">No work order costing data available</p>
+                <p className="text-center text-slate-400 py-8">No work order costing data available</p>
               )}
             </div>
           </div>
@@ -446,19 +446,19 @@ export default function Reports() {
           {/* Cost Summary */}
           {costing.length > 0 && (
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="card bg-blue-50 border-blue-200 text-center">
+              <div className="card bg-blue-500/10 border-blue-500/30 text-center">
                 <p className="text-sm text-blue-600">Total Estimated</p>
-                <p className="text-2xl font-bold text-blue-800">
+                <p className="text-2xl font-bold text-blue-300">
                   ${costing.reduce((sum, wo) => sum + wo.estimated_total, 0).toLocaleString()}
                 </p>
               </div>
-              <div className="card bg-green-50 border-green-200 text-center">
+              <div className="card bg-green-500/10 border-green-500/30 text-center">
                 <p className="text-sm text-green-600">Total Actual</p>
-                <p className="text-2xl font-bold text-green-800">
+                <p className="text-2xl font-bold text-emerald-300">
                   ${costing.reduce((sum, wo) => sum + wo.actual_total, 0).toLocaleString()}
                 </p>
               </div>
-              <div className="card bg-purple-50 border-purple-200 text-center">
+              <div className="card bg-purple-500/10 border-purple-500/30 text-center">
                 <p className="text-sm text-purple-600">Total Hours</p>
                 <p className="text-2xl font-bold text-purple-800">
                   {costing.reduce((sum, wo) => sum + wo.actual_hours, 0).toFixed(1)}
@@ -466,14 +466,14 @@ export default function Reports() {
               </div>
               <div className={`card text-center ${
                 costing.reduce((sum, wo) => sum + wo.cost_variance, 0) > 0 
-                  ? 'bg-red-50 border-red-200' 
-                  : 'bg-green-50 border-green-200'
+                  ? 'bg-red-500/10 border-red-500/30' 
+                  : 'bg-green-500/10 border-green-500/30'
               }`}>
-                <p className="text-sm text-gray-600">Total Variance</p>
+                <p className="text-sm text-slate-400">Total Variance</p>
                 <p className={`text-2xl font-bold ${
                   costing.reduce((sum, wo) => sum + wo.cost_variance, 0) > 0 
-                    ? 'text-red-800' 
-                    : 'text-green-800'
+                    ? 'text-red-300' 
+                    : 'text-emerald-300'
                 }`}>
                   ${costing.reduce((sum, wo) => sum + wo.cost_variance, 0).toLocaleString()}
                 </p>
@@ -491,14 +491,14 @@ export default function Reports() {
             
             {timesheets.map((emp) => (
               <div key={emp.user_id} className="mb-6 last:mb-0">
-                <div className="flex justify-between items-center bg-gray-100 px-4 py-2 rounded-t-lg">
+                <div className="flex justify-between items-center bg-slate-800/50 px-4 py-2 rounded-t-lg">
                   <span className="font-semibold">{emp.employee_name}</span>
                   <span className="text-werco-primary font-bold">{emp.total_hours} hrs</span>
                 </div>
                 <div className="border border-t-0 rounded-b-lg overflow-hidden">
                   <table className="min-w-full text-sm">
                     <thead>
-                      <tr className="bg-gray-50">
+                      <tr className="bg-slate-800">
                         <th className="text-left py-2 px-4">Date</th>
                         <th className="text-left py-2 px-4">Work Order</th>
                         <th className="text-left py-2 px-4">Operation</th>
@@ -523,7 +523,7 @@ export default function Reports() {
             ))}
             
             {timesheets.length === 0 && (
-              <p className="text-center text-gray-500 py-8">No time entries found</p>
+              <p className="text-center text-slate-400 py-8">No time entries found</p>
             )}
           </div>
         </div>

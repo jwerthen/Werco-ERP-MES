@@ -206,9 +206,9 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
   if (!bom) {
     return (
       <div className="card text-center py-12">
-        <DocumentDuplicateIcon className="h-12 w-12 mx-auto text-gray-300 mb-4" />
-        <h3 className="text-lg font-medium text-gray-900 mb-2">No Bill of Materials</h3>
-        <p className="text-sm text-gray-500 mb-6 max-w-md mx-auto">
+        <DocumentDuplicateIcon className="h-12 w-12 mx-auto text-slate-600 mb-4" />
+        <h3 className="text-lg font-medium text-white mb-2">No Bill of Materials</h3>
+        <p className="text-sm text-slate-400 mb-6 max-w-md mx-auto">
           Create a BOM to define the components, hardware, and materials needed to build this part.
         </p>
         <div className="flex justify-center gap-3">
@@ -242,21 +242,21 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div className="flex items-center gap-3">
           <StatusBadge status={bom.status} />
-          <span className="text-sm text-gray-500">Rev {bom.revision}</span>
-          <span className="text-sm text-gray-500">{bom.items.length} item{bom.items.length !== 1 ? 's' : ''}</span>
+          <span className="text-sm text-slate-400">Rev {bom.revision}</span>
+          <span className="text-sm text-slate-400">{bom.items.length} item{bom.items.length !== 1 ? 's' : ''}</span>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {/* View Toggle */}
-          <div className="flex rounded-lg border border-gray-300 overflow-hidden">
+          <div className="flex rounded-lg border border-slate-600 overflow-hidden">
             <button
               onClick={() => setViewMode('single')}
-              className={`px-3 py-1.5 text-xs font-medium ${viewMode === 'single' ? 'bg-werco-navy-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+              className={`px-3 py-1.5 text-xs font-medium ${viewMode === 'single' ? 'bg-werco-navy-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
             >
               Single Level
             </button>
             <button
               onClick={() => setViewMode('exploded')}
-              className={`px-3 py-1.5 text-xs font-medium ${viewMode === 'exploded' ? 'bg-werco-navy-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+              className={`px-3 py-1.5 text-xs font-medium ${viewMode === 'exploded' ? 'bg-werco-navy-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
             >
               Multi-Level
             </button>
@@ -293,22 +293,22 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       {/* Items Table */}
       <div className="card overflow-hidden p-0">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800">
               <tr>
-                {viewMode === 'exploded' && <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Level</th>}
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                {viewMode === 'exploded' && <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Ext Qty</th>}
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">UOM</th>
+                {viewMode === 'exploded' && <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Level</th>}
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Item #</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Category</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                {viewMode === 'exploded' && <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Ext Qty</th>}
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">UOM</th>
                 {viewMode === 'single' && bom.status === 'draft' && (
                   <th className="px-4 py-3 w-16" />
                 )}
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="bg-[#151b28] divide-y divide-slate-700">
               {viewMode === 'single' ? (
                 bom.items.length > 0 ? (
                   bom.items.map(item => (
@@ -322,7 +322,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={7} className="py-12 text-center text-gray-500">
+                    <td colSpan={7} className="py-12 text-center text-slate-400">
                       No items yet. Add components to build up this BOM.
                     </td>
                   </tr>
@@ -340,7 +340,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={7} className="py-12 text-center text-gray-500">
+                    <td colSpan={7} className="py-12 text-center text-slate-400">
                       No items to display.
                     </td>
                   </tr>
@@ -354,14 +354,14 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       {/* Add Item Modal */}
       {showAddItem && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAddItem(false)}>
-          <div className="bg-white rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold mb-4">Add BOM Item</h3>
+          <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-white mb-4">Add BOM Item</h3>
             <form onSubmit={handleAddItem} className="space-y-4">
               {/* Part Search */}
               <div>
                 <label className="label">Component Part</label>
                 <div className="relative">
-                  <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
                   <input
                     type="text"
                     value={partSearch}
@@ -372,7 +372,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                   />
                 </div>
                 {partSearch && (
-                  <div className="mt-1 max-h-40 overflow-y-auto border border-gray-200 rounded-lg">
+                  <div className="mt-1 max-h-40 overflow-y-auto border border-slate-700 rounded-lg">
                     {filteredParts.map(p => (
                       <button
                         key={p.id}
@@ -381,12 +381,12 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                           setNewItem(prev => ({ ...prev, component_part_id: p.id }));
                           setPartSearch(`${p.part_number} - ${p.name}`);
                         }}
-                        className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${
-                          p.id === newItem.component_part_id ? 'bg-blue-50' : ''
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-700/50 ${
+                          p.id === newItem.component_part_id ? 'bg-blue-500/10' : ''
                         }`}
                       >
-                        <span className="font-medium">{p.part_number}</span>
-                        <span className="text-gray-500 ml-2">{p.name}</span>
+                        <span className="font-medium text-slate-200">{p.part_number}</span>
+                        <span className="text-slate-400 ml-2">{p.name}</span>
                       </button>
                     ))}
                   </div>
@@ -518,7 +518,7 @@ function SingleLevelRow({ item, isDraft, onDelete, onNavigate }: {
   onNavigate: (partId: number) => void;
 }) {
   return (
-    <tr className={`hover:bg-gray-50 ${item.line_type === 'hardware' ? 'bg-amber-50/30' : ''}`}>
+    <tr className={`hover:bg-slate-700/50 ${item.line_type === 'hardware' ? 'bg-amber-500/5' : ''}`}>
       <td className="px-4 py-3 text-sm font-medium">{item.find_number || item.item_number}</td>
       <td className="px-4 py-3">
         <div className="flex items-center gap-2">
@@ -529,9 +529,9 @@ function SingleLevelRow({ item, isDraft, onDelete, onNavigate }: {
             >
               {item.component_part?.part_number}
             </button>
-            <div className="text-xs text-gray-500">{item.component_part?.name}</div>
+            <div className="text-xs text-slate-400">{item.component_part?.name}</div>
             {item.torque_spec && <div className="text-xs text-amber-600">Torque: {item.torque_spec}</div>}
-            {item.installation_notes && <div className="text-xs text-gray-400 italic">{item.installation_notes}</div>}
+            {item.installation_notes && <div className="text-xs text-slate-500 italic">{item.installation_notes}</div>}
           </div>
           {item.component_part?.has_bom && (
             <DocumentDuplicateIcon className="h-4 w-4 text-blue-400 flex-shrink-0" title="Has BOM" />
@@ -544,10 +544,10 @@ function SingleLevelRow({ item, isDraft, onDelete, onNavigate }: {
         </span>
       </td>
       <td className="px-4 py-3 text-right text-sm">{item.quantity}</td>
-      <td className="px-4 py-3 text-center text-sm text-gray-500">{item.unit_of_measure}</td>
+      <td className="px-4 py-3 text-center text-sm text-slate-400">{item.unit_of_measure}</td>
       {isDraft && (
         <td className="px-4 py-3 text-center">
-          <button onClick={() => onDelete(item.id)} className="text-gray-400 hover:text-red-500 p-1">
+          <button onClick={() => onDelete(item.id)} className="text-slate-500 hover:text-red-400 p-1">
             <TrashIcon className="h-4 w-4" />
           </button>
         </td>
@@ -567,24 +567,24 @@ function ExplodedRow({ item, depth, expandedItems, onToggle }: {
 
   return (
     <>
-      <tr className="hover:bg-gray-50">
+      <tr className="hover:bg-slate-700/50">
         <td className="px-4 py-3" style={{ paddingLeft: `${16 + depth * 24}px` }}>
           <div className="flex items-center">
             {hasChildren ? (
               <button onClick={() => onToggle(item.id)} className="mr-2">
                 {isExpanded
-                  ? <ChevronDownIcon className="h-4 w-4 text-gray-500" />
-                  : <ChevronRightIcon className="h-4 w-4 text-gray-500" />
+                  ? <ChevronDownIcon className="h-4 w-4 text-slate-400" />
+                  : <ChevronRightIcon className="h-4 w-4 text-slate-400" />
                 }
               </button>
             ) : <span className="w-6" />}
-            <span className="text-xs text-gray-400">L{item.level || 0}</span>
+            <span className="text-xs text-slate-500">L{item.level || 0}</span>
           </div>
         </td>
         <td className="px-4 py-3 text-sm font-medium">{item.find_number || item.item_number}</td>
         <td className="px-4 py-3">
           <div className="font-medium text-sm text-werco-navy-600">{item.component_part?.part_number}</div>
-          <div className="text-xs text-gray-500">{item.component_part?.name}</div>
+          <div className="text-xs text-slate-400">{item.component_part?.name}</div>
         </td>
         <td className="px-4 py-3">
           <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${lineTypeColors[item.line_type || 'component']}`}>
@@ -593,7 +593,7 @@ function ExplodedRow({ item, depth, expandedItems, onToggle }: {
         </td>
         <td className="px-4 py-3 text-right text-sm">{item.quantity}</td>
         <td className="px-4 py-3 text-right text-sm">{item.extended_quantity?.toFixed(3) || item.quantity}</td>
-        <td className="px-4 py-3 text-center text-sm text-gray-500">{item.unit_of_measure}</td>
+        <td className="px-4 py-3 text-center text-sm text-slate-400">{item.unit_of_measure}</td>
       </tr>
       {hasChildren && isExpanded && item.children!.map(child => (
         <ExplodedRow

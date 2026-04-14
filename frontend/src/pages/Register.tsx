@@ -41,7 +41,7 @@ const BlueprintGrid = () => (
 const AnimatedBackground = () => (
   <div className="absolute inset-0 overflow-hidden pointer-events-none">
     {/* Soft gradient orbs */}
-    <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-blue-500/8 rounded-full blur-3xl animate-pulse" />
+    <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-blue-500/100/8 rounded-full blur-3xl animate-pulse" />
     <div
       className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-600/6 rounded-full blur-3xl animate-pulse"
       style={{ animationDelay: '1s' }}
@@ -134,12 +134,12 @@ export default function Register() {
 
   if (success) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-blue-50/40 p-8">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0d1117] via-[#151b28] to-[#1a1f2e] p-8">
         <style>{`
           .glass-card {
-            background: rgba(255, 255, 255, 0.97);
+            background: rgba(21, 27, 40, 0.95);
             backdrop-filter: blur(20px);
-            border: 1px solid rgba(226, 232, 240, 0.8);
+            border: 1px solid rgba(51, 65, 85, 0.5);
           }
         `}</style>
         <div className="glass-card rounded-3xl shadow-xl p-10 max-w-md w-full text-center relative overflow-hidden">
@@ -153,10 +153,10 @@ export default function Register() {
           >
             <ShieldCheckIcon className="h-8 w-8 text-green-400" />
           </div>
-          <h2 className="text-2xl font-bold text-slate-800 mb-3">
+          <h2 className="text-2xl font-bold text-slate-100 mb-3">
             {success.isFirstUser ? 'System Ready' : 'Request Submitted'}
           </h2>
-          <p className="text-slate-600 mb-8">{success.message}</p>
+          <p className="text-slate-400 mb-8">{success.message}</p>
           <button
             onClick={() => navigate('/login')}
             className="du-btn du-btn-primary du-btn-block h-14 normal-case text-base font-semibold"
@@ -182,9 +182,9 @@ export default function Register() {
           100% { transform: translateX(50%); }
         }
         .glass-card {
-          background: rgba(255, 255, 255, 0.97);
+          background: rgba(21, 27, 40, 0.95);
           backdrop-filter: blur(20px);
-          border: 1px solid rgba(226, 232, 240, 0.8);
+          border: 1px solid rgba(51, 65, 85, 0.5);
         }
       `}</style>
 
@@ -234,15 +234,15 @@ export default function Register() {
 
             {/* Key metrics - matching wercomfg.com */}
             <div className="grid grid-cols-3 gap-4 pt-2">
-              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+              <div className="text-center p-3 rounded-xl bg-[#151b28]/[0.04] border border-white/[0.08]">
                 <div className="text-2xl font-bold text-white">24hr</div>
                 <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">RFQ Response</div>
               </div>
-              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+              <div className="text-center p-3 rounded-xl bg-[#151b28]/[0.04] border border-white/[0.08]">
                 <div className="text-2xl font-bold text-white">95%+</div>
                 <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">On-Time</div>
               </div>
-              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+              <div className="text-center p-3 rounded-xl bg-[#151b28]/[0.04] border border-white/[0.08]">
                 <div className="text-2xl font-bold text-white">99%+</div>
                 <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">First-Pass</div>
               </div>
@@ -250,27 +250,27 @@ export default function Register() {
 
             {/* Certification badges */}
             <div className="flex flex-wrap items-center gap-3 pt-4">
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#151b28]/[0.04] border border-white/[0.08]">
                 <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
                 <span className="text-sm font-medium text-white/90">AS9100D</span>
               </div>
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#151b28]/[0.04] border border-white/[0.08]">
                 <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
                 <span className="text-sm font-medium text-white/90">ISO 9001</span>
               </div>
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#151b28]/[0.04] border border-white/[0.08]">
                 <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
                 <span className="text-sm font-medium text-white/90">ITAR</span>
               </div>
             </div>
           </div>
 
-          <p className="text-slate-500 text-sm">&copy; 2026 Werco Manufacturing. All rights reserved.</p>
+          <p className="text-slate-400 text-sm">&copy; 2026 Werco Manufacturing. All rights reserved.</p>
         </div>
       </div>
 
       {/* Right side - Registration form */}
-      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-blue-50/40 p-8 relative overflow-y-auto">
+      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-[#0d1117] via-[#151b28] to-[#1a1f2e] p-8 relative overflow-y-auto">
         {/* Subtle dot pattern */}
         <div className="absolute inset-0 opacity-[0.02]">
           <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
@@ -287,7 +287,7 @@ export default function Register() {
           {/* Mobile logo */}
           <div className="lg:hidden text-center mb-8">
             <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-14 mx-auto mb-2" />
-            <p className="text-slate-500 text-sm">Manufacturing Execution System</p>
+            <p className="text-slate-400 text-sm">Manufacturing Execution System</p>
           </div>
 
           {/* Registration card */}
@@ -310,8 +310,8 @@ export default function Register() {
                   <UserPlusIcon className="h-8 w-8 text-blue-300" />
                 </div>
               </div>
-              <h2 className="text-2xl font-bold text-slate-800">Create Account</h2>
-              <p className="text-slate-500 mt-2">Set up your Werco ERP account</p>
+              <h2 className="text-2xl font-bold text-slate-100">Create Account</h2>
+              <p className="text-slate-400 mt-2">Set up your Werco ERP account</p>
               {isSetupMode && (
                 <p className="text-xs text-blue-600 mt-2 font-medium">
                   First user setup &mdash; this account will have administrator privileges.
@@ -336,7 +336,7 @@ export default function Register() {
               {/* First Name / Last Name row */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label htmlFor="firstName" className="block text-sm font-medium text-slate-700">
+                  <label htmlFor="firstName" className="block text-sm font-medium text-slate-300">
                     First Name
                   </label>
                   <div className="relative">
@@ -355,7 +355,7 @@ export default function Register() {
                       onChange={e => setFirstName(e.target.value)}
                       onFocus={() => setFocusedField('firstName')}
                       onBlur={() => setFocusedField(null)}
-                      className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-white"
+                      className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-[#151b28]"
                       placeholder="John"
                       autoComplete="given-name"
                     />
@@ -363,7 +363,7 @@ export default function Register() {
                 </div>
 
                 <div className="space-y-2">
-                  <label htmlFor="lastName" className="block text-sm font-medium text-slate-700">
+                  <label htmlFor="lastName" className="block text-sm font-medium text-slate-300">
                     Last Name
                   </label>
                   <div className="relative">
@@ -382,7 +382,7 @@ export default function Register() {
                       onChange={e => setLastName(e.target.value)}
                       onFocus={() => setFocusedField('lastName')}
                       onBlur={() => setFocusedField(null)}
-                      className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-white"
+                      className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-[#151b28]"
                       placeholder="Doe"
                       autoComplete="family-name"
                     />
@@ -392,7 +392,7 @@ export default function Register() {
 
               {/* Email field */}
               <div className="space-y-2">
-                <label htmlFor="email" className="block text-sm font-medium text-slate-700">
+                <label htmlFor="email" className="block text-sm font-medium text-slate-300">
                   Email Address
                 </label>
                 <div className="relative">
@@ -411,7 +411,7 @@ export default function Register() {
                     onChange={e => setEmail(e.target.value)}
                     onFocus={() => setFocusedField('email')}
                     onBlur={() => setFocusedField(null)}
-                    className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-white"
+                    className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-[#151b28]"
                     placeholder="you@wercomfg.com"
                     autoComplete="email"
                   />
@@ -420,7 +420,7 @@ export default function Register() {
 
               {/* Employee ID field (optional) */}
               <div className="space-y-2">
-                <label htmlFor="employeeId" className="block text-sm font-medium text-slate-700">
+                <label htmlFor="employeeId" className="block text-sm font-medium text-slate-300">
                   Employee ID <span className="text-slate-400 font-normal">(optional)</span>
                 </label>
                 <div className="relative">
@@ -438,7 +438,7 @@ export default function Register() {
                     onChange={e => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                     onFocus={() => setFocusedField('employeeId')}
                     onBlur={() => setFocusedField(null)}
-                    className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-white"
+                    className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-[#151b28]"
                     placeholder="Auto-generated if left blank"
                     autoComplete="off"
                   />
@@ -447,7 +447,7 @@ export default function Register() {
 
               {/* Password field */}
               <div className="space-y-2">
-                <label htmlFor="password" className="block text-sm font-medium text-slate-700">
+                <label htmlFor="password" className="block text-sm font-medium text-slate-300">
                   Password
                 </label>
                 <div className="relative">
@@ -467,26 +467,26 @@ export default function Register() {
                     onChange={e => setPassword(e.target.value)}
                     onFocus={() => setFocusedField('password')}
                     onBlur={() => setFocusedField(null)}
-                    className="du-input du-input-bordered w-full h-12 pl-12 pr-12 bg-white"
+                    className="du-input du-input-bordered w-full h-12 pl-12 pr-12 bg-[#151b28]"
                     placeholder="Create a password"
                     autoComplete="new-password"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
-                    className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-600 transition-colors"
+                    className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-400 transition-colors"
                   >
                     {showPassword ? <EyeSlashIcon className="h-5 w-5" /> : <EyeIcon className="h-5 w-5" />}
                   </button>
                 </div>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-slate-400">
                   Min 12 characters with uppercase, lowercase, number, and special character
                 </p>
               </div>
 
               {/* Confirm Password field */}
               <div className="space-y-2">
-                <label htmlFor="confirmPassword" className="block text-sm font-medium text-slate-700">
+                <label htmlFor="confirmPassword" className="block text-sm font-medium text-slate-300">
                   Confirm Password
                 </label>
                 <div className="relative">
@@ -506,14 +506,14 @@ export default function Register() {
                     onChange={e => setConfirmPassword(e.target.value)}
                     onFocus={() => setFocusedField('confirmPassword')}
                     onBlur={() => setFocusedField(null)}
-                    className="du-input du-input-bordered w-full h-12 pl-12 pr-12 bg-white"
+                    className="du-input du-input-bordered w-full h-12 pl-12 pr-12 bg-[#151b28]"
                     placeholder="Re-enter password"
                     autoComplete="new-password"
                   />
                   <button
                     type="button"
                     onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                    className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-600 transition-colors"
+                    className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-400 transition-colors"
                   >
                     {showConfirmPassword ? <EyeSlashIcon className="h-5 w-5" /> : <EyeIcon className="h-5 w-5" />}
                   </button>
@@ -543,8 +543,8 @@ export default function Register() {
             </form>
 
             {/* Link back to login */}
-            <div className="mt-8 pt-6 border-t border-slate-100">
-              <p className="text-center text-sm text-slate-500">
+            <div className="mt-8 pt-6 border-t border-slate-700/30">
+              <p className="text-center text-sm text-slate-400">
                 Already have an account?{' '}
                 <Link to="/login" className="du-link du-link-primary font-semibold">
                   Sign in
@@ -555,15 +555,15 @@ export default function Register() {
 
           {/* Mobile compliance badges */}
           <div className="lg:hidden flex flex-wrap items-center justify-center gap-3 mt-8">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">AS9100D</span>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">ISO 9001</span>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200 text-slate-600">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">ITAR</span>
             </div>

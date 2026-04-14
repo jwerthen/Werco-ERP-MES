@@ -46,13 +46,13 @@ interface Part {
 }
 
 const statusColors: Record<string, string> = {
-  draft: 'bg-gray-100 text-gray-800',
-  pending: 'bg-yellow-100 text-yellow-800',
-  sent: 'bg-blue-100 text-blue-800',
-  accepted: 'bg-green-100 text-green-800',
-  rejected: 'bg-red-100 text-red-800',
-  expired: 'bg-gray-100 text-gray-600',
-  converted: 'bg-emerald-100 text-emerald-800',
+  draft: 'bg-slate-800 text-slate-100',
+  pending: 'bg-yellow-500/20 text-yellow-300',
+  sent: 'bg-blue-500/20 text-blue-300',
+  accepted: 'bg-green-500/20 text-green-300',
+  rejected: 'bg-red-500/20 text-red-300',
+  expired: 'bg-slate-800 text-slate-400',
+  converted: 'bg-emerald-500/20 text-emerald-300',
 };
 
 export default function Quotes() {
@@ -175,7 +175,7 @@ export default function Quotes() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Quotes & Estimates</h1>
+        <h1 className="text-2xl font-bold text-white">Quotes & Estimates</h1>
         <div className="flex gap-2">
           <button onClick={() => navigate('/rfq-packages/new')} className="btn-secondary flex items-center">
             <SparklesIcon className="h-5 w-5 mr-2" />
@@ -191,30 +191,30 @@ export default function Quotes() {
       {/* Quotes Table */}
       <div className="card">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800/50">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Quote #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Valid Until</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Lines</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Quote #</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Date</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Valid Until</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Total</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Lines</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
+            <tbody className="divide-y divide-slate-700">
               {quotes.map((q) => (
-                <tr key={q.id} className="hover:bg-gray-50">
+                <tr key={q.id} className="hover:bg-slate-800/50">
                   <td className="px-4 py-3">
                     <span className="font-medium text-werco-primary">{q.quote_number}</span>
-                    <span className="text-gray-500 text-sm ml-1">Rev {q.revision}</span>
+                    <span className="text-slate-400 text-sm ml-1">Rev {q.revision}</span>
                   </td>
                   <td className="px-4 py-3">
                     <div className="font-medium">{q.customer_name}</div>
                     {q.customer_contact && (
-                      <div className="text-sm text-gray-500">{q.customer_contact}</div>
+                      <div className="text-sm text-slate-400">{q.customer_contact}</div>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -237,7 +237,7 @@ export default function Quotes() {
                       {q.status === 'draft' && (
                         <button
                           onClick={() => handleSend(q.id)}
-                          className="text-blue-600 hover:text-blue-800"
+                          className="text-blue-600 hover:text-blue-300"
                           title="Send to Customer"
                         >
                           <PaperAirplaneIcon className="h-5 w-5" />
@@ -246,14 +246,14 @@ export default function Quotes() {
                       {(q.status === 'sent' || q.status === 'accepted') && !q.work_order_id && (
                         <button
                           onClick={() => handleConvert(q.id)}
-                          className="text-green-600 hover:text-green-800"
+                          className="text-green-600 hover:text-green-300"
                           title="Convert to Work Order"
                         >
                           <ArrowRightIcon className="h-5 w-5" />
                         </button>
                       )}
                       {q.work_order_id && (
-                        <span className="text-xs text-gray-500">WO Created</span>
+                        <span className="text-xs text-slate-400">WO Created</span>
                       )}
                     </div>
                   </td>
@@ -262,7 +262,7 @@ export default function Quotes() {
             </tbody>
           </table>
           {quotes.length === 0 && (
-            <p className="text-center text-gray-500 py-8">No quotes yet</p>
+            <p className="text-center text-slate-400 py-8">No quotes yet</p>
           )}
         </div>
       </div>
@@ -270,7 +270,7 @@ export default function Quotes() {
       {/* Create Quote Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-semibold mb-4">Create Quote</h3>
             <form onSubmit={handleCreate} className="space-y-4">
               {/* Customer Info */}
@@ -335,7 +335,7 @@ export default function Quotes() {
                   </button>
                 </div>
                 {newQuote.lines.length > 0 && (
-                  <div className="flex gap-2 mb-1 text-xs text-gray-500 font-medium">
+                  <div className="flex gap-2 mb-1 text-xs text-slate-400 font-medium">
                     <div className="w-48">Part</div>
                     <div className="flex-1">Description</div>
                     <div className="w-20">Qty</div>
@@ -390,13 +390,13 @@ export default function Quotes() {
                     <div className="w-24 text-right pt-2 font-medium">
                       ${(line.quantity * line.unit_price).toFixed(2)}
                     </div>
-                    <button type="button" onClick={() => removeLine(idx)} className="text-red-500 hover:text-red-700 mt-2">
+                    <button type="button" onClick={() => removeLine(idx)} className="text-red-500 hover:text-red-400 mt-2">
                       &times;
                     </button>
                   </div>
                 ))}
                 {newQuote.lines.length === 0 && (
-                  <p className="text-gray-500 text-sm">Click "+ Add Line" to add items</p>
+                  <p className="text-slate-400 text-sm">Click "+ Add Line" to add items</p>
                 )}
                 {newQuote.lines.length > 0 && (
                   <div className="text-right mt-4 pt-4 border-t">

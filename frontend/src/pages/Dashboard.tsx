@@ -27,33 +27,33 @@ import {
 } from '@heroicons/react/24/solid';
 
 const workCenterTypeColors: Record<string, string> = {
-  fabrication: 'bg-blue-500',
-  cnc_machining: 'bg-purple-500',
+  fabrication: 'bg-blue-500/100',
+  cnc_machining: 'bg-purple-500/100',
   laser: 'bg-werco-navy-600',
-  press_brake: 'bg-indigo-500',
-  paint: 'bg-amber-500',
-  powder_coating: 'bg-orange-500',
-  assembly: 'bg-emerald-500',
-  welding: 'bg-red-500',
+  press_brake: 'bg-indigo-500/100',
+  paint: 'bg-amber-500/100',
+  powder_coating: 'bg-orange-500/100',
+  assembly: 'bg-emerald-500/100',
+  welding: 'bg-red-500/100',
   inspection: 'bg-werco-navy-600',
-  shipping: 'bg-slate-500',
+  shipping: 'bg-slate-800/500',
 };
 
 const statusColors: Record<string, { bg: string; dot: string; text: string }> = {
-  available: { bg: 'bg-emerald-50', dot: 'bg-emerald-500', text: 'text-emerald-700' },
-  in_use: { bg: 'bg-blue-50', dot: 'bg-blue-500', text: 'text-blue-700' },
-  maintenance: { bg: 'bg-amber-50', dot: 'bg-amber-500', text: 'text-amber-700' },
-  offline: { bg: 'bg-red-50', dot: 'bg-red-500', text: 'text-red-700' },
+  available: { bg: 'bg-emerald-500/10', dot: 'bg-emerald-500/100', text: 'text-emerald-400' },
+  in_use: { bg: 'bg-blue-500/10', dot: 'bg-blue-500/100', text: 'text-blue-400' },
+  maintenance: { bg: 'bg-amber-500/10', dot: 'bg-amber-500/100', text: 'text-amber-400' },
+  offline: { bg: 'bg-red-500/10', dot: 'bg-red-500/100', text: 'text-red-400' },
 };
 
 const roleBadgeClasses: Record<string, string> = {
-  admin: 'bg-slate-100 text-slate-700',
-  manager: 'bg-indigo-100 text-indigo-700',
-  supervisor: 'bg-blue-100 text-blue-700',
-  operator: 'bg-emerald-100 text-emerald-700',
-  quality: 'bg-amber-100 text-amber-700',
-  shipping: 'bg-blue-100 text-werco-navy-700',
-  viewer: 'bg-slate-100 text-slate-600',
+  admin: 'bg-slate-800/50 text-slate-300',
+  manager: 'bg-indigo-500/20 text-indigo-400',
+  supervisor: 'bg-blue-500/20 text-blue-400',
+  operator: 'bg-emerald-500/20 text-emerald-400',
+  quality: 'bg-amber-500/20 text-amber-400',
+  shipping: 'bg-blue-500/20 text-werco-navy-700',
+  viewer: 'bg-slate-800/50 text-slate-400',
 };
 
 interface Alert {
@@ -80,7 +80,7 @@ const formatElapsed = (clockIn: string, nowMs: number) => {
 };
 
 const getRoleBadgeClass = (role?: string) => {
-  return roleBadgeClasses[role || 'viewer'] || 'bg-slate-100 text-slate-700';
+  return roleBadgeClasses[role || 'viewer'] || 'bg-slate-800/50 text-slate-300';
 };
 
 const getEntryTypeLabel = (entryType?: string) => {
@@ -289,7 +289,7 @@ export default function Dashboard() {
             <h1 className="page-title">Dashboard</h1>
             {/* Data changed indicator */}
             {dataChanged && (
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 animate-pulse">
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-300 animate-pulse">
                 Updated
               </span>
             )}
@@ -336,16 +336,16 @@ export default function Dashboard() {
                 className={`
                   group flex items-center gap-4 p-4 rounded-xl border transition-all duration-200
                   ${alert.type === 'error' 
-                    ? 'bg-red-50 border-red-200 text-red-800 hover:bg-red-100' 
+                    ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/100/20' 
                     : alert.type === 'warning'
-                    ? 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
-                    : 'bg-blue-50 border-blue-200 text-blue-800 hover:bg-blue-100'
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/100/20'
+                    : 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/100/20'
                   }
                 `}
               >
                 <div className={`
                   p-2 rounded-lg
-                  ${alert.type === 'error' ? 'bg-red-100' : alert.type === 'warning' ? 'bg-amber-100' : 'bg-blue-100'}
+                  ${alert.type === 'error' ? 'bg-red-500/20' : alert.type === 'warning' ? 'bg-amber-500/20' : 'bg-blue-500/20'}
                 `}>
                   <Icon className="h-5 w-5" />
                 </div>
@@ -361,7 +361,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 xl:grid-cols-3 gap-4" data-tour="dashboard-stats">
         <StatCard
           icon={ClipboardDocumentListIcon}
-          iconBg="bg-blue-100"
+          iconBg="bg-blue-500/20"
           iconColor="text-blue-600"
           label="Active Work Orders"
           value={data?.summary.active_work_orders || 0}
@@ -369,7 +369,7 @@ export default function Dashboard() {
         />
         <StatCard
           icon={SignalIcon}
-          iconBg="bg-blue-100"
+          iconBg="bg-blue-500/20"
           iconColor="text-werco-navy-600"
           label="Signed In Now"
           value={data?.summary.signed_in_users || 0}
@@ -377,7 +377,7 @@ export default function Dashboard() {
         />
         <StatCard
           icon={UserGroupIcon}
-          iconBg="bg-emerald-100"
+          iconBg="bg-emerald-500/20"
           iconColor="text-emerald-600"
           label="Checked In Now"
           value={data?.summary.checked_in_users || 0}
@@ -386,7 +386,7 @@ export default function Dashboard() {
         />
         <StatCard
           icon={CalendarIcon}
-          iconBg="bg-amber-100"
+          iconBg="bg-amber-500/20"
           iconColor="text-amber-600"
           label="Due Today"
           value={data?.summary.due_today || 0}
@@ -394,7 +394,7 @@ export default function Dashboard() {
         />
         <StatCard
           icon={ExclamationTriangleIcon}
-          iconBg={data?.summary.overdue ? "bg-red-100" : "bg-emerald-100"}
+          iconBg={data?.summary.overdue ? "bg-red-500/20" : "bg-emerald-500/20"}
           iconColor={data?.summary.overdue ? "text-red-600" : "text-emerald-600"}
           label="Overdue"
           value={data?.summary.overdue || 0}
@@ -403,8 +403,8 @@ export default function Dashboard() {
         />
         <StatCard
           icon={UsersIcon}
-          iconBg={(data?.summary.idle_signed_in_users || 0) > 0 ? "bg-amber-100" : "bg-slate-100"}
-          iconColor={(data?.summary.idle_signed_in_users || 0) > 0 ? "text-amber-600" : "text-slate-600"}
+          iconBg={(data?.summary.idle_signed_in_users || 0) > 0 ? "bg-amber-500/20" : "bg-slate-800/50"}
+          iconColor={(data?.summary.idle_signed_in_users || 0) > 0 ? "text-amber-600" : "text-slate-400"}
           label="Signed In, Idle"
           value={data?.summary.idle_signed_in_users || 0}
           subtitle="Not clocked into work"
@@ -415,7 +415,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           icon={WrenchScrewdriverIcon}
-          iconBg={equipmentDue > 0 ? "bg-amber-100" : "bg-emerald-100"}
+          iconBg={equipmentDue > 0 ? "bg-amber-500/20" : "bg-emerald-500/20"}
           iconColor={equipmentDue > 0 ? "text-amber-600" : "text-emerald-600"}
           label="Calibration Due"
           value={equipmentDue}
@@ -424,7 +424,7 @@ export default function Dashboard() {
         />
         <StatCard
           icon={CubeIcon}
-          iconBg={lowInventory > 0 ? "bg-red-100" : "bg-emerald-100"}
+          iconBg={lowInventory > 0 ? "bg-red-500/20" : "bg-emerald-500/20"}
           iconColor={lowInventory > 0 ? "text-red-600" : "text-emerald-600"}
           label="Low Stock Items"
           value={lowInventory}
@@ -433,7 +433,7 @@ export default function Dashboard() {
         />
         <StatCard
           icon={CheckCircleIcon}
-          iconBg="bg-emerald-100"
+          iconBg="bg-emerald-500/20"
           iconColor="text-emerald-600"
           label="Completed Today"
           value={data?.recent_completions?.length || 0}
@@ -441,7 +441,7 @@ export default function Dashboard() {
         />
         <StatCard
           icon={ShieldExclamationIcon}
-          iconBg={openNCRs > 0 ? "bg-orange-100" : "bg-emerald-100"}
+          iconBg={openNCRs > 0 ? "bg-orange-500/20" : "bg-emerald-500/20"}
           iconColor={openNCRs > 0 ? "text-orange-600" : "text-emerald-600"}
           label="Open NCRs"
           value={openNCRs}
@@ -460,10 +460,10 @@ export default function Dashboard() {
         </div>
 
         <div className="mb-4 flex flex-wrap gap-2 text-xs">
-          <span className="rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-700">
+          <span className="rounded-full bg-slate-800/50 px-3 py-1 font-medium text-slate-300">
             Signed in = active authenticated ERP session
           </span>
-          <span className="rounded-full bg-emerald-100 px-3 py-1 font-medium text-emerald-700">
+          <span className="rounded-full bg-emerald-500/20 px-3 py-1 font-medium text-emerald-400">
             Checked in = active time clock entry
           </span>
         </div>
@@ -517,7 +517,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {data?.work_centers.map((wc: WorkCenterStatus) => {
             const statusStyle = statusColors[wc.status] || statusColors.offline;
-            const typeColor = workCenterTypeColors[wc.type] || 'bg-slate-500';
+            const typeColor = workCenterTypeColors[wc.type] || 'bg-slate-800/500';
             
             return (
               <div 
@@ -565,7 +565,7 @@ export default function Dashboard() {
                   {wc.active_people.length > 0 ? (
                     <div className="space-y-2">
                       {wc.active_people.map((person) => (
-                        <div key={`${wc.id}-${person.user_id}-${person.clock_in}`} className="rounded-lg bg-white/70 p-3">
+                        <div key={`${wc.id}-${person.user_id}-${person.clock_in}`} className="rounded-lg bg-[#151b28]/70 p-3">
                           <div className="flex items-center justify-between gap-3">
                             <div>
                               <p className="font-medium text-surface-800">{person.name}</p>
@@ -603,7 +603,7 @@ export default function Dashboard() {
               <SignedInUserRow key={user.id} user={user} />
             ))}
             {idleSignedInUsers.length > 0 && (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-300">
                 <p className="font-semibold">Signed in but not on a job</p>
                 <p className="mt-1">{idleSignedInUsers.map((user) => user.name).join(', ')}</p>
               </div>
@@ -635,7 +635,7 @@ export default function Dashboard() {
                 className="flex items-center justify-between py-4 first:pt-0 last:pb-0"
               >
                 <div className="flex items-center gap-4">
-                  <div className="p-2 rounded-lg bg-emerald-100">
+                  <div className="p-2 rounded-lg bg-emerald-500/20">
                     <CheckCircleSolid className="h-5 w-5 text-emerald-600" />
                   </div>
                   <div>
@@ -673,7 +673,7 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
   const isOverdue = Boolean(dueDate && isDateBeforeTodayInCentral(dueDate));
 
   return (
-    <div className="rounded-2xl border border-surface-200 bg-white p-5 shadow-sm">
+    <div className="rounded-2xl border border-surface-200 bg-[#151b28] p-5 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
@@ -690,12 +690,12 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
             {assignment.user.department ? ` • ${assignment.user.department}` : ''}
           </p>
         </div>
-        <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+        <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-400">
           {getEntryTypeLabel(assignment.entry_type)}
         </span>
       </div>
 
-      <div className="mt-4 rounded-xl bg-slate-50 p-4">
+      <div className="mt-4 rounded-xl bg-slate-800/50 p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-sm text-surface-500">Work order</p>
@@ -707,7 +707,7 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
             </Link>
           </div>
           {assignment.work_order.priority ? (
-            <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
+            <span className="rounded-full bg-amber-500/20 px-3 py-1 text-xs font-semibold text-amber-400">
               Priority {assignment.work_order.priority}
             </span>
           ) : null}
@@ -754,7 +754,7 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
 
 function SignedInUserRow({ user }: { user: SignedInUserStatus }) {
   return (
-    <div className="rounded-xl border border-surface-200 bg-white p-4">
+    <div className="rounded-xl border border-surface-200 bg-[#151b28] p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
@@ -768,7 +768,7 @@ function SignedInUserRow({ user }: { user: SignedInUserStatus }) {
             {user.department ? ` • ${user.department}` : ''}
           </p>
         </div>
-        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${user.has_active_job ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${user.has_active_job ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
           {user.has_active_job ? 'Checked In' : 'Signed In'}
         </span>
       </div>

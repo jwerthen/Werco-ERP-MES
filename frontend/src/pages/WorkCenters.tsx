@@ -4,23 +4,23 @@ import { WorkCenter, WorkCenterType } from '../types';
 import { PlusIcon, PencilIcon } from '@heroicons/react/24/outline';
 
 const typeColors: Record<string, string> = {
-  fabrication: 'bg-blue-100 text-blue-800',
-  cnc_machining: 'bg-purple-100 text-purple-800',
-  laser: 'bg-blue-100 text-blue-800',
+  fabrication: 'bg-blue-500/20 text-blue-300',
+  cnc_machining: 'bg-purple-500/20 text-purple-800',
+  laser: 'bg-blue-500/20 text-blue-300',
   press_brake: 'bg-indigo-100 text-indigo-800',
-  paint: 'bg-yellow-100 text-yellow-800',
-  powder_coating: 'bg-orange-100 text-orange-800',
-  assembly: 'bg-green-100 text-green-800',
-  welding: 'bg-red-100 text-red-800',
-  inspection: 'bg-blue-100 text-blue-800',
-  shipping: 'bg-gray-100 text-gray-800',
+  paint: 'bg-yellow-500/20 text-yellow-300',
+  powder_coating: 'bg-orange-500/20 text-orange-800',
+  assembly: 'bg-green-500/20 text-emerald-300',
+  welding: 'bg-red-500/20 text-red-300',
+  inspection: 'bg-blue-500/20 text-blue-300',
+  shipping: 'bg-slate-800/50 text-slate-100',
 };
 
 const statusColors: Record<string, string> = {
-  available: 'bg-green-500',
-  in_use: 'bg-blue-500',
-  maintenance: 'bg-yellow-500',
-  offline: 'bg-red-500',
+  available: 'bg-green-500/100',
+  in_use: 'bg-blue-500/100',
+  maintenance: 'bg-yellow-500/100',
+  offline: 'bg-red-500/100',
 };
 
 export default function WorkCenters() {
@@ -193,7 +193,7 @@ export default function WorkCenters() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Work Centers</h1>
+        <h1 className="text-2xl font-bold text-white">Work Centers</h1>
         <button
           onClick={() => { resetForm(); setShowModal(true); }}
           className="btn-primary flex items-center"
@@ -206,8 +206,8 @@ export default function WorkCenters() {
       {groupedWorkCenters.map((group) => (
         <div key={group.type} className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">{formatTypeLabel(group.type)}</h2>
-            <span className="text-sm text-gray-500">{group.items.length} center{group.items.length !== 1 ? 's' : ''}</span>
+            <h2 className="text-lg font-semibold text-white">{formatTypeLabel(group.type)}</h2>
+            <span className="text-sm text-slate-400">{group.items.length} center{group.items.length !== 1 ? 's' : ''}</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {group.items.map((wc) => (
@@ -219,35 +219,35 @@ export default function WorkCenters() {
                   </div>
                   <button
                     onClick={() => handleEdit(wc)}
-                    className="text-gray-400 hover:text-gray-600"
+                    className="text-slate-400 hover:text-slate-400"
                   >
                     <PencilIcon className="h-5 w-5" />
                   </button>
                 </div>
                 
-                <h3 className="font-medium text-gray-900 mb-2">{wc.name}</h3>
+                <h3 className="font-medium text-white mb-2">{wc.name}</h3>
                 
-                <span className={`inline-block px-2 py-1 rounded text-xs font-medium mb-3 ${typeColors[wc.work_center_type] || 'bg-gray-100 text-gray-800'}`}>
+                <span className={`inline-block px-2 py-1 rounded text-xs font-medium mb-3 ${typeColors[wc.work_center_type] || 'bg-slate-800/50 text-slate-100'}`}>
                   {formatTypeLabel(wc.work_center_type)}
                 </span>
                 
                 {wc.description && (
-                  <p className="text-sm text-gray-500 mb-3">{wc.description}</p>
+                  <p className="text-sm text-slate-400 mb-3">{wc.description}</p>
                 )}
                 
                 <div className="grid grid-cols-2 gap-2 text-sm">
                   <div>
-                    <span className="text-gray-500">Rate:</span>
+                    <span className="text-slate-400">Rate:</span>
                     <span className="ml-1 font-medium">${wc.hourly_rate}/hr</span>
                   </div>
                   <div>
-                    <span className="text-gray-500">Capacity:</span>
+                    <span className="text-slate-400">Capacity:</span>
                     <span className="ml-1 font-medium">{wc.capacity_hours_per_day}h/day</span>
                   </div>
                 </div>
                 
                 {(wc.building || wc.area) && (
-                  <div className="mt-2 text-sm text-gray-500">
+                  <div className="mt-2 text-sm text-slate-400">
                     {wc.building && <span>Building: {wc.building}</span>}
                     {wc.building && wc.area && <span> | </span>}
                     {wc.area && <span>Area: {wc.area}</span>}
@@ -276,7 +276,7 @@ export default function WorkCenters() {
       {/* Add/Edit Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-semibold mb-4">
               {editingWc ? 'Edit Work Center' : 'Add Work Center'}
             </h3>

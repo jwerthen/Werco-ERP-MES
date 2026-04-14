@@ -13,11 +13,11 @@ import {
 type ComplianceStatus = 'not_assessed' | 'compliant' | 'partial' | 'non_compliant' | 'not_applicable';
 
 const STATUS_COLORS: Record<string, string> = {
-  compliant: 'bg-green-100 text-green-800',
-  partial: 'bg-yellow-100 text-yellow-800',
-  non_compliant: 'bg-red-100 text-red-800',
-  not_assessed: 'bg-gray-100 text-gray-600',
-  not_applicable: 'bg-blue-100 text-blue-600',
+  compliant: 'bg-green-500/20 text-emerald-300',
+  partial: 'bg-yellow-500/20 text-yellow-300',
+  non_compliant: 'bg-red-500/20 text-red-300',
+  not_assessed: 'bg-slate-800/50 text-slate-400',
+  not_applicable: 'bg-blue-500/20 text-blue-600',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -271,18 +271,18 @@ export default function QMSStandards() {
             <div className="flex items-center gap-3">
               <button
                 onClick={() => { setView('overview'); setSelectedStandard(null); fetchData(); }}
-                className="text-sm text-blue-600 hover:text-blue-800"
+                className="text-sm text-blue-600 hover:text-blue-300"
               >
                 &larr; Back to Standards
               </button>
-              <h1 className="text-2xl font-bold text-gray-900">
+              <h1 className="text-2xl font-bold text-white">
                 {selectedStandard.name} {selectedStandard.version && `(${selectedStandard.version})`}
               </h1>
             </div>
           ) : (
             <>
-              <h1 className="text-2xl font-bold text-gray-900">QMS Standards & Audit Readiness</h1>
-              <p className="text-sm text-gray-500 mt-1">
+              <h1 className="text-2xl font-bold text-white">QMS Standards & Audit Readiness</h1>
+              <p className="text-sm text-slate-400 mt-1">
                 Manage AS9100D, ISO 9001 and other QMS standards. Map clauses to system evidence for seamless audit preparation.
               </p>
             </>
@@ -357,18 +357,18 @@ export default function QMSStandards() {
               </div>
 
               {/* Compliance Progress Bar */}
-              <div className="bg-white rounded-lg border p-4">
+              <div className="bg-[#151b28] rounded-lg border p-4">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-medium">Overall Compliance</span>
                   <span className="text-lg font-bold text-green-600">{auditSummary.compliance_percentage}%</span>
                 </div>
                 <div className="w-full bg-gray-200 rounded-full h-4">
                   <div
-                    className="bg-green-500 h-4 rounded-full transition-all duration-500"
+                    className="bg-green-500/100 h-4 rounded-full transition-all duration-500"
                     style={{ width: `${auditSummary.compliance_percentage}%` }}
                   />
                 </div>
-                <div className="flex justify-between mt-3 text-xs text-gray-500">
+                <div className="flex justify-between mt-3 text-xs text-slate-400">
                   <span>Evidence: {auditSummary.verified_evidence}/{auditSummary.total_evidence_links} verified</span>
                   {auditSummary.clauses_needing_review > 0 && (
                     <span className="text-amber-600 font-medium">
@@ -383,8 +383,8 @@ export default function QMSStandards() {
           {/* Standards List */}
           <h2 className="text-lg font-semibold mb-3">Registered Standards</h2>
           {standards.length === 0 ? (
-            <div className="text-center py-12 bg-white rounded-lg border">
-              <p className="text-gray-500 mb-4">No QMS standards registered yet.</p>
+            <div className="text-center py-12 bg-[#151b28] rounded-lg border">
+              <p className="text-slate-400 mb-4">No QMS standards registered yet.</p>
               <button onClick={() => setShowAddStandard(true)} className="btn btn-primary btn-sm">
                 Add Your First Standard
               </button>
@@ -395,38 +395,38 @@ export default function QMSStandards() {
                 <div
                   key={std.id}
                   onClick={() => loadStandardDetail(std.id)}
-                  className="bg-white rounded-lg border p-5 cursor-pointer hover:shadow-md transition-shadow"
+                  className="bg-[#151b28] rounded-lg border p-5 cursor-pointer hover:shadow-md transition-shadow"
                 >
                   <div className="flex items-start justify-between">
                     <div>
-                      <h3 className="font-semibold text-gray-900">{std.name}</h3>
-                      {std.version && <span className="text-xs text-gray-500">{std.version}</span>}
+                      <h3 className="font-semibold text-white">{std.name}</h3>
+                      {std.version && <span className="text-xs text-slate-400">{std.version}</span>}
                     </div>
                     <span className={`badge badge-sm ${std.is_active ? 'badge-success' : 'badge-ghost'}`}>
                       {std.is_active ? 'Active' : 'Inactive'}
                     </span>
                   </div>
-                  {std.standard_body && <p className="text-xs text-gray-400 mt-1">{std.standard_body}</p>}
-                  {std.description && <p className="text-sm text-gray-600 mt-2 line-clamp-2">{std.description}</p>}
+                  {std.standard_body && <p className="text-xs text-slate-400 mt-1">{std.standard_body}</p>}
+                  {std.description && <p className="text-sm text-slate-400 mt-2 line-clamp-2">{std.description}</p>}
 
                   {/* Mini compliance bar */}
                   {std.total_clauses > 0 && (
                     <div className="mt-4">
-                      <div className="flex gap-1 h-2 rounded-full overflow-hidden bg-gray-100">
+                      <div className="flex gap-1 h-2 rounded-full overflow-hidden bg-slate-800/50">
                         {std.compliant_clauses > 0 && (
-                          <div className="bg-green-500" style={{ width: `${(std.compliant_clauses / std.total_clauses) * 100}%` }} />
+                          <div className="bg-green-500/100" style={{ width: `${(std.compliant_clauses / std.total_clauses) * 100}%` }} />
                         )}
                         {std.partial_clauses > 0 && (
                           <div className="bg-yellow-400" style={{ width: `${(std.partial_clauses / std.total_clauses) * 100}%` }} />
                         )}
                         {std.non_compliant_clauses > 0 && (
-                          <div className="bg-red-500" style={{ width: `${(std.non_compliant_clauses / std.total_clauses) * 100}%` }} />
+                          <div className="bg-red-500/100" style={{ width: `${(std.non_compliant_clauses / std.total_clauses) * 100}%` }} />
                         )}
                         {std.not_assessed_clauses > 0 && (
                           <div className="bg-gray-300" style={{ width: `${(std.not_assessed_clauses / std.total_clauses) * 100}%` }} />
                         )}
                       </div>
-                      <p className="text-xs text-gray-500 mt-1">{std.total_clauses} clauses</p>
+                      <p className="text-xs text-slate-400 mt-1">{std.total_clauses} clauses</p>
                     </div>
                   )}
                 </div>
@@ -440,14 +440,14 @@ export default function QMSStandards() {
       {view === 'detail' && selectedStandard && (
         <div>
           {selectedStandard.description && (
-            <p className="text-sm text-gray-600 mb-4">{selectedStandard.description}</p>
+            <p className="text-sm text-slate-400 mb-4">{selectedStandard.description}</p>
           )}
 
           {/* Clauses Table */}
           {selectedStandard.clauses.length === 0 ? (
-            <div className="text-center py-12 bg-white rounded-lg border">
-              <p className="text-lg font-medium text-gray-700 mb-2">No clauses added yet</p>
-              <p className="text-sm text-gray-400 mb-6">Upload a PDF of your quality manual and clauses will be extracted automatically.</p>
+            <div className="text-center py-12 bg-[#151b28] rounded-lg border">
+              <p className="text-lg font-medium text-slate-300 mb-2">No clauses added yet</p>
+              <p className="text-sm text-slate-400 mb-6">Upload a PDF of your quality manual and clauses will be extracted automatically.</p>
               <div className="flex gap-3 justify-center">
                 <label className={`btn btn-accent ${uploading ? 'loading' : ''}`}>
                   {uploading ? 'Extracting clauses...' : 'Upload Quality Manual PDF'}
@@ -460,7 +460,7 @@ export default function QMSStandards() {
                   />
                 </label>
               </div>
-              <p className="text-xs text-gray-400 mt-4">Or add clauses manually:</p>
+              <p className="text-xs text-slate-400 mt-4">Or add clauses manually:</p>
               <div className="flex gap-2 justify-center mt-2">
                 <button onClick={() => setShowBulkImport(true)} className="btn btn-outline btn-xs">
                   Bulk Import
@@ -653,20 +653,20 @@ export default function QMSStandards() {
         <Modal title="Auto-Link Evidence Complete" onClose={() => setShowAutoLinkResult(false)}>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-green-50 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-green-700">{autoLinkResult.clauses_with_evidence}</p>
+              <div className="bg-green-500/10 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-emerald-400">{autoLinkResult.clauses_with_evidence}</p>
                 <p className="text-xs text-green-600">Clauses with Evidence</p>
               </div>
-              <div className="bg-gray-50 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-gray-500">{autoLinkResult.clauses_without_evidence}</p>
-                <p className="text-xs text-gray-500">Clauses without Match</p>
+              <div className="bg-slate-800 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-slate-400">{autoLinkResult.clauses_without_evidence}</p>
+                <p className="text-xs text-slate-400">Clauses without Match</p>
               </div>
-              <div className="bg-blue-50 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-blue-700">{autoLinkResult.total_evidence_created}</p>
+              <div className="bg-blue-500/10 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-blue-400">{autoLinkResult.total_evidence_created}</p>
                 <p className="text-xs text-blue-600">New Evidence Linked</p>
               </div>
-              <div className="bg-amber-50 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-amber-700">{autoLinkResult.total_evidence_updated}</p>
+              <div className="bg-amber-500/10 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-amber-400">{autoLinkResult.total_evidence_updated}</p>
                 <p className="text-xs text-amber-600">Evidence Updated</p>
               </div>
             </div>
@@ -684,7 +684,7 @@ export default function QMSStandards() {
               </div>
             )}
 
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-slate-400">
               Evidence has been automatically linked from live ERP/MES records. Auto-linked items show a {'\u26A1'} badge and include real-time record counts.
             </p>
 
@@ -701,11 +701,11 @@ export default function QMSStandards() {
       {showBulkImport && (
         <Modal title="Bulk Import Clauses" onClose={() => setShowBulkImport(false)}>
           <div className="space-y-4">
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-slate-400">
               Paste clause data, one per line. Use pipe (|) to separate fields:<br />
-              <code className="text-xs bg-gray-100 px-1 rounded">clause_number | title | description</code>
+              <code className="text-xs bg-slate-800/50 px-1 rounded">clause_number | title | description</code>
             </p>
-            <div className="bg-gray-50 p-3 rounded text-xs font-mono">
+            <div className="bg-slate-800 p-3 rounded text-xs font-mono">
               <p>4.1 | Context of the Organization | Understanding the organization and its context</p>
               <p>4.2 | Needs and Expectations | Understanding needs of interested parties</p>
               <p>4.3 | Scope of the QMS | Determining the scope of the quality management system</p>
@@ -718,7 +718,7 @@ export default function QMSStandards() {
               onChange={e => setBulkText(e.target.value)}
             />
             <div className="flex justify-between items-center">
-              <span className="text-xs text-gray-400">
+              <span className="text-xs text-slate-400">
                 {bulkText.trim() ? bulkText.trim().split('\n').filter(l => l.trim()).length : 0} clauses detected
               </span>
               <div className="flex gap-2">
@@ -743,11 +743,11 @@ export default function QMSStandards() {
 
 function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
   const colorMap: Record<string, string> = {
-    blue: 'border-blue-200 bg-blue-50 text-blue-700',
-    green: 'border-green-200 bg-green-50 text-green-700',
-    yellow: 'border-yellow-200 bg-yellow-50 text-yellow-700',
-    red: 'border-red-200 bg-red-50 text-red-700',
-    gray: 'border-gray-200 bg-gray-50 text-gray-700',
+    blue: 'border-blue-500/30 bg-blue-500/10 text-blue-400',
+    green: 'border-green-500/30 bg-green-500/10 text-emerald-400',
+    yellow: 'border-yellow-500/30 bg-yellow-500/10 text-yellow-400',
+    red: 'border-red-500/30 bg-red-500/10 text-red-400',
+    gray: 'border-slate-700 bg-slate-800 text-slate-300',
   };
   return (
     <div className={`rounded-lg border p-3 ${colorMap[color] || colorMap.gray}`}>
@@ -805,13 +805,13 @@ function ClauseRow({
   const manualCount = clause.evidence_links.length - autoLinkedCount;
 
   return (
-    <div className="bg-white rounded-lg border">
+    <div className="bg-[#151b28] rounded-lg border">
       {/* Clause Header */}
       <div
-        className="flex items-center gap-3 p-4 cursor-pointer hover:bg-gray-50"
+        className="flex items-center gap-3 p-4 cursor-pointer hover:bg-slate-800"
         onClick={() => setExpanded(!expanded)}
       >
-        <span className="text-xs font-mono font-bold text-gray-500 w-16 shrink-0">
+        <span className="text-xs font-mono font-bold text-slate-400 w-16 shrink-0">
           {clause.clause_number}
         </span>
         <span className="flex-1 font-medium text-sm">{clause.title}</span>
@@ -836,14 +836,14 @@ function ClauseRow({
           <span className="badge badge-sm badge-info">{manualCount} manual</span>
         )}
 
-        <span className="text-gray-400 text-xs">{expanded ? '\u25B2' : '\u25BC'}</span>
+        <span className="text-slate-400 text-xs">{expanded ? '\u25B2' : '\u25BC'}</span>
       </div>
 
       {/* Expanded Details */}
       {expanded && (
-        <div className="border-t px-4 pb-4 pt-3 space-y-3 bg-gray-50">
+        <div className="border-t px-4 pb-4 pt-3 space-y-3 bg-slate-800">
           {clause.description && (
-            <p className="text-sm text-gray-600 whitespace-pre-wrap">{clause.description}</p>
+            <p className="text-sm text-slate-400 whitespace-pre-wrap">{clause.description}</p>
           )}
 
           {/* Evidence Links */}
@@ -869,11 +869,11 @@ function ClauseRow({
             </div>
 
             {clause.evidence_links.length === 0 && !autoEvidence ? (
-              <p className="text-xs text-gray-400 italic">No evidence linked. Click Auto-Discover or add evidence manually.</p>
+              <p className="text-xs text-slate-400 italic">No evidence linked. Click Auto-Discover or add evidence manually.</p>
             ) : (
               <div className="space-y-2">
                 {clause.evidence_links.map(ev => (
-                  <div key={ev.id} className={`flex items-center gap-3 rounded border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-50 border-amber-200' : 'bg-white'}`}>
+                  <div key={ev.id} className={`flex items-center gap-3 rounded border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-[#151b28]'}`}>
                     {ev.is_auto_linked && (
                       <span className="text-amber-500 text-xs font-bold" title="Auto-linked from ERP/MES">{'\u26A1'}</span>
                     )}
@@ -916,29 +916,29 @@ function ClauseRow({
           {/* Auto-Discovered Evidence Preview */}
           {autoEvidence && autoEvidence.discovered_evidence.length > 0 && (
             <div>
-              <h4 className="text-sm font-semibold mb-2 text-amber-700">
+              <h4 className="text-sm font-semibold mb-2 text-amber-400">
                 {'\u26A1'} Discovered Evidence (Live Preview)
               </h4>
               <div className="space-y-2">
                 {autoEvidence.discovered_evidence.map((ev, idx) => (
-                  <div key={idx} className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <div key={idx} className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
                     <div className="flex items-center gap-2 mb-1">
                       <HealthDot status={ev.health_status} />
                       <span className="font-medium text-sm">{ev.title}</span>
                       <span className="badge badge-sm badge-warning">{ev.total_count} records</span>
                     </div>
-                    <p className="text-xs text-gray-600 mb-2">{ev.description}</p>
-                    <p className="text-xs text-gray-500 italic">{ev.health_detail}</p>
+                    <p className="text-xs text-slate-400 mb-2">{ev.description}</p>
+                    <p className="text-xs text-slate-400 italic">{ev.health_detail}</p>
                     {ev.examples.length > 0 && (
                       <div className="mt-2 space-y-1">
                         {ev.examples.slice(0, 3).map((ex, exIdx) => (
                           <a
                             key={exIdx}
                             href={ex.module_link}
-                            className="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                            className="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-300 hover:underline"
                           >
                             <span className="font-mono">{ex.record_identifier}</span>
-                            <span className="text-gray-500">{ex.summary}</span>
+                            <span className="text-slate-400">{ex.summary}</span>
                             <span className={`badge badge-xs ${ex.status === 'closed' ? 'badge-success' : 'badge-ghost'}`}>
                               {ex.status}
                             </span>
@@ -949,7 +949,7 @@ function ClauseRow({
                   </div>
                 ))}
               </div>
-              <p className="text-xs text-gray-400 mt-2">
+              <p className="text-xs text-slate-400 mt-2">
                 Suggested compliance: <span className={`font-medium ${STATUS_COLORS[autoEvidence.overall_suggested_compliance] || ''}`}>
                   {STATUS_LABELS[autoEvidence.overall_suggested_compliance] || autoEvidence.overall_suggested_compliance}
                 </span>
@@ -958,11 +958,11 @@ function ClauseRow({
           )}
 
           {autoEvidence && autoEvidence.discovered_evidence.length === 0 && (
-            <p className="text-xs text-gray-400 italic">No matching ERP/MES records found for this clause.</p>
+            <p className="text-xs text-slate-400 italic">No matching ERP/MES records found for this clause.</p>
           )}
 
           {clause.compliance_notes && (
-            <div className="text-xs text-gray-500">
+            <div className="text-xs text-slate-400">
               <strong>Notes:</strong> {clause.compliance_notes}
             </div>
           )}
@@ -974,9 +974,9 @@ function ClauseRow({
 
 function HealthDot({ status }: { status: string }) {
   const colors: Record<string, string> = {
-    healthy: 'bg-green-500',
-    warning: 'bg-yellow-500',
-    critical: 'bg-red-500',
+    healthy: 'bg-green-500/100',
+    warning: 'bg-yellow-500/100',
+    critical: 'bg-red-500/100',
     no_data: 'bg-gray-400',
   };
   return (

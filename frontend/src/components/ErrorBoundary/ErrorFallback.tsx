@@ -44,7 +44,7 @@ function GlobalErrorFallback({ error, message }: { error: Error; message: ErrorM
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 flex items-center justify-center p-4">
-      <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl p-8 text-center">
+      <div className="max-w-md w-full bg-[#151b28] rounded-2xl shadow-2xl p-8 text-center">
         {/* Error Icon */}
         <div className="w-20 h-20 bg-gradient-to-br from-werco-navy-600 to-blue-700 rounded-full flex items-center justify-center mx-auto mb-6 shadow-lg">
           <svg className="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
@@ -54,11 +54,11 @@ function GlobalErrorFallback({ error, message }: { error: Error; message: ErrorM
           </svg>
         </div>
 
-        <h1 className="text-2xl font-bold text-gray-900 mb-3">
+        <h1 className="text-2xl font-bold text-white mb-3">
           {message.title}
         </h1>
 
-        <p className="text-gray-600 mb-8 leading-relaxed">
+        <p className="text-slate-300 mb-8 leading-relaxed">
           {message.description}
         </p>
 
@@ -75,7 +75,7 @@ function GlobalErrorFallback({ error, message }: { error: Error; message: ErrorM
 
           <button
             onClick={handleGoHome}
-            className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500 focus-visible:ring-offset-2 transition-all font-medium min-h-[52px]"
+            className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-slate-700 text-slate-200 rounded-xl hover:bg-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d1117] transition-all font-medium min-h-[52px]"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
@@ -84,11 +84,11 @@ function GlobalErrorFallback({ error, message }: { error: Error; message: ErrorM
           </button>
         </div>
 
-        <div className="mt-8 pt-6 border-t border-gray-200">
-          <p className="text-sm text-gray-500">
+        <div className="mt-8 pt-6 border-t border-slate-700">
+          <p className="text-sm text-slate-400">
             If this problem continues, please contact IT support.
           </p>
-          <p className="mt-2 text-xs text-gray-400 font-mono bg-gray-50 rounded-lg py-2 px-3 inline-block">
+          <p className="mt-2 text-xs text-slate-500 font-mono bg-slate-800 rounded-lg py-2 px-3 inline-block">
             Error ID: {generateErrorId(error)}
           </p>
         </div>
@@ -123,11 +123,11 @@ function PageErrorFallback({
           </svg>
         </div>
 
-        <h1 className="text-xl font-bold text-gray-900 mb-2">
+        <h1 className="text-xl font-bold text-white mb-2">
           {message.title}
         </h1>
 
-        <p className="text-gray-600 mb-8">
+        <p className="text-slate-300 mb-8">
           {message.description}
         </p>
 
@@ -144,7 +144,7 @@ function PageErrorFallback({
 
           <button
             onClick={() => navigate(-1)}
-            className="flex items-center justify-center gap-2 px-6 py-3 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500 focus-visible:ring-offset-2 transition-all font-medium min-h-[48px]"
+            className="flex items-center justify-center gap-2 px-6 py-3 bg-slate-700 text-slate-200 rounded-xl hover:bg-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d1117] transition-all font-medium min-h-[48px]"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -153,8 +153,8 @@ function PageErrorFallback({
           </button>
         </div>
 
-        <p className="mt-8 text-sm text-gray-500">
-          Error ID: <span className="font-mono bg-gray-100 px-2 py-1 rounded">{generateErrorId(error)}</span>
+        <p className="mt-8 text-sm text-slate-400">
+          Error ID: <span className="font-mono bg-slate-800 px-2 py-1 rounded text-slate-500">{generateErrorId(error)}</span>
         </p>
       </div>
     </div>
@@ -177,13 +177,13 @@ function SectionErrorFallback({
 }) {
   return (
     <div
-      className="bg-gradient-to-br from-blue-50 to-blue-100 border border-blue-200 rounded-xl p-6"
+      className="bg-gradient-to-br from-blue-500/10 to-blue-500/5 border border-blue-500/30 rounded-xl p-6"
       role="alert"
       aria-live="polite"
     >
       <div className="flex items-start gap-4">
         <div className="flex-shrink-0">
-          <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+          <div className="w-10 h-10 bg-blue-500/20 rounded-full flex items-center justify-center">
             <svg className="w-5 h-5 text-werco-navy-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
                 d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" 
@@ -193,10 +193,10 @@ function SectionErrorFallback({
         </div>
 
         <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-semibold text-blue-800">
+          <h3 className="text-sm font-semibold text-blue-300">
             {name ? `Error loading ${name}` : message.title}
           </h3>
-          <p className="mt-1 text-sm text-werco-navy-700">
+          <p className="mt-1 text-sm text-slate-300">
             {message.description}
           </p>
 
@@ -235,11 +235,11 @@ function WidgetErrorFallback({
 }) {
   return (
     <div
-      className="flex items-center gap-3 p-4 bg-gray-100 rounded-lg text-sm text-gray-600"
+      className="flex items-center gap-3 p-4 bg-slate-800 rounded-lg text-sm text-slate-300"
       role="alert"
     >
       <div className="flex-shrink-0">
-        <svg className="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+        <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
             d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" 
           />
@@ -248,11 +248,11 @@ function WidgetErrorFallback({
       <span className="flex-1 truncate">{message.shortDescription}</span>
       <button
         onClick={onReset}
-        className="flex-shrink-0 p-2 hover:bg-gray-200 rounded-lg transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
+        className="flex-shrink-0 p-2 hover:bg-slate-700 rounded-lg transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
         aria-label="Retry loading"
         title="Retry"
       >
-        <svg className="w-4 h-4 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+        <svg className="w-4 h-4 text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
         </svg>
       </button>

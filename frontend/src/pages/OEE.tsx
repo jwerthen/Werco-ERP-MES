@@ -86,9 +86,9 @@ function oeeColor(value: number): string {
 }
 
 function oeeBgColor(value: number): string {
-  if (value >= 85) return 'bg-green-100 border-green-300';
-  if (value >= 65) return 'bg-yellow-100 border-yellow-300';
-  return 'bg-red-100 border-red-300';
+  if (value >= 85) return 'bg-green-500/20 border-green-500/40';
+  if (value >= 65) return 'bg-yellow-500/20 border-yellow-500/40';
+  return 'bg-red-500/20 border-red-500/40';
 }
 
 
@@ -246,8 +246,8 @@ export default function OEE() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">OEE Dashboard</h1>
-          <p className="text-sm text-gray-500 mt-1">Overall Equipment Effectiveness monitoring</p>
+          <h1 className="text-2xl font-bold text-white">OEE Dashboard</h1>
+          <p className="text-sm text-slate-400 mt-1">Overall Equipment Effectiveness monitoring</p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => loadData()} className="btn btn-ghost btn-sm" title="Refresh">
@@ -278,7 +278,7 @@ export default function OEE() {
       </div>
 
       {/* Filters */}
-      <div className="bg-white rounded-lg shadow p-4">
+      <div className="bg-[#151b28] rounded-lg shadow p-4">
         <div className="flex flex-wrap gap-3 items-end">
           <div>
             <label className="label"><span className="label-text text-xs font-medium">Work Center</span></label>
@@ -329,28 +329,28 @@ export default function OEE() {
       </div>
 
       {/* Plant-wide OEE */}
-      <div className="bg-white rounded-lg shadow p-6">
+      <div className="bg-[#151b28] rounded-lg shadow p-6">
         <div className="flex flex-col md:flex-row items-center gap-8">
           <div className="flex flex-col items-center">
-            <div className="text-sm text-gray-500 font-medium mb-1">Plant-wide OEE</div>
+            <div className="text-sm text-slate-400 font-medium mb-1">Plant-wide OEE</div>
             <div className={`text-6xl font-bold ${oeeColor(plantOEE)}`}>
               {plantOEE.toFixed(1)}%
             </div>
             <div className="flex items-center gap-1 mt-2">
-              <ChartBarIcon className="h-4 w-4 text-gray-400" />
-              <span className="text-xs text-gray-400">Target: 85%</span>
+              <ChartBarIcon className="h-4 w-4 text-slate-400" />
+              <span className="text-xs text-slate-400">Target: 85%</span>
             </div>
           </div>
           <div className="flex-1 grid grid-cols-3 gap-4 w-full">
-            <div className="text-center p-4 rounded-lg bg-blue-50 border border-blue-200">
+            <div className="text-center p-4 rounded-lg bg-blue-500/10 border border-blue-500/30">
               <div className="text-xs text-blue-600 font-medium mb-1">Availability</div>
               <div className={`text-2xl font-bold ${oeeColor(plantA)}`}>{plantA.toFixed(1)}%</div>
             </div>
-            <div className="text-center p-4 rounded-lg bg-purple-50 border border-purple-200">
+            <div className="text-center p-4 rounded-lg bg-purple-500/10 border border-purple-500/30">
               <div className="text-xs text-purple-600 font-medium mb-1">Performance</div>
               <div className={`text-2xl font-bold ${oeeColor(plantP)}`}>{plantP.toFixed(1)}%</div>
             </div>
-            <div className="text-center p-4 rounded-lg bg-teal-50 border border-teal-200">
+            <div className="text-center p-4 rounded-lg bg-teal-500/10 border border-teal-500/30">
               <div className="text-xs text-teal-600 font-medium mb-1">Quality</div>
               <div className={`text-2xl font-bold ${oeeColor(plantQ)}`}>{plantQ.toFixed(1)}%</div>
             </div>
@@ -359,8 +359,8 @@ export default function OEE() {
       </div>
 
       {/* Work Center OEE Cards */}
-      <div className="bg-white rounded-lg shadow p-4">
-        <h2 className="text-lg font-semibold text-gray-900 mb-3">Work Center OEE</h2>
+      <div className="bg-[#151b28] rounded-lg shadow p-4">
+        <h2 className="text-lg font-semibold text-white mb-3">Work Center OEE</h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
           {(dashboard?.work_centers || []).map((wc) => (
             <div
@@ -370,21 +370,21 @@ export default function OEE() {
                 selectedWorkCenter === String(wc.work_center_id) ? 'ring-2 ring-blue-500' : ''
               }`}
             >
-              <div className="font-bold text-sm text-gray-900">{wc.work_center_code}</div>
-              <div className="text-xs text-gray-500 truncate mb-2">{wc.work_center_name}</div>
+              <div className="font-bold text-sm text-white">{wc.work_center_code}</div>
+              <div className="text-xs text-slate-400 truncate mb-2">{wc.work_center_name}</div>
               <div className={`text-2xl font-bold ${oeeColor(wc.oee)}`}>
                 {wc.oee.toFixed(1)}%
               </div>
               <div className="mt-1 space-y-0.5">
-                <div className="flex justify-between text-xs text-gray-600">
+                <div className="flex justify-between text-xs text-slate-400">
                   <span>A</span>
                   <span>{wc.availability.toFixed(0)}%</span>
                 </div>
-                <div className="flex justify-between text-xs text-gray-600">
+                <div className="flex justify-between text-xs text-slate-400">
                   <span>P</span>
                   <span>{wc.performance.toFixed(0)}%</span>
                 </div>
-                <div className="flex justify-between text-xs text-gray-600">
+                <div className="flex justify-between text-xs text-slate-400">
                   <span>Q</span>
                   <span>{wc.quality.toFixed(0)}%</span>
                 </div>
@@ -392,7 +392,7 @@ export default function OEE() {
             </div>
           ))}
           {(dashboard?.work_centers || []).length === 0 && (
-            <div className="col-span-full text-center text-gray-400 py-8">
+            <div className="col-span-full text-center text-slate-400 py-8">
               No OEE data available for the selected period
             </div>
           )}
@@ -401,9 +401,9 @@ export default function OEE() {
 
       {/* Selected Work Center Detail - Gauge Cards */}
       {selectedWcData && (
-        <div className="bg-white rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">
-            <CogIcon className="h-5 w-5 inline mr-2 text-gray-400" />
+        <div className="bg-[#151b28] rounded-lg shadow p-4">
+          <h2 className="text-lg font-semibold text-white mb-3">
+            <CogIcon className="h-5 w-5 inline mr-2 text-slate-400" />
             {selectedWcData.work_center_code} - {selectedWcData.work_center_name}
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -418,7 +418,7 @@ export default function OEE() {
                   <path
                     d={gaugeArc(100)}
                     fill="none"
-                    stroke="#e5e7eb"
+                    stroke="#334155"
                     strokeWidth="12"
                     strokeLinecap="round"
                   />
@@ -434,8 +434,8 @@ export default function OEE() {
                     {metric.value.toFixed(1)}%
                   </text>
                 </svg>
-                <div className="text-sm font-medium text-gray-700 mt-1">{metric.label}</div>
-                <div className="text-xs text-gray-400">Target: {metric.target}%</div>
+                <div className="text-sm font-medium text-slate-300 mt-1">{metric.label}</div>
+                <div className="text-xs text-slate-400">Target: {metric.target}%</div>
                 <div className={`text-xs mt-1 font-medium ${metric.value >= metric.target ? 'text-green-600' : 'text-red-600'}`}>
                   {metric.value >= metric.target ? 'On Target' : `${(metric.target - metric.value).toFixed(1)}% below target`}
                 </div>
@@ -447,24 +447,25 @@ export default function OEE() {
 
       {/* Trend Chart */}
       {trends.length > 0 && (
-        <div className="bg-white rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">
-            <CalendarDaysIcon className="h-5 w-5 inline mr-2 text-gray-400" />
+        <div className="bg-[#151b28] rounded-lg shadow p-4">
+          <h2 className="text-lg font-semibold text-white mb-3">
+            <CalendarDaysIcon className="h-5 w-5 inline mr-2 text-slate-400" />
             OEE Trends (30 Days)
           </h2>
           <ResponsiveContainer width="100%" height={350}>
             <LineChart data={trends} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
               <XAxis
                 dataKey="date"
-                tick={{ fontSize: 11 }}
+                tick={{ fontSize: 11, fill: '#94a3b8' }}
                 tickFormatter={(val) => {
                   const d = new Date(val);
                   return `${d.getMonth() + 1}/${d.getDate()}`;
                 }}
               />
-              <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} />
+              <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#94a3b8' }} />
               <Tooltip
+                contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
                 formatter={(value: number, name: string) => [`${value.toFixed(1)}%`, name]}
                 labelFormatter={(label) => {
                   const d = new Date(label);
@@ -484,14 +485,14 @@ export default function OEE() {
 
       {/* Work Center Comparison Bar Chart */}
       {comparisonData.length > 0 && (
-        <div className="bg-white rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">Work Center Comparison</h2>
+        <div className="bg-[#151b28] rounded-lg shadow p-4">
+          <h2 className="text-lg font-semibold text-white mb-3">Work Center Comparison</h2>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={comparisonData} margin={{ top: 5, right: 20, left: 10, bottom: 40 }}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="name" angle={-35} textAnchor="end" interval={0} height={60} tick={{ fontSize: 11 }} />
-              <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} />
-              <Tooltip formatter={(value: number) => [`${value}%`]} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <XAxis dataKey="name" angle={-35} textAnchor="end" interval={0} height={60} tick={{ fontSize: 11, fill: '#94a3b8' }} />
+              <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#94a3b8' }} />
+              <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} formatter={(value: number) => [`${value}%`]} />
               <Legend />
               <ReferenceLine y={85} stroke="#ef4444" strokeDasharray="5 5" label={{ value: '85% Target', position: 'right', fontSize: 10 }} />
               <Bar dataKey="oee" fill="#2563eb" name="OEE" radius={[4, 4, 0, 0]} />
@@ -504,12 +505,12 @@ export default function OEE() {
       )}
 
       {/* OEE Records Table */}
-      <div className="bg-white rounded-lg shadow p-4">
-        <h2 className="text-lg font-semibold text-gray-900 mb-3">OEE Records</h2>
+      <div className="bg-[#151b28] rounded-lg shadow p-4">
+        <h2 className="text-lg font-semibold text-white mb-3">OEE Records</h2>
         <div className="overflow-x-auto">
           <table className="table table-sm w-full">
             <thead>
-              <tr className="bg-gray-50">
+              <tr className="bg-slate-800">
                 <th>Date</th>
                 <th>Work Center</th>
                 <th>Shift</th>
@@ -526,7 +527,7 @@ export default function OEE() {
             <tbody>
               {records.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="text-center text-gray-400 py-8">
+                  <td colSpan={11} className="text-center text-slate-400 py-8">
                     No OEE records found for the selected period
                   </td>
                 </tr>
@@ -549,7 +550,7 @@ export default function OEE() {
                     <td className="text-sm">{rec.total_pieces}</td>
                     <td className="text-sm">{rec.good_pieces}</td>
                     <td className="text-sm">{rec.rejected_pieces}</td>
-                    <td className="text-sm text-gray-500 max-w-[200px] truncate">{rec.notes || '-'}</td>
+                    <td className="text-sm text-slate-400 max-w-[200px] truncate">{rec.notes || '-'}</td>
                   </tr>
                 ))
               )}
@@ -697,8 +698,8 @@ export default function OEE() {
 
               {/* Live OEE Preview */}
               {addForm.planned_production_time > 0 && addForm.total_pieces > 0 && (
-                <div className="p-3 bg-gray-50 rounded-lg">
-                  <div className="text-xs font-medium text-gray-500 mb-2">Calculated OEE Preview</div>
+                <div className="p-3 bg-slate-800 rounded-lg">
+                  <div className="text-xs font-medium text-slate-400 mb-2">Calculated OEE Preview</div>
                   <div className="grid grid-cols-4 gap-3 text-center">
                     {(() => {
                       const a = addForm.planned_production_time > 0
@@ -714,19 +715,19 @@ export default function OEE() {
                       return (
                         <>
                           <div>
-                            <div className="text-xs text-gray-400">Availability</div>
+                            <div className="text-xs text-slate-400">Availability</div>
                             <div className={`text-lg font-bold ${oeeColor(a)}`}>{a.toFixed(1)}%</div>
                           </div>
                           <div>
-                            <div className="text-xs text-gray-400">Performance</div>
+                            <div className="text-xs text-slate-400">Performance</div>
                             <div className={`text-lg font-bold ${oeeColor(p)}`}>{p.toFixed(1)}%</div>
                           </div>
                           <div>
-                            <div className="text-xs text-gray-400">Quality</div>
+                            <div className="text-xs text-slate-400">Quality</div>
                             <div className={`text-lg font-bold ${oeeColor(q)}`}>{q.toFixed(1)}%</div>
                           </div>
                           <div>
-                            <div className="text-xs text-gray-400">OEE</div>
+                            <div className="text-xs text-slate-400">OEE</div>
                             <div className={`text-lg font-bold ${oeeColor(oee)}`}>{oee.toFixed(1)}%</div>
                           </div>
                         </>

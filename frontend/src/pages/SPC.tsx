@@ -80,9 +80,9 @@ const capabilityColor = (val: number): string => {
 };
 
 const capabilityBg = (val: number): string => {
-  if (val >= 1.33) return 'bg-green-50 border-green-200';
-  if (val >= 1.0) return 'bg-yellow-50 border-yellow-200';
-  return 'bg-red-50 border-red-200';
+  if (val >= 1.33) return 'bg-green-500/10 border-green-500/30';
+  if (val >= 1.0) return 'bg-yellow-500/10 border-yellow-500/30';
+  return 'bg-red-500/10 border-red-500/30';
 };
 
 const SPC = () => {
@@ -213,7 +213,7 @@ const SPC = () => {
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">Statistical Process Control</h1>
+        <h1 className="text-2xl font-bold text-white">Statistical Process Control</h1>
         <button
           onClick={() => setShowCreateChar(true)}
           className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
@@ -231,10 +231,10 @@ const SPC = () => {
           { label: 'Average Cpk', value: stats?.avg_cpk?.toFixed(2) ?? '--', icon: BeakerIcon, color: 'green' },
           { label: 'Measurements Today', value: stats?.measurements_today ?? 0, icon: ClipboardDocumentCheckIcon, color: 'purple' },
         ].map((card) => (
-          <div key={card.label} className="bg-white rounded-lg shadow p-5 border border-gray-200">
+          <div key={card.label} className="bg-[#151b28] rounded-lg shadow p-5 border border-slate-700">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-gray-500">{card.label}</p>
+                <p className="text-sm text-slate-400">{card.label}</p>
                 <p className={`text-2xl font-bold text-${card.color}-600 mt-1`}>{card.value}</p>
               </div>
               <card.icon className={`h-10 w-10 text-${card.color}-400`} />
@@ -245,8 +245,8 @@ const SPC = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Characteristic Selector */}
-        <div className="lg:col-span-1 bg-white rounded-lg shadow border border-gray-200 p-4">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">Characteristics</h2>
+        <div className="lg:col-span-1 bg-[#151b28] rounded-lg shadow border border-slate-700 p-4">
+          <h2 className="text-lg font-semibold text-white mb-3">Characteristics</h2>
           <div className="space-y-1 max-h-96 overflow-y-auto">
             {characteristics.map((c) => (
               <button
@@ -254,16 +254,16 @@ const SPC = () => {
                 onClick={() => setSelectedId(c.id)}
                 className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
                   selectedId === c.id
-                    ? 'bg-blue-100 text-blue-800 font-medium'
-                    : 'text-gray-700 hover:bg-gray-100'
+                    ? 'bg-blue-500/20 text-blue-300 font-medium'
+                    : 'text-slate-300 hover:bg-slate-800'
                 }`}
               >
                 {c.name}
-                <span className="block text-xs text-gray-400">{c.chart_type}</span>
+                <span className="block text-xs text-slate-500">{c.chart_type}</span>
               </button>
             ))}
             {characteristics.length === 0 && (
-              <p className="text-sm text-gray-400 py-2">No characteristics defined.</p>
+              <p className="text-sm text-slate-500 py-2">No characteristics defined.</p>
             )}
           </div>
         </div>
@@ -273,14 +273,14 @@ const SPC = () => {
           {selectedChar ? (
             <>
               {/* Control Chart */}
-              <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
+              <div className="bg-[#151b28] rounded-lg shadow border border-slate-700 p-5">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold text-gray-900">
+                  <h2 className="text-lg font-semibold text-white">
                     Control Chart: {selectedChar.name}
                   </h2>
                   <button
                     onClick={handleRecalculate}
-                    className="inline-flex items-center px-3 py-1.5 text-sm text-blue-600 border border-blue-300 rounded-md hover:bg-blue-50"
+                    className="inline-flex items-center px-3 py-1.5 text-sm text-blue-600 border border-blue-300 rounded-md hover:bg-blue-500/100/10"
                   >
                     <ArrowPathIcon className="h-4 w-4 mr-1" />
                     Recalculate
@@ -289,10 +289,10 @@ const SPC = () => {
                 <div className="h-80">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                      <XAxis dataKey="index" tick={{ fontSize: 12 }} />
-                      <YAxis tick={{ fontSize: 12 }} domain={['auto', 'auto']} />
-                      <Tooltip />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                      <XAxis dataKey="index" tick={{ fontSize: 12, fill: '#94a3b8' }} stroke="#334155" />
+                      <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} stroke="#334155" domain={['auto', 'auto']} />
+                      <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} />
                       <Legend />
                       {controlLimits && (
                         <>
@@ -313,7 +313,7 @@ const SPC = () => {
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
-                <div className="mt-3 flex gap-4 text-xs text-gray-500">
+                <div className="mt-3 flex gap-4 text-xs text-slate-400">
                   <span>Nominal: {selectedChar.nominal}</span>
                   <span>USL: {selectedChar.usl}</span>
                   <span>LSL: {selectedChar.lsl}</span>
@@ -322,8 +322,8 @@ const SPC = () => {
 
               {/* Process Capability */}
               {capability && (
-                <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
-                  <h2 className="text-lg font-semibold text-gray-900 mb-4">Process Capability</h2>
+                <div className="bg-[#151b28] rounded-lg shadow border border-slate-700 p-5">
+                  <h2 className="text-lg font-semibold text-white mb-4">Process Capability</h2>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                     {[
                       { label: 'Cp', value: capability.cp },
@@ -335,11 +335,11 @@ const SPC = () => {
                         key={item.label}
                         className={`border rounded-lg p-4 text-center ${capabilityBg(item.value)}`}
                       >
-                        <p className="text-sm font-medium text-gray-600">{item.label}</p>
+                        <p className="text-sm font-medium text-slate-400">{item.label}</p>
                         <p className={`text-2xl font-bold mt-1 ${capabilityColor(item.value)}`}>
                           {item.value?.toFixed(3) ?? '--'}
                         </p>
-                        <p className="text-xs text-gray-400 mt-1">
+                        <p className="text-xs text-slate-500 mt-1">
                           {item.value >= 1.33 ? 'Capable' : item.value >= 1.0 ? 'Marginal' : 'Not Capable'}
                         </p>
                       </div>
@@ -349,9 +349,9 @@ const SPC = () => {
               )}
 
               {/* Recent Measurements */}
-              <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
+              <div className="bg-[#151b28] rounded-lg shadow border border-slate-700 p-5">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold text-gray-900">Recent Measurements</h2>
+                  <h2 className="text-lg font-semibold text-white">Recent Measurements</h2>
                   <button
                     onClick={() => setShowAddMeasurement(true)}
                     className="inline-flex items-center px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700"
@@ -361,36 +361,36 @@ const SPC = () => {
                   </button>
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200 text-sm">
-                    <thead className="bg-gray-50">
+                  <table className="min-w-full divide-y divide-slate-700 text-sm">
+                    <thead className="bg-slate-800/50">
                       <tr>
-                        <th className="px-4 py-2 text-left font-medium text-gray-500">Value</th>
-                        <th className="px-4 py-2 text-left font-medium text-gray-500">Measured By</th>
-                        <th className="px-4 py-2 text-left font-medium text-gray-500">Time</th>
-                        <th className="px-4 py-2 text-left font-medium text-gray-500">Notes</th>
+                        <th className="px-4 py-2 text-left font-medium text-slate-400">Value</th>
+                        <th className="px-4 py-2 text-left font-medium text-slate-400">Measured By</th>
+                        <th className="px-4 py-2 text-left font-medium text-slate-400">Time</th>
+                        <th className="px-4 py-2 text-left font-medium text-slate-400">Notes</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-gray-100">
+                    <tbody className="divide-y divide-slate-700/30">
                       {measurements.map((m) => {
                         const ooc =
                           controlLimits &&
                           (m.value > controlLimits.ucl || m.value < controlLimits.lcl);
                         return (
-                          <tr key={m.id} className={ooc ? 'bg-red-50' : ''}>
+                          <tr key={m.id} className={ooc ? 'bg-red-500/10' : ''}>
                             <td className={`px-4 py-2 font-mono ${ooc ? 'text-red-600 font-bold' : ''}`}>
                               {m.value}
                             </td>
-                            <td className="px-4 py-2 text-gray-700">{m.measured_by}</td>
-                            <td className="px-4 py-2 text-gray-500">
+                            <td className="px-4 py-2 text-slate-300">{m.measured_by}</td>
+                            <td className="px-4 py-2 text-slate-400">
                               {new Date(m.measured_at).toLocaleString()}
                             </td>
-                            <td className="px-4 py-2 text-gray-500">{m.notes || '--'}</td>
+                            <td className="px-4 py-2 text-slate-400">{m.notes || '--'}</td>
                           </tr>
                         );
                       })}
                       {measurements.length === 0 && (
                         <tr>
-                          <td colSpan={4} className="px-4 py-6 text-center text-gray-400">
+                          <td colSpan={4} className="px-4 py-6 text-center text-slate-500">
                             No measurements recorded.
                           </td>
                         </tr>
@@ -402,17 +402,17 @@ const SPC = () => {
 
               {/* Violations */}
               {violations.length > 0 && (
-                <div className="bg-white rounded-lg shadow border border-red-200 p-5">
-                  <h2 className="text-lg font-semibold text-red-700 mb-3 flex items-center">
+                <div className="bg-[#151b28] rounded-lg shadow border border-red-500/30 p-5">
+                  <h2 className="text-lg font-semibold text-red-400 mb-3 flex items-center">
                     <ExclamationTriangleIcon className="h-5 w-5 mr-2" />
                     Control Violations
                   </h2>
                   <div className="space-y-2">
                     {violations.map((v) => (
-                      <div key={v.id} className="flex items-start gap-3 p-3 bg-red-50 rounded-md">
+                      <div key={v.id} className="flex items-start gap-3 p-3 bg-red-500/10 rounded-md">
                         <ExclamationTriangleIcon className="h-5 w-5 text-red-500 mt-0.5 flex-shrink-0" />
                         <div>
-                          <p className="text-sm font-medium text-red-800">{v.rule}</p>
+                          <p className="text-sm font-medium text-red-300">{v.rule}</p>
                           <p className="text-sm text-red-600">{v.description}</p>
                           <p className="text-xs text-red-400 mt-1">
                             Value: {v.measurement_value} | {new Date(v.detected_at).toLocaleString()}
@@ -425,10 +425,10 @@ const SPC = () => {
               )}
             </>
           ) : (
-            <div className="bg-white rounded-lg shadow border border-gray-200 p-12 text-center">
-              <ChartBarIcon className="h-16 w-16 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-500 text-lg">Select a characteristic to view control charts</p>
-              <p className="text-gray-400 text-sm mt-1">
+            <div className="bg-[#151b28] rounded-lg shadow border border-slate-700 p-12 text-center">
+              <ChartBarIcon className="h-16 w-16 text-slate-400 mx-auto mb-4" />
+              <p className="text-slate-400 text-lg">Select a characteristic to view control charts</p>
+              <p className="text-slate-500 text-sm mt-1">
                 Choose from the list on the left or create a new one.
               </p>
             </div>
@@ -438,8 +438,8 @@ const SPC = () => {
 
       {/* Out-of-Control Alerts */}
       {outOfControl.length > 0 && (
-        <div className="bg-white rounded-lg shadow border border-red-200 p-5">
-          <h2 className="text-lg font-semibold text-red-700 mb-3 flex items-center">
+        <div className="bg-[#151b28] rounded-lg shadow border border-red-500/30 p-5">
+          <h2 className="text-lg font-semibold text-red-400 mb-3 flex items-center">
             <ExclamationTriangleIcon className="h-5 w-5 mr-2" />
             Out-of-Control Alerts ({outOfControl.length})
           </h2>
@@ -448,9 +448,9 @@ const SPC = () => {
               <div
                 key={idx}
                 onClick={() => alert.characteristic_id && setSelectedId(alert.characteristic_id)}
-                className="p-3 bg-red-50 rounded-md border border-red-200 cursor-pointer hover:bg-red-100 transition-colors"
+                className="p-3 bg-red-500/10 rounded-md border border-red-500/30 cursor-pointer hover:bg-red-500/100/20 transition-colors"
               >
-                <p className="text-sm font-medium text-red-800">{alert.characteristic_name || `Characteristic #${alert.characteristic_id}`}</p>
+                <p className="text-sm font-medium text-red-300">{alert.characteristic_name || `Characteristic #${alert.characteristic_id}`}</p>
                 <p className="text-xs text-red-600 mt-1">{alert.reason || alert.description || 'Out of control'}</p>
               </div>
             ))}
@@ -461,41 +461,41 @@ const SPC = () => {
       {/* Add Measurement Modal */}
       {showAddMeasurement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-md p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Add Measurement</h3>
+              <h3 className="text-lg font-semibold text-white">Add Measurement</h3>
               <button onClick={() => setShowAddMeasurement(false)}>
-                <XMarkIcon className="h-5 w-5 text-gray-400 hover:text-gray-600" />
+                <XMarkIcon className="h-5 w-5 text-slate-500 hover:text-slate-400" />
               </button>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Value *</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Value *</label>
                 <input
                   type="number"
                   step="any"
                   value={measurementForm.value}
                   onChange={(e) => setMeasurementForm({ ...measurementForm, value: e.target.value })}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                   placeholder="Enter measured value"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Measured By</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Measured By</label>
                 <input
                   type="text"
                   value={measurementForm.measured_by}
                   onChange={(e) => setMeasurementForm({ ...measurementForm, measured_by: e.target.value })}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                   placeholder="Operator name"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Notes</label>
                 <textarea
                   value={measurementForm.notes}
                   onChange={(e) => setMeasurementForm({ ...measurementForm, notes: e.target.value })}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                   rows={2}
                   placeholder="Optional notes"
                 />
@@ -503,7 +503,7 @@ const SPC = () => {
               <div className="flex justify-end gap-3 pt-2">
                 <button
                   onClick={() => setShowAddMeasurement(false)}
-                  className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
+                  className="px-4 py-2 text-sm text-slate-300 border border-slate-600 rounded-md hover:bg-slate-800/50"
                 >
                   Cancel
                 </button>
@@ -522,71 +522,71 @@ const SPC = () => {
       {/* Create Characteristic Modal */}
       {showCreateChar && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-md p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">New Characteristic</h3>
+              <h3 className="text-lg font-semibold text-white">New Characteristic</h3>
               <button onClick={() => setShowCreateChar(false)}>
-                <XMarkIcon className="h-5 w-5 text-gray-400 hover:text-gray-600" />
+                <XMarkIcon className="h-5 w-5 text-slate-500 hover:text-slate-400" />
               </button>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Name *</label>
                 <input
                   type="text"
                   value={charForm.name}
                   onChange={(e) => setCharForm({ ...charForm, name: e.target.value })}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                   placeholder="e.g., Bore Diameter"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Part ID</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Part ID</label>
                 <input
                   type="number"
                   value={charForm.part_id}
                   onChange={(e) => setCharForm({ ...charForm, part_id: e.target.value })}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Nominal</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Nominal</label>
                   <input
                     type="number"
                     step="any"
                     value={charForm.nominal}
                     onChange={(e) => setCharForm({ ...charForm, nominal: e.target.value })}
-                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">USL</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">USL</label>
                   <input
                     type="number"
                     step="any"
                     value={charForm.usl}
                     onChange={(e) => setCharForm({ ...charForm, usl: e.target.value })}
-                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">LSL</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">LSL</label>
                   <input
                     type="number"
                     step="any"
                     value={charForm.lsl}
                     onChange={(e) => setCharForm({ ...charForm, lsl: e.target.value })}
-                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                   />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Chart Type</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Chart Type</label>
                 <select
                   value={charForm.chart_type}
                   onChange={(e) => setCharForm({ ...charForm, chart_type: e.target.value })}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full border border-slate-600 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
                 >
                   <option value="xbar_r">X-bar & R</option>
                   <option value="xbar_s">X-bar & S</option>
@@ -600,7 +600,7 @@ const SPC = () => {
               <div className="flex justify-end gap-3 pt-2">
                 <button
                   onClick={() => setShowCreateChar(false)}
-                  className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
+                  className="px-4 py-2 text-sm text-slate-300 border border-slate-600 rounded-md hover:bg-slate-800/50"
                 >
                   Cancel
                 </button>

@@ -231,8 +231,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       {!embedded && (
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
-            <p className="text-sm text-gray-500 mt-1">Parts, materials, hardware, and assemblies in one place</p>
+            <h1 className="text-2xl font-bold text-white">Inventory</h1>
+            <p className="text-sm text-slate-400 mt-1">Parts, materials, hardware, and assemblies in one place</p>
           </div>
           <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
             <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
@@ -251,28 +251,28 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="card">
           <div className="text-2xl font-bold">{filteredSummary.length}</div>
-          <div className="text-sm text-gray-500">Unique Items</div>
+          <div className="text-sm text-slate-400">Unique Items</div>
         </div>
         <div className="card">
           <div className="text-2xl font-bold">{summaryTotals.totalOnHand.toFixed(0)}</div>
-          <div className="text-sm text-gray-500">Total On Hand</div>
+          <div className="text-sm text-slate-400">Total On Hand</div>
         </div>
         <div className="card">
           <div className="text-2xl font-bold">{summaryTotals.totalAvailable.toFixed(0)}</div>
-          <div className="text-sm text-gray-500">Total Available</div>
+          <div className="text-sm text-slate-400">Total Available</div>
         </div>
         <div className="card">
           <div className="text-2xl font-bold text-amber-600">{lowStockCount}</div>
-          <div className="text-sm text-gray-500">Low Stock Alerts</div>
+          <div className="text-sm text-slate-400">Low Stock Alerts</div>
         </div>
       </div>
 
       {/* Low Stock Alert Banner */}
       {showLowStockOnly && (
-        <div className="flex items-center justify-between p-4 bg-amber-50 border border-amber-200 rounded-xl">
+        <div className="flex items-center justify-between p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
           <div className="flex items-center gap-3">
             <ExclamationTriangleIcon className="h-5 w-5 text-amber-600" />
-            <span className="font-medium text-amber-800">
+            <span className="font-medium text-amber-300">
               Showing {lowStockCount} low stock item(s)
             </span>
           </div>
@@ -283,7 +283,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               nextParams.delete('filter');
               setSearchParams(nextParams);
             }}
-            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-amber-100 text-amber-700 rounded-full hover:bg-amber-200"
+            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-amber-500/20 text-amber-400 rounded-full hover:bg-amber-500/30"
           >
             <XMarkIcon className="h-4 w-4" />
             Clear filter
@@ -306,7 +306,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               <button
                 type="button"
                 onClick={() => setFilterText('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-400"
                 aria-label="Clear filter"
               >
                 <XMarkIcon className="h-4 w-4" />
@@ -335,8 +335,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 }}
                 className={`rounded-full border px-3 py-1 font-medium transition ${
                   groupFilter === chip.id
-                    ? 'border-werco-500 bg-werco-50 text-werco-700'
-                    : 'border-gray-200 text-gray-600 hover:border-werco-300'
+                    ? 'border-werco-500 bg-werco-500/10 text-werco-700'
+                    : 'border-slate-700 text-slate-400 hover:border-werco-300'
                 }`}
               >
                 {chip.label}
@@ -344,13 +344,13 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             ))}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
+        <div className="flex flex-wrap items-center gap-2 text-sm text-slate-400">
           <span>Showing</span>
-          <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">
+          <span className="px-2 py-1 rounded-full bg-slate-800/50 text-slate-300 font-medium">
             {activeTab === 'details' ? filteredInventory.length : filteredSummary.length}
           </span>
           <span>of</span>
-          <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">
+          <span className="px-2 py-1 rounded-full bg-slate-800/50 text-slate-300 font-medium">
             {activeTab === 'details' ? groupInventory.length : groupSummary.length}
           </span>
           <span>items</span>
@@ -369,8 +369,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             }}
             className={`ml-2 px-3 py-1 rounded-full text-xs font-medium border ${
               showLowStockOnly
-                ? 'bg-amber-100 text-amber-700 border-amber-200'
-                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                : 'bg-[#151b28] text-slate-400 border-slate-700 hover:bg-slate-800'
             }`}
           >
             {showLowStockOnly ? 'Showing Low Stock' : 'Show Low Stock'}
@@ -379,7 +379,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-200">
+      <div className="border-b border-slate-700">
         <nav className="-mb-px flex space-x-8">
           {[
             { id: 'summary', label: 'Summary by Part' },
@@ -391,7 +391,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+                  : 'border-transparent text-slate-400 hover:text-slate-300'
               }`}
             >
               {tab.label}
@@ -404,33 +404,33 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       <div className="card">
         {activeTab === 'summary' && (
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">On Hand</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Allocated</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Available</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Locations</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">On Hand</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Allocated</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Available</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Locations</th>
                 </tr>
               </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {filteredSummary.map((item) => {
                   const isLowStock = lowStockPartIds.has(item.part_id);
                   const partType = getPartType(item.part_id);
                   return (
-                    <tr key={item.part_id} className={`hover:bg-gray-50 align-top ${isLowStock ? 'bg-red-50' : ''}`}>
+                    <tr key={item.part_id} className={`hover:bg-slate-800 align-top ${isLowStock ? 'bg-red-500/10' : ''}`}>
                       <td className="px-4 py-3">
                         <div className="font-medium">{item.part_number}</div>
-                        <div className="text-sm text-gray-500">{item.part_name}</div>
+                        <div className="text-sm text-slate-400">{item.part_name}</div>
                         {isLowStock && <span className="text-xs text-red-600 font-medium">LOW STOCK</span>}
                       </td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
                           PART_TYPES.has(partType || '')
-                            ? 'bg-blue-100 text-werco-navy-700'
-                            : 'bg-amber-100 text-amber-700'
+                            ? 'bg-blue-500/20 text-werco-navy-700'
+                            : 'bg-amber-500/20 text-amber-400'
                         }`}>
                           {getPartTypeIcon(partType)}
                           {getPartTypeLabel(partType)}
@@ -442,9 +442,9 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                       <td className="px-4 py-3">
                         {item.locations.map((loc, idx) => (
                           <div key={idx} className="text-sm">
-                            <span className="font-mono bg-gray-100 px-1 rounded">{loc.location}</span>
-                            <span className="text-gray-600 ml-2">({loc.quantity})</span>
-                            {loc.lot_number && <span className="text-gray-400 ml-1">Lot: {loc.lot_number}</span>}
+                            <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
+                            <span className="text-slate-400 ml-2">({loc.quantity})</span>
+                            {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
                           </div>
                         ))}
                       </td>
@@ -453,37 +453,37 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 })}
               </tbody>
             </table>
-            {summary.length === 0 && <p className="text-center text-gray-500 py-8">No inventory on hand</p>}
+            {summary.length === 0 && <p className="text-center text-slate-400 py-8">No inventory on hand</p>}
           </div>
         )}
 
         {activeTab === 'details' && (
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lot #</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Available</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Location</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Lot #</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Available</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {filteredInventory.map((item) => (
-                  <tr key={item.id} className="hover:bg-gray-50">
+                  <tr key={item.id} className="hover:bg-slate-800">
                     <td className="px-4 py-3">
                       <div className="font-medium">{item.part?.part_number}</div>
-                      <div className="text-xs text-gray-500">{item.part?.name}</div>
+                      <div className="text-xs text-slate-400">{item.part?.name}</div>
                     </td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
                         PART_TYPES.has(item.part?.part_type || '')
-                          ? 'bg-blue-100 text-werco-navy-700'
-                          : 'bg-amber-100 text-amber-700'
+                          ? 'bg-blue-500/20 text-werco-navy-700'
+                          : 'bg-amber-500/20 text-amber-400'
                       }`}>
                         {getPartTypeIcon(item.part?.part_type)}
                         {getPartTypeLabel(item.part?.part_type)}
@@ -495,13 +495,13 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                     <td className="px-4 py-3 text-right text-green-600">{item.quantity_available}</td>
                     <td className="px-4 py-3">
                       <span className={`px-2 py-1 rounded text-xs ${
-                        item.status === 'available' ? 'bg-green-100 text-green-800' :
-                        item.status === 'quarantine' ? 'bg-yellow-100 text-yellow-800' :
-                        'bg-gray-100 text-gray-800'
+                        item.status === 'available' ? 'bg-green-500/20 text-emerald-300' :
+                        item.status === 'quarantine' ? 'bg-yellow-500/20 text-yellow-300' :
+                        'bg-slate-800/50 text-slate-100'
                       }`}>{item.status}</span>
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <button onClick={() => openTransfer(item)} className="text-werco-primary hover:text-blue-700">
+                      <button onClick={() => openTransfer(item)} className="text-werco-primary hover:text-blue-400">
                         <ArrowsRightLeftIcon className="h-5 w-5" />
                       </button>
                     </td>
@@ -509,7 +509,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 ))}
               </tbody>
             </table>
-            {inventory.length === 0 && <p className="text-center text-gray-500 py-8">No inventory on hand</p>}
+            {inventory.length === 0 && <p className="text-center text-slate-400 py-8">No inventory on hand</p>}
           </div>
         )}
       </div>
@@ -517,7 +517,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       {/* Receive Modal */}
       {showReceiveModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">Receive Inventory</h3>
               <button onClick={() => setShowReceiveModal(false)}><XMarkIcon className="h-6 w-6" /></button>
@@ -571,15 +571,15 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       {/* Transfer Modal */}
       {showTransferModal && selectedItem && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">Transfer Inventory</h3>
               <button onClick={() => setShowTransferModal(false)}><XMarkIcon className="h-6 w-6" /></button>
             </div>
-            <div className="mb-4 p-3 bg-gray-50 rounded">
+            <div className="mb-4 p-3 bg-slate-800 rounded">
               <div className="font-medium">{selectedItem.part?.part_number}</div>
-              <div className="text-sm text-gray-500">From: {selectedItem.location}</div>
-              <div className="text-sm text-gray-500">Available: {selectedItem.quantity_available}</div>
+              <div className="text-sm text-slate-400">From: {selectedItem.location}</div>
+              <div className="text-sm text-slate-400">Available: {selectedItem.quantity_available}</div>
             </div>
             <form onSubmit={handleTransfer} className="space-y-4">
               <div>

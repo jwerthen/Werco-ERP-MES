@@ -182,9 +182,9 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
   if (!routing) {
     return (
       <div className="card text-center py-12">
-        <WrenchScrewdriverIcon className="h-12 w-12 mx-auto text-gray-300 mb-4" />
-        <h3 className="text-lg font-medium text-gray-900 mb-2">No Routing Defined</h3>
-        <p className="text-sm text-gray-500 mb-6 max-w-md mx-auto">
+        <WrenchScrewdriverIcon className="h-12 w-12 mx-auto text-slate-600 mb-4" />
+        <h3 className="text-lg font-medium text-white mb-2">No Routing Defined</h3>
+        <p className="text-sm text-slate-400 mb-6 max-w-md mx-auto">
           Create a routing to define the manufacturing operations, work centers, and time standards for this part.
         </p>
         <button onClick={handleCreateRouting} disabled={creating} className="btn-primary flex items-center gap-2 mx-auto">
@@ -205,8 +205,8 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div className="flex items-center gap-3">
           <StatusBadge status={routing.status} />
-          <span className="text-sm text-gray-500">Rev {routing.revision}</span>
-          <span className="text-sm text-gray-500">{ops.length} operation{ops.length !== 1 ? 's' : ''}</span>
+          <span className="text-sm text-slate-400">Rev {routing.revision}</span>
+          <span className="text-sm text-slate-400">{ops.length} operation{ops.length !== 1 ? 's' : ''}</span>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {routing.status === 'draft' && (
@@ -247,20 +247,20 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
 
       {/* Summary Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-white border border-gray-200 rounded-lg p-3">
-          <div className="text-xs text-gray-500 uppercase tracking-wide">Total Setup</div>
+        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
+          <div className="text-xs text-slate-400 uppercase tracking-wide">Total Setup</div>
           <div className="text-lg font-semibold mt-0.5">{formatHours(routing.total_setup_hours)}</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-3">
-          <div className="text-xs text-gray-500 uppercase tracking-wide">Run Time/Unit</div>
+        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
+          <div className="text-xs text-slate-400 uppercase tracking-wide">Run Time/Unit</div>
           <div className="text-lg font-semibold mt-0.5">{formatHours(routing.total_run_hours_per_unit)}</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-3">
-          <div className="text-xs text-gray-500 uppercase tracking-wide">Labor Cost</div>
+        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
+          <div className="text-xs text-slate-400 uppercase tracking-wide">Labor Cost</div>
           <div className="text-lg font-semibold mt-0.5">${routing.total_labor_cost.toFixed(2)}</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-3">
-          <div className="text-xs text-gray-500 uppercase tracking-wide">Operations</div>
+        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
+          <div className="text-xs text-slate-400 uppercase tracking-wide">Operations</div>
           <div className="text-lg font-semibold mt-0.5">{ops.length}</div>
         </div>
       </div>
@@ -268,34 +268,34 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
       {/* Operations Table */}
       <div className="card overflow-hidden p-0">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-slate-700">
+            <thead className="bg-slate-800">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Op #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Setup</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Run/Unit</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Inspect</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Op #</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Work Center</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Setup</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Run/Unit</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Inspect</th>
                 {routing.status === 'draft' && (
                   <th className="px-4 py-3 w-20" />
                 )}
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="bg-[#151b28] divide-y divide-slate-700">
               {ops.length > 0 ? ops.map(op => (
-                <tr key={op.id} className="hover:bg-gray-50">
+                <tr key={op.id} className="hover:bg-slate-800">
                   <td className="px-4 py-3 text-sm font-medium">{op.operation_number}</td>
                   <td className="px-4 py-3">
                     <div className="text-sm font-medium">{op.name}</div>
-                    {op.description && <div className="text-xs text-gray-400">{op.description}</div>}
+                    {op.description && <div className="text-xs text-slate-500">{op.description}</div>}
                     {op.is_outside_operation && (
                       <span className="text-xs text-purple-600 font-medium">Outside Processing</span>
                     )}
                   </td>
                   <td className="px-4 py-3">
                     <div className="text-sm font-medium">{op.work_center?.code}</div>
-                    <div className="text-xs text-gray-400">{op.work_center?.name}</div>
+                    <div className="text-xs text-slate-500">{op.work_center?.name}</div>
                   </td>
                   <td className="px-4 py-3 text-right text-sm">{formatHours(op.setup_hours)}</td>
                   <td className="px-4 py-3 text-right text-sm">{formatHours(op.run_hours_per_unit)}</td>
@@ -305,10 +305,10 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                   {routing.status === 'draft' && (
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        <button onClick={() => openEditOp(op)} className="text-gray-400 hover:text-werco-navy-600 p-1">
+                        <button onClick={() => openEditOp(op)} className="text-slate-500 hover:text-werco-navy-400 p-1">
                           <PencilIcon className="h-4 w-4" />
                         </button>
-                        <button onClick={() => handleDeleteOp(op.id)} className="text-gray-400 hover:text-red-500 p-1">
+                        <button onClick={() => handleDeleteOp(op.id)} className="text-slate-500 hover:text-red-400 p-1">
                           <TrashIcon className="h-4 w-4" />
                         </button>
                       </div>
@@ -317,7 +317,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                 </tr>
               )) : (
                 <tr>
-                  <td colSpan={routing.status === 'draft' ? 7 : 6} className="py-12 text-center text-gray-500">
+                  <td colSpan={routing.status === 'draft' ? 7 : 6} className="py-12 text-center text-slate-400">
                     No operations defined yet. Add operations to define the manufacturing process.
                   </td>
                 </tr>
@@ -330,7 +330,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
       {/* Add/Edit Operation Modal */}
       {showOpModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowOpModal(false)}>
-          <div className="bg-white rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
+          <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-4">
               {editingOp ? 'Edit Operation' : 'Add Operation'}
             </h3>
@@ -411,7 +411,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                         <select
                           value={timeUnits[field]}
                           onChange={e => setTimeUnits(p => ({ ...p, [field]: e.target.value as TimeUnit }))}
-                          className="border border-gray-300 rounded-lg px-2 py-2 w-18 bg-white text-sm"
+                          className="border border-slate-600 rounded-lg px-2 py-2 w-18 bg-slate-800 text-sm text-slate-200"
                         >
                           <option value="min">min</option>
                           <option value="hrs">hrs</option>
@@ -428,7 +428,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                     type="checkbox"
                     checked={opForm.is_inspection_point}
                     onChange={e => setOpForm(p => ({ ...p, is_inspection_point: e.target.checked }))}
-                    className="rounded border-gray-300 text-werco-navy-600"
+                    className="rounded border-slate-600 text-werco-navy-400"
                   />
                   <span className="text-sm">Inspection Point</span>
                 </label>
@@ -437,7 +437,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                     type="checkbox"
                     checked={opForm.is_outside_operation}
                     onChange={e => setOpForm(p => ({ ...p, is_outside_operation: e.target.checked }))}
-                    className="rounded border-gray-300 text-werco-navy-600"
+                    className="rounded border-slate-600 text-werco-navy-400"
                   />
                   <span className="text-sm">Outside Operation</span>
                 </label>

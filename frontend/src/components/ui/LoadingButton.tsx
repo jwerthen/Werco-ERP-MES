@@ -18,9 +18,9 @@ interface LoadingButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 
 const variantClasses = {
   primary: 'btn-primary',
-  secondary: 'btn bg-gray-100 text-gray-700 hover:bg-gray-200',
+  secondary: 'btn bg-slate-700 text-slate-200 hover:bg-slate-600',
   danger: 'btn bg-red-600 text-white hover:bg-red-700',
-  ghost: 'btn bg-transparent hover:bg-gray-100 text-gray-700',
+  ghost: 'btn bg-transparent hover:bg-slate-700 text-slate-200',
 };
 
 const sizeClasses = {

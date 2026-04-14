@@ -187,7 +187,7 @@ export default function CustomFieldsPage() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Custom Fields</h1>
+        <h1 className="text-2xl font-bold text-white">Custom Fields</h1>
         <button onClick={openCreateModal} className="btn-primary flex items-center">
           <PlusIcon className="h-5 w-5 mr-2" />
           New Field
@@ -202,7 +202,7 @@ export default function CustomFieldsPage() {
             className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
               selectedEntityType === ''
                 ? 'bg-werco-primary text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                : 'bg-slate-800/50 text-slate-300 hover:bg-gray-200'
             }`}
           >
             All Entities
@@ -214,7 +214,7 @@ export default function CustomFieldsPage() {
               className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                 selectedEntityType === et.value
                   ? 'bg-werco-primary text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  : 'bg-slate-800/50 text-slate-300 hover:bg-gray-200'
               }`}
             >
               {et.label}
@@ -229,37 +229,37 @@ export default function CustomFieldsPage() {
           <div key={group} className="card">
             <h2 className="text-lg font-semibold mb-4">{group}</h2>
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Field</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Entity</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Required</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">List</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Filter</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Field</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Entity</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Required</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">List</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Filter</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-[#151b28] divide-y divide-slate-700">
                   {groupFields.map((field) => (
                     <tr key={field.id} className={!field.is_active ? 'opacity-50' : ''}>
                       <td className="px-4 py-3">
                         <div className="font-medium">{field.display_name}</div>
-                        <div className="text-sm text-gray-500">{field.field_key}</div>
+                        <div className="text-sm text-slate-400">{field.field_key}</div>
                         {field.description && (
-                          <div className="text-xs text-gray-400 mt-1">{field.description}</div>
+                          <div className="text-xs text-slate-400 mt-1">{field.description}</div>
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <span className="inline-flex px-2 py-1 rounded bg-gray-100 text-gray-700 text-xs">
+                        <span className="inline-flex px-2 py-1 rounded bg-slate-800/50 text-slate-300 text-xs">
                           {entityTypes.find(e => e.value === field.entity_type)?.label}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-sm">
                         {fieldTypes.find(f => f.value === field.field_type)?.label}
                         {field.options && field.options.length > 0 && (
-                          <div className="text-xs text-gray-400">{field.options.length} options</div>
+                          <div className="text-xs text-slate-400">{field.options.length} options</div>
                         )}
                       </td>
                       <td className="px-4 py-3 text-center">
@@ -274,13 +274,13 @@ export default function CustomFieldsPage() {
                       <td className="px-4 py-3 text-right">
                         <button
                           onClick={() => openEditModal(field)}
-                          className="text-gray-400 hover:text-werco-primary mr-2"
+                          className="text-slate-400 hover:text-werco-primary mr-2"
                         >
                           <PencilIcon className="h-5 w-5" />
                         </button>
                         <button
                           onClick={() => handleDelete(field)}
-                          className="text-gray-400 hover:text-red-500"
+                          className="text-slate-400 hover:text-red-500"
                         >
                           <TrashIcon className="h-5 w-5" />
                         </button>
@@ -294,7 +294,7 @@ export default function CustomFieldsPage() {
         ))
       ) : (
         <div className="card text-center py-12">
-          <p className="text-gray-500 mb-4">No custom fields defined yet</p>
+          <p className="text-slate-400 mb-4">No custom fields defined yet</p>
           <button onClick={openCreateModal} className="btn-primary">
             Create Your First Custom Field
           </button>
@@ -304,13 +304,13 @@ export default function CustomFieldsPage() {
       {/* Create/Edit Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="p-6">
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-xl font-semibold">
                   {editingField ? 'Edit Field' : 'New Custom Field'}
                 </h2>
-                <button onClick={() => setShowCreateModal(false)} className="text-gray-400 hover:text-gray-600">
+                <button onClick={() => setShowCreateModal(false)} className="text-slate-400 hover:text-slate-400">
                   <XMarkIcon className="h-6 w-6" />
                 </button>
               </div>

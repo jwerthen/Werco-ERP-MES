@@ -64,11 +64,11 @@ interface Toast {
 }
 
 const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
-  pending: { bg: 'bg-gray-100', text: 'text-gray-700', dot: 'bg-gray-400' },
-  ready: { bg: 'bg-blue-100', text: 'text-blue-700', dot: 'bg-blue-500' },
-  in_progress: { bg: 'bg-amber-100', text: 'text-amber-700', dot: 'bg-amber-500' },
-  complete: { bg: 'bg-green-100', text: 'text-green-700', dot: 'bg-green-500' },
-  on_hold: { bg: 'bg-red-100', text: 'text-red-700', dot: 'bg-red-500' },
+  pending: { bg: 'bg-slate-800', text: 'text-slate-300', dot: 'bg-slate-500' },
+  ready: { bg: 'bg-blue-500/20', text: 'text-blue-400', dot: 'bg-blue-500/100' },
+  in_progress: { bg: 'bg-amber-500/20', text: 'text-amber-400', dot: 'bg-amber-500/100' },
+  complete: { bg: 'bg-green-500/20', text: 'text-green-400', dot: 'bg-green-500/100' },
+  on_hold: { bg: 'bg-red-500/20', text: 'text-red-400', dot: 'bg-red-500/100' },
 };
 
 const WORK_CENTER_STORAGE_KEY = 'shop_floor_work_center_id';
@@ -246,9 +246,9 @@ export default function ShopFloorSimple() {
   const canEditPriority = can('work_orders:edit');
 
   const getPriorityClasses = (priority: number) => {
-    if (priority <= 2) return 'bg-red-100 text-red-700';
-    if (priority <= 5) return 'bg-amber-100 text-amber-700';
-    return 'bg-gray-100 text-gray-600';
+    if (priority <= 2) return 'bg-red-500/20 text-red-400';
+    if (priority <= 5) return 'bg-amber-500/20 text-amber-400';
+    return 'bg-slate-800 text-slate-400';
   };
 
   const workCenterBuckets = useMemo(() => {
@@ -494,11 +494,11 @@ export default function ShopFloorSimple() {
       <div className="md:hidden space-y-3">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <h1 className="text-xl font-bold text-white flex items-center gap-2">
               <WrenchScrewdriverIcon className="h-6 w-6 text-werco-600" />
               Shop Floor
             </h1>
-            <p className="text-xs text-gray-500">Check in/out fast on mobile</p>
+            <p className="text-xs text-slate-400">Check in/out fast on mobile</p>
           </div>
           <button
             onClick={handleRefresh}
@@ -510,7 +510,7 @@ export default function ShopFloorSimple() {
         </div>
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
-            <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
             <input
               type="text"
               value={search}
@@ -554,7 +554,7 @@ export default function ShopFloorSimple() {
             </div>
             {canEditPriority && (
               <div>
-                <label className="text-xs font-medium text-gray-600 block mb-1">
+                <label className="text-xs font-medium text-slate-400 block mb-1">
                   Optional Priority Reason
                 </label>
                 <input
@@ -572,7 +572,7 @@ export default function ShopFloorSimple() {
                 type="button"
                 onClick={() => setDueTodayOnly((prev) => !prev)}
                 className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                  dueTodayOnly ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600'
+                  dueTodayOnly ? 'border-blue-500 bg-blue-500/20 text-blue-400' : 'border-slate-700 text-slate-400'
                 }`}
               >
                 Due Today
@@ -581,7 +581,7 @@ export default function ShopFloorSimple() {
                 type="button"
                 onClick={() => setActionableOnly((prev) => !prev)}
                 className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                  actionableOnly ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-gray-200 text-gray-600'
+                  actionableOnly ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-slate-700 text-slate-400'
                 }`}
               >
                 Actionable Only
@@ -617,7 +617,7 @@ export default function ShopFloorSimple() {
         <div className="flex flex-wrap gap-4 items-center">
           <div className="flex-1 min-w-[200px]">
             <div className="relative">
-              <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-400" />
+              <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-500" />
               <input
                 type="text"
                 value={search}
@@ -629,7 +629,7 @@ export default function ShopFloorSimple() {
           </div>
           
           <div className="flex items-center gap-2">
-            <FunnelIcon className="h-5 w-5 text-gray-400" />
+            <FunnelIcon className="h-5 w-5 text-slate-500" />
             <select
               value={workCenterId}
               onChange={(e) => setWorkCenterId(e.target.value ? Number(e.target.value) : '')}
@@ -654,13 +654,13 @@ export default function ShopFloorSimple() {
             </select>
           </div>
           
-          <div className="text-sm text-gray-500">
+          <div className="text-sm text-slate-400">
             {operations.length} operation{operations.length !== 1 ? 's' : ''}
           </div>
         </div>
         {canEditPriority && (
           <div className="mt-3">
-            <label className="text-xs font-medium text-gray-600 block mb-1">
+            <label className="text-xs font-medium text-slate-400 block mb-1">
               Optional Priority Reason
             </label>
             <input
@@ -679,8 +679,8 @@ export default function ShopFloorSimple() {
       <div className="space-y-4">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Work Center Status</h2>
-            <p className="text-sm text-gray-500">Real-time work cell availability and queue</p>
+            <h2 className="text-lg font-semibold text-white">Work Center Status</h2>
+            <p className="text-sm text-slate-400">Real-time work cell availability and queue</p>
           </div>
           <div className="flex items-center gap-3">
             <button
@@ -707,7 +707,7 @@ export default function ShopFloorSimple() {
               setActionableOnly(false);
             }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-              statusFilter === '' ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-gray-200 text-gray-600 hover:border-werco-300'
+              statusFilter === '' ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-slate-700 text-slate-400 hover:border-werco-300'
             }`}
           >
             All
@@ -719,7 +719,7 @@ export default function ShopFloorSimple() {
               setActionableOnly(false);
             }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-              statusFilter === 'pending' ? 'border-gray-500 bg-gray-100 text-gray-700' : 'border-gray-200 text-gray-600 hover:border-gray-400'
+              statusFilter === 'pending' ? 'border-slate-500 bg-slate-800 text-slate-300' : 'border-slate-700 text-slate-400 hover:border-slate-400'
             }`}
           >
             Open
@@ -731,7 +731,7 @@ export default function ShopFloorSimple() {
               setActionableOnly(false);
             }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-              statusFilter === 'in_progress' ? 'border-amber-500 bg-amber-100 text-amber-700' : 'border-gray-200 text-gray-600 hover:border-amber-300'
+              statusFilter === 'in_progress' ? 'border-amber-500 bg-amber-500/20 text-amber-400' : 'border-slate-700 text-slate-400 hover:border-amber-300'
             }`}
           >
             In Progress
@@ -743,7 +743,7 @@ export default function ShopFloorSimple() {
               setActionableOnly(false);
             }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-              statusFilter === 'on_hold' ? 'border-red-500 bg-red-100 text-red-700' : 'border-gray-200 text-gray-600 hover:border-red-300'
+              statusFilter === 'on_hold' ? 'border-red-500 bg-red-500/20 text-red-400' : 'border-slate-700 text-slate-400 hover:border-red-300'
             }`}
           >
             On Hold
@@ -755,7 +755,7 @@ export default function ShopFloorSimple() {
               setActionableOnly(false);
             }}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-              statusFilter === 'ready' ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
+              statusFilter === 'ready' ? 'border-blue-500 bg-blue-500/20 text-blue-400' : 'border-slate-700 text-slate-400 hover:border-blue-300'
             }`}
           >
             Ready
@@ -764,7 +764,7 @@ export default function ShopFloorSimple() {
             type="button"
             onClick={() => setDueTodayOnly((prev) => !prev)}
             className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-              dueTodayOnly ? 'border-blue-500 bg-blue-100 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-blue-300'
+              dueTodayOnly ? 'border-blue-500 bg-blue-500/20 text-blue-400' : 'border-slate-700 text-slate-400 hover:border-blue-300'
             }`}
           >
             Due Today
@@ -777,23 +777,23 @@ export default function ShopFloorSimple() {
             const statusLabel = isActive ? 'ACTIVE' : hasQueue ? 'QUEUED' : 'AVAILABLE';
             const statusPill =
               statusLabel === 'ACTIVE'
-                ? 'bg-amber-100 text-amber-700'
+                ? 'bg-amber-500/20 text-amber-400'
                 : statusLabel === 'QUEUED'
-                ? 'bg-blue-100 text-blue-700'
-                : 'bg-emerald-100 text-emerald-700';
+                ? 'bg-blue-500/20 text-blue-400'
+                : 'bg-emerald-500/20 text-emerald-400';
             const statusBar =
               statusLabel === 'ACTIVE'
-                ? 'bg-amber-500'
+                ? 'bg-amber-500/100'
                 : statusLabel === 'QUEUED'
-                ? 'bg-blue-500'
-                : 'bg-emerald-500';
+                ? 'bg-blue-500/100'
+                : 'bg-emerald-500/100';
             return (
               <button
                 key={bucket.id}
                 type="button"
                 onClick={() => focusOperations(bucket.id)}
                 className={`relative text-left rounded-2xl border px-5 py-4 transition hover:shadow-md ${
-                  workCenterId === bucket.id ? 'border-werco-500 bg-werco-50 shadow-sm' : 'border-gray-200 bg-emerald-50/30'
+                  workCenterId === bucket.id ? 'border-werco-500 bg-werco-50 shadow-sm' : 'border-slate-700 bg-emerald-500/10/30'
                 }`}
               >
                 <div className="flex items-center gap-2 text-xs font-semibold">
@@ -802,19 +802,19 @@ export default function ShopFloorSimple() {
                     {statusLabel}
                   </span>
                 </div>
-                <div className="mt-3 text-base font-semibold text-gray-900">{bucket.name}</div>
-                <div className="mt-1 text-xs text-gray-500">Work cell queue</div>
-                <div className="mt-4 flex items-center gap-4 text-sm text-gray-600">
-                  <span>Active: <span className="font-semibold text-gray-800">{bucket.inProgress}</span></span>
-                  <span>Queue: <span className="font-semibold text-gray-800">{bucket.open}</span></span>
+                <div className="mt-3 text-base font-semibold text-white">{bucket.name}</div>
+                <div className="mt-1 text-xs text-slate-400">Work cell queue</div>
+                <div className="mt-4 flex items-center gap-4 text-sm text-slate-400">
+                  <span>Active: <span className="font-semibold text-slate-100">{bucket.inProgress}</span></span>
+                  <span>Queue: <span className="font-semibold text-slate-100">{bucket.open}</span></span>
                 </div>
                 {bucket.dueToday > 0 && (
-                  <div className="mt-3 text-xs font-medium text-blue-700">
+                  <div className="mt-3 text-xs font-medium text-blue-400">
                     Due Today: {bucket.dueToday}
                   </div>
                 )}
                 {bucket.overdue > 0 && (
-                  <div className="mt-1 text-xs font-medium text-red-700">
+                  <div className="mt-1 text-xs font-medium text-red-400">
                     Overdue: {bucket.overdue}
                   </div>
                 )}
@@ -830,8 +830,8 @@ export default function ShopFloorSimple() {
         <div className="card">
           <div className="flex items-center justify-between mb-3">
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">Most Important Next</h2>
-              <p className="text-sm text-gray-500">Focus list ranked by overdue, priority, and due date</p>
+              <h2 className="text-lg font-semibold text-white">Most Important Next</h2>
+              <p className="text-sm text-slate-400">Focus list ranked by overdue, priority, and due date</p>
             </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
@@ -843,18 +843,18 @@ export default function ShopFloorSimple() {
                   type="button"
                   onClick={() => handleViewDetails(op)}
                   className={`rounded-xl border p-3 text-left transition ${
-                    overdue ? 'border-red-200 bg-red-50 hover:bg-red-100' : 'border-gray-200 bg-white hover:bg-gray-50'
+                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/100/20' : 'border-slate-700 bg-[#151b28] hover:bg-slate-800/50'
                   }`}
                 >
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-gray-500">#{idx + 1}</span>
+                    <span className="text-xs font-semibold text-slate-400">#{idx + 1}</span>
                     <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getPriorityClasses(op.priority)}`}>
                       P{op.priority}
                     </span>
                   </div>
                   <div className="text-sm font-semibold text-werco-700">{op.work_order_number}</div>
-                  <div className="text-xs text-gray-600 truncate">{op.operation_number} - {op.operation_name}</div>
-                  <div className={`mt-2 text-xs ${overdue ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
+                  <div className="text-xs text-slate-400 truncate">{op.operation_number} - {op.operation_name}</div>
+                  <div className={`mt-2 text-xs ${overdue ? 'text-red-600 font-medium' : 'text-slate-400'}`}>
                     {op.due_date ? `Due ${formatCentralDate(op.due_date, { year: undefined })}` : 'No due date'}
                   </div>
                 </button>
@@ -867,9 +867,9 @@ export default function ShopFloorSimple() {
       {/* Operations Grid */}
       {sortedVisibleOperations.length === 0 ? (
         <div className="card text-center py-16">
-          <CubeIcon className="h-12 w-12 text-gray-300 mx-auto mb-4" />
-          <p className="text-gray-600 font-medium">No operations found</p>
-          <p className="text-sm text-gray-500 mt-1">Try adjusting your filters</p>
+          <CubeIcon className="h-12 w-12 text-slate-400 mx-auto mb-4" />
+          <p className="text-slate-400 font-medium">No operations found</p>
+          <p className="text-sm text-slate-400 mt-1">Try adjusting your filters</p>
         </div>
       ) : (
         <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
@@ -883,7 +883,7 @@ export default function ShopFloorSimple() {
             return (
               <div 
                 key={op.id} 
-                className={`card hover:shadow-lg transition-shadow ${overdue ? 'border-red-300 bg-red-50/30' : ''}`}
+                className={`card hover:shadow-lg transition-shadow ${overdue ? 'border-red-300 bg-red-500/10/30' : ''}`}
               >
                 {/* Header */}
                 <div className="flex items-start justify-between mb-3">
@@ -891,12 +891,12 @@ export default function ShopFloorSimple() {
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-werco-primary text-lg">{op.work_order_number}</span>
                       {overdue && (
-                        <span className="px-2 py-0.5 bg-red-100 text-red-700 text-xs font-semibold rounded">
+                        <span className="px-2 py-0.5 bg-red-500/20 text-red-400 text-xs font-semibold rounded">
                           OVERDUE
                         </span>
                       )}
                     </div>
-                    <p className="text-sm text-gray-600">{op.part_number}</p>
+                    <p className="text-sm text-slate-400">{op.part_number}</p>
                   </div>
                   <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${colors.bg} ${colors.text}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${colors.dot}`}></span>
@@ -905,15 +905,15 @@ export default function ShopFloorSimple() {
                 </div>
                 
                 {/* Operation Info */}
-                <div className="bg-gray-50 rounded-lg p-3 mb-3">
+                <div className="bg-slate-800/50 rounded-lg p-3 mb-3">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="font-semibold text-gray-900">
+                    <span className="font-semibold text-white">
                       {op.operation_number} - {op.operation_name}
                     </span>
                   </div>
-                  <p className="text-sm text-gray-600">{op.part_name}</p>
+                  <p className="text-sm text-slate-400">{op.part_name}</p>
                   {op.work_center_name && (
-                    <p className="text-xs text-gray-500 mt-1">
+                    <p className="text-xs text-slate-400 mt-1">
                       Work Center: {op.work_center_name}
                     </p>
                   )}
@@ -922,24 +922,24 @@ export default function ShopFloorSimple() {
                 {/* Progress */}
                 <div className="mb-3">
                   <div className="flex justify-between text-sm mb-1">
-                    <span className="font-medium text-gray-700">Progress</span>
+                    <span className="font-medium text-slate-300">Progress</span>
                     <span className="font-semibold tabular-nums">
                       {op.quantity_complete} / {op.quantity_ordered}
                     </span>
                   </div>
-                  <div className="h-2.5 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="h-2.5 bg-slate-700 rounded-full overflow-hidden">
                     <div 
-                      className={`h-full rounded-full transition-all ${progress >= 100 ? 'bg-green-500' : 'bg-werco-600'}`}
+                      className={`h-full rounded-full transition-all ${progress >= 100 ? 'bg-green-500/100' : 'bg-werco-600'}`}
                       style={{ width: `${Math.min(100, progress)}%` }}
                     />
                   </div>
-                  <div className="text-right text-xs text-gray-500 mt-0.5">
+                  <div className="text-right text-xs text-slate-400 mt-0.5">
                     {Math.round(progress)}% complete
                   </div>
                 </div>
                 
                 {/* Meta Info */}
-                <div className="flex items-center justify-between text-sm text-gray-600 mb-4">
+                <div className="flex items-center justify-between text-sm text-slate-400 mb-4">
                   <div>
                     {op.due_date && (
                       <span className={overdue ? 'text-red-600 font-medium' : ''}>
@@ -1062,18 +1062,18 @@ export default function ShopFloorSimple() {
           <div className="modal max-w-md" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Mark Complete</h3>
-              <button onClick={() => setCompleteModal(null)} className="p-2 rounded-lg hover:bg-gray-100">
+              <button onClick={() => setCompleteModal(null)} className="p-2 rounded-lg hover:bg-slate-800">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
             
             <div className="modal-body space-y-4">
-              <div className="bg-gray-50 rounded-lg p-4">
-                <p className="text-sm text-gray-500">Operation</p>
-                <p className="font-semibold text-gray-900">
+              <div className="bg-slate-800/50 rounded-lg p-4">
+                <p className="text-sm text-slate-400">Operation</p>
+                <p className="font-semibold text-white">
                   {completeModal.operation_number} - {completeModal.operation_name}
                 </p>
-                <p className="text-sm text-gray-600 mt-1">
+                <p className="text-sm text-slate-400 mt-1">
                   {completeModal.work_order_number} • {completeModal.part_number}
                 </p>
               </div>
@@ -1089,9 +1089,9 @@ export default function ShopFloorSimple() {
                     onChange={(e) => setCompleteQty(Number(e.target.value))}
                     className="input text-center text-2xl font-bold flex-1"
                   />
-                  <span className="text-gray-500">/ {completeModal.quantity_ordered}</span>
+                  <span className="text-slate-400">/ {completeModal.quantity_ordered}</span>
                 </div>
-                <p className="text-sm text-gray-500 mt-1">
+                <p className="text-sm text-slate-400 mt-1">
                   {completeQty >= completeModal.quantity_ordered 
                     ? '✓ This will mark the operation as COMPLETE'
                     : 'Partial completion - operation will remain IN PROGRESS'}
@@ -1139,7 +1139,7 @@ export default function ShopFloorSimple() {
           <div className="modal max-w-2xl" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Operation Details</h3>
-              <button onClick={() => setDetailsModal(null)} className="p-2 rounded-lg hover:bg-gray-100">
+              <button onClick={() => setDetailsModal(null)} className="p-2 rounded-lg hover:bg-slate-800">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
@@ -1150,8 +1150,8 @@ export default function ShopFloorSimple() {
                 <div className="flex justify-between items-start">
                   <div>
                     <p className="text-sm text-werco-600 font-medium">Work Order</p>
-                    <p className="text-xl font-bold text-gray-900">{detailsModal.work_order.work_order_number}</p>
-                    <p className="text-gray-600">{detailsModal.work_order.part?.part_number} - {detailsModal.work_order.part?.name}</p>
+                    <p className="text-xl font-bold text-white">{detailsModal.work_order.work_order_number}</p>
+                    <p className="text-slate-400">{detailsModal.work_order.part?.part_number} - {detailsModal.work_order.part?.name}</p>
                   </div>
                   <button
                     onClick={() => {
@@ -1167,22 +1167,22 @@ export default function ShopFloorSimple() {
               
               {/* Operation Info */}
               <div>
-                <h4 className="font-semibold text-gray-900 mb-3">Current Operation</h4>
+                <h4 className="font-semibold text-white mb-3">Current Operation</h4>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <p className="text-sm text-gray-500">Operation</p>
+                    <p className="text-sm text-slate-400">Operation</p>
                     <p className="font-medium">{detailsModal.operation.operation_number} - {detailsModal.operation.name}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-500">Work Center</p>
+                    <p className="text-sm text-slate-400">Work Center</p>
                     <p className="font-medium">{detailsModal.work_center?.name || '—'}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-500">Quantity</p>
+                    <p className="text-sm text-slate-400">Quantity</p>
                     <p className="font-medium">{detailsModal.operation.quantity_complete} / {detailsModal.work_order.quantity_ordered}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-500">Status</p>
+                    <p className="text-sm text-slate-400">Status</p>
                     <p className="font-medium capitalize">{detailsModal.operation.status.replace('_', ' ')}</p>
                   </div>
                 </div>
@@ -1191,17 +1191,17 @@ export default function ShopFloorSimple() {
               {/* Instructions */}
               {(detailsModal.operation.setup_instructions || detailsModal.operation.run_instructions) && (
                 <div>
-                  <h4 className="font-semibold text-gray-900 mb-3">Work Instructions</h4>
+                  <h4 className="font-semibold text-white mb-3">Work Instructions</h4>
                   {detailsModal.operation.setup_instructions && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-2">
-                      <p className="text-sm font-medium text-amber-800">Setup Instructions</p>
-                      <p className="text-sm text-amber-700 whitespace-pre-wrap">{detailsModal.operation.setup_instructions}</p>
+                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-2">
+                      <p className="text-sm font-medium text-amber-300">Setup Instructions</p>
+                      <p className="text-sm text-amber-400 whitespace-pre-wrap">{detailsModal.operation.setup_instructions}</p>
                     </div>
                   )}
                   {detailsModal.operation.run_instructions && (
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                      <p className="text-sm font-medium text-blue-800">Run Instructions</p>
-                      <p className="text-sm text-blue-700 whitespace-pre-wrap">{detailsModal.operation.run_instructions}</p>
+                    <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
+                      <p className="text-sm font-medium text-blue-300">Run Instructions</p>
+                      <p className="text-sm text-blue-400 whitespace-pre-wrap">{detailsModal.operation.run_instructions}</p>
                     </div>
                   )}
                 </div>
@@ -1209,17 +1209,17 @@ export default function ShopFloorSimple() {
               
               {/* All Operations */}
               <div>
-                <h4 className="font-semibold text-gray-900 mb-3">All Operations</h4>
+                <h4 className="font-semibold text-white mb-3">All Operations</h4>
                 <div className="space-y-2">
                   {detailsModal.all_operations.map((op: any) => {
                     const opColors = STATUS_COLORS[op.status] || STATUS_COLORS.pending;
                     return (
                       <div 
                         key={op.id} 
-                        className={`flex items-center justify-between p-3 rounded-lg ${op.is_current ? 'bg-werco-100 border border-werco-300' : 'bg-gray-50'}`}
+                        className={`flex items-center justify-between p-3 rounded-lg ${op.is_current ? 'bg-werco-100 border border-werco-300' : 'bg-slate-800/50'}`}
                       >
                         <div className="flex items-center gap-3">
-                          <span className="text-sm font-medium text-gray-500 w-12">{op.operation_number}</span>
+                          <span className="text-sm font-medium text-slate-400 w-12">{op.operation_number}</span>
                           <span className="font-medium">{op.name}</span>
                           {op.is_current && <span className="text-xs bg-werco-600 text-white px-2 py-0.5 rounded">Current</span>}
                         </div>
@@ -1235,14 +1235,14 @@ export default function ShopFloorSimple() {
               {/* History */}
               {detailsModal.history && detailsModal.history.length > 0 && (
                 <div>
-                  <h4 className="font-semibold text-gray-900 mb-3">Recent History</h4>
+                  <h4 className="font-semibold text-white mb-3">Recent History</h4>
                   <div className="space-y-2">
                     {detailsModal.history.map((h: any, i: number) => (
                       <div key={i} className="flex items-start gap-3 text-sm">
-                        <span className="text-gray-400 w-32 flex-shrink-0">
+                        <span className="text-slate-500 w-32 flex-shrink-0">
                           {h.created_at ? formatCentralDateTime(h.created_at, { year: undefined }) : '—'}
                         </span>
-                        <span className="text-gray-700">{h.details}</span>
+                        <span className="text-slate-300">{h.details}</span>
                       </div>
                     ))}
                   </div>

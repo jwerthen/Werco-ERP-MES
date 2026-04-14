@@ -384,7 +384,7 @@ export default function Layout({ children }: LayoutProps) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50/40">
+    <div className="min-h-screen" style={{ background: '#0d1117' }}>
       {/* Skip to main content link for accessibility */}
       <SkipLink />
 
@@ -491,24 +491,24 @@ export default function Layout({ children }: LayoutProps) {
       {/* Main content area */}
       <div className="lg:pl-72 flex flex-col min-h-screen">
         {/* Top bar - Clean white with subtle border */}
-        <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-xl border-b border-slate-200/80 shadow-sm">
+        <header className="sticky top-0 z-30 bg-[#151b28]/90 backdrop-blur-xl border-b border-slate-700/50 shadow-sm">
           <div className="flex items-center justify-between h-16 px-4 sm:px-6 lg:px-8">
             {/* Mobile menu button */}
             <button
               onClick={() => setSidebarOpen(true)}
-              className="lg:hidden p-2 -ml-2 rounded-xl text-slate-600 hover:bg-slate-100 transition-colors"
+              className="lg:hidden p-2 -ml-2 rounded-xl text-slate-400 hover:bg-slate-700 transition-colors"
             >
               <Bars3Icon className="h-6 w-6" />
             </button>
 
             {/* Page title (desktop) */}
             <div className="hidden lg:block">
-              <h1 className="text-lg font-semibold text-slate-800">{pageTitle}</h1>
+              <h1 className="text-lg font-semibold text-slate-100">{pageTitle}</h1>
             </div>
 
             {/* Mobile logo */}
             <div className="lg:hidden">
-              <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-10 w-auto" />
+              <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-10 w-auto brightness-0 invert" />
             </div>
 
             {/* Right side actions */}
@@ -516,13 +516,13 @@ export default function Layout({ children }: LayoutProps) {
               {/* Quick search button */}
               <button
                 onClick={globalSearch.open}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-all duration-200 border border-slate-200"
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-all duration-200 border border-slate-600"
                 title="Search (Ctrl+K)"
                 data-tour="search"
               >
                 <MagnifyingGlassIcon className="h-4 w-4" />
                 <span className="hidden md:inline text-sm">Search...</span>
-                <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 text-xs font-medium text-slate-400 bg-slate-100 rounded">
+                <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 text-xs font-medium text-slate-500 bg-slate-700 rounded">
                   Ctrl+K
                 </kbd>
               </button>
@@ -530,7 +530,7 @@ export default function Layout({ children }: LayoutProps) {
               {/* Keyboard shortcuts help */}
               <button
                 onClick={keyboardShortcuts.showHelp}
-                className="hidden md:flex items-center justify-center p-2 rounded-xl text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-all duration-200"
+                className="hidden md:flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-all duration-200"
                 title="Keyboard shortcuts (Ctrl+/)"
                 aria-label="Show keyboard shortcuts"
               >
@@ -565,17 +565,17 @@ export default function Layout({ children }: LayoutProps) {
         </main>
 
         {/* Footer - Hidden on mobile, visible on desktop */}
-        <footer className="hidden lg:block flex-shrink-0 py-4 px-6 border-t border-slate-200/80 bg-white/60">
+        <footer className="hidden lg:block flex-shrink-0 py-4 px-6 border-t border-slate-700/50 bg-[#0f1419]/60">
           <div className="max-w-7xl mx-auto flex items-center justify-between text-sm text-slate-500">
             <div className="flex items-center gap-2">
-              <span className="font-medium text-slate-700">Werco Manufacturing</span>
-              <span className="text-slate-300">|</span>
-              <span className="text-werco-navy-600 font-semibold">ERP / MES</span>
+              <span className="font-medium text-slate-300">Werco Manufacturing</span>
+              <span className="text-slate-600">|</span>
+              <span className="text-blue-400 font-semibold">ERP / MES</span>
             </div>
             <div className="flex items-center gap-3">
-              <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400">AS9100D &middot; ISO 9001 &middot; ITAR</span>
-              <span className="text-slate-300">|</span>
-              <span className="text-slate-400">v1.0.0</span>
+              <span className="text-[10px] font-mono uppercase tracking-widest text-slate-500">AS9100D &middot; ISO 9001 &middot; ITAR</span>
+              <span className="text-slate-600">|</span>
+              <span className="text-slate-500">v1.0.0</span>
             </div>
           </div>
         </footer>

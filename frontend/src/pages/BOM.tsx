@@ -96,10 +96,10 @@ interface ImportPreview {
 }
 
 const lineTypeColors: Record<string, string> = {
-  component: 'bg-blue-100 text-blue-800',
-  hardware: 'bg-amber-100 text-amber-800',
-  consumable: 'bg-orange-100 text-orange-800',
-  reference: 'bg-gray-100 text-gray-600',
+  component: 'bg-blue-500/20 text-blue-300',
+  hardware: 'bg-amber-500/20 text-amber-300',
+  consumable: 'bg-orange-500/20 text-orange-300',
+  reference: 'bg-slate-800 text-slate-400',
 };
 
 const lineTypeLabels: Record<string, string> = {
@@ -119,12 +119,12 @@ const partTypeLabels: Record<string, string> = {
 };
 
 const partTypeBadge: Record<string, string> = {
-  manufactured: 'bg-blue-100 text-blue-800',
-  assembly: 'bg-indigo-100 text-indigo-800',
-  purchased: 'bg-emerald-100 text-emerald-800',
-  raw_material: 'bg-blue-100 text-blue-800',
-  hardware: 'bg-amber-100 text-amber-800',
-  consumable: 'bg-orange-100 text-orange-800',
+  manufactured: 'bg-blue-500/20 text-blue-300',
+  assembly: 'bg-indigo-500/20 text-indigo-800',
+  purchased: 'bg-emerald-500/20 text-emerald-300',
+  raw_material: 'bg-blue-500/20 text-blue-300',
+  hardware: 'bg-amber-500/20 text-amber-300',
+  consumable: 'bg-orange-500/20 text-orange-300',
 };
 
 export default function BOMPage() {
@@ -525,28 +525,28 @@ export default function BOMPage() {
 
     return (
       <React.Fragment key={`${item.id}-${depth}`}>
-        <tr className="hover:bg-gray-50">
+        <tr className="hover:bg-slate-800/50">
           <td className="px-4 py-3" style={{ paddingLeft: `${16 + depth * 24}px` }}>
             <div className="flex items-center">
               {hasChildren ? (
                 <button onClick={() => toggleExpanded(item.id)} className="mr-2">
                   {isExpanded ? (
-                    <ChevronDownIcon className="h-4 w-4 text-gray-500" />
+                    <ChevronDownIcon className="h-4 w-4 text-slate-400" />
                   ) : (
-                    <ChevronRightIcon className="h-4 w-4 text-gray-500" />
+                    <ChevronRightIcon className="h-4 w-4 text-slate-400" />
                   )}
                 </button>
               ) : (
                 <span className="w-6" />
               )}
-              <span className="text-sm text-gray-500">L{(item.level || 0)}</span>
+              <span className="text-sm text-slate-400">L{(item.level || 0)}</span>
             </div>
           </td>
           <td className="px-4 py-3 font-medium">{item.find_number || item.item_number}</td>
           <td className="px-4 py-3">
             <div>
               <div className="font-medium text-werco-primary">{item.component_part?.part_number}</div>
-              <div className="text-sm text-gray-500">{item.component_part?.name}</div>
+              <div className="text-sm text-slate-400">{item.component_part?.name}</div>
             </div>
           </td>
           <td className="px-4 py-3">
@@ -574,7 +574,7 @@ export default function BOMPage() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Bill of Materials</h1>
+        <h1 className="text-2xl font-bold text-white">Bill of Materials</h1>
         <div className="flex gap-2">
           <button onClick={() => setShowImportModal(true)} className="btn-secondary flex items-center">
             <DocumentDuplicateIcon className="h-5 w-5 mr-2" />
@@ -598,30 +598,30 @@ export default function BOMPage() {
                 onClick={() => { setSelectedBOM(bom); setViewMode('single'); }}
                 className={`p-3 rounded-lg cursor-pointer border transition-colors ${
                   selectedBOM?.id === bom.id 
-                    ? 'border-werco-primary bg-blue-50' 
-                    : 'border-gray-200 hover:border-gray-300'
+                    ? 'border-werco-primary bg-blue-500/10' 
+                    : 'border-slate-700 hover:border-slate-600'
                 }`}
               >
                 <div className="flex justify-between items-start">
                   <div>
                     <div className="font-medium">{bom.part?.part_number}</div>
-                    <div className="text-sm text-gray-500">{bom.part?.name}</div>
+                    <div className="text-sm text-slate-400">{bom.part?.name}</div>
                   </div>
                   <span className={`text-xs px-2 py-1 rounded ${
-                    bom.status === 'released' ? 'bg-green-100 text-green-800' :
-                    bom.status === 'draft' ? 'bg-gray-100 text-gray-800' :
-                    'bg-yellow-100 text-yellow-800'
+                    bom.status === 'released' ? 'bg-green-500/20 text-green-300' :
+                    bom.status === 'draft' ? 'bg-slate-800 text-slate-100' :
+                    'bg-yellow-500/20 text-yellow-300'
                   }`}>
                     {bom.status}
                   </span>
                 </div>
-                <div className="text-xs text-gray-400 mt-1">
+                <div className="text-xs text-slate-500 mt-1">
                   Rev {bom.revision} | {bom.items.length} items
                 </div>
               </div>
             ))}
             {boms.length === 0 && (
-              <p className="text-gray-500 text-center py-4">No BOMs created yet</p>
+              <p className="text-slate-400 text-center py-4">No BOMs created yet</p>
             )}
           </div>
         </div>
@@ -633,20 +633,20 @@ export default function BOMPage() {
               <div className="flex justify-between items-start mb-4">
                 <div>
                   <h2 className="text-lg font-semibold">{selectedBOM.part?.part_number}</h2>
-                  <p className="text-gray-500">{selectedBOM.part?.name}</p>
-                  <p className="text-sm text-gray-400">Revision {selectedBOM.revision}</p>
+                  <p className="text-slate-400">{selectedBOM.part?.name}</p>
+                  <p className="text-sm text-slate-500">Revision {selectedBOM.revision}</p>
                 </div>
                 <div className="flex gap-2">
-                  <div className="flex rounded-lg border border-gray-300 overflow-hidden">
+                  <div className="flex rounded-lg border border-slate-600 overflow-hidden">
                     <button
                       onClick={() => setViewMode('single')}
-                      className={`px-3 py-1 text-sm ${viewMode === 'single' ? 'bg-werco-primary text-white' : 'bg-white'}`}
+                      className={`px-3 py-1 text-sm ${viewMode === 'single' ? 'bg-werco-primary text-white' : 'bg-[#151b28]'}`}
                     >
                       Single Level
                     </button>
                     <button
                       onClick={() => setViewMode('exploded')}
-                      className={`px-3 py-1 text-sm ${viewMode === 'exploded' ? 'bg-werco-primary text-white' : 'bg-white'}`}
+                      className={`px-3 py-1 text-sm ${viewMode === 'exploded' ? 'bg-werco-primary text-white' : 'bg-[#151b28]'}`}
                     >
                       Multi-Level
                     </button>
@@ -679,39 +679,39 @@ export default function BOMPage() {
 
               {/* BOM Items Table */}
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
+                <table className="min-w-full divide-y divide-slate-700">
+                  <thead className="bg-slate-800/50">
                     <tr>
-                      {viewMode === 'exploded' && <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Level</th>}
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item #</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                      {viewMode === 'exploded' && <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Ext Qty</th>}
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">UOM</th>
+                      {viewMode === 'exploded' && <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Level</th>}
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Item #</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Category</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                      {viewMode === 'exploded' && <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Ext Qty</th>}
+                      <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">UOM</th>
                       {viewMode === 'single' && selectedBOM.status === 'draft' && (
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                       )}
                       {viewMode === 'single' && (
-                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Routing</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Routing</th>
                       )}
                     </tr>
                   </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
+                  <tbody className="bg-[#151b28] divide-y divide-slate-700">
                     {viewMode === 'single' ? (
                       selectedBOM.items.map(item => (
-                        <tr key={item.id} className={`hover:bg-gray-50 ${item.line_type === 'hardware' ? 'bg-amber-50/50' : ''}`}>
+                        <tr key={item.id} className={`hover:bg-slate-800/50 ${item.line_type === 'hardware' ? 'bg-amber-500/10/50' : ''}`}>
                           <td className="px-4 py-3 font-medium">{item.find_number || item.item_number}</td>
                           <td className="px-4 py-3">
                             <div className="flex items-center">
                               <div>
                                 <div className="font-medium text-werco-primary">{item.component_part?.part_number}</div>
-                                <div className="text-sm text-gray-500">{item.component_part?.name}</div>
+                                <div className="text-sm text-slate-400">{item.component_part?.name}</div>
                                 {item.torque_spec && (
                                   <div className="text-xs text-amber-600">Torque: {item.torque_spec}</div>
                                 )}
                                 {item.installation_notes && (
-                                  <div className="text-xs text-gray-400 italic">{item.installation_notes}</div>
+                                  <div className="text-xs text-slate-500 italic">{item.installation_notes}</div>
                                 )}
                               </div>
                               {item.component_part?.has_bom && (
@@ -730,7 +730,7 @@ export default function BOMPage() {
                             <td className="px-4 py-3 text-center">
                               <button
                                 onClick={() => handleDeleteItem(item.id)}
-                                className="text-red-500 hover:text-red-700"
+                                className="text-red-500 hover:text-red-400"
                               >
                                 <TrashIcon className="h-4 w-4" />
                               </button>
@@ -757,12 +757,12 @@ export default function BOMPage() {
               </div>
 
               {selectedBOM.items.length === 0 && (
-                <p className="text-gray-500 text-center py-8">No items in this BOM</p>
+                <p className="text-slate-400 text-center py-8">No items in this BOM</p>
               )}
             </>
           ) : (
-            <div className="text-center py-12 text-gray-500">
-              <DocumentDuplicateIcon className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+            <div className="text-center py-12 text-slate-400">
+              <DocumentDuplicateIcon className="h-12 w-12 mx-auto mb-4 text-slate-400" />
               <p>Select a BOM to view details</p>
             </div>
           )}
@@ -772,7 +772,7 @@ export default function BOMPage() {
       {/* Create BOM Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Create New BOM</h3>
             <form onSubmit={handleCreateBOM} className="space-y-4">
               <div>
@@ -845,11 +845,11 @@ export default function BOMPage() {
       {/* Import BOM / Drawing Modal */}
       {showImportModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold">Import BOM or Drawing</h3>
               <button onClick={() => setShowImportModal(false)}>
-                <XMarkIcon className="h-5 w-5 text-gray-500" />
+                <XMarkIcon className="h-5 w-5 text-slate-400" />
               </button>
             </div>
             <form onSubmit={handleImport} className="space-y-4">
@@ -868,12 +868,12 @@ export default function BOMPage() {
                   type="checkbox"
                   checked={importCreateMissingParts}
                   onChange={(e) => setImportCreateMissingParts(e.target.checked)}
-                  className="rounded border-gray-300"
+                  className="rounded border-slate-600"
                 />
                 <span className="text-sm">Create missing parts automatically</span>
               </label>
               {importWarnings.length > 0 && (
-                <div className="bg-amber-50 border border-amber-200 rounded-md p-3 text-sm text-amber-800">
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-md p-3 text-sm text-amber-300">
                   {importWarnings.map((w, idx) => (
                     <div key={idx}>{w}</div>
                   ))}
@@ -895,21 +895,21 @@ export default function BOMPage() {
       {/* Import Preview Modal */}
       {showPreviewModal && importPreview && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-6xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-6xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-lg font-semibold">Review Import</h3>
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-slate-400">
                   {importPreview.document_type === 'bom' ? 'Assembly BOM' : 'Single Part'} • Confidence: {importPreview.extraction_confidence || 'low'}
                 </p>
               </div>
               <button onClick={() => setShowPreviewModal(false)}>
-                <XMarkIcon className="h-5 w-5 text-gray-500" />
+                <XMarkIcon className="h-5 w-5 text-slate-400" />
               </button>
             </div>
 
             {importWarnings.length > 0 && (
-              <div className="bg-amber-50 border border-amber-200 rounded-md p-3 text-sm text-amber-800 mb-4">
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-md p-3 text-sm text-amber-300 mb-4">
                 {importWarnings.map((w, idx) => (
                   <div key={idx}>{w}</div>
                 ))}
@@ -979,7 +979,7 @@ export default function BOMPage() {
               <div className="mb-4">
                 {importPreview.raw_columns && importPreview.raw_columns.length > 0 && (
                   <div className="mb-4">
-                    <p className="text-sm text-gray-600 mb-2">Map your Excel columns:</p>
+                    <p className="text-sm text-slate-400 mb-2">Map your Excel columns:</p>
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                       {[
                         { key: 'line_number', label: 'Line #' },
@@ -1019,19 +1019,19 @@ export default function BOMPage() {
 
             {importPreview.document_type === 'bom' && (
               <div className="overflow-x-auto mb-6">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
+                <table className="min-w-full divide-y divide-slate-700">
+                  <thead className="bg-slate-800/50">
                     <tr>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Line</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Part #</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
-                      <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">UOM</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item Type</th>
-                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Line Type</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Line</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part #</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Description</th>
+                      <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">UOM</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Item Type</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Line Type</th>
                     </tr>
                   </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
+                  <tbody className="bg-[#151b28] divide-y divide-slate-700">
                     {(importPreview.raw_columns && importPreview.raw_columns.length > 0 ? importDerivedItems : importPreview.items).map((item, index) => (
                       <tr key={index}>
                         <td className="px-3 py-2 text-sm">
@@ -1165,7 +1165,7 @@ export default function BOMPage() {
                   </tbody>
                 </table>
                 {importPreview.items.length === 0 && (
-                  <p className="text-sm text-gray-500 py-3">No BOM items detected.</p>
+                  <p className="text-sm text-slate-400 py-3">No BOM items detected.</p>
                 )}
               </div>
             )}
@@ -1185,11 +1185,11 @@ export default function BOMPage() {
       {/* Add Item Modal */}
       {showAddItemModal && selectedBOM && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-6 max-w-5xl w-full mx-4">
+          <div className="bg-[#151b28] rounded-2xl p-6 max-w-5xl w-full mx-4">
             <div className="flex items-center justify-between mb-5">
               <div>
                 <h3 className="text-lg font-semibold">Add BOM Item</h3>
-                <p className="text-sm text-gray-500">Pick a component and configure its usage</p>
+                <p className="text-sm text-slate-400">Pick a component and configure its usage</p>
               </div>
               <button
                 type="button"
@@ -1216,7 +1216,7 @@ export default function BOMPage() {
                       <button
                         type="button"
                         onClick={() => setPartSearch('')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-400"
                         aria-label="Clear search"
                       >
                         <XMarkIcon className="h-4 w-4" />
@@ -1232,14 +1232,14 @@ export default function BOMPage() {
                         className={`rounded-full border px-3 py-1 font-medium transition ${
                           partTypeFilter === option.id
                             ? 'border-werco-500 bg-werco-50 text-werco-700'
-                            : 'border-gray-200 text-gray-600 hover:border-werco-300'
+                            : 'border-slate-700 text-slate-400 hover:border-werco-300'
                         }`}
                       >
                         {option.label}
                       </button>
                     ))}
                   </div>
-                  <div className="text-xs text-gray-500">
+                  <div className="text-xs text-slate-400">
                     Showing {filteredParts.length} part{filteredParts.length === 1 ? '' : 's'}
                   </div>
                   <div className="max-h-[360px] overflow-y-auto space-y-2 pr-1">
@@ -1251,41 +1251,41 @@ export default function BOMPage() {
                         className={`w-full text-left rounded-xl border px-3 py-2.5 transition ${
                           newItem.component_part_id === part.id
                             ? 'border-werco-500 bg-werco-50 shadow-sm'
-                            : 'border-gray-200 hover:border-werco-300 hover:bg-gray-50'
+                            : 'border-slate-700 hover:border-werco-300 hover:bg-slate-800/50'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div>
-                            <div className="font-semibold text-gray-900">{part.part_number}</div>
-                            <div className="text-sm text-gray-500">{part.name}</div>
+                            <div className="font-semibold text-white">{part.part_number}</div>
+                            <div className="text-sm text-slate-400">{part.name}</div>
                           </div>
-                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${partTypeBadge[part.part_type] || 'bg-gray-100 text-gray-600'}`}>
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${partTypeBadge[part.part_type] || 'bg-slate-800 text-slate-400'}`}>
                             {partTypeLabels[part.part_type] || part.part_type}
                           </span>
                         </div>
                       </button>
                     ))}
                     {filteredParts.length === 0 && (
-                      <div className="border border-dashed border-gray-200 rounded-xl p-4 text-sm text-gray-500 text-center">
+                      <div className="border border-dashed border-slate-700 rounded-xl p-4 text-sm text-slate-400 text-center">
                         No parts match your filters.
                       </div>
                     )}
                   </div>
                 </div>
                 <div className="lg:col-span-3 space-y-4">
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Selected Component</div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+                    <div className="text-xs text-slate-400 uppercase tracking-wide mb-2">Selected Component</div>
                     {newItem.component_part_id > 0 ? (
                       <div>
-                        <div className="font-semibold text-gray-900">
+                        <div className="font-semibold text-white">
                           {parts.find(p => p.id === newItem.component_part_id)?.part_number}
                         </div>
-                        <div className="text-sm text-gray-600">
+                        <div className="text-sm text-slate-400">
                           {parts.find(p => p.id === newItem.component_part_id)?.name}
                         </div>
                       </div>
                     ) : (
-                      <div className="text-sm text-gray-500">Select a part to continue.</div>
+                      <div className="text-sm text-slate-400">Select a part to continue.</div>
                     )}
                   </div>
                   <div className="grid grid-cols-2 gap-4">
@@ -1354,8 +1354,8 @@ export default function BOMPage() {
                 
               {/* Hardware-specific fields */}
               {(newItem.line_type === 'hardware') && (
-                <div className="p-3 bg-amber-50 rounded-lg space-y-3">
-                  <div className="text-sm font-medium text-amber-800">Hardware Details</div>
+                <div className="p-3 bg-amber-500/10 rounded-lg space-y-3">
+                  <div className="text-sm font-medium text-amber-300">Hardware Details</div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="label">Torque Spec</label>
@@ -1445,7 +1445,7 @@ export default function BOMPage() {
       {/* New Part Modal (nested inside Add Item flow) */}
       {showNewPartModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Create New Part</h3>
             <form onSubmit={handleCreateNewPart} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">

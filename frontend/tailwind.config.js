@@ -75,19 +75,19 @@ module.exports = {
           900: '#0f172a',
           950: '#020617',
         },
-        // Surface colors - clean light backgrounds
+        // Surface colors - dark theme palette (Palantir-style)
         surface: {
-          50: '#fafafa',
-          100: '#f4f4f5',
-          200: '#e4e4e7',
-          300: '#d4d4d8',
-          400: '#a1a1aa',
-          500: '#71717a',
-          600: '#52525b',
-          700: '#3f3f46',
-          800: '#27272a',
-          900: '#18181b',
-          950: '#09090b',
+          50: '#1e293b',   // was #fafafa - lightest surface in dark mode
+          100: '#1a2236',  // was #f4f4f5 - card/panel backgrounds
+          200: '#334155',  // was #e4e4e7 - borders, dividers
+          300: '#475569',  // was #d4d4d8 - heavier borders
+          400: '#94a3b8',  // was #a1a1aa - muted text (kept similar)
+          500: '#94a3b8',  // was #71717a - secondary text
+          600: '#cbd5e1',  // was #52525b - body text (inverted for dark)
+          700: '#e2e8f0',  // was #3f3f46 - primary text (inverted for dark)
+          800: '#f1f5f9',  // was #27272a - headings (inverted for dark)
+          900: '#f8fafc',  // was #18181b - strongest text (inverted for dark)
+          950: '#ffffff',  // was #09090b - maximum contrast text
         },
         // Status colors - high contrast for quick scanning
         status: {
@@ -216,10 +216,10 @@ module.exports = {
           secondary: '#3366FF',
           accent: '#C8352B',
           neutral: '#0f172a',
-          'base-100': '#ffffff',
-          'base-200': '#f8fafc',
-          'base-300': '#e2e8f0',
-          'base-content': '#0f172a',
+          'base-100': '#0f1419',
+          'base-200': '#1a1f2e',
+          'base-300': '#252b3b',
+          'base-content': '#e2e8f0',
           info: '#3b82f6',
           success: '#10b981',
           warning: '#f59e0b',

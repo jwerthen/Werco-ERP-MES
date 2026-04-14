@@ -58,7 +58,7 @@ export default function DXFViewer({ file, analysis }: DXFViewerProps) {
 
   if (error) {
     return (
-      <div className="bg-gray-100 rounded p-4 text-center text-gray-500 text-sm">
+      <div className="bg-slate-800 rounded p-4 text-center text-slate-400 text-sm">
         {error}
       </div>
     );
@@ -72,13 +72,13 @@ export default function DXFViewer({ file, analysis }: DXFViewerProps) {
       <div className="absolute top-2 right-2 z-10 flex gap-2">
         <button
           onClick={() => setExpanded(!expanded)}
-          className="bg-white/90 hover:bg-white p-1.5 rounded shadow"
+          className="bg-slate-800/90 hover:bg-slate-700 p-1.5 rounded shadow"
           title={expanded ? 'Collapse' : 'Expand'}
         >
           {expanded ? (
-            <ArrowsPointingInIcon className="h-5 w-5 text-gray-700" />
+            <ArrowsPointingInIcon className="h-5 w-5 text-slate-200" />
           ) : (
-            <ArrowsPointingOutIcon className="h-5 w-5 text-gray-700" />
+            <ArrowsPointingOutIcon className="h-5 w-5 text-slate-200" />
           )}
         </button>
       </div>

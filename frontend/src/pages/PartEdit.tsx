@@ -70,9 +70,9 @@ export default function PartEdit() {
   if (loading || !part) {
     return (
       <div className="space-y-6 animate-pulse">
-        <div className="h-6 w-48 bg-gray-200 rounded" />
-        <div className="h-10 w-72 bg-gray-200 rounded" />
-        <div className="h-96 bg-gray-200 rounded-xl" />
+        <div className="h-6 w-48 bg-slate-700 rounded" />
+        <div className="h-10 w-72 bg-slate-700 rounded" />
+        <div className="h-96 bg-slate-700 rounded-xl" />
       </div>
     );
   }
@@ -85,16 +85,16 @@ export default function PartEdit() {
         { label: 'Edit' },
       ]} />
 
-      <h1 className="text-2xl font-bold text-gray-900">Edit {part.part_number}</h1>
+      <h1 className="text-2xl font-bold text-white">Edit {part.part_number}</h1>
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Basic Information */}
         <div className="card">
-          <h2 className="text-base font-semibold text-gray-900 mb-4">Basic Information</h2>
+          <h2 className="text-base font-semibold text-white mb-4">Basic Information</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="label">Part Number</label>
-              <input type="text" value={part.part_number} disabled className="input bg-gray-50 text-gray-500" />
+              <input type="text" value={part.part_number} disabled className="input bg-slate-800 text-slate-400" />
             </div>
             <div>
               <label className="label">Revision</label>
@@ -156,7 +156,7 @@ export default function PartEdit() {
 
         {/* Customer */}
         <div className="card">
-          <h2 className="text-base font-semibold text-gray-900 mb-4">Customer Information</h2>
+          <h2 className="text-base font-semibold text-white mb-4">Customer Information</h2>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label className="label">Customer</label>
@@ -190,14 +190,14 @@ export default function PartEdit() {
 
         {/* Quality */}
         <div className="card">
-          <h2 className="text-base font-semibold text-gray-900 mb-4">Quality (AS9100D)</h2>
+          <h2 className="text-base font-semibold text-white mb-4">Quality (AS9100D)</h2>
           <div className="flex gap-6">
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
                 checked={form.is_critical}
                 onChange={e => setForm(p => ({ ...p, is_critical: e.target.checked }))}
-                className="rounded border-gray-300 text-werco-navy-600"
+                className="rounded border-slate-600 text-werco-navy-600"
               />
               <span className="text-sm">Critical Characteristic</span>
             </label>
@@ -206,7 +206,7 @@ export default function PartEdit() {
                 type="checkbox"
                 checked={form.requires_inspection}
                 onChange={e => setForm(p => ({ ...p, requires_inspection: e.target.checked }))}
-                className="rounded border-gray-300 text-werco-navy-600"
+                className="rounded border-slate-600 text-werco-navy-600"
               />
               <span className="text-sm">Requires Inspection</span>
             </label>

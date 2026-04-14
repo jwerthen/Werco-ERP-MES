@@ -34,9 +34,9 @@ export function MobileDataCard({
   return (
     <div
       className={`
-        bg-white rounded-xl border border-slate-200 overflow-hidden
-        ${highlight ? 'ring-2 ring-werco-navy-600 ring-offset-2' : ''}
-        ${isClickable ? 'cursor-pointer active:bg-slate-50 touch:active:scale-[0.99]' : ''}
+        bg-[#151b28] rounded-xl border border-slate-700 overflow-hidden
+        ${highlight ? 'ring-2 ring-werco-navy-600 ring-offset-2 ring-offset-[#0d1117]' : ''}
+        ${isClickable ? 'cursor-pointer active:bg-slate-800 touch:active:scale-[0.99]' : ''}
         transition-all duration-200
         ${className}
       `}
@@ -45,14 +45,14 @@ export function MobileDataCard({
       tabIndex={isClickable ? 0 : undefined}
     >
       {/* Header */}
-      <div className="px-4 py-3 border-b border-slate-100 flex items-start justify-between gap-3">
+      <div className="px-4 py-3 border-b border-slate-700/30 flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <h3 className="font-semibold text-slate-900 truncate">{title}</h3>
+            <h3 className="font-semibold text-white truncate">{title}</h3>
             {badge}
           </div>
           {subtitle && (
-            <p className="text-sm text-slate-500 truncate mt-0.5">{subtitle}</p>
+            <p className="text-sm text-slate-400 truncate mt-0.5">{subtitle}</p>
           )}
         </div>
         {isClickable && (
@@ -67,10 +67,10 @@ export function MobileDataCard({
             key={index}
             className={`${field.fullWidth ? 'col-span-2' : ''} ${field.className || ''}`}
           >
-            <dt className="text-xs text-slate-500 uppercase tracking-wide">
+            <dt className="text-xs text-slate-400 uppercase tracking-wide">
               {field.label}
             </dt>
-            <dd className="text-sm font-medium text-slate-900 mt-0.5">
+            <dd className="text-sm font-medium text-slate-100 mt-0.5">
               {field.value}
             </dd>
           </div>
@@ -79,7 +79,7 @@ export function MobileDataCard({
 
       {/* Actions */}
       {actions && (
-        <div className="px-4 py-3 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2">
+        <div className="px-4 py-3 bg-slate-800/50 border-t border-slate-700/30 flex items-center justify-end gap-2">
           {actions}
         </div>
       )}
@@ -141,13 +141,13 @@ export function ResponsiveDataView<T>({
           {loadingCard || (
             <MobileDataList>
               {[...Array(3)].map((_, i) => (
-                <div key={i} className="bg-white rounded-xl border border-slate-200 p-4 animate-pulse">
-                  <div className="h-5 bg-slate-200 rounded w-1/2 mb-3" />
+                <div key={i} className="bg-[#151b28] rounded-xl border border-slate-700 p-4 animate-pulse">
+                  <div className="h-5 bg-slate-700 rounded w-1/2 mb-3" />
                   <div className="grid grid-cols-2 gap-3">
-                    <div className="h-4 bg-slate-100 rounded" />
-                    <div className="h-4 bg-slate-100 rounded" />
-                    <div className="h-4 bg-slate-100 rounded" />
-                    <div className="h-4 bg-slate-100 rounded" />
+                    <div className="h-4 bg-slate-700/50 rounded" />
+                    <div className="h-4 bg-slate-700/50 rounded" />
+                    <div className="h-4 bg-slate-700/50 rounded" />
+                    <div className="h-4 bg-slate-700/50 rounded" />
                   </div>
                 </div>
               ))}
@@ -158,10 +158,10 @@ export function ResponsiveDataView<T>({
         {/* Desktop Loading */}
         <div className={tableBreakpointClass}>
           {loadingTable || (
-            <div className="bg-white rounded-xl border border-slate-200 p-4 animate-pulse">
-              <div className="h-8 bg-slate-200 rounded mb-4" />
+            <div className="bg-[#151b28] rounded-xl border border-slate-700 p-4 animate-pulse">
+              <div className="h-8 bg-slate-700 rounded mb-4" />
               {[...Array(5)].map((_, i) => (
-                <div key={i} className="h-12 bg-slate-100 rounded mb-2" />
+                <div key={i} className="h-12 bg-slate-700/50 rounded mb-2" />
               ))}
             </div>
           )}
@@ -172,8 +172,8 @@ export function ResponsiveDataView<T>({
 
   if (data.length === 0) {
     return (
-      <div className="bg-white rounded-xl border border-slate-200 p-8 text-center">
-        <p className="text-slate-500">{emptyMessage}</p>
+      <div className="bg-[#151b28] rounded-xl border border-slate-700 p-8 text-center">
+        <p className="text-slate-400">{emptyMessage}</p>
       </div>
     );
   }

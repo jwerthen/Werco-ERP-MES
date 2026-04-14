@@ -149,9 +149,9 @@ interface GenerationResult {
 }
 
 const confidenceBadge: Record<string, string> = {
-  high: 'bg-green-100 text-green-800',
-  medium: 'bg-yellow-100 text-yellow-800',
-  low: 'bg-red-100 text-red-800',
+  high: 'bg-green-500/20 text-green-300',
+  medium: 'bg-yellow-500/20 text-yellow-300',
+  low: 'bg-red-500/20 text-red-300',
 };
 
 const lineTypeLabels: Record<string, string> = {
@@ -162,16 +162,16 @@ const lineTypeLabels: Record<string, string> = {
 };
 
 const lineTypeBadge: Record<string, string> = {
-  component: 'bg-blue-100 text-blue-800',
-  hardware: 'bg-amber-100 text-amber-800',
-  consumable: 'bg-orange-100 text-orange-800',
-  reference: 'bg-gray-100 text-gray-600',
+  component: 'bg-blue-500/20 text-blue-300',
+  hardware: 'bg-amber-500/20 text-amber-300',
+  consumable: 'bg-orange-500/20 text-orange-300',
+  reference: 'bg-slate-800 text-slate-400',
 };
 
 const itemTypeBadge: Record<string, string> = {
-  make: 'bg-blue-100 text-blue-800',
-  buy: 'bg-gray-100 text-gray-700',
-  phantom: 'bg-purple-100 text-purple-800',
+  make: 'bg-blue-500/20 text-blue-300',
+  buy: 'bg-slate-800 text-slate-300',
+  phantom: 'bg-purple-500/20 text-purple-300',
 };
 
 export default function RoutingPage() {
@@ -762,7 +762,7 @@ export default function RoutingPage() {
   return (
     <div className="space-y-6" data-tour="eng-routing">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Operations Routing</h1>
+        <h1 className="text-2xl font-bold text-white">Operations Routing</h1>
         <div className="flex gap-3">
           <button
             onClick={openGenerateModal}
@@ -789,17 +789,17 @@ export default function RoutingPage() {
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
           <div>
             <h2 className="text-lg font-semibold">Assembly Components</h2>
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-slate-400">
               Select an assembly to review component routings and create missing ones.
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
+          <div className="flex flex-wrap items-center gap-4 text-sm text-slate-400">
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
                 checked={showMissingOnly}
                 onChange={(e) => setShowMissingOnly(e.target.checked)}
-                className="rounded border-gray-300 text-werco-navy-600 focus:ring-werco-navy-600"
+                className="rounded border-slate-600 text-werco-navy-600 focus:ring-werco-navy-600"
               />
               Missing only
             </label>
@@ -808,7 +808,7 @@ export default function RoutingPage() {
                 type="checkbox"
                 checked={includeNonComponentLines}
                 onChange={(e) => setIncludeNonComponentLines(e.target.checked)}
-                className="rounded border-gray-300 text-werco-navy-600 focus:ring-werco-navy-600"
+                className="rounded border-slate-600 text-werco-navy-600 focus:ring-werco-navy-600"
               />
               Include hardware/consumables
             </label>
@@ -838,61 +838,61 @@ export default function RoutingPage() {
               ))}
             </select>
           </div>
-          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-            <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Summary</div>
+          <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-4">
+            <div className="text-xs text-slate-400 uppercase tracking-wide mb-2">Summary</div>
             {assemblySummary ? (
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div>
-                  <div className="text-gray-500">Components</div>
+                  <div className="text-slate-400">Components</div>
                   <div className="font-semibold">{assemblySummary.total}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500">With Routing</div>
-                  <div className="font-semibold text-green-700">{assemblySummary.withRouting}</div>
+                  <div className="text-slate-400">With Routing</div>
+                  <div className="font-semibold text-green-400">{assemblySummary.withRouting}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500">Missing</div>
-                  <div className="font-semibold text-amber-700">{assemblySummary.missing}</div>
+                  <div className="text-slate-400">Missing</div>
+                  <div className="font-semibold text-amber-400">{assemblySummary.missing}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500">Checking</div>
-                  <div className="font-semibold text-gray-600">{assemblySummary.checking}</div>
+                  <div className="text-slate-400">Checking</div>
+                  <div className="font-semibold text-slate-400">{assemblySummary.checking}</div>
                 </div>
               </div>
             ) : (
-              <div className="text-sm text-gray-500">Select an assembly to view routing status.</div>
+              <div className="text-sm text-slate-400">Select an assembly to view routing status.</div>
             )}
           </div>
         </div>
 
         {assemblyLoading && (
-          <div className="flex items-center gap-2 text-sm text-gray-500">
-            <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-werco-primary"></div>
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-600 border-t-werco-primary"></div>
             Loading BOM...
           </div>
         )}
 
         {assemblyError && (
-          <div className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded-lg">
+          <div className="text-sm text-amber-600 bg-amber-500/10 px-3 py-2 rounded-lg">
             {assemblyError}
           </div>
         )}
 
         {assemblyBOM && (
           <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800/50">
                 <tr>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item #</th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Line Type</th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Make/Buy</th>
-                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Routing</th>
-                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Item #</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Line Type</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Make/Buy</th>
+                  <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Routing</th>
+                  <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Action</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {assemblyItems.map((item) => {
                   const part = item.component_part;
                   const lineType = item.line_type || 'component';
@@ -901,7 +901,7 @@ export default function RoutingPage() {
                   const routing = routingByPartId[item.component_part_id];
                   const loadingRouting = routingLoadingIds.has(item.component_part_id);
                   return (
-                    <tr key={item.id} className="hover:bg-gray-50">
+                    <tr key={item.id} className="hover:bg-slate-800/50">
                       <td className="px-3 py-2 text-sm font-medium">
                         {item.item_number}
                       </td>
@@ -909,36 +909,36 @@ export default function RoutingPage() {
                         <div className="font-medium text-werco-primary">
                           {part?.part_number || `Part #${item.component_part_id}`}
                         </div>
-                        <div className="text-xs text-gray-500">{part?.name || '-'}</div>
+                        <div className="text-xs text-slate-400">{part?.name || '-'}</div>
                       </td>
                       <td className="px-3 py-2 text-sm">
-                        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${lineTypeBadge[lineType] || 'bg-gray-100 text-gray-600'}`}>
+                        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${lineTypeBadge[lineType] || 'bg-slate-800 text-slate-400'}`}>
                           {lineTypeLabels[lineType] || lineType}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-sm">
-                        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${itemTypeBadge[itemType] || 'bg-gray-100 text-gray-600'}`}>
+                        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${itemTypeBadge[itemType] || 'bg-slate-800 text-slate-400'}`}>
                           {itemType}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-sm text-right">{item.quantity}</td>
                       <td className="px-3 py-2 text-sm">
                         {loadingRouting && isRoutable && (
-                          <span className="text-gray-400">Checking...</span>
+                          <span className="text-slate-500">Checking...</span>
                         )}
                         {!loadingRouting && isRoutable && routing && (
-                          <span className="text-green-700 text-sm font-medium">
+                          <span className="text-green-400 text-sm font-medium">
                             {routing.status} (Rev {routing.revision})
                           </span>
                         )}
                         {!loadingRouting && isRoutable && routing === null && (
-                          <span className="text-amber-700 text-sm font-medium">Missing</span>
+                          <span className="text-amber-400 text-sm font-medium">Missing</span>
                         )}
                         {!loadingRouting && isRoutable && routing === undefined && (
-                          <span className="text-gray-400 text-sm">Pending</span>
+                          <span className="text-slate-500 text-sm">Pending</span>
                         )}
                         {!isRoutable && (
-                          <span className="text-gray-400 text-sm">Not routable</span>
+                          <span className="text-slate-500 text-sm">Not routable</span>
                         )}
                       </td>
                       <td className="px-3 py-2 text-right">
@@ -961,10 +961,10 @@ export default function RoutingPage() {
                           </button>
                         )}
                         {isRoutable && routing === undefined && (
-                          <span className="text-xs text-gray-400">Checking...</span>
+                          <span className="text-xs text-slate-500">Checking...</span>
                         )}
                         {!isRoutable && (
-                          <span className="text-xs text-gray-400">-</span>
+                          <span className="text-xs text-slate-500">-</span>
                         )}
                       </td>
                     </tr>
@@ -973,7 +973,7 @@ export default function RoutingPage() {
               </tbody>
             </table>
             {assemblyItems.length === 0 && (
-              <div className="text-sm text-gray-500 py-4 text-center">
+              <div className="text-sm text-slate-400 py-4 text-center">
                 No matching components to display.
               </div>
             )}
@@ -992,39 +992,39 @@ export default function RoutingPage() {
                 onClick={() => loadRouting(routing.id)}
                 className={`p-3 rounded-lg border cursor-pointer transition-colors ${
                   selectedRouting?.id === routing.id
-                    ? 'border-werco-primary bg-blue-50'
-                    : 'border-gray-200 hover:border-gray-300'
+                    ? 'border-werco-primary bg-blue-500/10'
+                    : 'border-slate-700 hover:border-slate-600'
                 }`}
               >
                 <div className="flex justify-between items-start">
                   <div className="flex-1">
                     <div className="font-medium">{routing.part?.part_number}</div>
-                    <div className="text-sm text-gray-500">{routing.part?.name}</div>
+                    <div className="text-sm text-slate-400">{routing.part?.name}</div>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`text-xs px-2 py-1 rounded ${
-                      routing.status === 'released' ? 'bg-green-100 text-green-800' :
-                      routing.status === 'draft' ? 'bg-yellow-100 text-yellow-800' :
-                      'bg-gray-100 text-gray-800'
+                      routing.status === 'released' ? 'bg-green-500/20 text-green-300' :
+                      routing.status === 'draft' ? 'bg-yellow-500/20 text-yellow-300' :
+                      'bg-slate-800 text-slate-100'
                     }`}>
                       {routing.status}
                     </span>
                     <button
                       onClick={(e) => { e.stopPropagation(); handleDeleteRouting(routing); }}
-                      className="text-gray-400 hover:text-red-600 p-1"
+                      className="text-slate-500 hover:text-red-600 p-1"
                       title={routing.status === 'draft' ? 'Delete' : 'Deactivate'}
                     >
                       <TrashIcon className="h-4 w-4" />
                     </button>
                   </div>
                 </div>
-                <div className="text-xs text-gray-400 mt-1">
+                <div className="text-xs text-slate-500 mt-1">
                   Rev {routing.revision} | {routing.operations?.length || 0} operations
                 </div>
               </div>
             ))}
             {routings.length === 0 && (
-              <p className="text-gray-500 text-center py-4">No routings created yet</p>
+              <p className="text-slate-400 text-center py-4">No routings created yet</p>
             )}
           </div>
         </div>
@@ -1036,8 +1036,8 @@ export default function RoutingPage() {
               <div className="flex justify-between items-start mb-4">
                 <div>
                   <h2 className="text-lg font-semibold">{selectedRouting.part?.part_number}</h2>
-                  <p className="text-gray-500">{selectedRouting.part?.name}</p>
-                  <p className="text-sm text-gray-400">Revision {selectedRouting.revision}</p>
+                  <p className="text-slate-400">{selectedRouting.part?.name}</p>
+                  <p className="text-sm text-slate-500">Revision {selectedRouting.revision}</p>
                 </div>
                 <div className="flex gap-2">
                   {selectedRouting.status === 'draft' && (
@@ -1056,55 +1056,55 @@ export default function RoutingPage() {
 
               {/* Totals Summary */}
               <div className="grid grid-cols-4 gap-4 mb-4">
-                <div className="bg-gray-50 rounded-lg p-3">
-                  <div className="text-sm text-gray-500">Total Setup</div>
+                <div className="bg-slate-800/50 rounded-lg p-3">
+                  <div className="text-sm text-slate-400">Total Setup</div>
                   <div className="text-lg font-semibold">{formatHours(selectedRouting.total_setup_hours)}</div>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-3">
-                  <div className="text-sm text-gray-500">Run Time/Unit</div>
+                <div className="bg-slate-800/50 rounded-lg p-3">
+                  <div className="text-sm text-slate-400">Run Time/Unit</div>
                   <div className="text-lg font-semibold">{formatHours(selectedRouting.total_run_hours_per_unit)}</div>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-3">
-                  <div className="text-sm text-gray-500">Labor Cost</div>
+                <div className="bg-slate-800/50 rounded-lg p-3">
+                  <div className="text-sm text-slate-400">Labor Cost</div>
                   <div className="text-lg font-semibold">${selectedRouting.total_labor_cost.toFixed(2)}</div>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-3">
-                  <div className="text-sm text-gray-500">Operations</div>
+                <div className="bg-slate-800/50 rounded-lg p-3">
+                  <div className="text-sm text-slate-400">Operations</div>
                   <div className="text-lg font-semibold">{selectedRouting.operations.length}</div>
                 </div>
               </div>
 
               {/* Operations Table */}
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
+                <table className="min-w-full divide-y divide-slate-700">
+                  <thead className="bg-slate-800/50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Op #</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Setup</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Run/Unit</th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Inspect</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Op #</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Work Center</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Setup</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Run/Unit</th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Inspect</th>
                       {selectedRouting.status === 'draft' && (
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                       )}
                     </tr>
                   </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
+                  <tbody className="bg-[#151b28] divide-y divide-slate-700">
                     {selectedRouting.operations
                       .sort((a, b) => a.sequence - b.sequence)
                       .map((op) => (
-                        <tr key={op.id} className="hover:bg-gray-50">
+                        <tr key={op.id} className="hover:bg-slate-800/50">
                           <td className="px-4 py-3 font-medium">{op.operation_number}</td>
                           <td className="px-4 py-3">
                             <div>{op.name}</div>
                             {op.description && (
-                              <div className="text-xs text-gray-400">{op.description}</div>
+                              <div className="text-xs text-slate-500">{op.description}</div>
                             )}
                           </td>
                           <td className="px-4 py-3">
                             <div className="font-medium">{op.work_center?.code}</div>
-                            <div className="text-xs text-gray-400">{op.work_center?.name}</div>
+                            <div className="text-xs text-slate-500">{op.work_center?.name}</div>
                           </td>
                           <td className="px-4 py-3 text-right">{formatHours(op.setup_hours)}</td>
                           <td className="px-4 py-3 text-right">{formatHours(op.run_hours_per_unit)}</td>
@@ -1117,13 +1117,13 @@ export default function RoutingPage() {
                             <td className="px-4 py-3 text-center">
                               <button
                                 onClick={() => openEditOperation(op)}
-                                className="text-gray-400 hover:text-werco-primary mr-2"
+                                className="text-slate-500 hover:text-werco-primary mr-2"
                               >
                                 <PencilIcon className="h-5 w-5" />
                               </button>
                               <button
                                 onClick={() => handleDeleteOperation(op.id)}
-                                className="text-gray-400 hover:text-red-500"
+                                className="text-slate-500 hover:text-red-500"
                               >
                                 <TrashIcon className="h-5 w-5" />
                               </button>
@@ -1136,12 +1136,12 @@ export default function RoutingPage() {
               </div>
 
               {selectedRouting.operations.length === 0 && (
-                <p className="text-gray-500 text-center py-8">No operations defined yet</p>
+                <p className="text-slate-400 text-center py-8">No operations defined yet</p>
               )}
             </>
           ) : (
-            <div className="text-center py-12 text-gray-500">
-              <ArrowPathIcon className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+            <div className="text-center py-12 text-slate-400">
+              <ArrowPathIcon className="h-12 w-12 mx-auto mb-4 text-slate-400" />
               <p>Select a routing to view operations</p>
             </div>
           )}
@@ -1151,7 +1151,7 @@ export default function RoutingPage() {
       {/* Create Routing Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Create New Routing</h3>
             <form onSubmit={handleCreateRouting} className="space-y-4">
               <div>
@@ -1184,34 +1184,34 @@ export default function RoutingPage() {
                         setRoutingPartOpen(true);
                         setForcedRoutingPart(null);
                       }}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-400"
                       title="Clear selection"
                     >
                       x
                     </button>
                   ) : (
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">v</span>
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">v</span>
                   )}
                   {routingPartOpen && (
-                    <div className="absolute z-10 mt-1 w-full rounded-md border border-gray-200 bg-white shadow-lg max-h-64 overflow-y-auto">
+                    <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-700 bg-[#151b28] shadow-lg max-h-64 overflow-y-auto">
                       {filteredRoutingParts.length === 0 ? (
-                        <div className="px-3 py-2 text-sm text-gray-500">No matching parts found.</div>
+                        <div className="px-3 py-2 text-sm text-slate-400">No matching parts found.</div>
                       ) : (
                         filteredRoutingParts.map((part) => (
                           <button
                             type="button"
                             key={part.id}
                             onMouseDown={() => handleSelectRoutingPart(part)}
-                            className={`w-full px-3 py-2 text-left hover:bg-gray-50 ${
-                              part.id === newRouting.part_id ? 'bg-blue-50' : ''
+                            className={`w-full px-3 py-2 text-left hover:bg-slate-800/50 ${
+                              part.id === newRouting.part_id ? 'bg-blue-500/10' : ''
                             }`}
                           >
                             <div className="flex items-center justify-between gap-3">
                               <div>
-                                <div className="text-sm font-medium text-gray-900">{part.part_number}</div>
-                                <div className="text-xs text-gray-500 truncate">{part.name}</div>
+                                <div className="text-sm font-medium text-white">{part.part_number}</div>
+                                <div className="text-xs text-slate-400 truncate">{part.name}</div>
                               </div>
-                              <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                              <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">
                                 {part.part_type || 'part'}
                               </span>
                             </div>
@@ -1221,7 +1221,7 @@ export default function RoutingPage() {
                     </div>
                   )}
                 </div>
-                <div className="text-xs text-gray-500 mt-1">
+                <div className="text-xs text-slate-400 mt-1">
                   Type to search. Select a result to continue.
                 </div>
               </div>
@@ -1269,7 +1269,7 @@ export default function RoutingPage() {
       {/* Generate from Drawing Modal */}
       {showGenerateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => !generating && setShowGenerateModal(false)}>
-          <div className="bg-white rounded-lg p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-3 mb-4">
               <SparklesIcon className="h-6 w-6 text-werco-primary" />
               <h3 className="text-lg font-semibold">Generate Routing from Drawing</h3>
@@ -1277,7 +1277,7 @@ export default function RoutingPage() {
 
             {!generationResult ? (
               <div className="space-y-4">
-                <p className="text-sm text-gray-600">
+                <p className="text-sm text-slate-400">
                   Upload a drawing (PDF, DXF, or STEP) and select a part. The system will analyze the drawing and propose a draft routing with operations mapped to your work centers.
                 </p>
 
@@ -1299,9 +1299,9 @@ export default function RoutingPage() {
                       placeholder="Search by part number or name..."
                     />
                     {generatePartOpen && (
-                      <div className="absolute z-10 mt-1 w-full rounded-md border border-gray-200 bg-white shadow-lg max-h-48 overflow-y-auto">
+                      <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-700 bg-[#151b28] shadow-lg max-h-48 overflow-y-auto">
                         {filteredGenerateParts.length === 0 ? (
-                          <div className="px-3 py-2 text-sm text-gray-500">No matching parts found.</div>
+                          <div className="px-3 py-2 text-sm text-slate-400">No matching parts found.</div>
                         ) : (
                           filteredGenerateParts.map((part) => (
                             <button
@@ -1312,10 +1312,10 @@ export default function RoutingPage() {
                                 setGeneratePartSearch(`${part.part_number} - ${part.name}`);
                                 setGeneratePartOpen(false);
                               }}
-                              className={`w-full px-3 py-2 text-left hover:bg-gray-50 ${part.id === generatePartId ? 'bg-blue-50' : ''}`}
+                              className={`w-full px-3 py-2 text-left hover:bg-slate-800/50 ${part.id === generatePartId ? 'bg-blue-500/10' : ''}`}
                             >
                               <div className="text-sm font-medium">{part.part_number}</div>
-                              <div className="text-xs text-gray-500">{part.name}</div>
+                              <div className="text-xs text-slate-400">{part.name}</div>
                             </button>
                           ))
                         )}
@@ -1328,7 +1328,7 @@ export default function RoutingPage() {
                 <div>
                   <label className="label">Drawing File</label>
                   <div
-                    className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center cursor-pointer hover:border-werco-primary transition-colors"
+                    className="border-2 border-dashed border-slate-600 rounded-lg p-6 text-center cursor-pointer hover:border-werco-primary transition-colors"
                     onClick={() => fileInputRef.current?.click()}
                   >
                     <input
@@ -1338,13 +1338,13 @@ export default function RoutingPage() {
                       className="hidden"
                       onChange={(e) => setGenerateFile(e.target.files?.[0] || null)}
                     />
-                    <DocumentArrowUpIcon className="h-10 w-10 mx-auto text-gray-400 mb-2" />
+                    <DocumentArrowUpIcon className="h-10 w-10 mx-auto text-slate-500 mb-2" />
                     {generateFile ? (
                       <p className="text-sm font-medium text-werco-primary">{generateFile.name}</p>
                     ) : (
                       <>
-                        <p className="text-sm text-gray-600">Click to select a file</p>
-                        <p className="text-xs text-gray-400 mt-1">Supports PDF, DXF, STEP (.stp)</p>
+                        <p className="text-sm text-slate-400">Click to select a file</p>
+                        <p className="text-xs text-slate-500 mt-1">Supports PDF, DXF, STEP (.stp)</p>
                       </>
                     )}
                   </div>
@@ -1377,25 +1377,25 @@ export default function RoutingPage() {
               <div className="space-y-4">
                 {/* Drawing info summary */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                  <div className="bg-gray-50 rounded-lg p-3">
-                    <div className="text-xs text-gray-500">Part</div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-xs text-slate-400">Part</div>
                     <div className="font-semibold text-sm">{generationResult.part_number}</div>
-                    <div className="text-xs text-gray-400">{generationResult.part_name}</div>
+                    <div className="text-xs text-slate-500">{generationResult.part_name}</div>
                   </div>
-                  <div className="bg-gray-50 rounded-lg p-3">
-                    <div className="text-xs text-gray-500">Material</div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-xs text-slate-400">Material</div>
                     <div className="font-semibold text-sm">{generationResult.drawing_info.material || 'Not detected'}</div>
                     {generationResult.drawing_info.thickness && (
-                      <div className="text-xs text-gray-400">{generationResult.drawing_info.thickness}</div>
+                      <div className="text-xs text-slate-500">{generationResult.drawing_info.thickness}</div>
                     )}
                   </div>
-                  <div className="bg-gray-50 rounded-lg p-3">
-                    <div className="text-xs text-gray-500">Finish</div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-xs text-slate-400">Finish</div>
                     <div className="font-semibold text-sm">{generationResult.drawing_info.finish || 'None specified'}</div>
                   </div>
-                  <div className="bg-gray-50 rounded-lg p-3">
-                    <div className="text-xs text-gray-500">Confidence</div>
-                    <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${confidenceBadge[generationResult.extraction_confidence] || 'bg-gray-100 text-gray-600'}`}>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <div className="text-xs text-slate-400">Confidence</div>
+                    <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${confidenceBadge[generationResult.extraction_confidence] || 'bg-slate-800 text-slate-400'}`}>
                       {generationResult.extraction_confidence}
                     </span>
                   </div>
@@ -1403,7 +1403,7 @@ export default function RoutingPage() {
 
                 {/* Geometry info row */}
                 {(generationResult.drawing_info.cut_length || generationResult.drawing_info.hole_count || generationResult.drawing_info.bend_count) && (
-                  <div className="flex gap-4 text-sm text-gray-600">
+                  <div className="flex gap-4 text-sm text-slate-400">
                     {generationResult.drawing_info.cut_length && (
                       <span>Cut: {generationResult.drawing_info.cut_length.toFixed(1)}"</span>
                     )}
@@ -1423,13 +1423,13 @@ export default function RoutingPage() {
                 {(generationResult.warnings.length > 0 || generationResult.existing_routing_warning) && (
                   <div className="space-y-2">
                     {generationResult.existing_routing_warning && (
-                      <div className="flex items-start gap-2 bg-amber-50 text-amber-800 text-sm px-3 py-2 rounded-lg">
+                      <div className="flex items-start gap-2 bg-amber-500/10 text-amber-300 text-sm px-3 py-2 rounded-lg">
                         <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0 mt-0.5" />
                         {generationResult.existing_routing_warning}
                       </div>
                     )}
                     {generationResult.warnings.map((w, i) => (
-                      <div key={i} className="flex items-start gap-2 bg-yellow-50 text-yellow-800 text-sm px-3 py-2 rounded-lg">
+                      <div key={i} className="flex items-start gap-2 bg-yellow-500/10 text-yellow-300 text-sm px-3 py-2 rounded-lg">
                         <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0 mt-0.5" />
                         {w}
                       </div>
@@ -1441,21 +1441,21 @@ export default function RoutingPage() {
                 <div>
                   <h4 className="font-semibold text-sm mb-2">Proposed Operations ({editedOperations.length})</h4>
                   <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200 text-sm">
-                      <thead className="bg-gray-50">
+                    <table className="min-w-full divide-y divide-slate-700 text-sm">
+                      <thead className="bg-slate-800/50">
                         <tr>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Seq</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
-                          <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Setup</th>
-                          <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Run/Unit</th>
-                          <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Conf.</th>
-                          <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase w-10"></th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Seq</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Work Center</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Setup</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Run/Unit</th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase">Conf.</th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase w-10"></th>
                         </tr>
                       </thead>
-                      <tbody className="bg-white divide-y divide-gray-200">
+                      <tbody className="bg-[#151b28] divide-y divide-slate-700">
                         {editedOperations.map((op, idx) => (
-                          <tr key={idx} className="hover:bg-gray-50">
+                          <tr key={idx} className="hover:bg-slate-800/50">
                             <td className="px-3 py-2 font-medium">{op.sequence}</td>
                             <td className="px-3 py-2">
                               <input
@@ -1465,7 +1465,7 @@ export default function RoutingPage() {
                                 className="input py-1 text-sm w-full"
                               />
                               {op.description && (
-                                <div className="text-xs text-gray-400 mt-0.5">{op.description}</div>
+                                <div className="text-xs text-slate-500 mt-0.5">{op.description}</div>
                               )}
                             </td>
                             <td className="px-3 py-2">
@@ -1499,7 +1499,7 @@ export default function RoutingPage() {
                                 step={1}
                                 min={0}
                               />
-                              <span className="text-xs text-gray-400 ml-1">min</span>
+                              <span className="text-xs text-slate-500 ml-1">min</span>
                             </td>
                             <td className="px-3 py-2 text-right">
                               <input
@@ -1510,17 +1510,17 @@ export default function RoutingPage() {
                                 step={0.1}
                                 min={0}
                               />
-                              <span className="text-xs text-gray-400 ml-1">min</span>
+                              <span className="text-xs text-slate-500 ml-1">min</span>
                             </td>
                             <td className="px-3 py-2 text-center">
-                              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${confidenceBadge[op.confidence] || 'bg-gray-100 text-gray-600'}`}>
+                              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${confidenceBadge[op.confidence] || 'bg-slate-800 text-slate-400'}`}>
                                 {op.confidence}
                               </span>
                             </td>
                             <td className="px-3 py-2 text-center">
                               <button
                                 onClick={() => removeEditedOp(idx)}
-                                className="text-gray-400 hover:text-red-500"
+                                className="text-slate-500 hover:text-red-500"
                                 title="Remove operation"
                               >
                                 <TrashIcon className="h-4 w-4" />
@@ -1532,7 +1532,7 @@ export default function RoutingPage() {
                     </table>
                   </div>
                   {editedOperations.length === 0 && (
-                    <p className="text-sm text-gray-500 text-center py-4">No operations proposed. The drawing may not have enough information.</p>
+                    <p className="text-sm text-slate-400 text-center py-4">No operations proposed. The drawing may not have enough information.</p>
                   )}
                 </div>
 
@@ -1544,7 +1544,7 @@ export default function RoutingPage() {
                       setEditedOperations([]);
                       setGenerateFile(null);
                     }}
-                    className="text-sm text-gray-500 hover:text-gray-700"
+                    className="text-sm text-slate-400 hover:text-slate-300"
                   >
                     Start over
                   </button>
@@ -1580,7 +1580,7 @@ export default function RoutingPage() {
       {/* Add/Edit Operation Modal */}
       {showAddOperationModal && selectedRouting && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowAddOperationModal(false)}>
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-4">
               {editingOperation ? 'Edit Operation' : 'Add Operation'}
             </h3>
@@ -1652,7 +1652,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.setup}
                       onChange={(e) => setTimeUnits({ ...timeUnits, setup: e.target.value as 'hrs' | 'min' })}
-                      className="border border-gray-300 rounded-lg px-3 py-2 w-20 bg-white cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-[#151b28] cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -1676,7 +1676,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.run}
                       onChange={(e) => setTimeUnits({ ...timeUnits, run: e.target.value as 'hrs' | 'min' })}
-                      className="border border-gray-300 rounded-lg px-3 py-2 w-20 bg-white cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-[#151b28] cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -1702,7 +1702,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.move}
                       onChange={(e) => setTimeUnits({ ...timeUnits, move: e.target.value as 'hrs' | 'min' })}
-                      className="border border-gray-300 rounded-lg px-3 py-2 w-20 bg-white cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-[#151b28] cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -1726,7 +1726,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.queue}
                       onChange={(e) => setTimeUnits({ ...timeUnits, queue: e.target.value as 'hrs' | 'min' })}
-                      className="border border-gray-300 rounded-lg px-3 py-2 w-20 bg-white cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-[#151b28] cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>

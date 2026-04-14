@@ -501,12 +501,12 @@ export default function WorkOrderNew() {
                     placeholder="Select or type customer"
                   />
                   <ChevronDownIcon
-                    className="h-5 w-5 absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 cursor-pointer"
+                    className="h-5 w-5 absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 cursor-pointer"
                     onClick={() => setShowCustomerDropdown(!showCustomerDropdown)}
                   />
                 </div>
                 {showCustomerDropdown && (
-                  <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-y-auto">
+                  <div className="absolute z-10 w-full mt-1 bg-[#151b28] border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto">
                     {filteredCustomers.length > 0 ? (
                       <>
                       {filteredCustomers.map((customer, index) => (
@@ -514,7 +514,7 @@ export default function WorkOrderNew() {
                           key={customer.id}
                           type="button"
                           className={`w-full text-left px-3 py-2 text-sm ${
-                            highlightedCustomerIndex === index ? 'bg-blue-50' : 'hover:bg-gray-100'
+                            highlightedCustomerIndex === index ? 'bg-blue-500/10' : 'hover:bg-slate-800'
                           }`}
                           onMouseEnter={() => setHighlightedCustomerIndex(index)}
                           onMouseDown={(event) => {
@@ -526,18 +526,18 @@ export default function WorkOrderNew() {
                         </button>
                       ))}
                       {matchingCustomers.length > filteredCustomers.length && (
-                        <div className="px-3 py-2 text-xs text-gray-500 border-t border-gray-100">
+                        <div className="px-3 py-2 text-xs text-slate-400 border-t border-slate-700/30">
                           Showing {filteredCustomers.length} of {matchingCustomers.length}. Keep typing to narrow results.
                         </div>
                       )}
                       {canCreateCustomer && (
                         <button
                           type="button"
-                          className={`w-full text-left px-3 py-2 text-sm border-t border-gray-100 ${
+                          className={`w-full text-left px-3 py-2 text-sm border-t border-slate-700/30 ${
                             highlightedCustomerIndex === filteredCustomers.length
-                              ? 'bg-blue-50 text-blue-700'
-                              : 'hover:bg-blue-50 text-blue-600'
-                          } disabled:text-gray-400`}
+                              ? 'bg-blue-500/10 text-blue-400'
+                              : 'hover:bg-blue-500/100/10 text-blue-600'
+                          } disabled:text-slate-500`}
                           disabled={creatingCustomer}
                           onMouseEnter={() => setHighlightedCustomerIndex(filteredCustomers.length)}
                           onMouseDown={async (event) => {
@@ -554,7 +554,7 @@ export default function WorkOrderNew() {
                     ) : canCreateCustomer ? (
                       <button
                         type="button"
-                        className="w-full text-left px-3 py-2 hover:bg-blue-50 text-sm text-blue-600 disabled:text-gray-400"
+                        className="w-full text-left px-3 py-2 hover:bg-blue-500/100/10 text-sm text-blue-600 disabled:text-slate-500"
                         disabled={creatingCustomer}
                         onMouseDown={async (event) => {
                           event.preventDefault();
@@ -565,7 +565,7 @@ export default function WorkOrderNew() {
                         {creatingCustomer ? 'Creating customer...' : `Create "${customerSearch.trim()}"`}
                       </button>
                     ) : (
-                      <div className="px-3 py-2 text-sm text-gray-500">Type to search customer</div>
+                      <div className="px-3 py-2 text-sm text-slate-400">Type to search customer</div>
                     )}
                   </div>
                 )}
@@ -635,7 +635,7 @@ export default function WorkOrderNew() {
 
           {!loadingRouting && form.part_id > 0 && routing && operations.length > 0 && (
             <>
-              <div className="flex items-center gap-2 mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-700">
+              <div className="flex items-center gap-2 mb-4 p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400">
                 <CheckCircleIcon className="h-5 w-5 flex-shrink-0" />
                 <span className="text-sm font-medium">
                   {routing.revision === 'BOM' 
@@ -659,7 +659,7 @@ export default function WorkOrderNew() {
                   </thead>
                   <tbody>
                     {operations.map((op, index) => (
-                      <tr key={index} className={!op.fromRouting ? 'bg-amber-50' : ''}>
+                      <tr key={index} className={!op.fromRouting ? 'bg-amber-500/10' : ''}>
                         <td>
                           <input
                             type="number"
@@ -710,7 +710,7 @@ export default function WorkOrderNew() {
                           <button
                             type="button"
                             onClick={() => removeOperation(index)}
-                            className="p-1.5 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-50"
+                            className="p-1.5 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/100/10"
                           >
                             <TrashIcon className="h-4 w-4" />
                           </button>
@@ -731,7 +731,7 @@ export default function WorkOrderNew() {
 
           {!loadingRouting && form.part_id > 0 && !routing && (
             <>
-              <div className="flex items-center gap-2 mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-700">
+              <div className="flex items-center gap-2 mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400">
                 <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0" />
                 <span className="text-sm">
                   No released routing found for this part. Add operations manually.
@@ -814,7 +814,7 @@ export default function WorkOrderNew() {
                             <button
                               type="button"
                               onClick={() => removeOperation(index)}
-                              className="p-1.5 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-50"
+                              className="p-1.5 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/100/10"
                             >
                               <TrashIcon className="h-4 w-4" />
                             </button>

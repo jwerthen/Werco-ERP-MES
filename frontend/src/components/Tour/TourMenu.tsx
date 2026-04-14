@@ -108,7 +108,7 @@ export default function TourMenu() {
     <div className="relative">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="p-2 rounded-xl text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+        className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
         aria-label="Help & Tours"
         data-tour="help-menu"
       >
@@ -124,7 +124,7 @@ export default function TourMenu() {
           />
 
           {/* Menu */}
-          <div className="absolute right-0 top-full mt-2 w-96 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-slide-down">
+          <div className="absolute right-0 top-full mt-2 w-96 bg-[#151b28] rounded-2xl shadow-2xl border border-slate-700 overflow-hidden z-50 animate-slide-down">
             {/* Header with role badge */}
             <div className="bg-gradient-to-r from-werco-navy-600 to-blue-700 px-5 py-4">
               <div className="flex items-center justify-between mb-3">
@@ -172,19 +172,19 @@ export default function TourMenu() {
             </div>
 
             {/* Tabs */}
-            <div className="flex border-b border-slate-100">
+            <div className="flex border-b border-slate-700">
               <button
                 onClick={() => setActiveTab('tours')}
                 className={`flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors ${
                   activeTab === 'tours'
                     ? 'text-werco-navy-600 border-b-2 border-werco-navy-600'
-                    : 'text-slate-500 hover:text-slate-700'
+                    : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <RocketLaunchIcon className="h-4 w-4" />
                 Guided Tours
                 {totalCount > 0 && (
-                  <span className="text-xs bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded-full">
+                  <span className="text-xs bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded-full">
                     {totalCount}
                   </span>
                 )}
@@ -194,13 +194,13 @@ export default function TourMenu() {
                 className={`flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors ${
                   activeTab === 'tips'
                     ? 'text-werco-navy-600 border-b-2 border-werco-navy-600'
-                    : 'text-slate-500 hover:text-slate-700'
+                    : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <LightBulbIcon className="h-4 w-4" />
                 Quick Tips
                 {helpTips.length > 0 && (
-                  <span className="text-xs bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded-full">
+                  <span className="text-xs bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded-full">
                     {helpTips.length}
                   </span>
                 )}
@@ -227,13 +227,13 @@ export default function TourMenu() {
                             <button
                               key={tour.id}
                               onClick={() => handleStartTour(tour.id)}
-                              className="w-full flex items-start gap-3 p-3 rounded-xl hover:bg-slate-50 transition-colors text-left group"
+                              className="w-full flex items-start gap-3 p-3 rounded-xl hover:bg-slate-700/50 transition-colors text-left group"
                             >
                               <div
                                 className={`flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
                                   isComplete
-                                    ? 'bg-emerald-100 text-emerald-600'
-                                    : 'bg-blue-50 text-werco-navy-600 group-hover:bg-blue-100'
+                                    ? 'bg-emerald-500/20 text-emerald-400'
+                                    : 'bg-blue-500/10 text-blue-400 group-hover:bg-blue-500/20'
                                 }`}
                               >
                                 {isComplete ? (
@@ -244,14 +244,14 @@ export default function TourMenu() {
                               </div>
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
-                                  <span className="font-medium text-sm text-slate-800">
+                                  <span className="font-medium text-sm text-slate-100">
                                     {tour.name}
                                   </span>
                                   {isComplete && (
                                     <CheckCircleIcon className="h-3.5 w-3.5 text-emerald-500 flex-shrink-0" />
                                   )}
                                 </div>
-                                <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">
+                                <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">
                                   {tour.description}
                                 </p>
                                 <div className="flex items-center gap-2 mt-1">
@@ -291,23 +291,23 @@ export default function TourMenu() {
                   {helpTips.map((tip) => (
                     <div
                       key={tip.id}
-                      className="flex items-start gap-3 p-3 rounded-xl hover:bg-amber-50/50 transition-colors"
+                      className="flex items-start gap-3 p-3 rounded-xl hover:bg-amber-500/5 transition-colors"
                     >
-                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">
+                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center">
                         <LightBulbIcon className="h-4 w-4" />
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="font-medium text-sm text-slate-800">
+                          <span className="font-medium text-sm text-slate-100">
                             {tip.title}
                           </span>
                           {tip.shortcut && (
-                            <kbd className="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded border border-slate-200 font-mono">
+                            <kbd className="text-xs bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded border border-slate-600 font-mono">
                               {tip.shortcut}
                             </kbd>
                           )}
                         </div>
-                        <p className="text-xs text-slate-500 mt-0.5">
+                        <p className="text-xs text-slate-400 mt-0.5">
                           {tip.description}
                         </p>
                       </div>
@@ -323,23 +323,23 @@ export default function TourMenu() {
             </div>
 
             {/* Footer */}
-            <div className="border-t border-slate-100 p-3 flex items-center gap-2">
+            <div className="border-t border-slate-700 p-3 flex items-center gap-2">
               <button
                 onClick={() => {
                   resetAllTours();
                 }}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700 rounded-lg transition-colors"
               >
                 <ArrowPathIcon className="h-3.5 w-3.5" />
                 Reset Tours
               </button>
-              <div className="w-px h-4 bg-slate-200" />
+              <div className="w-px h-4 bg-slate-700" />
               <button
                 onClick={() => {
                   setIsOpen(false);
                   navigate('/');
                 }}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700 rounded-lg transition-colors"
               >
                 <CommandLineIcon className="h-3.5 w-3.5" />
                 Keyboard Shortcuts

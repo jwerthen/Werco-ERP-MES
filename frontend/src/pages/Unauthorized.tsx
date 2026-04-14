@@ -14,12 +14,12 @@ export default function Unauthorized() {
   const { role } = usePermissions();
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-100 via-slate-50 to-blue-50 flex flex-col items-center justify-center px-4">
+    <div className="min-h-screen bg-gradient-to-br from-[#0d1117] via-[#151b28] to-[#1a1f2e] flex flex-col items-center justify-center px-4">
       <div className="du-card max-w-md w-full bg-base-100 shadow-xl border border-base-300/50">
         <div className="du-card-body text-center">
           {/* Icon */}
           <div className="mx-auto du-avatar placeholder mb-2">
-            <div className="bg-red-100 text-red-600 rounded-full w-16">
+            <div className="bg-red-500/20 text-red-600 rounded-full w-16">
               <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path
                   strokeLinecap="round"

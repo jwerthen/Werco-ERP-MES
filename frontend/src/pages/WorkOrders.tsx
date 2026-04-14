@@ -20,19 +20,19 @@ import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 
 const statusConfig: Record<WorkOrderStatus, { bg: string; text: string; dot: string }> = {
   draft: { bg: 'bg-surface-100', text: 'text-surface-700', dot: 'bg-surface-400' },
-  released: { bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500' },
-  in_progress: { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
-  on_hold: { bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500' },
-  complete: { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
+  released: { bg: 'bg-blue-500/10', text: 'text-blue-400', dot: 'bg-blue-500/100' },
+  in_progress: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', dot: 'bg-emerald-500/100' },
+  on_hold: { bg: 'bg-amber-500/10', text: 'text-amber-400', dot: 'bg-amber-500/100' },
+  complete: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', dot: 'bg-emerald-500/100' },
   closed: { bg: 'bg-surface-100', text: 'text-surface-500', dot: 'bg-surface-400' },
-  cancelled: { bg: 'bg-red-50', text: 'text-red-700', dot: 'bg-red-500' },
+  cancelled: { bg: 'bg-red-500/10', text: 'text-red-400', dot: 'bg-red-500/100' },
 };
 
 const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
-  1: { bg: 'bg-red-100', text: 'text-red-700', label: 'Critical' },
-  2: { bg: 'bg-red-50', text: 'text-red-600', label: 'High' },
-  3: { bg: 'bg-amber-50', text: 'text-amber-700', label: 'Medium' },
-  4: { bg: 'bg-blue-50', text: 'text-blue-600', label: 'Normal' },
+  1: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Critical' },
+  2: { bg: 'bg-red-500/10', text: 'text-red-600', label: 'High' },
+  3: { bg: 'bg-amber-500/10', text: 'text-amber-400', label: 'Medium' },
+  4: { bg: 'bg-blue-500/10', text: 'text-blue-600', label: 'Normal' },
   5: { bg: 'bg-surface-100', text: 'text-surface-600', label: 'Low' },
 };
 
@@ -200,10 +200,10 @@ export default function WorkOrders() {
         {/* Header skeleton */}
         <div className="flex items-center justify-between">
           <div className="space-y-2">
-            <div className="h-8 w-48 bg-gray-200 rounded animate-pulse" />
-            <div className="h-4 w-72 bg-gray-200 rounded animate-pulse" />
+            <div className="h-8 w-48 bg-slate-700 rounded animate-pulse" />
+            <div className="h-4 w-72 bg-slate-700 rounded animate-pulse" />
           </div>
-          <div className="h-10 w-40 bg-gray-200 rounded animate-pulse" />
+          <div className="h-10 w-40 bg-slate-700 rounded animate-pulse" />
         </div>
         
         {/* Stats skeleton */}
@@ -240,7 +240,7 @@ export default function WorkOrders() {
       {/* Quick Stats */}
       <div className="grid grid-cols-3 gap-4">
         <div className="card-compact flex items-center gap-4">
-          <div className={`p-3 rounded-xl ${stats.overdue > 0 ? 'bg-red-100' : 'bg-emerald-100'}`}>
+          <div className={`p-3 rounded-xl ${stats.overdue > 0 ? 'bg-red-500/20' : 'bg-emerald-500/20'}`}>
             <ExclamationTriangleIcon className={`h-6 w-6 ${stats.overdue > 0 ? 'text-red-600' : 'text-emerald-600'}`} />
           </div>
           <div>
@@ -251,7 +251,7 @@ export default function WorkOrders() {
           </div>
         </div>
         <div className="card-compact flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-blue-100">
+          <div className="p-3 rounded-xl bg-blue-500/20">
             <Squares2X2Icon className="h-6 w-6 text-blue-600" />
           </div>
           <div>
@@ -260,7 +260,7 @@ export default function WorkOrders() {
           </div>
         </div>
         <div className="card-compact flex items-center gap-4">
-          <div className={`p-3 rounded-xl ${stats.dueToday > 0 ? 'bg-amber-100' : 'bg-surface-100'}`}>
+          <div className={`p-3 rounded-xl ${stats.dueToday > 0 ? 'bg-amber-500/20' : 'bg-surface-100'}`}>
             <ClockIcon className={`h-6 w-6 ${stats.dueToday > 0 ? 'text-amber-600' : 'text-surface-500'}`} />
           </div>
           <div>
@@ -436,7 +436,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
             const isReleasing = releasingIds?.has(wo.id);
             
             return (
-              <tr key={wo.id} className={overdue ? 'bg-red-50/50' : ''}>
+              <tr key={wo.id} className={overdue ? 'bg-red-500/10/50' : ''}>
                 <td>
                   <Link 
                     to={`/work-orders/${wo.id}`} 
@@ -494,7 +494,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
                       <button
                         onClick={() => onRelease(wo)}
                         disabled={isReleasing}
-                        className="p-2 rounded-lg text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/100/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Release"
                       >
                         <CheckCircleIcon className="h-4 w-4" />
@@ -503,7 +503,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
                     {onDelete && (wo.status === 'draft' || wo.status === 'cancelled') && (
                       <button 
                         onClick={() => onDelete(wo)}
-                        className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                        className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/100/10 transition-colors"
                         title="Delete"
                       >
                         <TrashIcon className="h-4 w-4" />

@@ -624,7 +624,7 @@ function WorkCenterRatesTable({ data, onEdit }: { data: any[]; onEdit: (item: an
               <td className="tabular-nums text-lg font-semibold text-werco-600">${wc.hourly_rate?.toFixed(2)}</td>
               <td><StatusBadge active={wc.is_active} /></td>
               <td>
-                <button onClick={() => onEdit(wc)} className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-50">
+                <button onClick={() => onEdit(wc)} className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10">
                   <PencilIcon className="h-4 w-4" />
                 </button>
               </td>
@@ -705,7 +705,7 @@ function WorkCenterTypesPanel({
           <EmptyState message="No work center types configured yet" />
         )}
         {types.map((type) => (
-          <div key={type} className="flex items-center justify-between border border-surface-200 rounded-lg px-3 py-2 bg-white">
+          <div key={type} className="flex items-center justify-between border border-surface-200 rounded-lg px-3 py-2 bg-[#151b28]">
             <div>
               <div className="text-sm font-medium text-surface-900">{formatLabel(type)}</div>
               <div className="text-xs text-surface-500 font-mono">{type}</div>
@@ -810,7 +810,7 @@ function OverheadSettings({ data, onUpdate }: { data: Record<string, any>; onUpd
                     className="input w-48"
                     autoFocus
                   />
-                  <button onClick={() => saveEdit(def.key, def.type)} className="p-2 rounded-lg bg-emerald-100 text-emerald-600 hover:bg-emerald-200">
+                  <button onClick={() => saveEdit(def.key, def.type)} className="p-2 rounded-lg bg-emerald-500/20 text-emerald-600 hover:bg-emerald-200">
                     <CheckIcon className="h-4 w-4" />
                   </button>
                   <button onClick={() => setEditing(null)} className="p-2 rounded-lg bg-surface-200 text-surface-600 hover:bg-surface-300">
@@ -819,10 +819,10 @@ function OverheadSettings({ data, onUpdate }: { data: Record<string, any>; onUpd
                 </>
               ) : (
                 <>
-                  <code className="px-3 py-1.5 bg-white border border-surface-200 rounded-lg text-sm font-mono">
+                  <code className="px-3 py-1.5 bg-[#151b28] border border-surface-200 rounded-lg text-sm font-mono">
                     {def.type === 'json' ? (typeof displayValue === 'string' ? displayValue : JSON.stringify(displayValue)) : displayValue}
                   </code>
-                  <button onClick={() => startEdit(def.key, displayValue)} className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-50">
+                  <button onClick={() => startEdit(def.key, displayValue)} className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10">
                     <PencilIcon className="h-4 w-4" />
                   </button>
                 </>
@@ -932,14 +932,14 @@ function EmployeesTable({
               <td className="flex items-center gap-1">
                 <button
                   onClick={() => onEdit(employee)}
-                  className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-50"
+                  className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10"
                   title="Edit"
                 >
                   <PencilIcon className="h-4 w-4" />
                 </button>
                 <button
                   onClick={() => onToggleActive(employee)}
-                  className={`p-2 rounded-lg ${employee.is_active ? 'text-surface-500 hover:text-red-600 hover:bg-red-50' : 'text-surface-500 hover:text-werco-600 hover:bg-werco-50'}`}
+                  className={`p-2 rounded-lg ${employee.is_active ? 'text-surface-500 hover:text-red-600 hover:bg-red-500/10' : 'text-surface-500 hover:text-werco-600 hover:bg-werco-500/10'}`}
                   title={employee.is_active ? 'Deactivate' : 'Activate'}
                 >
                   {employee.is_active ? <TrashIcon className="h-4 w-4" /> : <CheckIcon className="h-4 w-4" />}
@@ -1171,7 +1171,7 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
       </div>
 
       {hasChanges && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 text-sm text-amber-800">
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-2 text-sm text-amber-300">
           You have unsaved changes. Click "Save Changes" to apply them.
         </div>
       )}
@@ -1193,7 +1193,7 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
                     allSelected
                       ? 'bg-werco-100 text-werco-700'
                       : someSelected
-                      ? 'bg-amber-100 text-amber-700'
+                      ? 'bg-amber-500/20 text-amber-400'
                       : 'bg-surface-200 text-surface-600'
                   }`}
                 >
@@ -1253,11 +1253,11 @@ function StatusBadge({ active }: { active: boolean }) {
 function ActionButtons({ onEdit, onDelete }: { onEdit: () => void; onDelete?: () => void }) {
   return (
     <div className="flex items-center gap-1">
-      <button onClick={onEdit} className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-50">
+      <button onClick={onEdit} className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10">
         <PencilIcon className="h-4 w-4" />
       </button>
       {onDelete && (
-        <button onClick={onDelete} className="p-2 rounded-lg text-surface-500 hover:text-red-600 hover:bg-red-50">
+        <button onClick={onDelete} className="p-2 rounded-lg text-surface-500 hover:text-red-600 hover:bg-red-500/10">
           <TrashIcon className="h-4 w-4" />
         </button>
       )}

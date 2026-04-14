@@ -103,14 +103,14 @@ interface DocumentType {
 type TabType = 'receiving' | 'orders' | 'vendors' | 'inspection';
 
 const statusColors: Record<string, string> = {
-  draft: 'bg-gray-100 text-gray-800',
-  pending_approval: 'bg-yellow-100 text-yellow-800',
-  approved: 'bg-blue-100 text-blue-800',
+  draft: 'bg-slate-800/50 text-slate-100',
+  pending_approval: 'bg-yellow-500/20 text-yellow-300',
+  approved: 'bg-blue-500/20 text-blue-300',
   sent: 'bg-indigo-100 text-indigo-800',
-  partial: 'bg-orange-100 text-orange-800',
-  received: 'bg-green-100 text-green-800',
-  closed: 'bg-gray-100 text-gray-600',
-  cancelled: 'bg-red-100 text-red-800',
+  partial: 'bg-orange-500/20 text-orange-800',
+  received: 'bg-green-500/20 text-emerald-300',
+  closed: 'bg-slate-800/50 text-slate-400',
+  cancelled: 'bg-red-500/20 text-red-300',
 };
 
 export default function Purchasing() {
@@ -554,7 +554,7 @@ export default function Purchasing() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Purchasing & Receiving</h1>
+        <h1 className="text-2xl font-bold text-white">Purchasing & Receiving</h1>
         <div className="flex gap-2">
           <button onClick={() => setShowVendorModal(true)} className="btn-secondary flex items-center">
             <BuildingOfficeIcon className="h-5 w-5 mr-2" />
@@ -569,21 +569,21 @@ export default function Purchasing() {
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="card bg-blue-50 border-blue-200">
+        <div className="card bg-blue-500/10 border-blue-500/30">
           <div className="flex items-center">
             <TruckIcon className="h-8 w-8 text-blue-600 mr-3" />
             <div>
               <p className="text-sm text-blue-600">Awaiting Receipt</p>
-              <p className="text-2xl font-bold text-blue-800">{receivingQueue.length}</p>
+              <p className="text-2xl font-bold text-blue-300">{receivingQueue.length}</p>
             </div>
           </div>
         </div>
-        <div className="card bg-yellow-50 border-yellow-200">
+        <div className="card bg-yellow-500/10 border-yellow-500/30">
           <div className="flex items-center">
             <ClipboardDocumentCheckIcon className="h-8 w-8 text-yellow-600 mr-3" />
             <div>
               <p className="text-sm text-yellow-600">Pending Inspection</p>
-              <p className="text-2xl font-bold text-yellow-800">{pendingInspection.length}</p>
+              <p className="text-2xl font-bold text-yellow-300">{pendingInspection.length}</p>
             </div>
           </div>
         </div>
@@ -598,19 +598,19 @@ export default function Purchasing() {
             </div>
           </div>
         </div>
-        <div className="card bg-green-50 border-green-200">
+        <div className="card bg-green-500/10 border-green-500/30">
           <div className="flex items-center">
             <CheckCircleIcon className="h-8 w-8 text-green-600 mr-3" />
             <div>
               <p className="text-sm text-green-600">Approved Vendors</p>
-              <p className="text-2xl font-bold text-green-800">{vendors.filter(v => v.is_approved).length}</p>
+              <p className="text-2xl font-bold text-emerald-300">{vendors.filter(v => v.is_approved).length}</p>
             </div>
           </div>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-200">
+      <div className="border-b border-slate-700">
         <nav className="flex space-x-8">
           {[
             { id: 'receiving', label: 'Receiving Queue', count: receivingQueue.length },
@@ -624,13 +624,13 @@ export default function Purchasing() {
               className={`py-2 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+                  : 'border-transparent text-slate-400 hover:text-slate-300'
               }`}
             >
               {tab.label}
               {tab.count > 0 && (
                 <span className={`ml-2 px-2 py-0.5 rounded-full text-xs ${
-                  activeTab === tab.id ? 'bg-werco-primary text-white' : 'bg-gray-100'
+                  activeTab === tab.id ? 'bg-werco-primary text-white' : 'bg-slate-800/50'
                 }`}>
                   {tab.count}
                 </span>
@@ -645,27 +645,27 @@ export default function Purchasing() {
         <div className="card">
           <h2 className="text-lg font-semibold mb-4">Material Awaiting Receipt</h2>
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PO #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vendor</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Ordered</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Received</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Remaining</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Due</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO #</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Ordered</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Received</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Remaining</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {receivingQueue.map((item) => (
                   <tr
                     key={item.po_line_id}
                     className={`${
                       isPartialReceivingItem(item)
-                        ? 'bg-amber-50 hover:bg-amber-100'
-                        : 'hover:bg-gray-50'
+                        ? 'bg-amber-500/10 hover:bg-amber-500/20'
+                        : 'hover:bg-slate-800'
                     }`}
                   >
                     <td className="px-4 py-3 font-medium text-werco-primary">{item.po_number}</td>
@@ -674,12 +674,12 @@ export default function Purchasing() {
                       <div className="flex items-center gap-2">
                         <div className="font-medium">{item.part_number}</div>
                         {isPartialReceivingItem(item) && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-200 text-amber-800">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-200 text-amber-300">
                             Partial
                           </span>
                         )}
                       </div>
-                      <div className="text-sm text-gray-500">{item.part_name}</div>
+                      <div className="text-sm text-slate-400">{item.part_name}</div>
                     </td>
                     <td className="px-4 py-3 text-right">{item.quantity_ordered}</td>
                     <td className="px-4 py-3 text-right">{item.quantity_received}</td>
@@ -700,7 +700,7 @@ export default function Purchasing() {
               </tbody>
             </table>
             {receivingQueue.length === 0 && (
-              <p className="text-center text-gray-500 py-8">No material awaiting receipt</p>
+              <p className="text-center text-slate-400 py-8">No material awaiting receipt</p>
             )}
           </div>
         </div>
@@ -711,28 +711,28 @@ export default function Purchasing() {
         <div className="card">
           <h2 className="text-lg font-semibold mb-4">Pending Receiving Inspection</h2>
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Receipt #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PO #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vendor</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lot #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Received</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Receipt #</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO #</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Lot #</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Received</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {pendingInspection.map((item) => (
-                  <tr key={item.receipt_id} className="hover:bg-gray-50">
+                  <tr key={item.receipt_id} className="hover:bg-slate-800">
                     <td className="px-4 py-3 font-mono">{item.receipt_number}</td>
                     <td className="px-4 py-3">{item.po_number}</td>
                     <td className="px-4 py-3">{item.vendor_name}</td>
                     <td className="px-4 py-3">
                       <div className="font-medium">{item.part_number}</div>
-                      <div className="text-sm text-gray-500">{item.part_name}</div>
+                      <div className="text-sm text-slate-400">{item.part_name}</div>
                     </td>
                     <td className="px-4 py-3 text-right font-medium">{item.quantity_received}</td>
                     <td className="px-4 py-3 font-mono text-sm">{item.lot_number || '-'}</td>
@@ -752,7 +752,7 @@ export default function Purchasing() {
               </tbody>
             </table>
             {pendingInspection.length === 0 && (
-              <p className="text-center text-gray-500 py-8">No receipts pending inspection</p>
+              <p className="text-center text-slate-400 py-8">No receipts pending inspection</p>
             )}
           </div>
         </div>
@@ -772,20 +772,20 @@ export default function Purchasing() {
             />
           </div>
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">PO #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vendor</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Order Date</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Due Date</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Lines</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO #</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Order Date</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due Date</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Total</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Lines</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                   {purchaseOrders
                     .filter((po) => {
                       const term = poSearch.trim().toLowerCase();
@@ -796,11 +796,11 @@ export default function Purchasing() {
                       );
                     })
                     .map((po) => (
-                  <tr key={po.id} className="hover:bg-gray-50">
+                  <tr key={po.id} className="hover:bg-slate-800">
                     <td className="px-4 py-3 font-medium text-werco-primary">{po.po_number}</td>
                     <td className="px-4 py-3">{po.vendor_name}</td>
                     <td className="px-4 py-3">
-                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[po.status] || 'bg-gray-100'}`}>
+                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[po.status] || 'bg-slate-800/50'}`}>
                         {po.status.replace('_', ' ')}
                       </span>
                     </td>
@@ -837,7 +837,7 @@ export default function Purchasing() {
               </tbody>
             </table>
             {purchaseOrders.length === 0 && (
-              <p className="text-center text-gray-500 py-8">No purchase orders</p>
+              <p className="text-center text-slate-400 py-8">No purchase orders</p>
             )}
           </div>
         </div>
@@ -848,47 +848,47 @@ export default function Purchasing() {
         <div className="card">
           <h2 className="text-lg font-semibold mb-4">Vendors</h2>
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Code</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Contact</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Approved</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">AS9100</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">ISO9001</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Payment Terms</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Code</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Contact</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Approved</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">AS9100</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">ISO9001</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Payment Terms</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {vendors.map((vendor) => (
-                  <tr key={vendor.id} className="hover:bg-gray-50">
+                  <tr key={vendor.id} className="hover:bg-slate-800">
                     <td className="px-4 py-3 font-mono">{vendor.code}</td>
                     <td className="px-4 py-3 font-medium">{vendor.name}</td>
                     <td className="px-4 py-3">
                       <div>{vendor.contact_name}</div>
-                      <div className="text-sm text-gray-500">{vendor.email}</div>
+                      <div className="text-sm text-slate-400">{vendor.email}</div>
                     </td>
                     <td className="px-4 py-3 text-center">
                       {vendor.is_approved ? (
                         <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" />
                       ) : (
-                        <span className="text-gray-400">-</span>
+                        <span className="text-slate-400">-</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-center">
                       {vendor.is_as9100_certified ? (
                         <CheckCircleIcon className="h-5 w-5 text-blue-500 mx-auto" />
                       ) : (
-                        <span className="text-gray-400">-</span>
+                        <span className="text-slate-400">-</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-center">
                       {vendor.is_iso9001_certified ? (
                         <CheckCircleIcon className="h-5 w-5 text-blue-500 mx-auto" />
                       ) : (
-                        <span className="text-gray-400">-</span>
+                        <span className="text-slate-400">-</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-sm">{vendor.payment_terms || '-'}</td>
@@ -911,7 +911,7 @@ export default function Purchasing() {
       {/* Create PO Modal */}
       {showPOModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-semibold mb-4">Create Purchase Order</h3>
             <form onSubmit={handleCreatePO} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -948,7 +948,7 @@ export default function Purchasing() {
                   </button>
                 </div>
                 {newPO.lines.length > 0 && (
-                  <div className="flex gap-2 mb-1 text-xs text-gray-500 font-medium">
+                  <div className="flex gap-2 mb-1 text-xs text-slate-400 font-medium">
                     <div className="flex-1">Part</div>
                     <div className="w-24">Quantity</div>
                     <div className="w-28">Unit Price ($)</div>
@@ -998,13 +998,13 @@ export default function Purchasing() {
                         required
                       />
                     </div>
-                    <button type="button" onClick={() => removePOLine(idx)} className="text-red-500 hover:text-red-700 mt-2">
+                    <button type="button" onClick={() => removePOLine(idx)} className="text-red-500 hover:text-red-400 mt-2">
                       &times;
                     </button>
                   </div>
                 ))}
                 {newPO.lines.length === 0 && (
-                  <p className="text-gray-500 text-sm">Click "+ Add Line" to add items</p>
+                  <p className="text-slate-400 text-sm">Click "+ Add Line" to add items</p>
                 )}
               </div>
 
@@ -1030,7 +1030,7 @@ export default function Purchasing() {
       {/* Create Vendor Modal */}
       {showVendorModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Create Vendor</h3>
             <form onSubmit={handleCreateVendor} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -1118,13 +1118,13 @@ export default function Purchasing() {
       {/* Edit Vendor Modal */}
       {showEditVendorModal && selectedVendor && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-5xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-5xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-lg font-semibold">Edit Vendor</h3>
-                <p className="text-sm text-gray-500">{selectedVendor.code}</p>
+                <p className="text-sm text-slate-400">{selectedVendor.code}</p>
               </div>
-              <button onClick={() => setShowEditVendorModal(false)} className="text-gray-500 hover:text-gray-700">
+              <button onClick={() => setShowEditVendorModal(false)} className="text-slate-400 hover:text-slate-300">
                 <span className="text-xl">×</span>
               </button>
             </div>
@@ -1251,7 +1251,7 @@ export default function Purchasing() {
                     type="checkbox"
                     checked={editVendorForm.is_approved}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, is_approved: e.target.checked })}
-                    className="rounded border-gray-300"
+                    className="rounded border-slate-600"
                   />
                   <span>Approved Vendor</span>
                 </label>
@@ -1260,7 +1260,7 @@ export default function Purchasing() {
                     type="checkbox"
                     checked={editVendorForm.is_active}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, is_active: e.target.checked })}
-                    className="rounded border-gray-300"
+                    className="rounded border-slate-600"
                   />
                   <span>Active</span>
                 </label>
@@ -1272,7 +1272,7 @@ export default function Purchasing() {
                     type="checkbox"
                     checked={editVendorForm.is_as9100_certified}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, is_as9100_certified: e.target.checked })}
-                    className="rounded border-gray-300"
+                    className="rounded border-slate-600"
                   />
                   <span>AS9100D Certified</span>
                 </label>
@@ -1281,7 +1281,7 @@ export default function Purchasing() {
                     type="checkbox"
                     checked={editVendorForm.is_iso9001_certified}
                     onChange={(e) => setEditVendorForm({ ...editVendorForm, is_iso9001_certified: e.target.checked })}
-                    className="rounded border-gray-300"
+                    className="rounded border-slate-600"
                   />
                   <span>ISO 9001 Certified</span>
                 </label>
@@ -1354,30 +1354,30 @@ export default function Purchasing() {
               </form>
 
               {vendorDocsLoading ? (
-                <div className="text-sm text-gray-500">Loading documents...</div>
+                <div className="text-sm text-slate-400">Loading documents...</div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
+                  <table className="min-w-full divide-y divide-slate-700">
+                    <thead className="bg-slate-800">
                       <tr>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">File</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Uploaded</th>
-                        <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Title</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">File</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Uploaded</th>
+                        <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Actions</th>
                       </tr>
                     </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
+                    <tbody className="bg-[#151b28] divide-y divide-slate-700">
                       {vendorDocuments.map((doc) => (
-                        <tr key={doc.id} className="hover:bg-gray-50">
+                        <tr key={doc.id} className="hover:bg-slate-800">
                           <td className="px-3 py-2 text-sm">
                             <div className="font-medium">{doc.title}</div>
-                            <div className="text-xs text-gray-500">{doc.document_number} Rev {doc.revision}</div>
+                            <div className="text-xs text-slate-400">{doc.document_number} Rev {doc.revision}</div>
                           </td>
                           <td className="px-3 py-2 text-sm capitalize">{doc.document_type.replace('_', ' ')}</td>
                           <td className="px-3 py-2 text-sm">
                             <div>{doc.file_name || '-'}</div>
-                            <div className="text-xs text-gray-500">{formatFileSize(doc.file_size)}</div>
+                            <div className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</div>
                           </td>
                           <td className="px-3 py-2 text-sm">{formatCentralDate(doc.created_at)}</td>
                           <td className="px-3 py-2 text-right">
@@ -1385,14 +1385,14 @@ export default function Purchasing() {
                               <button
                                 type="button"
                                 onClick={() => handleVendorDocDownload(doc)}
-                                className="text-werco-primary hover:text-blue-700 text-sm"
+                                className="text-werco-primary hover:text-blue-400 text-sm"
                               >
                                 Download
                               </button>
                               <button
                                 type="button"
                                 onClick={() => handleVendorDocDelete(doc.id)}
-                                className="text-red-600 hover:text-red-800 text-sm"
+                                className="text-red-600 hover:text-red-300 text-sm"
                               >
                                 Delete
                               </button>
@@ -1403,7 +1403,7 @@ export default function Purchasing() {
                     </tbody>
                   </table>
                   {vendorDocuments.length === 0 && (
-                    <p className="text-sm text-gray-500 py-3">No documents for this vendor.</p>
+                    <p className="text-sm text-slate-400 py-3">No documents for this vendor.</p>
                   )}
                 </div>
               )}
@@ -1415,12 +1415,12 @@ export default function Purchasing() {
       {/* Receive Material Modal */}
       {showReceiveModal && selectedReceiveItem && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Receive Material</h3>
-            <div className="bg-gray-50 rounded p-3 mb-4">
+            <div className="bg-slate-800 rounded p-3 mb-4">
               <p className="font-medium">{selectedReceiveItem.part_number}</p>
-              <p className="text-sm text-gray-600">{selectedReceiveItem.part_name}</p>
-              <p className="text-sm text-gray-500 mt-1">
+              <p className="text-sm text-slate-400">{selectedReceiveItem.part_name}</p>
+              <p className="text-sm text-slate-400 mt-1">
                 PO: {selectedReceiveItem.po_number} | Remaining: {selectedReceiveItem.quantity_remaining}
               </p>
             </div>
@@ -1494,7 +1494,7 @@ export default function Purchasing() {
                   />
                   <span>Requires Receiving Inspection</span>
                 </label>
-                <p className="text-xs text-gray-500 ml-6">
+                <p className="text-xs text-slate-400 ml-6">
                   If unchecked, material will be added directly to inventory
                 </p>
               </div>
@@ -1510,12 +1510,12 @@ export default function Purchasing() {
       {/* Inspection Modal */}
       {showInspectModal && selectedInspectItem && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Complete Inspection</h3>
-            <div className="bg-gray-50 rounded p-3 mb-4">
+            <div className="bg-slate-800 rounded p-3 mb-4">
               <p className="font-medium">{selectedInspectItem.part_number}</p>
-              <p className="text-sm text-gray-600">{selectedInspectItem.part_name}</p>
-              <p className="text-sm text-gray-500 mt-1">
+              <p className="text-sm text-slate-400">{selectedInspectItem.part_name}</p>
+              <p className="text-sm text-slate-400 mt-1">
                 Receipt: {selectedInspectItem.receipt_number} | Qty: {selectedInspectItem.quantity_received}
                 {selectedInspectItem.lot_number && ` | Lot: ${selectedInspectItem.lot_number}`}
               </p>
@@ -1580,7 +1580,7 @@ export default function Purchasing() {
       {/* Add New Part Modal */}
       {showAddPartModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4">Add New Part</h3>
             <form onSubmit={handleCreatePart} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">

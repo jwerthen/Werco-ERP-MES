@@ -62,23 +62,23 @@ const TABS = ['Scorecards', 'Approved Supplier List', 'Audits'] as const;
 type Tab = typeof TABS[number];
 
 const scoreColor = (score: number) => {
-  if (score >= 80) return 'bg-green-500';
-  if (score >= 60) return 'bg-yellow-500';
-  return 'bg-red-500';
+  if (score >= 80) return 'bg-green-500/100';
+  if (score >= 60) return 'bg-yellow-500/100';
+  return 'bg-red-500/100';
 };
 
 const scoreBadge = (score: number) => {
-  if (score >= 80) return 'text-green-700 bg-green-100';
-  if (score >= 60) return 'text-yellow-700 bg-yellow-100';
-  return 'text-red-700 bg-red-100';
+  if (score >= 80) return 'text-emerald-400 bg-green-500/20';
+  if (score >= 60) return 'text-yellow-400 bg-yellow-500/20';
+  return 'text-red-400 bg-red-500/20';
 };
 
 const statusBadge = (status: string) => {
   const s = status?.toLowerCase();
-  if (s === 'approved' || s === 'active' || s === 'completed') return 'bg-green-100 text-green-800';
-  if (s === 'pending' || s === 'scheduled') return 'bg-yellow-100 text-yellow-800';
-  if (s === 'suspended' || s === 'at_risk') return 'bg-red-100 text-red-800';
-  return 'bg-gray-100 text-gray-800';
+  if (s === 'approved' || s === 'active' || s === 'completed') return 'bg-green-500/20 text-emerald-300';
+  if (s === 'pending' || s === 'scheduled') return 'bg-yellow-500/20 text-yellow-300';
+  if (s === 'suspended' || s === 'at_risk') return 'bg-red-500/20 text-red-300';
+  return 'bg-slate-800/50 text-slate-100';
 };
 
 const SupplierScorecards = () => {
@@ -188,16 +188,16 @@ const SupplierScorecards = () => {
   }, []);
 
   const statCards = useMemo(() => [
-    { label: 'Suppliers Rated', value: stats.total_rated, icon: ChartBarIcon, color: 'text-blue-600 bg-blue-100' },
-    { label: 'Average Score', value: stats.average_score?.toFixed(1), icon: ShieldCheckIcon, color: 'text-green-600 bg-green-100' },
-    { label: 'At-Risk Suppliers', value: stats.at_risk_count, icon: ExclamationTriangleIcon, color: 'text-red-600 bg-red-100' },
-    { label: 'Audits Due Soon', value: stats.audits_due_soon, icon: CalendarDaysIcon, color: 'text-amber-600 bg-amber-100' },
+    { label: 'Suppliers Rated', value: stats.total_rated, icon: ChartBarIcon, color: 'text-blue-600 bg-blue-500/20' },
+    { label: 'Average Score', value: stats.average_score?.toFixed(1), icon: ShieldCheckIcon, color: 'text-green-600 bg-green-500/20' },
+    { label: 'At-Risk Suppliers', value: stats.at_risk_count, icon: ExclamationTriangleIcon, color: 'text-red-600 bg-red-500/20' },
+    { label: 'Audits Due Soon', value: stats.audits_due_soon, icon: CalendarDaysIcon, color: 'text-amber-600 bg-amber-500/20' },
   ], [stats]);
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">Supplier Scorecards</h1>
+        <h1 className="text-2xl font-bold text-white">Supplier Scorecards</h1>
         <div className="flex gap-2">
           {activeTab === 'Scorecards' && (
             <button onClick={() => setShowScorecardModal(true)} className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
@@ -215,13 +215,13 @@ const SupplierScorecards = () => {
       {/* Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {statCards.map(card => (
-          <div key={card.label} className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex items-center gap-4">
+          <div key={card.label} className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 p-5 flex items-center gap-4">
             <div className={`p-3 rounded-lg ${card.color}`}>
               <card.icon className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">{card.label}</p>
-              <p className="text-2xl font-bold text-gray-900">{card.value}</p>
+              <p className="text-sm text-slate-400">{card.label}</p>
+              <p className="text-2xl font-bold text-white">{card.value}</p>
             </div>
           </div>
         ))}
@@ -230,21 +230,21 @@ const SupplierScorecards = () => {
       {/* Search & Tabs */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-4">
         <div className="relative flex-1 max-w-md">
-          <MagnifyingGlassIcon className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <MagnifyingGlassIcon className="w-5 h-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             placeholder="Search by vendor name..."
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+            className="w-full pl-10 pr-4 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
           />
         </div>
-        <div className="flex border border-gray-300 rounded-lg overflow-hidden">
+        <div className="flex border border-slate-600 rounded-lg overflow-hidden">
           {TABS.map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 text-sm font-medium ${activeTab === tab ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+              className={`px-4 py-2 text-sm font-medium ${activeTab === tab ? 'bg-blue-600 text-white' : 'bg-[#151b28] text-slate-300 hover:bg-slate-800'}`}
             >
               {tab}
             </button>
@@ -260,32 +260,32 @@ const SupplierScorecards = () => {
         <>
           {/* Scorecards Tab */}
           {activeTab === 'Scorecards' && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-hidden">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800">
                   <tr>
                     <th className="w-10 px-4 py-3" />
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vendor</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Overall Score</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Quality</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Delivery</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Cost</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Period</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Overall Score</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Quality</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Delivery</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Cost</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Period</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-200">
+                <tbody className="divide-y divide-slate-700">
                   {filteredScorecards.length === 0 ? (
-                    <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">No scorecards found.</td></tr>
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-400">No scorecards found.</td></tr>
                   ) : filteredScorecards.map(sc => (
                     <React.Fragment key={sc.id}>
-                      <tr className="hover:bg-gray-50 cursor-pointer" onClick={() => toggleExpand(sc.id)}>
+                      <tr className="hover:bg-slate-800 cursor-pointer" onClick={() => toggleExpand(sc.id)}>
                         <td className="px-4 py-3">
                           {expandedRow === sc.id
-                            ? <ChevronUpIcon className="w-4 h-4 text-gray-500" />
-                            : <ChevronDownIcon className="w-4 h-4 text-gray-500" />}
+                            ? <ChevronUpIcon className="w-4 h-4 text-slate-400" />
+                            : <ChevronDownIcon className="w-4 h-4 text-slate-400" />}
                         </td>
-                        <td className="px-4 py-3 text-sm font-medium text-gray-900">{sc.vendor_name}</td>
+                        <td className="px-4 py-3 text-sm font-medium text-white">{sc.vendor_name}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
@@ -299,7 +299,7 @@ const SupplierScorecards = () => {
                         <td className="px-4 py-3 text-center text-sm">{sc.quality_score}</td>
                         <td className="px-4 py-3 text-center text-sm">{sc.delivery_score}</td>
                         <td className="px-4 py-3 text-center text-sm">{sc.cost_score}</td>
-                        <td className="px-4 py-3 text-sm text-gray-600">{sc.period}</td>
+                        <td className="px-4 py-3 text-sm text-slate-400">{sc.period}</td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${statusBadge(sc.status)}`}>
                             {sc.status}
@@ -308,27 +308,27 @@ const SupplierScorecards = () => {
                       </tr>
                       {expandedRow === sc.id && (
                         <tr>
-                          <td colSpan={8} className="px-6 py-4 bg-gray-50">
+                          <td colSpan={8} className="px-6 py-4 bg-slate-800">
                             <div className="flex flex-col lg:flex-row gap-6">
                               <div className="w-full lg:w-1/2 h-64">
-                                <h4 className="text-sm font-semibold text-gray-700 mb-2">Score Breakdown</h4>
+                                <h4 className="text-sm font-semibold text-slate-300 mb-2">Score Breakdown</h4>
                                 <ResponsiveContainer width="100%" height="100%">
                                   <RadarChart data={radarData(sc)}>
                                     <PolarGrid />
-                                    <PolarAngleAxis dataKey="dimension" tick={{ fontSize: 12 }} />
-                                    <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fontSize: 10 }} />
+                                    <PolarAngleAxis dataKey="dimension" tick={{ fontSize: 12, fill: '#94a3b8' }} />
+                                    <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fontSize: 10, fill: '#94a3b8' }} />
                                     <Radar name="Score" dataKey="score" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.3} />
                                   </RadarChart>
                                 </ResponsiveContainer>
                               </div>
                               <div className="w-full lg:w-1/2 h-64">
-                                <h4 className="text-sm font-semibold text-gray-700 mb-2">Dimension Comparison</h4>
+                                <h4 className="text-sm font-semibold text-slate-300 mb-2">Dimension Comparison</h4>
                                 <ResponsiveContainer width="100%" height="100%">
                                   <BarChart data={radarData(sc)}>
-                                    <CartesianGrid strokeDasharray="3 3" />
-                                    <XAxis dataKey="dimension" tick={{ fontSize: 12 }} />
-                                    <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
-                                    <Tooltip />
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                                    <XAxis dataKey="dimension" tick={{ fontSize: 12, fill: '#94a3b8' }} />
+                                    <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                                    <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} />
                                     <Legend />
                                     <Bar dataKey="score" fill="#3b82f6" radius={[4, 4, 0, 0]} />
                                   </BarChart>
@@ -347,31 +347,31 @@ const SupplierScorecards = () => {
 
           {/* Approved Supplier List Tab */}
           {activeTab === 'Approved Supplier List' && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-hidden">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vendor</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Approved Date</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Commodity</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Notes</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Approved Date</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Commodity</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Notes</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-200">
+                <tbody className="divide-y divide-slate-700">
                   {filteredASL.length === 0 ? (
-                    <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-500">No approved suppliers found.</td></tr>
+                    <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400">No approved suppliers found.</td></tr>
                   ) : filteredASL.map(s => (
-                    <tr key={s.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 text-sm font-medium text-gray-900">{s.vendor_name}</td>
+                    <tr key={s.id} className="hover:bg-slate-800">
+                      <td className="px-4 py-3 text-sm font-medium text-white">{s.vendor_name}</td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${statusBadge(s.status)}`}>
                           {s.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-600">{s.approved_date}</td>
-                      <td className="px-4 py-3 text-sm text-gray-600">{s.commodity}</td>
-                      <td className="px-4 py-3 text-sm text-gray-500 max-w-xs truncate">{s.notes}</td>
+                      <td className="px-4 py-3 text-sm text-slate-400">{s.approved_date}</td>
+                      <td className="px-4 py-3 text-sm text-slate-400">{s.commodity}</td>
+                      <td className="px-4 py-3 text-sm text-slate-400 max-w-xs truncate">{s.notes}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -381,34 +381,34 @@ const SupplierScorecards = () => {
 
           {/* Audits Tab */}
           {activeTab === 'Audits' && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-hidden">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vendor</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Audit Date</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Score</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Findings</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Next Audit Due</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Audit Date</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Score</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Findings</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Next Audit Due</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-200">
+                <tbody className="divide-y divide-slate-700">
                   {filteredAudits.length === 0 ? (
-                    <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">No audits found.</td></tr>
+                    <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400">No audits found.</td></tr>
                   ) : filteredAudits.map(a => (
-                    <tr key={a.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 text-sm font-medium text-gray-900">{a.vendor_name}</td>
-                      <td className="px-4 py-3 text-sm text-gray-600">{a.audit_date}</td>
-                      <td className="px-4 py-3 text-sm text-gray-600 capitalize">{a.audit_type}</td>
+                    <tr key={a.id} className="hover:bg-slate-800">
+                      <td className="px-4 py-3 text-sm font-medium text-white">{a.vendor_name}</td>
+                      <td className="px-4 py-3 text-sm text-slate-400">{a.audit_date}</td>
+                      <td className="px-4 py-3 text-sm text-slate-400 capitalize">{a.audit_type}</td>
                       <td className="px-4 py-3 text-center">
                         <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${scoreBadge(a.score)}`}>
                           {a.score}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-500 max-w-xs truncate">{a.findings}</td>
-                      <td className="px-4 py-3 text-sm text-gray-600">{a.next_audit_due}</td>
+                      <td className="px-4 py-3 text-sm text-slate-400 max-w-xs truncate">{a.findings}</td>
+                      <td className="px-4 py-3 text-sm text-slate-400">{a.next_audit_due}</td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${statusBadge(a.status)}`}>
                           {a.status}
@@ -426,49 +426,49 @@ const SupplierScorecards = () => {
       {/* Create Scorecard Modal */}
       {showScorecardModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-              <h3 className="text-lg font-semibold text-gray-900">New Supplier Scorecard</h3>
-              <button onClick={() => setShowScorecardModal(false)} className="text-gray-400 hover:text-gray-600">
+          <div className="bg-[#151b28] rounded-xl shadow-xl w-full max-w-lg mx-4">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+              <h3 className="text-lg font-semibold text-white">New Supplier Scorecard</h3>
+              <button onClick={() => setShowScorecardModal(false)} className="text-slate-400 hover:text-slate-400">
                 <XMarkIcon className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleCreateScorecard} className="p-6 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Vendor ID</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Vendor ID</label>
                 <input
                   type="number" required
                   value={scorecardForm.vendor_id}
                   onChange={e => setScorecardForm(f => ({ ...f, vendor_id: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Period</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Period</label>
                 <input
                   type="text" required placeholder="e.g., 2026-Q1"
                   value={scorecardForm.period}
                   onChange={e => setScorecardForm(f => ({ ...f, period: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                 />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 {(['quality_score', 'delivery_score', 'cost_score', 'responsiveness_score'] as const).map(field => (
                   <div key={field}>
-                    <label className="block text-sm font-medium text-gray-700 mb-1 capitalize">
+                    <label className="block text-sm font-medium text-slate-300 mb-1 capitalize">
                       {field.replace('_score', '').replace('_', ' ')}
                     </label>
                     <input
                       type="number" min="0" max="100" required
                       value={scorecardForm[field]}
                       onChange={e => setScorecardForm(f => ({ ...f, [field]: e.target.value }))}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                      className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                     />
                   </div>
                 ))}
               </div>
               <div className="flex justify-end gap-3 pt-2">
-                <button type="button" onClick={() => setShowScorecardModal(false)} className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">
+                <button type="button" onClick={() => setShowScorecardModal(false)} className="px-4 py-2 text-sm font-medium text-slate-300 bg-[#151b28] border border-slate-600 rounded-lg hover:bg-slate-800">
                   Cancel
                 </button>
                 <button type="submit" className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">
@@ -483,39 +483,39 @@ const SupplierScorecards = () => {
       {/* Create Audit Modal */}
       {showAuditModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-              <h3 className="text-lg font-semibold text-gray-900">New Supplier Audit</h3>
-              <button onClick={() => setShowAuditModal(false)} className="text-gray-400 hover:text-gray-600">
+          <div className="bg-[#151b28] rounded-xl shadow-xl w-full max-w-lg mx-4">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+              <h3 className="text-lg font-semibold text-white">New Supplier Audit</h3>
+              <button onClick={() => setShowAuditModal(false)} className="text-slate-400 hover:text-slate-400">
                 <XMarkIcon className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleCreateAudit} className="p-6 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Vendor ID</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Vendor ID</label>
                 <input
                   type="number" required
                   value={auditForm.vendor_id}
                   onChange={e => setAuditForm(f => ({ ...f, vendor_id: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                 />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Audit Date</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Audit Date</label>
                   <input
                     type="date" required
                     value={auditForm.audit_date}
                     onChange={e => setAuditForm(f => ({ ...f, audit_date: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                    className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Audit Type</label>
+                  <label className="block text-sm font-medium text-slate-300 mb-1">Audit Type</label>
                   <select
                     value={auditForm.audit_type}
                     onChange={e => setAuditForm(f => ({ ...f, audit_type: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                    className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                   >
                     <option value="on-site">On-Site</option>
                     <option value="remote">Remote</option>
@@ -525,34 +525,34 @@ const SupplierScorecards = () => {
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Score (0-100)</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Score (0-100)</label>
                 <input
                   type="number" min="0" max="100" required
                   value={auditForm.score}
                   onChange={e => setAuditForm(f => ({ ...f, score: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Findings</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Findings</label>
                 <textarea
                   rows={3}
                   value={auditForm.findings}
                   onChange={e => setAuditForm(f => ({ ...f, findings: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Next Audit Due</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">Next Audit Due</label>
                 <input
                   type="date"
                   value={auditForm.next_audit_due}
                   onChange={e => setAuditForm(f => ({ ...f, next_audit_due: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                  className="w-full px-3 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
                 />
               </div>
               <div className="flex justify-end gap-3 pt-2">
-                <button type="button" onClick={() => setShowAuditModal(false)} className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">
+                <button type="button" onClick={() => setShowAuditModal(false)} className="px-4 py-2 text-sm font-medium text-slate-300 bg-[#151b28] border border-slate-600 rounded-lg hover:bg-slate-800">
                   Cancel
                 </button>
                 <button type="submit" className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">

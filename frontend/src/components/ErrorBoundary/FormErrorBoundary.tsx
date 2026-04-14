@@ -106,13 +106,13 @@ export class FormErrorBoundary extends Component<FormErrorBoundaryProps, FormErr
     if (hasError && error) {
       return (
         <div 
-          className="bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-300 rounded-xl p-6"
+          className="bg-gradient-to-br from-amber-500/10 to-orange-500/10 border border-amber-500/30 rounded-xl p-6"
           role="alert"
           aria-live="assertive"
         >
           <div className="flex items-start gap-4">
             <div className="flex-shrink-0">
-              <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center">
+              <div className="w-12 h-12 bg-amber-500/20 rounded-full flex items-center justify-center">
                 <svg className="w-6 h-6 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
                     d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" 
@@ -122,24 +122,24 @@ export class FormErrorBoundary extends Component<FormErrorBoundaryProps, FormErr
             </div>
 
             <div className="flex-1">
-              <h3 className="text-lg font-semibold text-amber-800">
+              <h3 className="text-lg font-semibold text-amber-300">
                 Error in {formName} Form
               </h3>
-              <p className="mt-1 text-sm text-amber-700">
+              <p className="mt-1 text-sm text-amber-400">
                 Something went wrong while processing the form. 
                 {preservedData && " Your data has been preserved."}
               </p>
 
               {/* Preserved data indicator */}
               {preservedData && (
-                <div className="mt-4 p-3 bg-white/60 rounded-lg border border-amber-200">
-                  <div className="flex items-center gap-2 text-sm text-amber-800">
+                <div className="mt-4 p-3 bg-slate-800/60 rounded-lg border border-amber-500/20">
+                  <div className="flex items-center gap-2 text-sm text-amber-300">
                     <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                     </svg>
                     <span className="font-medium">Form data preserved</span>
                   </div>
-                  <p className="mt-1 text-xs text-amber-600">
+                  <p className="mt-1 text-xs text-amber-500">
                     {Object.keys(preservedData).length} field(s) saved
                   </p>
                 </div>
@@ -160,7 +160,7 @@ export class FormErrorBoundary extends Component<FormErrorBoundaryProps, FormErr
                 {preservedData && (
                   <button
                     onClick={this.copyDataToClipboard}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-white text-amber-700 border border-amber-300 rounded-lg hover:bg-amber-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 transition-colors min-h-[44px] font-medium text-sm"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-800 text-amber-400 border border-amber-500/30 rounded-lg hover:bg-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2 transition-colors min-h-[44px] font-medium text-sm"
                   >
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />

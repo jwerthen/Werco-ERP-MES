@@ -33,16 +33,16 @@ export function ConfirmDialog({
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onCancel}>
       <div
-        className="bg-white rounded-xl p-6 max-w-sm w-full mx-4 shadow-xl animate-scale-in"
+        className="bg-[#151b28] rounded-xl p-6 max-w-sm w-full mx-4 shadow-xl animate-scale-in"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-start gap-3">
-          <div className={`p-2 rounded-full ${variant === 'danger' ? 'bg-red-100' : variant === 'warning' ? 'bg-amber-100' : 'bg-blue-100'}`}>
+          <div className={`p-2 rounded-full ${variant === 'danger' ? 'bg-red-500/20' : variant === 'warning' ? 'bg-amber-500/20' : 'bg-blue-500/20'}`}>
             <ExclamationTriangleIcon className={`h-5 w-5 ${variant === 'danger' ? 'text-red-600' : variant === 'warning' ? 'text-amber-600' : 'text-blue-600'}`} />
           </div>
           <div className="flex-1">
-            <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
-            <p className="text-sm text-gray-600 mt-1">{message}</p>
+            <h3 className="text-lg font-semibold text-white">{title}</h3>
+            <p className="text-sm text-slate-300 mt-1">{message}</p>
           </div>
         </div>
         <div className="flex justify-end gap-3 mt-6">

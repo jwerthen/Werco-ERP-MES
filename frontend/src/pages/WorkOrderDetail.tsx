@@ -15,15 +15,15 @@ import {
 } from '@heroicons/react/24/outline';
 
 const statusColors: Record<string, string> = {
-  draft: 'bg-gray-100 text-gray-800',
-  released: 'bg-blue-100 text-blue-800',
-  in_progress: 'bg-green-100 text-green-800',
-  on_hold: 'bg-yellow-100 text-yellow-800',
-  complete: 'bg-emerald-100 text-emerald-800',
-  closed: 'bg-gray-100 text-gray-600',
-  cancelled: 'bg-red-100 text-red-800',
-  pending: 'bg-gray-100 text-gray-800',
-  ready: 'bg-blue-100 text-blue-800',
+  draft: 'bg-slate-800 text-slate-100',
+  released: 'bg-blue-500/20 text-blue-300',
+  in_progress: 'bg-green-500/20 text-green-300',
+  on_hold: 'bg-yellow-500/20 text-yellow-300',
+  complete: 'bg-emerald-500/20 text-emerald-300',
+  closed: 'bg-slate-800 text-slate-400',
+  cancelled: 'bg-red-500/20 text-red-300',
+  pending: 'bg-slate-800 text-slate-100',
+  ready: 'bg-blue-500/20 text-blue-300',
 };
 
 interface MaterialRequirement {
@@ -258,7 +258,7 @@ export default function WorkOrderDetail() {
 
   if (error || !workOrder) {
     return (
-      <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+      <div className="bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-3 rounded-lg">
         {error || 'Work order not found'}
       </div>
     );
@@ -269,12 +269,12 @@ export default function WorkOrderDetail() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center">
-          <button onClick={() => navigate('/work-orders')} className="mr-4 text-gray-500 hover:text-gray-700">
+          <button onClick={() => navigate('/work-orders')} className="mr-4 text-slate-400 hover:text-slate-300">
             <ArrowLeftIcon className="h-6 w-6" />
           </button>
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">{workOrder.work_order_number}</h1>
-            <p className="text-gray-500">Work Order Details</p>
+            <h1 className="text-2xl font-bold text-white">{workOrder.work_order_number}</h1>
+            <p className="text-slate-400">Work Order Details</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -313,36 +313,36 @@ export default function WorkOrderDetail() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Work Order Info */}
         <div className="card">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Work Order Information</h2>
+          <h2 className="text-lg font-semibold text-white mb-4">Work Order Information</h2>
           <dl className="grid grid-cols-2 gap-4">
             <div>
-              <dt className="text-sm text-gray-500">Quantity Ordered</dt>
+              <dt className="text-sm text-slate-400">Quantity Ordered</dt>
               <dd className="text-lg font-medium">{workOrder.quantity_ordered}</dd>
             </div>
             <div>
-              <dt className="text-sm text-gray-500">Quantity Complete</dt>
+              <dt className="text-sm text-slate-400">Quantity Complete</dt>
               <dd className="text-lg font-medium text-green-600">{workOrder.quantity_complete}</dd>
             </div>
             <div>
-              <dt className="text-sm text-gray-500">Due Date</dt>
+              <dt className="text-sm text-slate-400">Due Date</dt>
               <dd className="text-lg font-medium">
                 {workOrder.due_date ? formatCentralDate(workOrder.due_date) : '-'}
               </dd>
             </div>
             <div>
-              <dt className="text-sm text-gray-500">Priority</dt>
+              <dt className="text-sm text-slate-400">Priority</dt>
               <dd className="text-lg font-medium">{workOrder.priority}</dd>
             </div>
             <div>
-              <dt className="text-sm text-gray-500">Customer</dt>
+              <dt className="text-sm text-slate-400">Customer</dt>
               <dd className="text-lg font-medium">{workOrder.customer_name || '-'}</dd>
             </div>
             <div>
-              <dt className="text-sm text-gray-500">Customer PO</dt>
+              <dt className="text-sm text-slate-400">Customer PO</dt>
               <dd className="text-lg font-medium">{workOrder.customer_po || '-'}</dd>
             </div>
             <div>
-              <dt className="text-sm text-gray-500">Actual Hours</dt>
+              <dt className="text-sm text-slate-400">Actual Hours</dt>
               <dd className="text-lg font-medium">{Number(workOrder.actual_hours || 0).toFixed(2)}</dd>
             </div>
           </dl>
@@ -350,14 +350,14 @@ export default function WorkOrderDetail() {
 
         {/* Notes */}
         <div className="card">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Notes & Instructions</h2>
+          <h2 className="text-lg font-semibold text-white mb-4">Notes & Instructions</h2>
           <div className="space-y-4">
             <div>
-              <label className="text-sm text-gray-500">Notes</label>
+              <label className="text-sm text-slate-400">Notes</label>
               <p className="mt-1">{workOrder.notes || 'No notes'}</p>
             </div>
             <div>
-              <label className="text-sm text-gray-500">Special Instructions</label>
+              <label className="text-sm text-slate-400">Special Instructions</label>
               <p className="mt-1">{workOrder.special_instructions || 'No special instructions'}</p>
             </div>
           </div>
@@ -367,76 +367,76 @@ export default function WorkOrderDetail() {
       {isAdminView && (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-gray-900">Operator Activity (Admin)</h2>
-            <span className="text-xs text-gray-500">
+            <h2 className="text-lg font-semibold text-white">Operator Activity (Admin)</h2>
+            <span className="text-xs text-slate-400">
               Live: {activeUsersOnWorkOrder.length} clocked in
             </span>
           </div>
           {activeUsersOnWorkOrder.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800/50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operator</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Work Center</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Entry Type</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Clocked In (CT)</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operator</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Work Center</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Entry Type</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Clocked In (CT)</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-[#151b28] divide-y divide-slate-700">
                   {activeUsersOnWorkOrder.map((entry, index) => (
-                    <tr key={`${entry.user_id}-${entry.operation || 'op'}-${index}`} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                    <tr key={`${entry.user_id}-${entry.operation || 'op'}-${index}`} className="hover:bg-slate-800/50">
+                      <td className="px-4 py-3 text-sm font-medium text-white">
                         {entry.user_name || userNameById[entry.user_id] || `User #${entry.user_id}`}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{entry.operation || '-'}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{entry.work_center || '-'}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">
+                      <td className="px-4 py-3 text-sm text-slate-300">{entry.operation || '-'}</td>
+                      <td className="px-4 py-3 text-sm text-slate-300">{entry.work_center || '-'}</td>
+                      <td className="px-4 py-3 text-sm text-slate-300">
                         {entry.entry_type ? entry.entry_type.toString().replace('_', ' ') : '-'}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{formatDateTimeCT(entry.clock_in)}</td>
+                      <td className="px-4 py-3 text-sm text-slate-300">{formatDateTimeCT(entry.clock_in)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           ) : (
-            <p className="text-sm text-gray-500">No one is currently clocked in on this work order.</p>
+            <p className="text-sm text-slate-400">No one is currently clocked in on this work order.</p>
           )}
         </div>
       )}
 
       {/* Operations */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Operations / Routing</h2>
+        <h2 className="text-lg font-semibold text-white mb-4">Operations / Routing</h2>
         
         {workOrder.operations.length === 0 ? (
-          <p className="text-gray-500">No operations defined</p>
+          <p className="text-slate-400">No operations defined</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800/50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Seq</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Group</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Operation</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Est. Hours</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Seq</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Group</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Qty</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Est. Hours</th>
                   {isAdminView && (
                     <>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started By</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Started At (CT)</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Completed By</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Completed At (CT)</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Started By</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Started At (CT)</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Completed By</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Completed At (CT)</th>
                     </>
                   )}
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {(() => {
                   let lastGroup = '';
                   return workOrder.operations.map((op) => {
@@ -444,24 +444,24 @@ export default function WorkOrderDetail() {
                     if (op.operation_group) lastGroup = op.operation_group;
                     
                     const groupColors: Record<string, string> = {
-                      'LASER': 'bg-red-100 text-red-800',
-                      'MACHINE': 'bg-blue-100 text-blue-800',
-                      'BEND': 'bg-orange-100 text-orange-800',
-                      'WELD': 'bg-yellow-100 text-yellow-800',
-                      'FINISH': 'bg-purple-100 text-purple-800',
-                      'ASSEMBLY': 'bg-green-100 text-green-800',
-                      'INSPECT': 'bg-blue-100 text-blue-800',
+                      'LASER': 'bg-red-500/20 text-red-300',
+                      'MACHINE': 'bg-blue-500/20 text-blue-300',
+                      'BEND': 'bg-orange-500/20 text-orange-300',
+                      'WELD': 'bg-yellow-500/20 text-yellow-300',
+                      'FINISH': 'bg-purple-500/20 text-purple-300',
+                      'ASSEMBLY': 'bg-green-500/20 text-green-300',
+                      'INSPECT': 'bg-blue-500/20 text-blue-300',
                     };
                     
                     return (
                       <tr 
                         key={op.id} 
-                        className={`hover:bg-gray-50 ${isNewGroup ? 'border-t-2 border-gray-300' : ''}`}
+                        className={`hover:bg-slate-800/50 ${isNewGroup ? 'border-t-2 border-slate-600' : ''}`}
                       >
                         <td className="px-4 py-3 font-medium text-sm">{op.sequence}</td>
                         <td className="px-4 py-3">
                           {op.operation_group && (
-                            <span className={`inline-flex px-2 py-1 rounded text-xs font-bold ${groupColors[op.operation_group] || 'bg-gray-100 text-gray-800'}`}>
+                            <span className={`inline-flex px-2 py-1 rounded text-xs font-bold ${groupColors[op.operation_group] || 'bg-slate-800 text-slate-100'}`}>
                               {op.operation_group}
                             </span>
                           )}
@@ -470,7 +470,7 @@ export default function WorkOrderDetail() {
                           <div>
                             <div className="font-medium text-sm">{op.name}</div>
                             {op.description && (
-                              <div className="text-xs text-gray-500 mt-0.5">{op.description}</div>
+                              <div className="text-xs text-slate-400 mt-0.5">{op.description}</div>
                             )}
                           </div>
                         </td>
@@ -479,11 +479,11 @@ export default function WorkOrderDetail() {
                             <div>
                               <div className="font-medium text-sm text-blue-600">{op.component_part_number}</div>
                               {op.component_part_name && (
-                                <div className="text-xs text-gray-500">{op.component_part_name}</div>
+                                <div className="text-xs text-slate-400">{op.component_part_name}</div>
                               )}
                             </div>
                           ) : (
-                            <span className="text-gray-400 text-sm">-</span>
+                            <span className="text-slate-500 text-sm">-</span>
                           )}
                         </td>
                         <td className="px-4 py-3">
@@ -492,7 +492,7 @@ export default function WorkOrderDetail() {
                           ) : (
                             <div>
                               <span className="font-medium text-sm">{op.quantity_complete}</span>
-                              <span className="text-gray-500 text-sm">/{workOrder.quantity_ordered}</span>
+                              <span className="text-slate-400 text-sm">/{workOrder.quantity_ordered}</span>
                             </div>
                           )}
                         </td>
@@ -501,16 +501,16 @@ export default function WorkOrderDetail() {
                         </td>
                         {isAdminView && (
                           <>
-                            <td className="px-4 py-3 text-sm text-gray-700">
+                            <td className="px-4 py-3 text-sm text-slate-300">
                               {op.started_by ? (userNameById[op.started_by] || `User #${op.started_by}`) : '-'}
                             </td>
-                            <td className="px-4 py-3 text-sm text-gray-700">
+                            <td className="px-4 py-3 text-sm text-slate-300">
                               {formatDateTimeCT(op.actual_start)}
                             </td>
-                            <td className="px-4 py-3 text-sm text-gray-700">
+                            <td className="px-4 py-3 text-sm text-slate-300">
                               {op.completed_by ? (userNameById[op.completed_by] || `User #${op.completed_by}`) : '-'}
                             </td>
-                            <td className="px-4 py-3 text-sm text-gray-700">
+                            <td className="px-4 py-3 text-sm text-slate-300">
                               {formatDateTimeCT(op.actual_end)}
                             </td>
                           </>
@@ -524,14 +524,14 @@ export default function WorkOrderDetail() {
                           {op.status !== 'complete' && workOrder.status !== 'draft' && (
                             <button
                               onClick={() => handleCompleteOperation(op.id, op.name)}
-                              className="text-green-600 hover:text-green-800 text-sm font-medium"
+                              className="text-green-600 hover:text-green-300 text-sm font-medium"
                               title="Complete Operation"
                             >
                               <CheckCircleIcon className="h-5 w-5 inline" /> Complete
                             </button>
                           )}
                           {op.status === 'complete' && (
-                            <span className="text-gray-400 text-sm">Done</span>
+                            <span className="text-slate-500 text-sm">Done</span>
                           )}
                         </td>
                       </tr>
@@ -549,67 +549,67 @@ export default function WorkOrderDetail() {
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
-              <CubeIcon className="h-5 w-5 text-gray-500" />
-              <h2 className="text-lg font-semibold text-gray-900">Material Requirements</h2>
+              <CubeIcon className="h-5 w-5 text-slate-400" />
+              <h2 className="text-lg font-semibold text-white">Material Requirements</h2>
             </div>
-            <span className="text-sm text-gray-500">
+            <span className="text-sm text-slate-400">
               BOM Rev {materialReqs.bom_revision} • Qty: {materialReqs.quantity_ordered}
             </span>
           </div>
           
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800/50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Part Number</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty/Asm</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty Required</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Scrap</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total Needed</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">UOM</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Item</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part Number</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Description</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty/Asm</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty Required</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Scrap</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Total Needed</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">UOM</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-[#151b28] divide-y divide-slate-700">
                 {materialReqs.materials.map((mat) => (
-                  <tr key={mat.bom_item_id} className={mat.is_optional ? 'bg-yellow-50' : 'hover:bg-gray-50'}>
+                  <tr key={mat.bom_item_id} className={mat.is_optional ? 'bg-yellow-500/10' : 'hover:bg-slate-800/50'}>
                     <td className="px-4 py-3 text-sm font-medium">{mat.item_number}</td>
                     <td className="px-4 py-3 text-sm font-medium text-blue-600">{mat.part_number}</td>
-                    <td className="px-4 py-3 text-sm text-gray-700">{mat.part_name}</td>
+                    <td className="px-4 py-3 text-sm text-slate-300">{mat.part_name}</td>
                     <td className="px-4 py-3">
                       <span className={`text-xs px-2 py-1 rounded ${
-                        mat.part_type === 'purchased' ? 'bg-green-100 text-green-800' :
-                        mat.part_type === 'manufactured' ? 'bg-blue-100 text-blue-800' :
-                        mat.part_type === 'raw_material' ? 'bg-yellow-100 text-yellow-800' :
-                        'bg-gray-100 text-gray-800'
+                        mat.part_type === 'purchased' ? 'bg-green-500/20 text-green-300' :
+                        mat.part_type === 'manufactured' ? 'bg-blue-500/20 text-blue-300' :
+                        mat.part_type === 'raw_material' ? 'bg-yellow-500/20 text-yellow-300' :
+                        'bg-slate-800 text-slate-100'
                       }`}>
                         {mat.part_type.replace('_', ' ')}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-sm text-right">{mat.quantity_per_assembly}</td>
                     <td className="px-4 py-3 text-sm text-right font-medium">{mat.quantity_required}</td>
-                    <td className="px-4 py-3 text-sm text-right text-gray-500">
+                    <td className="px-4 py-3 text-sm text-right text-slate-400">
                       {mat.scrap_allowance > 0 ? `+${mat.scrap_allowance}` : '-'}
                     </td>
-                    <td className="px-4 py-3 text-sm text-right font-bold text-green-700">{mat.total_required}</td>
-                    <td className="px-4 py-3 text-sm text-gray-500">{mat.unit_of_measure}</td>
+                    <td className="px-4 py-3 text-sm text-right font-bold text-green-400">{mat.total_required}</td>
+                    <td className="px-4 py-3 text-sm text-slate-400">{mat.unit_of_measure}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           
-          <div className="mt-4 text-sm text-gray-500">
-            <span className="bg-yellow-50 px-2 py-1 rounded">Optional items</span> highlighted in yellow
+          <div className="mt-4 text-sm text-slate-400">
+            <span className="bg-yellow-500/10 px-2 py-1 rounded">Optional items</span> highlighted in yellow
           </div>
         </div>
       )}
       
       {materialReqs && !materialReqs.has_bom && (
         <div className="card">
-          <div className="flex items-center gap-2 text-gray-500">
+          <div className="flex items-center gap-2 text-slate-400">
             <CubeIcon className="h-5 w-5" />
             <span>No BOM defined for this part</span>
           </div>

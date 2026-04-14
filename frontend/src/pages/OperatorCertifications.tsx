@@ -113,11 +113,11 @@ const formatDate = (d: string | null | undefined) =>
   d ? new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '-';
 
 const statusBadge: Record<CertStatus, string> = {
-  active: 'bg-green-100 text-green-800',
-  expired: 'bg-red-100 text-red-800',
-  suspended: 'bg-yellow-100 text-yellow-800',
-  revoked: 'bg-gray-100 text-gray-800',
-  pending: 'bg-blue-100 text-blue-800',
+  active: 'bg-green-500/20 text-emerald-300',
+  expired: 'bg-red-500/20 text-red-300',
+  suspended: 'bg-yellow-500/20 text-yellow-300',
+  revoked: 'bg-slate-800/50 text-slate-100',
+  pending: 'bg-blue-500/20 text-blue-300',
 };
 
 const statusLabel: Record<CertStatus, string> = {
@@ -128,7 +128,7 @@ const statusLabel: Record<CertStatus, string> = {
   pending: 'Pending',
 };
 
-const skillColor = (level: number) => level >= 4 ? 'bg-green-500' : level >= 2 ? 'bg-yellow-500' : 'bg-red-500';
+const skillColor = (level: number) => level >= 4 ? 'bg-green-500/100' : level >= 2 ? 'bg-yellow-500/100' : 'bg-red-500/100';
 const skillLabel = (level: number) => level >= 4 ? 'Expert' : level >= 3 ? 'Proficient' : level >= 2 ? 'Competent' : level >= 1 ? 'Beginner' : 'Untrained';
 
 const defaultCertForm: CertCreateForm = { user_id: '', certification_type: '', certification_name: '', issuing_authority: '', certificate_number: '', issue_date: todayISO(), expiration_date: '', status: 'active', level: '', scope: '', notes: '' };
@@ -360,8 +360,8 @@ export default function OperatorCertifications() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Operator Certifications & Training</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage certifications, training records, and skill assessments</p>
+          <h1 className="text-2xl font-bold text-white">Operator Certifications & Training</h1>
+          <p className="text-sm text-slate-400 mt-1">Manage certifications, training records, and skill assessments</p>
         </div>
         <div className="flex gap-2">
           {activeTab === 'certifications' && (
@@ -380,39 +380,39 @@ export default function OperatorCertifications() {
       {/* Dashboard Cards */}
       {dashboard && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+          <div className="rounded-xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
             <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-green-100 p-2"><CheckCircleIcon className="h-5 w-5 text-green-600" /></div>
+              <div className="rounded-lg bg-green-500/20 p-2"><CheckCircleIcon className="h-5 w-5 text-green-600" /></div>
               <div>
-                <p className="text-sm text-gray-500">Certified Operators</p>
-                <p className="text-2xl font-bold text-gray-900">{dashboard.total_certified}</p>
+                <p className="text-sm text-slate-400">Certified Operators</p>
+                <p className="text-2xl font-bold text-white">{dashboard.total_certified}</p>
               </div>
             </div>
           </div>
-          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+          <div className="rounded-xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
             <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-yellow-100 p-2"><ClockIcon className="h-5 w-5 text-yellow-600" /></div>
+              <div className="rounded-lg bg-yellow-500/20 p-2"><ClockIcon className="h-5 w-5 text-yellow-600" /></div>
               <div>
-                <p className="text-sm text-gray-500">Expiring Soon</p>
+                <p className="text-sm text-slate-400">Expiring Soon</p>
                 <p className="text-2xl font-bold text-yellow-600">{dashboard.expiring_soon}</p>
               </div>
             </div>
           </div>
-          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+          <div className="rounded-xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
             <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-red-100 p-2"><ExclamationTriangleIcon className="h-5 w-5 text-red-600" /></div>
+              <div className="rounded-lg bg-red-500/20 p-2"><ExclamationTriangleIcon className="h-5 w-5 text-red-600" /></div>
               <div>
-                <p className="text-sm text-gray-500">Expired</p>
+                <p className="text-sm text-slate-400">Expired</p>
                 <p className="text-2xl font-bold text-red-600">{dashboard.expired}</p>
               </div>
             </div>
           </div>
-          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+          <div className="rounded-xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
             <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-blue-100 p-2"><CalendarDaysIcon className="h-5 w-5 text-blue-600" /></div>
+              <div className="rounded-lg bg-blue-500/20 p-2"><CalendarDaysIcon className="h-5 w-5 text-blue-600" /></div>
               <div>
-                <p className="text-sm text-gray-500">Training Scheduled</p>
-                <p className="text-2xl font-bold text-gray-900">{dashboard.training_scheduled}</p>
+                <p className="text-sm text-slate-400">Training Scheduled</p>
+                <p className="text-2xl font-bold text-white">{dashboard.training_scheduled}</p>
               </div>
             </div>
           </div>
@@ -420,7 +420,7 @@ export default function OperatorCertifications() {
       )}
 
       {/* Tabs */}
-      <div className="border-b border-gray-200">
+      <div className="border-b border-slate-700">
         <nav className="-mb-px flex gap-6">
           {tabs.map((tab) => (
             <button
@@ -429,7 +429,7 @@ export default function OperatorCertifications() {
               className={`whitespace-nowrap border-b-2 pb-3 text-sm font-medium transition-colors ${
                 activeTab === tab.key
                   ? 'border-blue-600 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
+                  : 'border-transparent text-slate-400 hover:border-slate-600 hover:text-slate-300'
               }`}
             >
               {tab.label}
@@ -442,20 +442,20 @@ export default function OperatorCertifications() {
       {activeTab !== 'skill_matrix' && (
         <div className="flex flex-wrap items-center gap-3">
           <div className="relative flex-1 min-w-[200px]">
-            <MagnifyingGlassIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+            <MagnifyingGlassIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               placeholder={activeTab === 'certifications' ? 'Search by operator, certification, type...' : 'Search by operator, training, trainer...'}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 py-2 pl-9 pr-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full rounded-lg border border-slate-600 py-2 pl-9 pr-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           </div>
           {activeTab === 'certifications' && (
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="rounded-lg border border-gray-300 py-2 pl-3 pr-8 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="rounded-lg border border-slate-600 py-2 pl-3 pr-8 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
               <option value="">All Statuses</option>
               <option value="active">Active</option>
@@ -470,7 +470,7 @@ export default function OperatorCertifications() {
 
       {/* Error */}
       {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400">{error}</div>
       )}
 
       {/* Certifications Tab */}
@@ -478,40 +478,40 @@ export default function OperatorCertifications() {
         loading ? (
           <SkeletonTable rows={6} columns={7} />
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="bg-gray-50">
+          <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
+            <table className="min-w-full divide-y divide-slate-700 text-sm">
+              <thead className="bg-slate-800">
                 <tr>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">Operator</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">Certification</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">Type</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">Status</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">Issued</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">Expires</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">Authority</th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400">Operator</th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400">Certification</th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400">Type</th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400">Status</th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400">Issued</th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400">Expires</th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400">Authority</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {filteredCerts.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-gray-400">
+                    <td colSpan={7} className="px-4 py-10 text-center text-slate-400">
                       {searchTerm ? 'No certifications match your search' : 'No certifications found'}
                     </td>
                   </tr>
                 ) : (
                   filteredCerts.map((cert) => (
-                    <tr key={cert.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-4 py-3 font-medium text-gray-900">{cert.user_name || `User #${cert.user_id}`}</td>
-                      <td className="px-4 py-3 text-gray-700">{cert.certification_name}</td>
-                      <td className="px-4 py-3 text-gray-500 capitalize">{cert.certification_type.replace(/_/g, ' ')}</td>
+                    <tr key={cert.id} className="hover:bg-slate-800 transition-colors">
+                      <td className="px-4 py-3 font-medium text-white">{cert.user_name || `User #${cert.user_id}`}</td>
+                      <td className="px-4 py-3 text-slate-300">{cert.certification_name}</td>
+                      <td className="px-4 py-3 text-slate-400 capitalize">{cert.certification_type.replace(/_/g, ' ')}</td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusBadge[cert.status] || 'bg-gray-100 text-gray-800'}`}>
+                        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusBadge[cert.status] || 'bg-slate-800/50 text-slate-100'}`}>
                           {statusLabel[cert.status] || cert.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-500">{formatDate(cert.issue_date)}</td>
-                      <td className="px-4 py-3 text-gray-500">{formatDate(cert.expiration_date)}</td>
-                      <td className="px-4 py-3 text-gray-500">{cert.issuing_authority || '-'}</td>
+                      <td className="px-4 py-3 text-slate-400">{formatDate(cert.issue_date)}</td>
+                      <td className="px-4 py-3 text-slate-400">{formatDate(cert.expiration_date)}</td>
+                      <td className="px-4 py-3 text-slate-400">{cert.issuing_authority || '-'}</td>
                     </tr>
                   ))
                 )}
@@ -523,42 +523,42 @@ export default function OperatorCertifications() {
 
       {/* Training Records Tab */}
       {activeTab === 'training' && (
-        <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
-            <thead className="bg-gray-50">
+        <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
+          <table className="min-w-full divide-y divide-slate-700 text-sm">
+            <thead className="bg-slate-800">
               <tr>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Operator</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Training</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Type</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Trainer</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Date</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Hours</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Result</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">Score</th>
+                <th className="px-4 py-3 text-left font-medium text-slate-400">Operator</th>
+                <th className="px-4 py-3 text-left font-medium text-slate-400">Training</th>
+                <th className="px-4 py-3 text-left font-medium text-slate-400">Type</th>
+                <th className="px-4 py-3 text-left font-medium text-slate-400">Trainer</th>
+                <th className="px-4 py-3 text-left font-medium text-slate-400">Date</th>
+                <th className="px-4 py-3 text-left font-medium text-slate-400">Hours</th>
+                <th className="px-4 py-3 text-left font-medium text-slate-400">Result</th>
+                <th className="px-4 py-3 text-left font-medium text-slate-400">Score</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filteredTraining.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-gray-400">
+                  <td colSpan={8} className="px-4 py-10 text-center text-slate-400">
                     {searchTerm ? 'No training records match your search' : 'No training records found'}
                   </td>
                 </tr>
               ) : (
                 filteredTraining.map((tr) => (
-                  <tr key={tr.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-4 py-3 font-medium text-gray-900">{tr.user_name || `User #${tr.user_id}`}</td>
-                    <td className="px-4 py-3 text-gray-700">{tr.training_name}</td>
-                    <td className="px-4 py-3 text-gray-500 capitalize">{(tr.training_type || '-').replace(/_/g, ' ')}</td>
-                    <td className="px-4 py-3 text-gray-500">{tr.trainer || '-'}</td>
-                    <td className="px-4 py-3 text-gray-500">{formatDate(tr.training_date)}</td>
-                    <td className="px-4 py-3 text-gray-500">{tr.hours != null ? `${tr.hours}h` : '-'}</td>
+                  <tr key={tr.id} className="hover:bg-slate-800 transition-colors">
+                    <td className="px-4 py-3 font-medium text-white">{tr.user_name || `User #${tr.user_id}`}</td>
+                    <td className="px-4 py-3 text-slate-300">{tr.training_name}</td>
+                    <td className="px-4 py-3 text-slate-400 capitalize">{(tr.training_type || '-').replace(/_/g, ' ')}</td>
+                    <td className="px-4 py-3 text-slate-400">{tr.trainer || '-'}</td>
+                    <td className="px-4 py-3 text-slate-400">{formatDate(tr.training_date)}</td>
+                    <td className="px-4 py-3 text-slate-400">{tr.hours != null ? `${tr.hours}h` : '-'}</td>
                     <td className="px-4 py-3">
-                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tr.passed ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tr.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
                         {tr.passed ? 'Passed' : 'Failed'}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-gray-500">{tr.score != null ? `${tr.score}%` : '-'}</td>
+                    <td className="px-4 py-3 text-slate-400">{tr.score != null ? `${tr.score}%` : '-'}</td>
                   </tr>
                 ))
               )}
@@ -571,31 +571,31 @@ export default function OperatorCertifications() {
       {activeTab === 'skill_matrix' && (
         <div className="space-y-4">
           {/* Legend */}
-          <div className="flex items-center gap-4 text-xs text-gray-500">
-            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-green-500" /> Expert / Proficient</span>
-            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-yellow-500" /> Competent</span>
-            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-red-500" /> Beginner / Untrained</span>
+          <div className="flex items-center gap-4 text-xs text-slate-400">
+            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-green-500/100" /> Expert / Proficient</span>
+            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-yellow-500/100" /> Competent</span>
+            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-red-500/100" /> Beginner / Untrained</span>
           </div>
 
           {operators.length === 0 ? (
-            <div className="rounded-xl border border-gray-200 bg-white p-10 text-center text-gray-400 shadow-sm">
+            <div className="rounded-xl border border-slate-700 bg-[#151b28] p-10 text-center text-slate-400 shadow-sm">
               No skill matrix data available
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
-              <table className="min-w-full divide-y divide-gray-200 text-sm">
-                <thead className="bg-gray-50">
+            <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
+              <table className="min-w-full divide-y divide-slate-700 text-sm">
+                <thead className="bg-slate-800">
                   <tr>
-                    <th className="sticky left-0 z-10 bg-gray-50 px-4 py-3 text-left font-medium text-gray-600">Operator</th>
+                    <th className="sticky left-0 z-10 bg-slate-800 px-4 py-3 text-left font-medium text-slate-400">Operator</th>
                     {workCenters.map((wc) => (
-                      <th key={wc.id} className="px-4 py-3 text-center font-medium text-gray-600 whitespace-nowrap">{wc.name}</th>
+                      <th key={wc.id} className="px-4 py-3 text-center font-medium text-slate-400 whitespace-nowrap">{wc.name}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {operators.map((op) => (
-                    <tr key={op.id} className="hover:bg-gray-50">
-                      <td className="sticky left-0 z-10 bg-white px-4 py-3 font-medium text-gray-900 whitespace-nowrap">{op.name}</td>
+                    <tr key={op.id} className="hover:bg-slate-800">
+                      <td className="sticky left-0 z-10 bg-[#151b28] px-4 py-3 font-medium text-white whitespace-nowrap">{op.name}</td>
                       {workCenters.map((wc) => {
                         const entry = matrixMap.get(`${op.id}-${wc.id}`);
                         const level = entry?.skill_level ?? 0;
@@ -603,7 +603,7 @@ export default function OperatorCertifications() {
                           <td key={wc.id} className="px-4 py-3 text-center">
                             <div className="flex flex-col items-center gap-0.5" title={`${skillLabel(level)} (Level ${level})`}>
                               <span className={`inline-block h-4 w-4 rounded-full ${skillColor(level)}`} />
-                              <span className="text-[10px] text-gray-400">{level}</span>
+                              <span className="text-[10px] text-slate-400">{level}</span>
                             </div>
                           </td>
                         );
@@ -620,24 +620,24 @@ export default function OperatorCertifications() {
       {/* ── Create Certification Modal ────────────────────────────── */}
       {showCertModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
+          <div className="w-full max-w-lg rounded-xl bg-[#151b28] p-6 shadow-xl">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">New Certification</h2>
-              <button onClick={() => setShowCertModal(false)} className="text-gray-400 hover:text-gray-600">
+              <h2 className="text-lg font-semibold text-white">New Certification</h2>
+              <button onClick={() => setShowCertModal(false)} className="text-slate-400 hover:text-slate-400">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
             <form onSubmit={handleCreateCert} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">User ID *</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">User ID *</label>
                   <input type="number" required value={certForm.user_id} onChange={(e) => setCertForm({ ...certForm, user_id: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Status</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Status</label>
                   <select value={certForm.status} onChange={(e) => setCertForm({ ...certForm, status: e.target.value as CertStatus })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
                     <option value="active">Active</option>
                     <option value="pending">Pending</option>
                     <option value="suspended">Suspended</option>
@@ -645,55 +645,55 @@ export default function OperatorCertifications() {
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Certification Name *</label>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Certification Name *</label>
                 <input type="text" required value={certForm.certification_name} onChange={(e) => setCertForm({ ...certForm, certification_name: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Type</label>
                   <input type="text" value={certForm.certification_type} onChange={(e) => setCertForm({ ...certForm, certification_type: e.target.value })}
                     placeholder="e.g. welding, safety"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Level</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Level</label>
                   <input type="text" value={certForm.level} onChange={(e) => setCertForm({ ...certForm, level: e.target.value })}
                     placeholder="e.g. Level 1, Advanced"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Issuing Authority</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Issuing Authority</label>
                   <input type="text" value={certForm.issuing_authority} onChange={(e) => setCertForm({ ...certForm, issuing_authority: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Certificate Number</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Certificate Number</label>
                   <input type="text" value={certForm.certificate_number} onChange={(e) => setCertForm({ ...certForm, certificate_number: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Issue Date</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Issue Date</label>
                   <input type="date" value={certForm.issue_date} onChange={(e) => setCertForm({ ...certForm, issue_date: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Expiration Date</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Expiration Date</label>
                   <input type="date" value={certForm.expiration_date} onChange={(e) => setCertForm({ ...certForm, expiration_date: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Notes</label>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Notes</label>
                 <textarea rows={2} value={certForm.notes} onChange={(e) => setCertForm({ ...certForm, notes: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
               </div>
               <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setShowCertModal(false)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button>
+                <button type="button" onClick={() => setShowCertModal(false)} className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">Cancel</button>
                 <button type="submit" disabled={certCreateLoading} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
                   {certCreateLoading ? 'Creating...' : 'Create Certification'}
                 </button>
@@ -706,85 +706,85 @@ export default function OperatorCertifications() {
       {/* ── Create Training Record Modal ──────────────────────────── */}
       {showTrainingModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
+          <div className="w-full max-w-lg rounded-xl bg-[#151b28] p-6 shadow-xl">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">New Training Record</h2>
-              <button onClick={() => setShowTrainingModal(false)} className="text-gray-400 hover:text-gray-600">
+              <h2 className="text-lg font-semibold text-white">New Training Record</h2>
+              <button onClick={() => setShowTrainingModal(false)} className="text-slate-400 hover:text-slate-400">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
             <form onSubmit={handleCreateTraining} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">User ID *</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">User ID *</label>
                   <input type="number" required value={trainingForm.user_id} onChange={(e) => setTrainingForm({ ...trainingForm, user_id: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Training Type</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Training Type</label>
                   <input type="text" value={trainingForm.training_type} onChange={(e) => setTrainingForm({ ...trainingForm, training_type: e.target.value })}
                     placeholder="e.g. safety, technical"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Training Name *</label>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Training Name *</label>
                 <input type="text" required value={trainingForm.training_name} onChange={(e) => setTrainingForm({ ...trainingForm, training_name: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Description</label>
                 <textarea rows={2} value={trainingForm.description} onChange={(e) => setTrainingForm({ ...trainingForm, description: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Trainer</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Trainer</label>
                   <input type="text" value={trainingForm.trainer} onChange={(e) => setTrainingForm({ ...trainingForm, trainer: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Work Center ID</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Work Center ID</label>
                   <input type="number" value={trainingForm.work_center_id} onChange={(e) => setTrainingForm({ ...trainingForm, work_center_id: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
               </div>
               <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Training Date *</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Training Date *</label>
                   <input type="date" required value={trainingForm.training_date} onChange={(e) => setTrainingForm({ ...trainingForm, training_date: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Completion Date</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Completion Date</label>
                   <input type="date" value={trainingForm.completion_date} onChange={(e) => setTrainingForm({ ...trainingForm, completion_date: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Hours</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Hours</label>
                   <input type="number" step="0.5" value={trainingForm.hours} onChange={(e) => setTrainingForm({ ...trainingForm, hours: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex items-center gap-2">
                   <input type="checkbox" id="passed" checked={trainingForm.passed} onChange={(e) => setTrainingForm({ ...trainingForm, passed: e.target.checked })}
-                    className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-                  <label htmlFor="passed" className="text-sm text-gray-700">Passed</label>
+                    className="h-4 w-4 rounded border-slate-600 text-blue-600 focus:ring-blue-500" />
+                  <label htmlFor="passed" className="text-sm text-slate-300">Passed</label>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Score (%)</label>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Score (%)</label>
                   <input type="number" min="0" max="100" value={trainingForm.score} onChange={(e) => setTrainingForm({ ...trainingForm, score: e.target.value })}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Notes</label>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Notes</label>
                 <textarea rows={2} value={trainingForm.notes} onChange={(e) => setTrainingForm({ ...trainingForm, notes: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
               </div>
               <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setShowTrainingModal(false)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button>
+                <button type="button" onClick={() => setShowTrainingModal(false)} className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">Cancel</button>
                 <button type="submit" disabled={trainingCreateLoading} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
                   {trainingCreateLoading ? 'Creating...' : 'Create Training Record'}
                 </button>

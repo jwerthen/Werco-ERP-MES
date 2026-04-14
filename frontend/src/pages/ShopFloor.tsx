@@ -288,8 +288,8 @@ export default function ShopFloor() {
   };
 
   const getPriorityClasses = (priority: number) => {
-    if (priority <= 2) return 'bg-red-100 text-red-700';
-    if (priority <= 5) return 'bg-amber-100 text-amber-700';
+    if (priority <= 2) return 'bg-red-500/20 text-red-400';
+    if (priority <= 5) return 'bg-amber-500/20 text-amber-400';
     return 'bg-surface-100 text-surface-600';
   };
 
@@ -399,8 +399,8 @@ export default function ShopFloor() {
               
               <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-6">
                 <div className="flex items-start gap-4">
-                  <div className="p-3 bg-white/20 rounded-xl">
-                    <div className="h-4 w-4 rounded-full bg-white animate-pulse"></div>
+                  <div className="p-3 bg-[#151b28]/20 rounded-xl">
+                    <div className="h-4 w-4 rounded-full bg-[#151b28] animate-pulse"></div>
                   </div>
                   <div>
                     <p className="text-emerald-100 text-sm font-medium uppercase tracking-wide mb-1">
@@ -432,7 +432,7 @@ export default function ShopFloor() {
                       setClockOutData({ quantity_produced: remaining, quantity_scrapped: 0, notes: '' });
                       setClockOutModal(true);
                     }}
-                    className="btn bg-white text-emerald-700 hover:bg-emerald-50 shadow-lg"
+                    className="btn bg-[#151b28] text-emerald-400 hover:bg-emerald-500/100/10 shadow-lg"
                   >
                     <StopIcon className="h-5 w-5 mr-2" />
                     Clock Out
@@ -454,7 +454,7 @@ export default function ShopFloor() {
               px-5 py-3 rounded-xl font-semibold transition-all duration-200 
               ${selectedWorkCenter === wc.id
                 ? 'bg-werco-600 text-white shadow-md shadow-werco-600/30'
-                : 'bg-white text-surface-700 border border-surface-200 hover:border-werco-300 hover:bg-werco-50'
+                : 'bg-[#151b28] text-surface-700 border border-surface-200 hover:border-werco-300 hover:bg-werco-50'
               }
             `}
           >
@@ -478,7 +478,7 @@ export default function ShopFloor() {
                   key={`focus-${item.operation_id}`}
                   type="button"
                   className={`text-left p-3 rounded-xl border transition-colors ${
-                    overdue ? 'border-red-200 bg-red-50 hover:bg-red-100' : 'border-surface-200 bg-white hover:bg-surface-50'
+                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/100/20' : 'border-surface-200 bg-[#151b28] hover:bg-surface-50'
                   }`}
                   onClick={() => toggleRowExpansion(item.work_order_id)}
                 >
@@ -562,7 +562,7 @@ export default function ShopFloor() {
                   return (
                     <React.Fragment key={item.operation_id}>
                       <tr 
-                        className={`${isOverdue ? 'bg-red-50/50' : ''} ${isExpanded ? 'bg-werco-50/50' : ''} cursor-pointer hover:bg-surface-50`}
+                        className={`${isOverdue ? 'bg-red-500/10/50' : ''} ${isExpanded ? 'bg-werco-50/50' : ''} cursor-pointer hover:bg-surface-50`}
                         onClick={() => toggleRowExpansion(item.work_order_id)}
                       >
                         <td className="w-10">
@@ -639,15 +639,15 @@ export default function ShopFloor() {
                           <span className={`
                             inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold
                             ${item.status === 'in_progress' 
-                              ? 'bg-emerald-100 text-emerald-700' 
+                              ? 'bg-emerald-500/20 text-emerald-400' 
                               : item.status === 'ready' 
-                              ? 'bg-blue-100 text-blue-700' 
+                              ? 'bg-blue-500/20 text-blue-400' 
                             : 'bg-surface-100 text-surface-600'
                           }
                         `}>
                           <span className={`w-1.5 h-1.5 rounded-full ${
-                            item.status === 'in_progress' ? 'bg-emerald-500' : 
-                            item.status === 'ready' ? 'bg-blue-500' : 'bg-surface-400'
+                            item.status === 'in_progress' ? 'bg-emerald-500/100' : 
+                            item.status === 'ready' ? 'bg-blue-500/100' : 'bg-surface-400'
                           }`}></span>
                           {item.status.replace('_', ' ')}
                         </span>
@@ -696,21 +696,21 @@ export default function ShopFloor() {
                                   
                                   {/* Info Cards */}
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="bg-white rounded-lg p-4 border border-surface-200">
+                                    <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer</p>
                                       <p className="font-semibold text-surface-900">{details.customer_name || 'â€"'}</p>
                                     </div>
-                                    <div className="bg-white rounded-lg p-4 border border-surface-200">
+                                    <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer PO</p>
                                       <p className="font-semibold text-surface-900">{details.customer_po || 'â€"'}</p>
                                     </div>
-                                    <div className="bg-white rounded-lg p-4 border border-surface-200">
+                                    <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Qty Complete / Ordered</p>
                                       <p className="font-semibold text-surface-900">
                                         {details.quantity_complete} / {details.quantity_ordered}
                                       </p>
                                     </div>
-                                    <div className="bg-white rounded-lg p-4 border border-surface-200">
+                                    <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Due Date</p>
                                       <p className="font-semibold text-surface-900">
                                         {details.due_date ? formatCentralDate(details.due_date) : 'â€"'}
@@ -720,12 +720,12 @@ export default function ShopFloor() {
                                   
                                   {/* Notes */}
                                   {details.notes && (
-                                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
                                       <div className="flex items-start gap-2">
                                         <DocumentTextIcon className="h-5 w-5 text-amber-600 mt-0.5" />
                                         <div>
-                                          <p className="font-medium text-amber-800">Notes</p>
-                                          <p className="text-sm text-amber-700">{details.notes}</p>
+                                          <p className="font-medium text-amber-300">Notes</p>
+                                          <p className="text-sm text-amber-400">{details.notes}</p>
                                         </div>
                                       </div>
                                     </div>
@@ -734,7 +734,7 @@ export default function ShopFloor() {
                                   {/* Operations Table */}
                                   <div>
                                     <h4 className="font-medium text-surface-700 mb-2">All Operations</h4>
-                                    <div className="bg-white rounded-lg border border-surface-200 overflow-hidden">
+                                    <div className="bg-[#151b28] rounded-lg border border-surface-200 overflow-hidden">
                                       <table className="w-full text-sm">
                                         <thead className="bg-surface-100">
                                           <tr>
@@ -757,8 +757,8 @@ export default function ShopFloor() {
                                               <td className="px-4 py-2">{op.work_center_name}</td>
                                               <td className="px-4 py-2">
                                                 <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                                                  op.status === 'complete' ? 'bg-green-100 text-green-700' :
-                                                  op.status === 'in_progress' ? 'bg-blue-100 text-blue-700' :
+                                                  op.status === 'complete' ? 'bg-green-500/20 text-green-400' :
+                                                  op.status === 'in_progress' ? 'bg-blue-500/20 text-blue-400' :
                                                   'bg-surface-100 text-surface-600'
                                                 }`}>
                                                   {op.status.replace('_', ' ')}
