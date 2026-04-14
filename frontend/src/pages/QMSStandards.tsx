@@ -6,7 +6,6 @@ import {
   QMSClauseResponse,
   QMSAuditReadinessSummary,
   ClauseAutoEvidenceResponse,
-  AutoEvidenceResult,
   AutoLinkSummary,
 } from '../types/api';
 
