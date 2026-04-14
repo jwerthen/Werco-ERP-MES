@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.quote import Quote, QuoteLine, QuoteStatus
 from app.models.rfq_quote import QuoteEstimate, RfqPackage
@@ -218,9 +218,10 @@ def list_quotes(
     status: Optional[str] = None,
     customer: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    query = db.query(Quote).options(joinedload(Quote.lines))
+    query = db.query(Quote).options(joinedload(Quote.lines)).filter(Quote.company_id == company_id)
     
     if status:
         query = query.filter(Quote.status == status)
@@ -275,10 +276,11 @@ def list_quotes(
 def create_quote(
     quote_in: QuoteCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     quote_number = generate_quote_number(db)
-    
+
     quote = Quote(
         quote_number=quote_number,
         customer_name=quote_in.customer_name,
@@ -292,9 +294,10 @@ def create_quote(
         notes=quote_in.notes,
         created_by=current_user.id
     )
+    quote.company_id = company_id
     db.add(quote)
     db.flush()
-    
+
     subtotal = 0.0
     for idx, line_data in enumerate(quote_in.lines, 1):
         line_total = line_data.quantity * line_data.unit_price
@@ -327,11 +330,12 @@ def create_quote(
 def get_quote(
     quote_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     quote = db.query(Quote).options(
         joinedload(Quote.lines).joinedload(QuoteLine.part)
-    ).filter(Quote.id == quote_id).first()
+    ).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
     
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
@@ -381,9 +385,10 @@ def update_quote(
     quote_id: int,
     quote_in: QuoteUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    quote = db.query(Quote).filter(Quote.id == quote_id).first()
+    quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
     
@@ -403,10 +408,11 @@ def update_quote(
 def send_quote(
     quote_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Mark quote as sent to customer"""
-    quote = db.query(Quote).filter(Quote.id == quote_id).first()
+    quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
     
@@ -420,12 +426,13 @@ def send_quote(
 def convert_to_work_order(
     quote_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Convert accepted quote to work order"""
     quote = db.query(Quote).options(
         joinedload(Quote.lines)
-    ).filter(Quote.id == quote_id).first()
+    ).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
     
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
@@ -489,9 +496,10 @@ def generate_quote_pdf(
     quote_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Generate customer-ready quote PDF (no operation-time line items)."""
-    quote = db.query(Quote).options(joinedload(Quote.lines).joinedload(QuoteLine.part)).filter(Quote.id == quote_id).first()
+    quote = db.query(Quote).options(joinedload(Quote.lines).joinedload(QuoteLine.part)).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
 
@@ -566,9 +574,10 @@ def add_quote_line(
     quote_id: int,
     line_in: QuoteLineCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    quote = db.query(Quote).filter(Quote.id == quote_id).first()
+    quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
     

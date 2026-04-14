@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class ScorecardPeriod(str, enum.Enum):
@@ -12,7 +13,7 @@ class ScorecardPeriod(str, enum.Enum):
     ANNUAL = "annual"
 
 
-class SupplierScorecard(Base):
+class SupplierScorecard(Base, TenantMixin):
     """Performance scorecard per vendor per period - AS9100D supplier monitoring"""
     __tablename__ = "supplier_scorecards"
 
@@ -63,7 +64,7 @@ class SupplierScorecard(Base):
     evaluator = relationship("User", foreign_keys=[evaluated_by])
 
 
-class SupplierAudit(Base):
+class SupplierAudit(Base, TenantMixin):
     """Supplier audit tracking for AS9100D compliance"""
     __tablename__ = "supplier_audits"
 
@@ -91,7 +92,7 @@ class SupplierAudit(Base):
     vendor = relationship("Vendor", backref="audits")
 
 
-class ApprovedSupplierList(Base):
+class ApprovedSupplierList(Base, TenantMixin):
     """Formal Approved Supplier List (ASL) entry"""
     __tablename__ = "approved_supplier_list"
 

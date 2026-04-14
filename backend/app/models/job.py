@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, Enum as SQLEnum
 from sqlalchemy.sql import func
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 import enum
 
 
@@ -18,7 +19,7 @@ class JobPriority(str, enum.Enum):
     HIGH = "HIGH"
 
 
-class Job(Base):
+class Job(Base, TenantMixin):
     """Background job tracking"""
     __tablename__ = "jobs"
 

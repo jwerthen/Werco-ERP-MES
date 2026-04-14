@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.part import Part
 from app.models.work_order import WorkOrder
@@ -77,7 +77,8 @@ class ScanLookupResponse(BaseModel):
 def lookup_barcode(
     code: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Look up a scanned barcode/code.
@@ -182,10 +183,11 @@ def list_supplier_mappings(
     part_id: Optional[int] = None,
     vendor_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List supplier part mappings"""
-    query = db.query(SupplierPartMapping).options(
+    query = db.query(SupplierPartMapping).filter(SupplierPartMapping.company_id == company_id).options(
         joinedload(SupplierPartMapping.part),
         joinedload(SupplierPartMapping.vendor)
     ).filter(SupplierPartMapping.is_active == True)
@@ -229,7 +231,8 @@ def list_supplier_mappings(
 def create_supplier_mapping(
     mapping_in: SupplierMappingCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new supplier part mapping"""
     # Verify part exists
@@ -262,6 +265,7 @@ def create_supplier_mapping(
         notes=mapping_in.notes
     )
     
+    mapping.company_id = company_id
     db.add(mapping)
     db.commit()
     db.refresh(mapping)
@@ -286,10 +290,11 @@ def create_supplier_mapping(
 def delete_supplier_mapping(
     mapping_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Deactivate a supplier mapping"""
-    mapping = db.query(SupplierPartMapping).filter(SupplierPartMapping.id == mapping_id).first()
+    mapping = db.query(SupplierPartMapping).filter(SupplierPartMapping.id == mapping_id, SupplierPartMapping.company_id == company_id).first()
     if not mapping:
         raise HTTPException(status_code=404, detail="Mapping not found")
     

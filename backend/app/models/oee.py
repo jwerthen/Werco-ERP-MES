@@ -2,9 +2,10 @@ from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, Date, D
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
-class OEERecord(Base):
+class OEERecord(Base, TenantMixin):
     """Daily OEE snapshot per work center"""
     __tablename__ = "oee_records"
 
@@ -54,7 +55,7 @@ class OEERecord(Base):
     work_center = relationship("WorkCenter")
 
 
-class OEETarget(Base):
+class OEETarget(Base, TenantMixin):
     """Target OEE per work center"""
     __tablename__ = "oee_targets"
 

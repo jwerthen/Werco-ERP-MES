@@ -1,8 +1,8 @@
 """
 Database mixins for common functionality.
 """
-from sqlalchemy import Column, Integer, DateTime, Boolean, String, event
-from sqlalchemy.orm import declared_attr
+from sqlalchemy import Column, Integer, DateTime, Boolean, String, ForeignKey, event
+from sqlalchemy.orm import declared_attr, relationship
 from datetime import datetime
 
 
@@ -74,6 +74,28 @@ class OptimisticLockMixin:
             onupdate=datetime.utcnow,
             server_default='now()'
         )
+
+
+class TenantMixin:
+    """
+    Mixin that adds multi-company tenant isolation.
+
+    Usage:
+        class MyModel(Base, TenantMixin):
+            __tablename__ = "my_table"
+            ...
+
+    Every record is scoped to a company. Use tenant_query() or
+    tenant_filter() from app.db.tenant_filter to scope queries.
+    """
+
+    @declared_attr
+    def company_id(cls):
+        return Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+
+    @declared_attr
+    def company(cls):
+        return relationship("Company")
 
 
 class TimestampMixin:

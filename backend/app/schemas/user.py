@@ -105,9 +105,11 @@ class UserResponse(UserBase):
     version: Optional[int] = 0  # For optimistic locking (optional for backwards compatibility)
     is_active: bool
     is_superuser: bool
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 

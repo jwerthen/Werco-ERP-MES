@@ -9,7 +9,7 @@ from sqlalchemy import desc
 
 from app.models.part import Part, PartType
 from app.models.quote_config import MaterialCategory, QuoteMaterial, QuoteSettings
-from app.models.rfq_quote import PriceSnapshot
+from app.models.rfq_quote import PriceSnapshot, RfqPackage
 from app.services.sheet_metal_costing_service import normalize_material
 
 
@@ -206,6 +206,13 @@ class MaterialPriceService:
             return row
         return None
 
+    def _resolve_company_id(self, db: Session, rfq_package_id: Optional[int]) -> Optional[int]:
+        if rfq_package_id:
+            pkg = db.query(RfqPackage).filter(RfqPackage.id == rfq_package_id).first()
+            if pkg:
+                return pkg.company_id
+        return None
+
     def _store_snapshot(
         self,
         db: Session,
@@ -239,6 +246,7 @@ class MaterialPriceService:
             raw_data=raw_data,
             fetched_at=datetime.utcnow(),
             expires_at=datetime.utcnow() + timedelta(hours=self._cache_hours(db)),
+            company_id=self._resolve_company_id(db, rfq_package_id),
         )
         db.add(snapshot)
         return snapshot

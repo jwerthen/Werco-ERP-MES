@@ -1,5 +1,6 @@
+from __future__ import annotations
 from datetime import datetime, timedelta
-from typing import Optional, Any, Tuple
+from typing import Optional, Any, Tuple, Union
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 import secrets
@@ -11,7 +12,7 @@ from app.models.user import User
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def create_access_token(subject: str | Any, expires_delta: Optional[timedelta] = None) -> str:
+def create_access_token(subject: str | Any, expires_delta: Optional[timedelta] = None, company_id: Optional[int] = None) -> str:
     """Create a short-lived access token (default 15 minutes)."""
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -24,11 +25,13 @@ def create_access_token(subject: str | Any, expires_delta: Optional[timedelta] =
         "type": "access",
         "iat": datetime.utcnow(),
     }
+    if company_id is not None:
+        to_encode["cid"] = company_id
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
 
-def create_refresh_token(subject: str | Any, session_id: Optional[str] = None) -> Tuple[str, str, datetime]:
+def create_refresh_token(subject: str | Any, session_id: Optional[str] = None, company_id: Optional[int] = None) -> Tuple[str, str, datetime]:
     """
     Create a longer-lived refresh token (default 7 days).
     Returns: (token, session_id, expiry_time)
@@ -36,11 +39,11 @@ def create_refresh_token(subject: str | Any, session_id: Optional[str] = None) -
     expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     # Absolute session timeout - even with refresh, can't exceed this
     absolute_timeout = datetime.utcnow() + timedelta(hours=settings.SESSION_ABSOLUTE_TIMEOUT_HOURS)
-    
+
     # Generate or reuse session ID for tracking
     if not session_id:
         session_id = secrets.token_urlsafe(32)
-    
+
     to_encode = {
         "exp": expire,
         "sub": str(subject),
@@ -49,17 +52,22 @@ def create_refresh_token(subject: str | Any, session_id: Optional[str] = None) -
         "absolute_timeout": absolute_timeout.isoformat(),
         "iat": datetime.utcnow(),
     }
+    if company_id is not None:
+        to_encode["cid"] = company_id
     encoded_jwt = jwt.encode(to_encode, settings.REFRESH_TOKEN_SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt, session_id, expire
 
 
-def verify_token(token: str) -> Optional[str]:
-    """Verify an access token and return the user ID."""
+def verify_token(token: str) -> Optional[dict]:
+    """Verify an access token and return user_id and company_id."""
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         if payload.get("type") != "access":
             return None
-        return payload.get("sub")
+        return {
+            "user_id": payload.get("sub"),
+            "company_id": payload.get("cid"),  # None for legacy tokens
+        }
     except JWTError:
         return None
 
@@ -85,6 +93,7 @@ def verify_refresh_token(token: str) -> Optional[dict]:
             "user_id": payload.get("sub"),
             "session_id": payload.get("session_id"),
             "absolute_timeout": absolute_timeout_str,
+            "company_id": payload.get("cid"),
         }
     except JWTError:
         return None

@@ -5,9 +5,10 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Foreign
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
-class ReportTemplate(Base):
+class ReportTemplate(Base, TenantMixin):
     """Saved custom report templates"""
     __tablename__ = "report_templates"
     

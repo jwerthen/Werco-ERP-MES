@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.customer import Customer
 from app.services.audit_service import AuditService
@@ -105,9 +105,10 @@ def list_customers(
     ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all customers"""
-    query = db.query(Customer)
+    query = db.query(Customer).filter(Customer.company_id == company_id)
 
     # Filter out soft-deleted unless explicitly requested by admin
     if not include_deleted or current_user.role != UserRole.ADMIN:
@@ -126,12 +127,13 @@ def list_customers(
 
 @router.get("/names")
 def list_customer_names(
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get simple list of customer names for dropdowns"""
     customers = (
         db.query(Customer.id, Customer.name)
-        .filter(Customer.is_active == True)
+        .filter(Customer.is_active == True, Customer.company_id == company_id)
         .order_by(Customer.name)
         .all()
     )
@@ -143,9 +145,10 @@ def get_customer(
     customer_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get customer by ID"""
-    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.company_id == company_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     return customer
@@ -156,9 +159,10 @@ def get_customer_stats(
     customer_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get customer statistics including work order counts"""
-    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.company_id == company_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -286,15 +290,17 @@ def create_customer(
     customer_in: CustomerCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new customer"""
     # Check name uniqueness
-    if db.query(Customer).filter(Customer.name == customer_in.name).first():
+    if db.query(Customer).filter(Customer.name == customer_in.name, Customer.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Customer name already exists")
 
     code = customer_in.code or generate_customer_code(db, customer_in.name)
 
     customer = Customer(**customer_in.model_dump(exclude={"code"}), code=code)
+    customer.company_id = company_id
     db.add(customer)
     db.commit()
     db.refresh(customer)
@@ -307,9 +313,10 @@ def update_customer(
     customer_in: CustomerUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a customer"""
-    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.company_id == company_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -317,7 +324,7 @@ def update_customer(
 
     # Check name uniqueness if changing
     if "name" in update_data and update_data["name"] != customer.name:
-        if db.query(Customer).filter(Customer.name == update_data["name"]).first():
+        if db.query(Customer).filter(Customer.name == update_data["name"], Customer.company_id == company_id).first():
             raise HTTPException(status_code=400, detail="Customer name already exists")
 
     for field, value in update_data.items():
@@ -337,9 +344,10 @@ def delete_customer(
     ),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Soft delete or permanently delete a customer."""
-    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.company_id == company_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -374,9 +382,10 @@ def restore_customer(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Restore a soft-deleted customer."""
-    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.company_id == company_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 

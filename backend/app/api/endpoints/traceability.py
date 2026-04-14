@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.work_order import WorkOrder
@@ -57,7 +57,8 @@ class LotTraceResponse(BaseModel):
 def trace_lot(
     lot_number: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Get full traceability for a lot number.
@@ -210,7 +211,8 @@ def trace_lot(
 def trace_serial(
     serial_number: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get traceability for a serial number"""
     # Similar to lot tracing but for individual serial numbers
@@ -257,7 +259,8 @@ def trace_serial(
 def search_lots(
     q: str = Query(..., min_length=1),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Search for lot/serial numbers"""
     results = []

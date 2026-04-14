@@ -3,7 +3,7 @@ from datetime import datetime, date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.tool_management import Tool, ToolCheckout, ToolUsageLog, ToolStatus, ToolType
 from pydantic import BaseModel
@@ -278,9 +278,10 @@ def list_tools(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List tools with optional filters"""
-    query = db.query(Tool)
+    query = db.query(Tool).filter(Tool.company_id == company_id)
     if not include_inactive:
         query = query.filter(Tool.is_active == True)
     if status:
@@ -304,9 +305,10 @@ def get_tool(
     tool_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get single tool by primary key"""
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
     return _tool_to_dict(tool)
@@ -317,9 +319,10 @@ def create_tool(
     tool_in: ToolCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new tool"""
-    if db.query(Tool).filter(Tool.tool_id == tool_in.tool_id).first():
+    if db.query(Tool).filter(Tool.tool_id == tool_in.tool_id, Tool.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Tool ID already exists")
 
     data = tool_in.model_dump()
@@ -332,6 +335,7 @@ def create_tool(
         data["next_inspection_date"] = base + timedelta(days=data["inspection_interval_days"])
 
     tool = Tool(**data)
+    tool.company_id = company_id
     tool.life_remaining_pct = _calc_life_remaining(tool)
     db.add(tool)
     db.commit()
@@ -345,9 +349,10 @@ def update_tool(
     tool_in: ToolUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
 
@@ -371,9 +376,10 @@ def retire_tool(
     tool_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Retire a tool (soft delete)"""
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
     tool.status = ToolStatus.RETIRED
@@ -390,9 +396,10 @@ def checkout_tool(
     req: CheckoutRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Check out a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
     if tool.status == ToolStatus.IN_USE:
@@ -426,9 +433,10 @@ def checkin_tool(
     req: CheckinRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Check in a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
     if tool.status != ToolStatus.IN_USE:
@@ -469,9 +477,10 @@ def log_usage(
     req: UsageLogRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Log usage hours/cycles for a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
+    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
 

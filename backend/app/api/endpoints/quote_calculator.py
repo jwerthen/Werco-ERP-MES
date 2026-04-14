@@ -2,7 +2,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.quote_config import QuoteMaterial, QuoteMachine, QuoteFinish, QuoteSettings, MaterialCategory, MachineType
 from pydantic import BaseModel
@@ -242,19 +242,21 @@ def apply_quantity_breaks(subtotal: float, quantity: int, db: Session) -> float:
 def calculate_cnc_quote(
     request: CNCQuoteRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Calculate quote for CNC machined part"""
-    
+
     # Get material
-    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == request.material_id).first()
+    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == request.material_id, QuoteMaterial.company_id == company_id).first()
     if not material:
         raise HTTPException(status_code=404, detail="Material not found")
     
     # Get machine rate (use first active CNC mill)
     machine = db.query(QuoteMachine).filter(
         QuoteMachine.machine_type.in_([MachineType.CNC_MILL_3AXIS, MachineType.CNC_MILL_4AXIS, MachineType.CNC_MILL_5AXIS]),
-        QuoteMachine.is_active == True
+        QuoteMachine.is_active == True,
+        QuoteMachine.company_id == company_id
     ).first()
     
     # Default rates if no machine configured
@@ -398,12 +400,13 @@ def calculate_cnc_quote(
 def calculate_sheet_metal_quote(
     request: SheetMetalQuoteRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Calculate quote for sheet metal part"""
-    
+
     # Get material
-    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == request.material_id).first()
+    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == request.material_id, QuoteMaterial.company_id == company_id).first()
     if not material:
         raise HTTPException(status_code=404, detail="Material not found")
     
@@ -414,12 +417,14 @@ def calculate_sheet_metal_quote(
     # Get machines
     laser = db.query(QuoteMachine).filter(
         QuoteMachine.machine_type.in_([MachineType.LASER_FIBER, MachineType.LASER_CO2]),
-        QuoteMachine.is_active == True
+        QuoteMachine.is_active == True,
+        QuoteMachine.company_id == company_id
     ).first()
-    
+
     brake = db.query(QuoteMachine).filter(
         QuoteMachine.machine_type == MachineType.PRESS_BRAKE,
-        QuoteMachine.is_active == True
+        QuoteMachine.is_active == True,
+        QuoteMachine.company_id == company_id
     ).first()
     
     # Default rates
@@ -588,10 +593,11 @@ def calculate_sheet_metal_quote(
 def list_materials(
     category: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List available materials for quoting"""
-    query = db.query(QuoteMaterial).filter(QuoteMaterial.is_active == True)
+    query = db.query(QuoteMaterial).filter(QuoteMaterial.is_active == True, QuoteMaterial.company_id == company_id)
     if category:
         query = query.filter(QuoteMaterial.category == category)
     return query.order_by(QuoteMaterial.name).all()

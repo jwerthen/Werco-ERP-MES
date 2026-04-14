@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Text
 from sqlalchemy.sql import func
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
-class Webhook(Base):
+class Webhook(Base, TenantMixin):
     """Webhook subscription"""
     __tablename__ = "webhooks"
 
@@ -30,7 +31,7 @@ class Webhook(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
-class WebhookDelivery(Base):
+class WebhookDelivery(Base, TenantMixin):
     """Webhook delivery log"""
     __tablename__ = "webhook_deliveries"
 

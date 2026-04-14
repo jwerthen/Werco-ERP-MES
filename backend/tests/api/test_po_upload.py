@@ -162,7 +162,8 @@ class TestMatchingService:
         po = PurchaseOrder(
             po_number="PO-TEST-EXISTS",
             vendor_id=test_vendor.id,
-            status=POStatus.DRAFT
+            status=POStatus.DRAFT,
+            company_id=1,
         )
         db_session.add(po)
         db_session.commit()
@@ -382,7 +383,8 @@ class TestPOCreateFromUpload:
         existing_po = PurchaseOrder(
             po_number="PO-DUPLICATE-001",
             vendor_id=test_vendor.id,
-            status=POStatus.DRAFT
+            status=POStatus.DRAFT,
+            company_id=1,
         )
         db_session.add(existing_po)
         db_session.commit()

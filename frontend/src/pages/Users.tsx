@@ -33,6 +33,7 @@ interface UserCsvImportResult {
 }
 
 const roleColors: Record<UserRole, string> = {
+  platform_admin: 'bg-amber-500/20 text-amber-300',
   admin: 'bg-red-500/20 text-red-300',
   manager: 'bg-purple-500/20 text-purple-800',
   supervisor: 'bg-blue-500/20 text-blue-300',
@@ -43,6 +44,7 @@ const roleColors: Record<UserRole, string> = {
 };
 
 const roleLabels: Record<UserRole, string> = {
+  platform_admin: 'Platform Admin',
   admin: 'Administrator',
   manager: 'Manager',
   supervisor: 'Supervisor',

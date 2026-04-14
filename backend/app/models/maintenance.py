@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class MaintenanceType(str, enum.Enum):
@@ -50,7 +51,7 @@ FREQUENCY_DAYS_MAP = {
 }
 
 
-class MaintenanceSchedule(Base):
+class MaintenanceSchedule(Base, TenantMixin):
     """Preventive Maintenance schedule template"""
     __tablename__ = "maintenance_schedules"
 
@@ -84,7 +85,7 @@ class MaintenanceSchedule(Base):
     work_orders = relationship("MaintenanceWorkOrder", back_populates="schedule")
 
 
-class MaintenanceWorkOrder(Base):
+class MaintenanceWorkOrder(Base, TenantMixin):
     """Individual maintenance work order / task"""
     __tablename__ = "maintenance_work_orders"
 
@@ -130,7 +131,7 @@ class MaintenanceWorkOrder(Base):
     schedule = relationship("MaintenanceSchedule", back_populates="work_orders")
 
 
-class MaintenanceLog(Base):
+class MaintenanceLog(Base, TenantMixin):
     """History entry for maintenance events"""
     __tablename__ = "maintenance_logs"
 

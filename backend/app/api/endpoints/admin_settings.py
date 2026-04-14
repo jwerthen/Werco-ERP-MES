@@ -12,7 +12,7 @@ from app.models.quote_config import (
     LaborRate, OutsideService, SettingsAuditLog,
     MaterialCategory, MachineType, ProcessType, CostUnit
 )
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.schemas.admin_settings import (
     MaterialCreate, MaterialUpdate, MaterialResponse,
     MachineCreate, MachineUpdate, MachineResponse,
@@ -42,10 +42,11 @@ def log_change(
     field_changed: str = None,
     old_value: any = None,
     new_value: any = None,
-    ip_address: str = None
+    ip_address: str = None,
+    company_id: int = None
 ):
     """Log a settings change for audit purposes"""
-    audit = SettingsAuditLog(
+    kwargs = dict(
         entity_type=entity_type,
         entity_id=entity_id,
         entity_name=entity_name,
@@ -54,8 +55,11 @@ def log_change(
         old_value=json.dumps(old_value) if old_value is not None else None,
         new_value=json.dumps(new_value) if new_value is not None else None,
         changed_by=user_id,
-        ip_address=ip_address
+        ip_address=ip_address,
     )
+    if company_id is not None:
+        kwargs["company_id"] = company_id
+    audit = SettingsAuditLog(**kwargs)
     db.add(audit)
 
 
@@ -74,10 +78,11 @@ def list_materials(
     include_inactive: bool = False,
     category: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all materials"""
-    query = db.query(QuoteMaterial)
+    query = db.query(QuoteMaterial).filter(QuoteMaterial.company_id == company_id)
     if not include_inactive:
         query = query.filter(QuoteMaterial.is_active == True)
     if category:
@@ -90,10 +95,12 @@ def create_material(
     data: MaterialCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new material"""
     material = QuoteMaterial(**data.model_dump())
+    material.company_id = company_id
     db.add(material)
     db.commit()
     db.refresh(material)
@@ -111,10 +118,11 @@ def update_material(
     data: MaterialUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a material"""
-    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == material_id).first()
+    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == material_id, QuoteMaterial.company_id == company_id).first()
     if not material:
         raise HTTPException(status_code=404, detail="Material not found")
     
@@ -136,10 +144,11 @@ def delete_material(
     material_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Soft-delete a material"""
-    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == material_id).first()
+    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == material_id, QuoteMaterial.company_id == company_id).first()
     if not material:
         raise HTTPException(status_code=404, detail="Material not found")
     
@@ -157,10 +166,11 @@ def list_machines(
     include_inactive: bool = False,
     machine_type: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all machines"""
-    query = db.query(QuoteMachine)
+    query = db.query(QuoteMachine).filter(QuoteMachine.company_id == company_id)
     if not include_inactive:
         query = query.filter(QuoteMachine.is_active == True)
     if machine_type:
@@ -173,10 +183,12 @@ def create_machine(
     data: MachineCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new machine"""
     machine = QuoteMachine(**data.model_dump())
+    machine.company_id = company_id
     db.add(machine)
     db.commit()
     db.refresh(machine)
@@ -194,10 +206,11 @@ def update_machine(
     data: MachineUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a machine"""
-    machine = db.query(QuoteMachine).filter(QuoteMachine.id == machine_id).first()
+    machine = db.query(QuoteMachine).filter(QuoteMachine.id == machine_id, QuoteMachine.company_id == company_id).first()
     if not machine:
         raise HTTPException(status_code=404, detail="Machine not found")
     
@@ -219,10 +232,11 @@ def delete_machine(
     machine_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Soft-delete a machine"""
-    machine = db.query(QuoteMachine).filter(QuoteMachine.id == machine_id).first()
+    machine = db.query(QuoteMachine).filter(QuoteMachine.id == machine_id, QuoteMachine.company_id == company_id).first()
     if not machine:
         raise HTTPException(status_code=404, detail="Machine not found")
     
@@ -240,10 +254,11 @@ def list_finishes(
     include_inactive: bool = False,
     category: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all finishes"""
-    query = db.query(QuoteFinish)
+    query = db.query(QuoteFinish).filter(QuoteFinish.company_id == company_id)
     if not include_inactive:
         query = query.filter(QuoteFinish.is_active == True)
     if category:
@@ -256,10 +271,12 @@ def create_finish(
     data: FinishCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new finish"""
     finish = QuoteFinish(**data.model_dump())
+    finish.company_id = company_id
     db.add(finish)
     db.commit()
     db.refresh(finish)
@@ -277,10 +294,11 @@ def update_finish(
     data: FinishUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a finish"""
-    finish = db.query(QuoteFinish).filter(QuoteFinish.id == finish_id).first()
+    finish = db.query(QuoteFinish).filter(QuoteFinish.id == finish_id, QuoteFinish.company_id == company_id).first()
     if not finish:
         raise HTTPException(status_code=404, detail="Finish not found")
     
@@ -302,10 +320,11 @@ def delete_finish(
     finish_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Soft-delete a finish"""
-    finish = db.query(QuoteFinish).filter(QuoteFinish.id == finish_id).first()
+    finish = db.query(QuoteFinish).filter(QuoteFinish.id == finish_id, QuoteFinish.company_id == company_id).first()
     if not finish:
         raise HTTPException(status_code=404, detail="Finish not found")
     
@@ -322,10 +341,11 @@ def delete_finish(
 def list_labor_rates(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all labor rates"""
-    query = db.query(LaborRate)
+    query = db.query(LaborRate).filter(LaborRate.company_id == company_id)
     if not include_inactive:
         query = query.filter(LaborRate.is_active == True)
     return query.order_by(LaborRate.name).all()
@@ -336,10 +356,12 @@ def create_labor_rate(
     data: LaborRateCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new labor rate"""
     labor_rate = LaborRate(**data.model_dump())
+    labor_rate.company_id = company_id
     db.add(labor_rate)
     db.commit()
     db.refresh(labor_rate)
@@ -357,10 +379,11 @@ def update_labor_rate(
     data: LaborRateUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a labor rate"""
-    labor_rate = db.query(LaborRate).filter(LaborRate.id == rate_id).first()
+    labor_rate = db.query(LaborRate).filter(LaborRate.id == rate_id, LaborRate.company_id == company_id).first()
     if not labor_rate:
         raise HTTPException(status_code=404, detail="Labor rate not found")
     
@@ -382,10 +405,11 @@ def delete_labor_rate(
     rate_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Soft-delete a labor rate"""
-    labor_rate = db.query(LaborRate).filter(LaborRate.id == rate_id).first()
+    labor_rate = db.query(LaborRate).filter(LaborRate.id == rate_id, LaborRate.company_id == company_id).first()
     if not labor_rate:
         raise HTTPException(status_code=404, detail="Labor rate not found")
     
@@ -402,10 +426,11 @@ def delete_labor_rate(
 def list_work_center_rates(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all work centers with their rates"""
-    query = db.query(WorkCenter)
+    query = db.query(WorkCenter).filter(WorkCenter.company_id == company_id)
     if not include_inactive:
         query = query.filter(WorkCenter.is_active == True)
     return query.order_by(WorkCenter.name).all()
@@ -417,10 +442,11 @@ def update_work_center_rate(
     data: WorkCenterRateUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a work center's hourly rate"""
-    wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id).first()
+    wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
     
@@ -440,7 +466,8 @@ def update_work_center_rate(
 @router.get("/work-center-types", response_model=WorkCenterTypesResponse)
 def list_work_center_types_admin(
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List allowed work center types"""
     types = get_work_center_types(db, include_in_use=False)
@@ -453,7 +480,8 @@ def update_work_center_types_admin(
     data: WorkCenterTypesUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update allowed work center types"""
     old_types = get_work_center_types(db, include_in_use=False)
@@ -488,10 +516,11 @@ def list_outside_services(
     include_inactive: bool = False,
     process_type: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all outside services"""
-    query = db.query(OutsideService)
+    query = db.query(OutsideService).filter(OutsideService.company_id == company_id)
     if not include_inactive:
         query = query.filter(OutsideService.is_active == True)
     if process_type:
@@ -504,10 +533,12 @@ def create_outside_service(
     data: OutsideServiceCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new outside service"""
     service = OutsideService(**data.model_dump())
+    service.company_id = company_id
     db.add(service)
     db.commit()
     db.refresh(service)
@@ -525,10 +556,11 @@ def update_outside_service(
     data: OutsideServiceUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update an outside service"""
-    service = db.query(OutsideService).filter(OutsideService.id == service_id).first()
+    service = db.query(OutsideService).filter(OutsideService.id == service_id, OutsideService.company_id == company_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Outside service not found")
     
@@ -550,10 +582,11 @@ def delete_outside_service(
     service_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Soft-delete an outside service"""
-    service = db.query(OutsideService).filter(OutsideService.id == service_id).first()
+    service = db.query(OutsideService).filter(OutsideService.id == service_id, OutsideService.company_id == company_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Outside service not found")
     
@@ -569,10 +602,11 @@ def delete_outside_service(
 @router.get("/overhead")
 def get_overhead_settings(
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get all overhead/markup settings"""
-    settings = db.query(QuoteSettings).all()
+    settings = db.query(QuoteSettings).filter(QuoteSettings.company_id == company_id).all()
     result = {}
     for s in settings:
         result[s.setting_key] = {
@@ -590,13 +624,14 @@ def update_overhead_setting(
     data: SettingUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update an overhead/markup setting"""
-    setting = db.query(QuoteSettings).filter(QuoteSettings.setting_key == key).first()
-    
+    setting = db.query(QuoteSettings).filter(QuoteSettings.setting_key == key, QuoteSettings.company_id == company_id).first()
+
     old_value = setting.setting_value if setting else None
-    
+
     if setting:
         setting.setting_value = data.value
         setting.setting_type = data.setting_type
@@ -607,7 +642,8 @@ def update_overhead_setting(
             setting_key=key,
             setting_value=data.value,
             setting_type=data.setting_type,
-            description=data.description
+            description=data.description,
+            company_id=company_id
         )
         db.add(setting)
     
@@ -626,7 +662,8 @@ def get_audit_log(
     days: int = 30,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get audit log entries (up to 1 year history)"""
     cutoff_date = datetime.utcnow() - timedelta(days=min(days, 365))
@@ -638,7 +675,10 @@ def get_audit_log(
     ).outerjoin(User, SettingsAuditLog.changed_by == User.id)
     
     query = query.filter(SettingsAuditLog.changed_at >= cutoff_date)
-    
+
+    if hasattr(SettingsAuditLog, 'company_id'):
+        query = query.filter(SettingsAuditLog.company_id == company_id)
+
     if entity_type:
         query = query.filter(SettingsAuditLog.entity_type == entity_type)
     
@@ -669,7 +709,8 @@ def get_audit_log(
 @router.post("/seed-labor-rates")
 def seed_labor_rates(
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Seed default labor rates"""
     defaults = [
@@ -684,9 +725,9 @@ def seed_labor_rates(
     
     created = 0
     for name, rate, desc in defaults:
-        existing = db.query(LaborRate).filter(LaborRate.name == name).first()
+        existing = db.query(LaborRate).filter(LaborRate.name == name, LaborRate.company_id == company_id).first()
         if not existing:
-            db.add(LaborRate(name=name, rate_per_hour=rate, description=desc))
+            db.add(LaborRate(name=name, rate_per_hour=rate, description=desc, company_id=company_id))
             created += 1
     
     db.commit()
@@ -745,7 +786,8 @@ async def seed_database(
 @router.post("/seed-outside-services")
 def seed_outside_services(
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Seed default outside services"""
     defaults = [
@@ -763,9 +805,10 @@ def seed_outside_services(
     
     created = 0
     for name, vendor, ptype, cost, unit, minimum, days in defaults:
-        existing = db.query(OutsideService).filter(OutsideService.name == name).first()
+        existing = db.query(OutsideService).filter(OutsideService.name == name, OutsideService.company_id == company_id).first()
         if not existing:
             db.add(OutsideService(
+                company_id=company_id,
                 name=name,
                 vendor_name=vendor,
                 process_type=ptype,
@@ -789,7 +832,8 @@ from app.models.role_permission import (
 @router.get("/role-permissions")
 def get_all_role_permissions(
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Get permissions for all roles.
@@ -817,7 +861,8 @@ def get_all_role_permissions(
 def get_role_permissions(
     role: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get permissions for a specific role"""
     try:
@@ -843,7 +888,8 @@ def update_role_permissions(
     request: Request,
     permissions: list[str],
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update permissions for a specific role"""
     try:
@@ -893,7 +939,8 @@ def reset_role_permissions(
     role: str,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Reset a role's permissions to defaults"""
     try:

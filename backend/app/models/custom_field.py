@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class FieldType(str, enum.Enum):
@@ -29,7 +30,7 @@ class EntityType(str, enum.Enum):
     BOM = "bom"
 
 
-class CustomFieldDefinition(Base):
+class CustomFieldDefinition(Base, TenantMixin):
     """Definition of a custom field that can be added to entities"""
     __tablename__ = "custom_field_definitions"
     
@@ -82,7 +83,7 @@ class CustomFieldDefinition(Base):
     )
 
 
-class CustomFieldValue(Base):
+class CustomFieldValue(Base, TenantMixin):
     """Actual values stored for custom fields on entities"""
     __tablename__ = "custom_field_values"
     

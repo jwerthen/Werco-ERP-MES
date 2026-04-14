@@ -23,7 +23,7 @@ class TestSecretKeyValidation:
                 from app.core.config import Settings
                 Settings()
             
-            assert "SECRET_KEY is set to an insecure default value" in str(exc_info.value)
+            assert "SECRET_KEY is set to an insecure value" in str(exc_info.value)
 
     def test_short_secret_key_rejected(self):
         """Test that a SECRET_KEY less than 32 characters is rejected."""
@@ -67,7 +67,7 @@ class TestRefreshTokenSecretKeyValidation:
                 from app.core.config import Settings
                 Settings()
             
-            assert "REFRESH_TOKEN_SECRET_KEY is set to an insecure default value" in str(exc_info.value)
+            assert "REFRESH_TOKEN_SECRET_KEY is set to an insecure value" in str(exc_info.value)
 
     def test_short_refresh_key_rejected(self):
         """Test that a REFRESH_TOKEN_SECRET_KEY less than 32 characters is rejected."""

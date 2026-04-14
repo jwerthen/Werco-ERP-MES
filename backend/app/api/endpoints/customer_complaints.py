@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, extract
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.customer_complaint import (
     CustomerComplaint, ReturnMaterialAuthorization,
@@ -382,10 +382,11 @@ def list_complaints(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all complaints with filters"""
-    query = db.query(CustomerComplaint).options(
+    query = db.query(CustomerComplaint).filter(CustomerComplaint.company_id == company_id).options(
         joinedload(CustomerComplaint.part),
         joinedload(CustomerComplaint.customer),
         joinedload(CustomerComplaint.rmas),
@@ -427,7 +428,8 @@ def get_complaint(
 def create_complaint(
     data: ComplaintCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new customer complaint"""
     complaint = CustomerComplaint(
@@ -436,6 +438,7 @@ def create_complaint(
         received_by=current_user.id,
         date_received=data.date_received or date.today()
     )
+    complaint.company_id = company_id
     db.add(complaint)
     db.commit()
     db.refresh(complaint)
@@ -447,10 +450,11 @@ def update_complaint(
     complaint_id: int,
     data: ComplaintUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a complaint"""
-    complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
+    complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id, CustomerComplaint.company_id == company_id).first()
     if not complaint:
         raise HTTPException(status_code=404, detail="Complaint not found")
 
@@ -629,10 +633,11 @@ def list_rmas(
     customer_id: Optional[int] = None,
     complaint_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all RMAs with filters"""
-    query = db.query(ReturnMaterialAuthorization).options(
+    query = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.company_id == company_id).options(
         joinedload(ReturnMaterialAuthorization.part),
         joinedload(ReturnMaterialAuthorization.customer),
     )
@@ -668,13 +673,15 @@ def get_rma(
 def create_rma(
     data: RMACreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new RMA"""
     rma = ReturnMaterialAuthorization(
         rma_number=generate_rma_number(db),
         **data.model_dump()
     )
+    rma.company_id = company_id
     db.add(rma)
     db.commit()
     db.refresh(rma)
@@ -686,10 +693,11 @@ def update_rma(
     rma_id: int,
     data: RMAUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update an RMA"""
-    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
+    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id, ReturnMaterialAuthorization.company_id == company_id).first()
     if not rma:
         raise HTTPException(status_code=404, detail="RMA not found")
 

@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class DocumentType(str, enum.Enum):
@@ -20,7 +21,7 @@ class DocumentType(str, enum.Enum):
     OTHER = "other"
 
 
-class Document(Base):
+class Document(Base, TenantMixin):
     """
     Document management for ISO 9001 / AS9100D compliance.
     Tracks controlled documents and quality records.

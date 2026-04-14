@@ -83,6 +83,21 @@ export type Permission =
  * - viewer: Read-only access
  */
 const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
+  platform_admin: [
+    // Platform admin has ALL permissions (cross-company oversight)
+    'work_orders:view', 'work_orders:create', 'work_orders:edit', 'work_orders:delete', 'work_orders:release', 'work_orders:complete',
+    'parts:view', 'parts:create', 'parts:edit', 'parts:delete',
+    'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
+    'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
+    'inventory:view', 'inventory:adjust', 'inventory:transfer',
+    'purchasing:view', 'purchasing:create', 'purchasing:approve',
+    'receiving:view', 'receiving:create', 'receiving:inspect',
+    'shipping:view', 'shipping:create', 'shipping:complete',
+    'quality:view', 'quality:inspect', 'quality:approve', 'quality:calibration',
+    'users:view', 'users:create', 'users:edit', 'users:delete', 'users:roles',
+    'analytics:view', 'analytics:export',
+    'admin:settings', 'admin:audit_logs', 'admin:system',
+  ],
   admin: [
     // Admin has ALL permissions
     'work_orders:view', 'work_orders:create', 'work_orders:edit', 'work_orders:delete', 'work_orders:release', 'work_orders:complete',
@@ -250,6 +265,7 @@ export function getPermissionsForRole(role: UserRole): Permission[] {
  * Role display names
  */
 export const ROLE_LABELS: Record<UserRole, string> = {
+  platform_admin: 'Platform Admin',
   admin: 'Administrator',
   manager: 'Manager',
   supervisor: 'Supervisor',
@@ -263,6 +279,7 @@ export const ROLE_LABELS: Record<UserRole, string> = {
  * Role descriptions
  */
 export const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
+  platform_admin: 'Cross-company oversight with full read access to all companies',
   admin: 'Full system access including user management and system settings',
   manager: 'Department-wide access with approval and release capabilities',
   supervisor: 'Team-level access with create and edit permissions',

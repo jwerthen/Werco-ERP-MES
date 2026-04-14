@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class CalibrationStatus(str, enum.Enum):
@@ -13,7 +14,7 @@ class CalibrationStatus(str, enum.Enum):
     RETIRED = "retired"
 
 
-class Equipment(Base):
+class Equipment(Base, TenantMixin):
     """Measurement equipment/gauges for calibration tracking"""
     __tablename__ = "equipment"
     
@@ -60,7 +61,7 @@ class Equipment(Base):
     calibration_records = relationship("CalibrationRecord", back_populates="equipment", cascade="all, delete-orphan")
 
 
-class CalibrationRecord(Base):
+class CalibrationRecord(Base, TenantMixin):
     """Calibration history record"""
     __tablename__ = "calibration_records"
     

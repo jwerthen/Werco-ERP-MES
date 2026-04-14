@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.time_entry import TimeEntry
@@ -19,7 +19,8 @@ router = APIRouter()
 def get_production_summary(
     days: int = 30,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get production metrics for dashboard"""
     cutoff = datetime.utcnow() - timedelta(days=days)
@@ -29,6 +30,7 @@ def get_production_summary(
         WorkOrder.status,
         func.count(WorkOrder.id)
     ).filter(
+        WorkOrder.company_id == company_id,
         WorkOrder.created_at >= cutoff
     ).group_by(WorkOrder.status).all()
     
@@ -36,6 +38,7 @@ def get_production_summary(
     
     # Completed work orders
     completed_wos = db.query(WorkOrder).filter(
+        WorkOrder.company_id == company_id,
         WorkOrder.status == WorkOrderStatus.COMPLETE,
         WorkOrder.actual_end >= cutoff
     ).all()
@@ -81,13 +84,15 @@ def get_production_summary(
 def get_quality_metrics(
     days: int = 30,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get quality metrics"""
     cutoff = datetime.utcnow() - timedelta(days=days)
     
     # NCR counts
     ncrs = db.query(NonConformanceReport).filter(
+        NonConformanceReport.company_id == company_id,
         NonConformanceReport.created_at >= cutoff
     ).all()
     
@@ -122,7 +127,8 @@ def get_quality_metrics(
 @router.get("/inventory-value")
 def get_inventory_value(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get inventory value summary"""
     from app.models.part import Part
@@ -132,6 +138,7 @@ def get_inventory_value(
         func.sum(InventoryItem.quantity_on_hand).label("qty"),
         Part.standard_cost
     ).join(Part).filter(
+        InventoryItem.company_id == company_id,
         InventoryItem.is_active == True,
         InventoryItem.quantity_on_hand > 0
     ).group_by(InventoryItem.part_id, Part.standard_cost).all()
@@ -151,7 +158,8 @@ def get_inventory_value(
 def get_vendor_performance(
     days: int = 90,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get vendor performance metrics"""
     from app.models.purchasing import Vendor, PurchaseOrderLine
@@ -201,7 +209,8 @@ def get_vendor_performance(
 def get_work_center_utilization(
     days: int = 30,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get work center utilization"""
     from app.models.work_center import WorkCenter
@@ -240,7 +249,8 @@ def get_work_center_utilization(
 def get_daily_output(
     days: int = 14,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get daily production output"""
     result = []
@@ -279,12 +289,14 @@ def get_work_order_costing(
     work_order_id: Optional[int] = None,
     days: int = 90,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get work order costing details"""
     from app.models.part import Part
     
     query = db.query(WorkOrder).filter(
+        WorkOrder.company_id == company_id,
         WorkOrder.status.in_([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.IN_PROGRESS])
     )
     
@@ -360,7 +372,8 @@ def get_employee_time_report(
     end_date: Optional[date] = None,
     user_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get employee time report"""
     if not start_date:

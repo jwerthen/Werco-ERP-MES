@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class ShipmentStatus(str, enum.Enum):
@@ -13,7 +14,7 @@ class ShipmentStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
-class Shipment(Base):
+class Shipment(Base, TenantMixin):
     """Shipment header for shipping work orders to customers"""
     __tablename__ = "shipments"
     

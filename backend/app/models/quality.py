@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class NCRStatus(str, enum.Enum):
@@ -53,7 +54,7 @@ class FAIStatus(str, enum.Enum):
     CONDITIONAL = "conditional"
 
 
-class NonConformanceReport(Base):
+class NonConformanceReport(Base, TenantMixin):
     """NCR - Non-Conformance Report for AS9100D compliance"""
     __tablename__ = "ncrs"
     
@@ -120,7 +121,7 @@ class NonConformanceReport(Base):
     car = relationship("CorrectiveActionRequest", back_populates="ncrs", foreign_keys=[car_id])
 
 
-class CorrectiveActionRequest(Base):
+class CorrectiveActionRequest(Base, TenantMixin):
     """CAR - Corrective Action Request for AS9100D compliance"""
     __tablename__ = "cars"
     
@@ -171,7 +172,7 @@ class CorrectiveActionRequest(Base):
     ncrs = relationship("NonConformanceReport", back_populates="car", foreign_keys="NonConformanceReport.car_id")
 
 
-class FirstArticleInspection(Base):
+class FirstArticleInspection(Base, TenantMixin):
     """FAI - First Article Inspection for AS9100D compliance (AS9102)"""
     __tablename__ = "fais"
     
@@ -224,7 +225,7 @@ class FirstArticleInspection(Base):
     characteristics = relationship("FAICharacteristic", back_populates="fai", cascade="all, delete-orphan")
 
 
-class FAICharacteristic(Base):
+class FAICharacteristic(Base, TenantMixin):
     """Individual characteristic/dimension in FAI"""
     __tablename__ = "fai_characteristics"
     

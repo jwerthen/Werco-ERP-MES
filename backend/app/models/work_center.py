@@ -1,14 +1,18 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
-class WorkCenter(Base):
+class WorkCenter(Base, TenantMixin):
     __tablename__ = "work_centers"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_work_centers_company_code'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(20), unique=True, index=True, nullable=False)
+    code = Column(String(20), index=True, nullable=False)
     name = Column(String(100), nullable=False)
     work_center_type = Column(String(50), nullable=False)
     description = Column(Text)

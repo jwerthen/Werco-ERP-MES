@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POReceipt, POStatus
 from app.models.quality import NonConformanceReport
@@ -433,10 +433,11 @@ def list_scorecards(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List scorecards with filters."""
-    query = db.query(SupplierScorecard).options(
+    query = db.query(SupplierScorecard).filter(SupplierScorecard.company_id == company_id).options(
         joinedload(SupplierScorecard.vendor)
     )
     if vendor_id:
@@ -456,7 +457,8 @@ def list_scorecards(
 def create_scorecard(
     data: ScorecardCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new scorecard."""
     vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
@@ -491,6 +493,7 @@ def create_scorecard(
     sc.overall_score = calculate_overall(sc)
     sc.rating = calculate_rating(sc.overall_score)
 
+    sc.company_id = company_id
     db.add(sc)
     db.commit()
     db.refresh(sc)
@@ -502,7 +505,8 @@ def update_scorecard(
     scorecard_id: int,
     data: ScorecardUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update an existing scorecard."""
     sc = db.query(SupplierScorecard).options(
@@ -705,13 +709,15 @@ def list_audits(
 def create_audit(
     data: AuditCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
     audit = SupplierAudit(**data.model_dump())
+    audit.company_id = company_id
     db.add(audit)
     db.commit()
     db.refresh(audit)
@@ -774,7 +780,8 @@ def get_approved_supplier(
 def create_approved_supplier(
     data: ASLCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
     if not vendor:
@@ -789,6 +796,7 @@ def create_approved_supplier(
     entry = ApprovedSupplierList(
         **data.model_dump(),
         approved_by=current_user.id,
+        company_id=company_id,
         last_review_date=date.today(),
     )
     if not entry.approved_date:

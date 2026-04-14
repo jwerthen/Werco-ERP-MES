@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, case
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.downtime import DowntimeEvent, DowntimeReasonCode, DowntimeCategory, DowntimePlannedType
 
@@ -146,7 +146,8 @@ class WorkCenterDowntime(BaseModel):
 @router.get("/active", response_model=List[DowntimeEventResponse])
 def get_active_downtime(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get all currently active (ongoing) downtime events"""
     events = db.query(DowntimeEvent).options(
@@ -155,6 +156,7 @@ def get_active_downtime(
         joinedload(DowntimeEvent.resolver),
         joinedload(DowntimeEvent.work_order),
     ).filter(
+        DowntimeEvent.company_id == company_id,
         DowntimeEvent.end_time.is_(None)
     ).order_by(DowntimeEvent.start_time.desc()).all()
     return events
@@ -166,10 +168,11 @@ def get_downtime_summary(
     date_to: Optional[date] = None,
     work_center_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get summary statistics for downtime events"""
-    query = db.query(DowntimeEvent).filter(DowntimeEvent.end_time.isnot(None))
+    query = db.query(DowntimeEvent).filter(DowntimeEvent.company_id == company_id, DowntimeEvent.end_time.isnot(None))
 
     if date_from:
         query = query.filter(DowntimeEvent.start_time >= datetime.combine(date_from, datetime.min.time()))
@@ -227,7 +230,8 @@ def get_downtime_by_work_center(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get downtime hours grouped by work center"""
     from app.models.work_center import WorkCenter
@@ -241,6 +245,7 @@ def get_downtime_by_work_center(
     ).join(
         WorkCenter, DowntimeEvent.work_center_id == WorkCenter.id
     ).filter(
+        DowntimeEvent.company_id == company_id,
         DowntimeEvent.end_time.isnot(None)
     )
 
@@ -270,10 +275,11 @@ def list_reason_codes(
     category: Optional[DowntimeCategory] = None,
     active_only: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all downtime reason codes"""
-    query = db.query(DowntimeReasonCode)
+    query = db.query(DowntimeReasonCode).filter(DowntimeReasonCode.company_id == company_id)
     if category:
         query = query.filter(DowntimeReasonCode.category == category)
     if active_only:
@@ -285,14 +291,16 @@ def list_reason_codes(
 def create_reason_code(
     data: ReasonCodeCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new downtime reason code"""
-    existing = db.query(DowntimeReasonCode).filter(DowntimeReasonCode.code == data.code).first()
+    existing = db.query(DowntimeReasonCode).filter(DowntimeReasonCode.code == data.code, DowntimeReasonCode.company_id == company_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="Reason code already exists")
 
     reason_code = DowntimeReasonCode(**data.model_dump())
+    reason_code.company_id = company_id
     db.add(reason_code)
     db.commit()
     db.refresh(reason_code)
@@ -304,10 +312,11 @@ def update_reason_code(
     reason_code_id: int,
     data: ReasonCodeUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a downtime reason code"""
-    reason_code = db.query(DowntimeReasonCode).filter(DowntimeReasonCode.id == reason_code_id).first()
+    reason_code = db.query(DowntimeReasonCode).filter(DowntimeReasonCode.id == reason_code_id, DowntimeReasonCode.company_id == company_id).first()
     if not reason_code:
         raise HTTPException(status_code=404, detail="Reason code not found")
 
@@ -331,10 +340,11 @@ def list_downtime_events(
     date_to: Optional[date] = None,
     active_only: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List downtime events with optional filters"""
-    query = db.query(DowntimeEvent).options(
+    query = db.query(DowntimeEvent).filter(DowntimeEvent.company_id == company_id).options(
         joinedload(DowntimeEvent.work_center),
         joinedload(DowntimeEvent.reporter),
         joinedload(DowntimeEvent.resolver),
@@ -361,7 +371,8 @@ def list_downtime_events(
 def get_downtime_event(
     event_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a single downtime event by ID"""
     event = db.query(DowntimeEvent).options(
@@ -369,7 +380,7 @@ def get_downtime_event(
         joinedload(DowntimeEvent.reporter),
         joinedload(DowntimeEvent.resolver),
         joinedload(DowntimeEvent.work_order),
-    ).filter(DowntimeEvent.id == event_id).first()
+    ).filter(DowntimeEvent.id == event_id, DowntimeEvent.company_id == company_id).first()
 
     if not event:
         raise HTTPException(status_code=404, detail="Downtime event not found")
@@ -380,7 +391,8 @@ def get_downtime_event(
 def create_downtime_event(
     data: DowntimeEventCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Start a new downtime event"""
     event = DowntimeEvent(
@@ -393,6 +405,7 @@ def create_downtime_event(
         description=data.description,
         reported_by=current_user.id,
     )
+    event.company_id = company_id
     db.add(event)
     db.commit()
     db.refresh(event)
@@ -413,10 +426,11 @@ def update_downtime_event(
     event_id: int,
     data: DowntimeEventUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a downtime event"""
-    event = db.query(DowntimeEvent).filter(DowntimeEvent.id == event_id).first()
+    event = db.query(DowntimeEvent).filter(DowntimeEvent.id == event_id, DowntimeEvent.company_id == company_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Downtime event not found")
 
@@ -442,10 +456,11 @@ def resolve_downtime_event(
     event_id: int,
     data: DowntimeResolve,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """End/resolve a downtime event - sets end_time and calculates duration"""
-    event = db.query(DowntimeEvent).filter(DowntimeEvent.id == event_id).first()
+    event = db.query(DowntimeEvent).filter(DowntimeEvent.id == event_id, DowntimeEvent.company_id == company_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Downtime event not found")
 

@@ -13,7 +13,8 @@ from app.core.security import (
 from app.core.config import settings
 from app.models.user import User, UserRole
 from app.schemas.user import UserCreate, UserResponse, Token, TokenRefresh, RefreshTokenRequest, EmployeeLoginRequest, PublicRegister
-from app.api.deps import get_current_user, require_role
+from app.models.company import Company
+from app.api.deps import get_current_user, get_current_company_id, require_role, require_platform_admin
 from app.services.audit_service import AuditService
 
 router = APIRouter()
@@ -116,15 +117,15 @@ def login(
     user.locked_until = None
     db.commit()
     
-    # Create access token (short-lived)
-    access_token = create_access_token(subject=user.id)
-    
+    # Create access token (short-lived) with company context
+    access_token = create_access_token(subject=user.id, company_id=user.company_id)
+
     # Create refresh token (longer-lived, with rotation)
-    refresh_token, session_id, _ = create_refresh_token(subject=user.id)
-    
+    refresh_token, session_id, _ = create_refresh_token(subject=user.id, company_id=user.company_id)
+
     log_auth_event(db, "LOGIN_SUCCESS", user=user, success=True, request=request)
     _ensure_valid_auth_email(user, db)
-    
+
     return Token(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -272,8 +273,8 @@ def employee_login(
     user.locked_until = None
     db.commit()
 
-    access_token = create_access_token(subject=user.id)
-    refresh_token, _, _ = create_refresh_token(subject=user.id)
+    access_token = create_access_token(subject=user.id, company_id=user.company_id)
+    refresh_token, _, _ = create_refresh_token(subject=user.id, company_id=user.company_id)
 
     log_auth_event(db, "EMPLOYEE_LOGIN_SUCCESS", user=user, success=True, request=request)
     _ensure_valid_auth_email(user, db)
@@ -351,12 +352,15 @@ def refresh_token(
             detail="Account is locked"
         )
     
+    # Preserve company context from the refresh token
+    token_company_id = payload.get("company_id") or user.company_id
+
     # Create new access token
-    new_access_token = create_access_token(subject=user.id)
-    
+    new_access_token = create_access_token(subject=user.id, company_id=token_company_id)
+
     # Token rotation: create NEW refresh token (invalidates the old one implicitly)
     # Use same session_id to maintain session continuity
-    new_refresh_token, _, _ = create_refresh_token(subject=user.id, session_id=session_id)
+    new_refresh_token, _, _ = create_refresh_token(subject=user.id, session_id=session_id, company_id=token_company_id)
     
     log_auth_event(db, "TOKEN_REFRESHED", user=user, success=True, request=request)
     
@@ -388,23 +392,24 @@ def register(
     request: Request,
     user_in: UserCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
-    """Register a new user (admin only)"""
-    # Check if email already exists
-    if db.query(User).filter(User.email == user_in.email).first():
+    """Register a new user within the current company (admin only)"""
+    # Check if email already exists within this company
+    if db.query(User).filter(User.email == user_in.email, User.company_id == company_id).first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-    
-    # Check if employee_id already exists
-    if db.query(User).filter(User.employee_id == user_in.employee_id).first():
+
+    # Check if employee_id already exists within this company
+    if db.query(User).filter(User.employee_id == user_in.employee_id, User.company_id == company_id).first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Employee ID already exists"
         )
-    
+
     user = User(
         email=user_in.email,
         employee_id=user_in.employee_id,
@@ -413,12 +418,13 @@ def register(
         role=user_in.role,
         department=user_in.department,
         hashed_password=get_password_hash(user_in.password),
+        company_id=company_id,
     )
-    
+
     db.add(user)
     db.commit()
     db.refresh(user)
-    
+
     log_auth_event(db, "USER_REGISTERED", user=user, success=True, request=request)
 
     return user
@@ -475,13 +481,23 @@ def register_public(
     is_first_user = user_count == 0
 
     if is_first_user:
-        role = UserRole.ADMIN
+        role = UserRole.PLATFORM_ADMIN
         is_superuser = True
         is_active = True
+        # Create the initial Werco company
+        werco = db.query(Company).filter(Company.slug == "werco").first()
+        if not werco:
+            werco = Company(name="Werco Manufacturing", slug="werco", is_active=True)
+            db.add(werco)
+            db.flush()
+        initial_company_id = werco.id
     else:
         role = UserRole.VIEWER
         is_superuser = False
         is_active = False
+        # Assign to the first (Werco) company by default
+        werco = db.query(Company).filter(Company.slug == "werco").first()
+        initial_company_id = werco.id if werco else 1
 
     user = User(
         email=user_in.email,
@@ -492,6 +508,7 @@ def register_public(
         is_superuser=is_superuser,
         is_active=is_active,
         hashed_password=get_password_hash(user_in.password),
+        company_id=initial_company_id,
     )
 
     db.add(user)
@@ -505,6 +522,35 @@ def register_public(
         return {"message": "Admin account created successfully", "is_first_user": True}
     else:
         return {"message": "Account submitted for approval", "is_first_user": False}
+
+
+@router.post("/switch-company/{target_company_id}", response_model=Token)
+def switch_company(
+    target_company_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_platform_admin)
+):
+    """
+    Switch the active company context (platform admin only).
+    Issues new tokens scoped to the target company for read-only browsing.
+    """
+    company = db.query(Company).filter(Company.id == target_company_id, Company.is_active == True).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found or inactive")
+
+    access_token = create_access_token(subject=current_user.id, company_id=company.id)
+    refresh_token, _, _ = create_refresh_token(subject=current_user.id, company_id=company.id)
+
+    log_auth_event(db, "COMPANY_SWITCH", user=current_user, success=True, request=request)
+
+    return Token(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=UserResponse.model_validate(current_user)
+    )
 
 
 @router.post("/reset-database")

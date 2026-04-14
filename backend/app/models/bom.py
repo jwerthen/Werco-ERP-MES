@@ -3,7 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
-from app.db.mixins import SoftDeleteMixin
+from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
 class BOMItemType(str, enum.Enum):
@@ -20,7 +20,7 @@ class BOMLineType(str, enum.Enum):
     REFERENCE = "reference"  # Reference only - not consumed (documentation, tooling)
 
 
-class BOM(Base, SoftDeleteMixin):
+class BOM(Base, SoftDeleteMixin, TenantMixin):
     """Bill of Materials - Top level BOM for a part/assembly"""
     __tablename__ = "boms"
     
@@ -52,7 +52,7 @@ class BOM(Base, SoftDeleteMixin):
     items = relationship("BOMItem", back_populates="bom", cascade="all, delete-orphan", order_by="BOMItem.item_number")
 
 
-class BOMItem(Base):
+class BOMItem(Base, TenantMixin):
     """Individual line item in a BOM - supports multi-level nesting"""
     __tablename__ = "bom_items"
     

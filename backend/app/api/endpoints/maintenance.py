@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.work_center import WorkCenter
 from app.models.maintenance import (
@@ -201,9 +201,10 @@ def list_schedules(
     is_active: Optional[bool] = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List PM schedules with optional filters"""
-    query = db.query(MaintenanceSchedule)
+    query = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.company_id == company_id)
     if is_active is not None:
         query = query.filter(MaintenanceSchedule.is_active == is_active)
     if work_center_id:
@@ -217,9 +218,10 @@ def get_schedule(
     schedule_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get schedule detail"""
-    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id).first()
+    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
     return _serialize_schedule(schedule)
@@ -230,6 +232,7 @@ def create_schedule(
     data: ScheduleCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new PM schedule"""
     wc = db.query(WorkCenter).filter(WorkCenter.id == data.work_center_id).first()
@@ -250,6 +253,7 @@ def create_schedule(
         assigned_to=data.assigned_to,
         next_due_date=data.next_due_date or date.today(),
     )
+    schedule.company_id = company_id
     db.add(schedule)
     db.commit()
     db.refresh(schedule)
@@ -262,9 +266,10 @@ def update_schedule(
     data: ScheduleUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a PM schedule"""
-    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id).first()
+    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
 
@@ -289,9 +294,10 @@ def deactivate_schedule(
     schedule_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Deactivate a PM schedule (soft delete)"""
-    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id).first()
+    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
     schedule.is_active = False
@@ -310,9 +316,10 @@ def list_work_orders(
     end_date: Optional[date] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List maintenance work orders with filters"""
-    query = db.query(MaintenanceWorkOrder)
+    query = db.query(MaintenanceWorkOrder).filter(MaintenanceWorkOrder.company_id == company_id)
     if status:
         query = query.filter(MaintenanceWorkOrder.status == status)
     if work_center_id:
@@ -360,9 +367,10 @@ def get_work_order(
     wo_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get maintenance work order detail"""
-    wo = db.query(MaintenanceWorkOrder).filter(MaintenanceWorkOrder.id == wo_id).first()
+    wo = db.query(MaintenanceWorkOrder).filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id).first()
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
     return _serialize_wo(wo)
@@ -373,6 +381,7 @@ def create_work_order(
     data: WorkOrderCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new maintenance work order"""
     wc = db.query(WorkCenter).filter(WorkCenter.id == data.work_center_id).first()
@@ -396,6 +405,7 @@ def create_work_order(
         requires_shutdown=data.requires_shutdown,
         assigned_to=data.assigned_to,
     )
+    wo.company_id = company_id
     db.add(wo)
     db.commit()
     db.refresh(wo)
@@ -408,9 +418,10 @@ def update_work_order(
     data: WorkOrderUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a maintenance work order"""
-    wo = db.query(MaintenanceWorkOrder).filter(MaintenanceWorkOrder.id == wo_id).first()
+    wo = db.query(MaintenanceWorkOrder).filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id).first()
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
 

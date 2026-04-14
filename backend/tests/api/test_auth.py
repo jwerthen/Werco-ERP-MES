@@ -105,6 +105,7 @@ class TestAuthLogin:
             hashed_password=get_password_hash("SecureP@ss123!"),
             role=UserRole.OPERATOR,
             is_active=True,
+            company_id=1,
         )
         db_session.add(user)
         db_session.commit()
@@ -312,6 +313,7 @@ class TestEmployeeIdLogin:
             hashed_password=get_password_hash("SecureP@ss123!"),
             role=UserRole.OPERATOR,
             is_active=True,
+            company_id=1,
         )
         db_session.add(user)
         db_session.commit()
@@ -335,6 +337,7 @@ class TestEmployeeIdLogin:
             hashed_password=get_password_hash("SecureP@ss123!"),
             role=UserRole.OPERATOR,
             is_active=True,
+            company_id=1,
         )
         db_session.add(user)
         db_session.commit()

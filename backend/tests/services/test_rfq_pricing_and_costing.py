@@ -12,7 +12,7 @@ from app.services.sheet_metal_costing_service import (
 
 
 def test_pricing_cache_and_snapshot_creation(db_session):
-    package = RfqPackage(rfq_number="RFQ-TEST-001", customer_name="Test Customer", status="uploaded")
+    package = RfqPackage(rfq_number="RFQ-TEST-001", customer_name="Test Customer", status="uploaded", company_id=1)
     db_session.add(package)
     db_session.flush()
 
@@ -23,6 +23,7 @@ def test_pricing_cache_and_snapshot_creation(db_session):
         density_lb_per_cubic_inch=0.284,
         sheet_pricing={"0.125": 6.0},
         is_active=True,
+        company_id=1,
     )
     db_session.add(material)
     db_session.commit()

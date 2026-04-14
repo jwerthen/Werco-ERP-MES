@@ -224,6 +224,7 @@ class TestWorkOrdersAPI:
             part_type="assembly",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         component_one = Part(
             part_number="CMP-ORDER-001",
@@ -231,6 +232,7 @@ class TestWorkOrdersAPI:
             part_type="manufactured",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         component_two = Part(
             part_number="CMP-ORDER-002",
@@ -238,6 +240,7 @@ class TestWorkOrdersAPI:
             part_type="manufactured",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([assembly, component_one, component_two])
         db_session.flush()
@@ -247,23 +250,26 @@ class TestWorkOrdersAPI:
             name="Laser Seq",
             work_center_type="laser",
             is_active=True,
+            company_id=1,
         )
         bend_wc = WorkCenter(
             code="WC-BEND-SEQ",
             name="Bend Seq",
             work_center_type="press",
             is_active=True,
+            company_id=1,
         )
         weld_wc = WorkCenter(
             code="WC-WELD-SEQ",
             name="Weld Seq",
             work_center_type="weld",
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([laser_wc, bend_wc, weld_wc])
         db_session.flush()
 
-        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True)
+        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add(bom)
         db_session.flush()
         db_session.add_all(
@@ -276,6 +282,7 @@ class TestWorkOrdersAPI:
                     item_type="make",
                     line_type="component",
                     unit_of_measure="each",
+                    company_id=1,
                 ),
                 BOMItem(
                     bom_id=bom.id,
@@ -285,6 +292,7 @@ class TestWorkOrdersAPI:
                     item_type="make",
                     line_type="component",
                     unit_of_measure="each",
+                    company_id=1,
                 ),
             ]
         )
@@ -385,6 +393,7 @@ class TestWorkOrdersAPI:
             part_type="assembly",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         component = Part(
             part_number="CMP-FINAL-001",
@@ -392,6 +401,7 @@ class TestWorkOrdersAPI:
             part_type="manufactured",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([assembly, component])
         db_session.flush()
@@ -401,23 +411,26 @@ class TestWorkOrdersAPI:
             name="Machine Final",
             work_center_type="machine",
             is_active=True,
+            company_id=1,
         )
         assembly_wc = WorkCenter(
             code="WC-ASM-FINAL",
             name="Assembly Final",
             work_center_type="assembly",
             is_active=True,
+            company_id=1,
         )
         inspect_wc = WorkCenter(
             code="WC-INSP-FINAL",
             name="Final Inspection",
             work_center_type="inspection",
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([machine_wc, assembly_wc, inspect_wc])
         db_session.flush()
 
-        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True)
+        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add(bom)
         db_session.flush()
         db_session.add(
@@ -429,6 +442,7 @@ class TestWorkOrdersAPI:
                 item_type="make",
                 line_type="component",
                 unit_of_measure="each",
+                company_id=1,
             )
         )
 
@@ -504,6 +518,7 @@ class TestWorkOrdersAPI:
             part_type="assembly",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         component = Part(
             part_number="CMP-SEQ-001",
@@ -511,6 +526,7 @@ class TestWorkOrdersAPI:
             part_type="manufactured",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([assembly, component])
         db_session.flush()
@@ -520,17 +536,19 @@ class TestWorkOrdersAPI:
             name="Cut Seq",
             work_center_type="laser",
             is_active=True,
+            company_id=1,
         )
         weld_wc = WorkCenter(
             code="WC-WELD-SEQ2",
             name="Weld Seq",
             work_center_type="weld",
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([cut_wc, weld_wc])
         db_session.flush()
 
-        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True)
+        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add(bom)
         db_session.flush()
         db_session.add(
@@ -542,6 +560,7 @@ class TestWorkOrdersAPI:
                 item_type="make",
                 line_type="component",
                 unit_of_measure="each",
+                company_id=1,
             )
         )
 

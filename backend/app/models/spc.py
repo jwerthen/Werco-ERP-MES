@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class ChartType(str, enum.Enum):
@@ -15,7 +16,7 @@ class ChartType(str, enum.Enum):
     U_CHART = "u_chart"
 
 
-class SPCCharacteristic(Base):
+class SPCCharacteristic(Base, TenantMixin):
     """SPC Characteristic - defines what measurement is being tracked"""
     __tablename__ = "spc_characteristics"
 
@@ -45,7 +46,7 @@ class SPCCharacteristic(Base):
     capability_studies = relationship("SPCProcessCapability", back_populates="characteristic", cascade="all, delete-orphan")
 
 
-class SPCControlLimit(Base):
+class SPCControlLimit(Base, TenantMixin):
     """Calculated control limits for an SPC characteristic"""
     __tablename__ = "spc_control_limits"
 
@@ -68,7 +69,7 @@ class SPCControlLimit(Base):
     characteristic = relationship("SPCCharacteristic", back_populates="control_limits")
 
 
-class SPCMeasurement(Base):
+class SPCMeasurement(Base, TenantMixin):
     """Individual measurement data point for SPC"""
     __tablename__ = "spc_measurements"
 
@@ -92,7 +93,7 @@ class SPCMeasurement(Base):
     work_order = relationship("WorkOrder")
 
 
-class SPCProcessCapability(Base):
+class SPCProcessCapability(Base, TenantMixin):
     """Cp/Cpk process capability study results"""
     __tablename__ = "spc_process_capabilities"
 

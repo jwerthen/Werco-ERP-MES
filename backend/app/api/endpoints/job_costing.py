@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.job_costing import JobCost, CostEntry, JobCostStatus, CostEntryType, CostEntrySource
 from app.models.work_order import WorkOrder, WorkOrderOperation
@@ -191,9 +191,10 @@ def list_job_costs(
     date_to: Optional[date] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all job costs with optional filtering."""
-    query = db.query(JobCost).options(
+    query = db.query(JobCost).filter(JobCost.company_id == company_id).options(
         joinedload(JobCost.work_order).joinedload(WorkOrder.part),
         joinedload(JobCost.entries),
     )
@@ -215,9 +216,10 @@ def list_job_costs(
 def get_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get summary statistics for job costing dashboard."""
-    all_jobs = db.query(JobCost).options(
+    all_jobs = db.query(JobCost).filter(JobCost.company_id == company_id).options(
         joinedload(JobCost.entries),
     ).all()
 
@@ -267,12 +269,13 @@ def get_job_cost(
     job_cost_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get a single job cost with all details."""
     job_cost = db.query(JobCost).options(
         joinedload(JobCost.work_order).joinedload(WorkOrder.part),
         joinedload(JobCost.entries),
-    ).filter(JobCost.id == job_cost_id).first()
+    ).filter(JobCost.id == job_cost_id, JobCost.company_id == company_id).first()
 
     if not job_cost:
         raise HTTPException(status_code=404, detail="Job cost not found")
@@ -285,6 +288,7 @@ def create_job_cost(
     data: JobCostCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new job cost record for a work order."""
     # Verify work order exists
@@ -314,6 +318,7 @@ def create_job_cost(
         job_cost.margin_amount = data.revenue
         job_cost.margin_percent = 100.0
 
+    job_cost.company_id = company_id
     db.add(job_cost)
     db.commit()
     db.refresh(job_cost)
@@ -333,6 +338,7 @@ def update_job_cost(
     data: JobCostUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a job cost record."""
     job_cost = db.query(JobCost).options(

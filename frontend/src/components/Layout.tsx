@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import CompanySwitcher from './CompanySwitcher';
+import ReadOnlyBanner from './ReadOnlyBanner';
 import { TourMenu } from './Tour';
 import SessionWarningModal from './SessionWarningModal';
 import GlobalSearch, { useGlobalSearch } from './GlobalSearch';
@@ -137,6 +139,7 @@ const navigation: NavItem[] = [
       { name: 'Supplier Scorecards', href: '/supplier-scorecards', icon: ChartBarIcon },
       { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
       { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
+      { name: 'Platform Overview', href: '/platform', icon: BuildingOfficeIcon, adminOnly: true },
       { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },
     ],
   },
@@ -513,6 +516,9 @@ export default function Layout({ children }: LayoutProps) {
 
             {/* Right side actions */}
             <div className="flex items-center gap-2" data-tour="user-menu">
+              {/* Company switcher (platform admins) */}
+              <CompanySwitcher />
+
               {/* Quick search button */}
               <button
                 onClick={globalSearch.open}
@@ -558,6 +564,9 @@ export default function Layout({ children }: LayoutProps) {
             </div>
           </div>
         </header>
+
+        {/* Read-only banner when viewing another company */}
+        <ReadOnlyBanner />
 
         {/* Main content - extra bottom padding for mobile nav */}
         <main id="main-content" className="flex-1 p-4 sm:p-6 lg:p-8 pb-20 lg:pb-8" role="main" tabIndex={-1}>

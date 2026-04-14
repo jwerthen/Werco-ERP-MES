@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.qms_standard import QMSStandard, QMSClause, QMSClauseEvidence
 from app.schemas.qms_standard import (
@@ -32,9 +32,10 @@ def list_standards(
     active_only: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all QMS standards with compliance summary counts."""
-    query = db.query(QMSStandard)
+    query = db.query(QMSStandard).filter(QMSStandard.company_id == company_id)
     if active_only:
         query = query.filter(QMSStandard.is_active == True)
 
@@ -65,12 +66,14 @@ def create_standard(
     data: QMSStandardCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new QMS standard."""
     standard = QMSStandard(
         **data.model_dump(),
         created_by=current_user.id,
     )
+    standard.company_id = company_id
     db.add(standard)
     db.commit()
     db.refresh(standard)
@@ -290,6 +293,7 @@ def get_standard(
     standard_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get a QMS standard with all its clauses and evidence."""
     standard = (
@@ -298,7 +302,7 @@ def get_standard(
             joinedload(QMSStandard.clauses)
             .joinedload(QMSClause.evidence_links)
         )
-        .filter(QMSStandard.id == standard_id)
+        .filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id)
         .first()
     )
     if not standard:
@@ -312,9 +316,10 @@ def update_standard(
     data: QMSStandardUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a QMS standard."""
-    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id).first()
+    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id).first()
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
@@ -331,9 +336,10 @@ def delete_standard(
     standard_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Delete a QMS standard and all its clauses/evidence (Admin only)."""
-    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id).first()
+    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id).first()
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
     db.delete(standard)

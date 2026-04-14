@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime, date
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class TransactionType(str, enum.Enum):
@@ -33,7 +34,7 @@ class CycleCountStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
-class InventoryLocation(Base):
+class InventoryLocation(Base, TenantMixin):
     """Warehouse locations/bins"""
     __tablename__ = "inventory_locations"
     
@@ -67,7 +68,7 @@ class InventoryLocation(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-class CycleCount(Base):
+class CycleCount(Base, TenantMixin):
     """Cycle count session"""
     __tablename__ = "cycle_counts"
     
@@ -104,7 +105,7 @@ class CycleCount(Base):
     items = relationship("CycleCountItem", back_populates="cycle_count", cascade="all, delete-orphan")
 
 
-class CycleCountItem(Base):
+class CycleCountItem(Base, TenantMixin):
     """Individual item in a cycle count"""
     __tablename__ = "cycle_count_items"
     
@@ -134,7 +135,7 @@ class CycleCountItem(Base):
     inventory_item = relationship("InventoryItem")
 
 
-class InventoryItem(Base):
+class InventoryItem(Base, TenantMixin):
     """Inventory on hand - tracks quantity at location"""
     __tablename__ = "inventory_items"
     
@@ -181,7 +182,7 @@ class InventoryItem(Base):
     part = relationship("Part", back_populates="inventory_items")
 
 
-class InventoryTransaction(Base):
+class InventoryTransaction(Base, TenantMixin):
     """Transaction history for inventory movements"""
     __tablename__ = "inventory_transactions"
     

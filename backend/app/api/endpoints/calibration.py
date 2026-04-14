@@ -3,7 +3,7 @@ from datetime import datetime, date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.calibration import Equipment, CalibrationRecord, CalibrationStatus
 from pydantic import BaseModel
@@ -116,10 +116,11 @@ def list_equipment(
     status: Optional[str] = None,
     include_inactive: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all equipment"""
-    query = db.query(Equipment)
+    query = db.query(Equipment).filter(Equipment.company_id == company_id)
     
     if not include_inactive:
         query = query.filter(Equipment.is_active == True)
@@ -165,12 +166,14 @@ def list_equipment(
 def get_equipment_due_soon(
     days: int = 30,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get equipment due for calibration within specified days"""
     cutoff = date.today() + timedelta(days=days)
-    
+
     equipment = db.query(Equipment).filter(
+        Equipment.company_id == company_id,
         Equipment.is_active == True,
         Equipment.next_calibration_date <= cutoff
     ).order_by(Equipment.next_calibration_date).all()
@@ -189,13 +192,15 @@ def get_equipment_due_soon(
 def create_equipment(
     equipment_in: EquipmentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create new equipment"""
-    if db.query(Equipment).filter(Equipment.equipment_id == equipment_in.equipment_id).first():
+    if db.query(Equipment).filter(Equipment.equipment_id == equipment_in.equipment_id, Equipment.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Equipment ID already exists")
     
     equipment = Equipment(**equipment_in.model_dump())
+    equipment.company_id = company_id
     db.add(equipment)
     db.commit()
     db.refresh(equipment)
@@ -225,10 +230,11 @@ def create_equipment(
 def get_equipment(
     equipment_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get equipment with calibration history"""
-    equipment = db.query(Equipment).filter(Equipment.id == equipment_id).first()
+    equipment = db.query(Equipment).filter(Equipment.id == equipment_id, Equipment.company_id == company_id).first()
     if not equipment:
         raise HTTPException(status_code=404, detail="Equipment not found")
     
@@ -247,10 +253,11 @@ def update_equipment(
     equipment_id: int,
     equipment_in: EquipmentUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update equipment"""
-    equipment = db.query(Equipment).filter(Equipment.id == equipment_id).first()
+    equipment = db.query(Equipment).filter(Equipment.id == equipment_id, Equipment.company_id == company_id).first()
     if not equipment:
         raise HTTPException(status_code=404, detail="Equipment not found")
     
@@ -294,10 +301,11 @@ def record_calibration(
     equipment_id: int,
     record_in: CalibrationRecordCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Record a calibration for equipment"""
-    equipment = db.query(Equipment).filter(Equipment.id == equipment_id).first()
+    equipment = db.query(Equipment).filter(Equipment.id == equipment_id, Equipment.company_id == company_id).first()
     if not equipment:
         raise HTTPException(status_code=404, detail="Equipment not found")
     

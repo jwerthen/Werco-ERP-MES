@@ -19,21 +19,30 @@ def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
-    user_id = verify_token(token)
+
+    payload = verify_token(token)
+    if payload is None:
+        raise credentials_exception
+
+    user_id = payload.get("user_id")
     if user_id is None:
         raise credentials_exception
-    
+
     user = db.query(User).filter(User.id == int(user_id)).first()
     if user is None:
         raise credentials_exception
-    
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is disabled"
         )
-    
+
+    # Attach active company context from JWT (may differ from user.company_id
+    # when a platform admin switches to view another company)
+    token_company_id = payload.get("company_id")
+    user._active_company_id = token_company_id if token_company_id else user.company_id
+
     return user
 
 
@@ -45,10 +54,21 @@ def get_current_active_user(
     return current_user
 
 
+def get_current_company_id(
+    current_user: User = Depends(get_current_user)
+) -> int:
+    """Get the active company_id for the current request.
+    For normal users this is their own company.
+    For platform admins who switched context, this is the viewed company."""
+    return current_user._active_company_id
+
+
 def require_role(allowed_roles: list[UserRole]):
     """Dependency to require specific roles"""
     def role_checker(current_user: User = Depends(get_current_user)) -> User:
         if current_user.is_superuser:
+            return current_user
+        if current_user.role == UserRole.PLATFORM_ADMIN:
             return current_user
         if current_user.role not in allowed_roles:
             raise HTTPException(
@@ -59,8 +79,20 @@ def require_role(allowed_roles: list[UserRole]):
     return role_checker
 
 
+def require_platform_admin(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """Require PLATFORM_ADMIN role or superuser status."""
+    if current_user.role == UserRole.PLATFORM_ADMIN or current_user.is_superuser:
+        return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Platform admin access required"
+    )
+
+
 def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
-    if not current_user.is_superuser and current_user.role != UserRole.ADMIN:
+    if not current_user.is_superuser and current_user.role not in (UserRole.ADMIN, UserRole.PLATFORM_ADMIN):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required"

@@ -139,7 +139,8 @@ class TestMatchPart:
             part_number="P-123.45",
             name="Test Part with Dots",
             part_type="purchased",
-            unit_of_measure="each"
+            unit_of_measure="each",
+            company_id=1,
         )
         db_session.add(part)
         db_session.commit()

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from pydantic import BaseModel, Field
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.oee import OEERecord, OEETarget
 from app.models.work_center import WorkCenter
@@ -232,9 +232,10 @@ def list_oee_records(
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List OEE records with optional filters."""
-    query = db.query(OEERecord).options(joinedload(OEERecord.work_center))
+    query = db.query(OEERecord).filter(OEERecord.company_id == company_id).options(joinedload(OEERecord.work_center))
 
     if work_center_id:
         query = query.filter(OEERecord.work_center_id == work_center_id)
@@ -254,11 +255,12 @@ def get_oee_record(
     record_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get a single OEE record."""
     record = db.query(OEERecord).options(
         joinedload(OEERecord.work_center)
-    ).filter(OEERecord.id == record_id).first()
+    ).filter(OEERecord.id == record_id, OEERecord.company_id == company_id).first()
 
     if not record:
         raise HTTPException(status_code=404, detail="OEE record not found")
@@ -270,6 +272,7 @@ def create_oee_record(
     record_in: OEERecordCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new OEE record with auto-calculated OEE metrics."""
     # Verify work center exists
@@ -293,6 +296,7 @@ def create_oee_record(
         **oee_calcs,
         created_by=current_user.id,
     )
+    record.company_id = company_id
     db.add(record)
     db.commit()
     db.refresh(record)
@@ -311,11 +315,12 @@ def update_oee_record(
     record_in: OEERecordUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an OEE record and recalculate OEE metrics."""
     record = db.query(OEERecord).options(
         joinedload(OEERecord.work_center)
-    ).filter(OEERecord.id == record_id).first()
+    ).filter(OEERecord.id == record_id, OEERecord.company_id == company_id).first()
 
     if not record:
         raise HTTPException(status_code=404, detail="OEE record not found")
@@ -347,9 +352,10 @@ def delete_oee_record(
     record_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Delete an OEE record."""
-    record = db.query(OEERecord).filter(OEERecord.id == record_id).first()
+    record = db.query(OEERecord).filter(OEERecord.id == record_id, OEERecord.company_id == company_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="OEE record not found")
 
@@ -694,9 +700,10 @@ def get_six_big_losses(
 def list_oee_targets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all OEE targets."""
-    targets = db.query(OEETarget).options(
+    targets = db.query(OEETarget).filter(OEETarget.company_id == company_id).options(
         joinedload(OEETarget.work_center)
     ).all()
 
@@ -721,6 +728,7 @@ def create_oee_target(
     target_in: OEETargetCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create or update an OEE target for a work center."""
     wc = db.query(WorkCenter).filter(WorkCenter.id == target_in.work_center_id).first()
@@ -742,6 +750,7 @@ def create_oee_target(
         target = existing
     else:
         target = OEETarget(**target_in.model_dump())
+        target.company_id = company_id
         db.add(target)
         db.commit()
         db.refresh(target)

@@ -6,16 +6,20 @@ from sqlalchemy import or_
 import os
 import uuid
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.document import Document, DocumentType
 from pydantic import BaseModel
 
 router = APIRouter()
 
-# Create uploads directory
-UPLOAD_DIR = "/app/uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Create uploads directory (use env var for non-Docker environments)
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/app/uploads")
+try:
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+except OSError:
+    UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "uploads")
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 class DocumentResponse(BaseModel):
@@ -64,9 +68,10 @@ def list_documents(
     document_type: Optional[str] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    query = db.query(Document)
+    query = db.query(Document).filter(Document.company_id == company_id)
     
     if part_id:
         query = query.filter(Document.part_id == part_id)
@@ -100,7 +105,8 @@ async def upload_document(
     vendor_id: int = Form(None),
     revision: str = Form("A"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Upload a new document"""
     # Allowed file extensions and MIME types
@@ -172,6 +178,7 @@ async def upload_document(
         created_by=current_user.id
     )
     
+    document.company_id = company_id
     db.add(document)
     db.commit()
     db.refresh(document)
@@ -183,9 +190,10 @@ async def upload_document(
 def get_document(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
@@ -195,11 +203,12 @@ def get_document(
 def download_document(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     from fastapi.responses import FileResponse
     
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
@@ -217,9 +226,10 @@ def download_document(
 def delete_document(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     

@@ -14,7 +14,7 @@ class TestCustomersAPI:
     def test_get_customer_names(
         self, client: TestClient, auth_headers: dict, db_session: Session
     ):
-        customer = Customer(name="Acme Aerospace", code="ACM001", is_active=True)
+        customer = Customer(name="Acme Aerospace", code="ACM001", is_active=True, company_id=1)
         db_session.add(customer)
         db_session.commit()
 
@@ -26,8 +26,8 @@ class TestCustomersAPI:
     def test_customer_stats_includes_parts_assemblies_and_work_orders(
         self, client: TestClient, auth_headers: dict, db_session: Session
     ):
-        customer = Customer(name="Acme Aerospace", code="ACM001", is_active=True)
-        other_customer = Customer(name="Beta Systems", code="BET001", is_active=True)
+        customer = Customer(name="Acme Aerospace", code="ACM001", is_active=True, company_id=1)
+        other_customer = Customer(name="Beta Systems", code="BET001", is_active=True, company_id=1)
         db_session.add_all([customer, other_customer])
         db_session.flush()
 
@@ -38,6 +38,7 @@ class TestCustomersAPI:
             unit_of_measure="each",
             customer_name=customer.name,
             is_active=True,
+            company_id=1,
         )
         part = Part(
             part_number="PRT-100",
@@ -46,6 +47,7 @@ class TestCustomersAPI:
             unit_of_measure="each",
             customer_name=customer.name,
             is_active=True,
+            company_id=1,
         )
         unrelated_part = Part(
             part_number="PRT-200",
@@ -54,6 +56,7 @@ class TestCustomersAPI:
             unit_of_measure="each",
             customer_name=other_customer.name,
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([assembly, part, unrelated_part])
         db_session.flush()
@@ -63,6 +66,7 @@ class TestCustomersAPI:
             part_id=part.id,
             quantity_ordered=10,
             status=WorkOrderStatus.RELEASED,
+            company_id=1,
         )
         past_work_order = WorkOrder(
             work_order_number="WO-PAST-001",
@@ -70,6 +74,7 @@ class TestCustomersAPI:
             quantity_ordered=6,
             status=WorkOrderStatus.COMPLETE,
             customer_name=customer.name,
+            company_id=1,
         )
         by_name_work_order = WorkOrder(
             work_order_number="WO-CURRENT-002",
@@ -77,6 +82,7 @@ class TestCustomersAPI:
             quantity_ordered=4,
             status=WorkOrderStatus.DRAFT,
             customer_name=customer.name,
+            company_id=1,
         )
         other_customer_work_order = WorkOrder(
             work_order_number="WO-OTHER-001",
@@ -84,6 +90,7 @@ class TestCustomersAPI:
             quantity_ordered=8,
             status=WorkOrderStatus.RELEASED,
             customer_name=other_customer.name,
+            company_id=1,
         )
         db_session.add_all(
             [

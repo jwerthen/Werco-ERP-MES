@@ -3,7 +3,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.mrp import MRPRun, MRPRequirement, MRPAction, MRPRunStatus, PlanningAction
 from app.models.part import Part
@@ -23,10 +23,11 @@ def list_mrp_runs(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List MRP runs"""
-    runs = db.query(MRPRun).order_by(MRPRun.created_at.desc()).offset(skip).limit(limit).all()
+    runs = db.query(MRPRun).filter(MRPRun.company_id == company_id).order_by(MRPRun.created_at.desc()).offset(skip).limit(limit).all()
     return runs
 
 
@@ -55,13 +56,14 @@ def create_mrp_run(
 def get_mrp_run(
     run_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get MRP run details with requirements and actions"""
     run = db.query(MRPRun).options(
         joinedload(MRPRun.requirements).joinedload(MRPRequirement.part),
         joinedload(MRPRun.actions).joinedload(MRPAction.part)
-    ).filter(MRPRun.id == run_id).first()
+    ).filter(MRPRun.id == run_id, MRPRun.company_id == company_id).first()
     
     if not run:
         raise HTTPException(status_code=404, detail="MRP run not found")
@@ -191,10 +193,12 @@ def get_mrp_actions(
 @router.get("/runs/latest", response_model=Optional[MRPRunResponse])
 def get_latest_mrp_run(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get the most recent completed MRP run"""
     run = db.query(MRPRun).filter(
+        MRPRun.company_id == company_id,
         MRPRun.status == MRPRunStatus.COMPLETE
     ).order_by(MRPRun.completed_at.desc()).first()
     
@@ -204,11 +208,13 @@ def get_latest_mrp_run(
 @router.get("/shortages")
 def get_current_shortages(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get summary of current material shortages from latest MRP run"""
     # Get latest completed run
     latest_run = db.query(MRPRun).filter(
+        MRPRun.company_id == company_id,
         MRPRun.status == MRPRunStatus.COMPLETE
     ).order_by(MRPRun.completed_at.desc()).first()
     
@@ -296,10 +302,11 @@ def process_mrp_action(
 def delete_mrp_run(
     run_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Delete an MRP run and all its data"""
-    run = db.query(MRPRun).filter(MRPRun.id == run_id).first()
+    run = db.query(MRPRun).filter(MRPRun.id == run_id, MRPRun.company_id == company_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="MRP run not found")
     

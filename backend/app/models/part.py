@@ -1,9 +1,9 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
-from app.db.mixins import SoftDeleteMixin
+from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
 class PartType(str, enum.Enum):
@@ -26,11 +26,14 @@ class UnitOfMeasure(str, enum.Enum):
     LITERS = "liters"
 
 
-class Part(Base, SoftDeleteMixin):
+class Part(Base, SoftDeleteMixin, TenantMixin):
     __tablename__ = "parts"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'part_number', name='uq_parts_company_part_number'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    part_number = Column(String(100), unique=True, index=True, nullable=False)
+    part_number = Column(String(100), index=True, nullable=False)
     revision = Column(String(20), default="A")
     name = Column(String(255), nullable=False)
     description = Column(Text)

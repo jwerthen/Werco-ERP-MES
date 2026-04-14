@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POStatus
 from app.models.part import Part, PartType
@@ -331,7 +331,8 @@ async def upload_and_extract_invoice(
 def create_po_from_upload(
     data: POCreateFromUpload,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Create a purchase order from extracted and reviewed data.
@@ -364,6 +365,7 @@ def create_po_from_upload(
             is_active=True,
             is_approved=False
         )
+        new_vendor.company_id = company_id
         db.add(new_vendor)
         db.flush()
         vendor_id = new_vendor.id
@@ -412,6 +414,7 @@ def create_po_from_upload(
             is_active=True,
             status="active"
         )
+        new_part.company_id = company_id
         db.add(new_part)
         db.flush()
         part_id_map[part_number] = new_part.id
@@ -443,6 +446,7 @@ def create_po_from_upload(
         source_document_path=data.pdf_path,
         created_by=current_user.id
     )
+    po.company_id = company_id
     db.add(po)
     db.flush()
     
@@ -458,7 +462,8 @@ def create_po_from_upload(
             quantity_ordered=item.quantity_ordered,
             unit_price=item.unit_price,
             line_total=line_total,
-            notes=item.notes
+            notes=item.notes,
+            company_id=company_id,
         )
         db.add(po_line)
         subtotal += line_total

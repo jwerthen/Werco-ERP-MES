@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
 
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.models.quote import Quote, QuoteLine
@@ -86,14 +86,15 @@ class WorkOrderPrintData(BaseModel):
 def get_work_order_print_data(
     work_order_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get all data needed to print a work order."""
     wo = db.query(WorkOrder).options(
         joinedload(WorkOrder.part),
         joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.work_center),
         joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.component_part)
-    ).filter(WorkOrder.id == work_order_id).first()
+    ).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -186,12 +187,13 @@ class QuotePrintData(BaseModel):
 def get_quote_print_data(
     quote_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get all data needed to print a quote."""
     quote = db.query(Quote).options(
         joinedload(Quote.lines).joinedload(QuoteLine.part)
-    ).filter(Quote.id == quote_id).first()
+    ).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
     
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
@@ -269,13 +271,14 @@ class PurchaseOrderPrintData(BaseModel):
 def get_purchase_order_print_data(
     po_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get all data needed to print a purchase order."""
     po = db.query(PurchaseOrder).options(
         joinedload(PurchaseOrder.vendor),
         joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part)
-    ).filter(PurchaseOrder.id == po_id).first()
+    ).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.work_center import WorkCenter
 from app.models.operator_certification import (
@@ -338,10 +338,11 @@ def list_certifications(
     status: Optional[str] = None,
     expiring_within_days: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all certifications with filters"""
-    query = db.query(OperatorCertification)
+    query = db.query(OperatorCertification).filter(OperatorCertification.company_id == company_id)
 
     if user_id:
         query = query.filter(OperatorCertification.user_id == user_id)
@@ -382,7 +383,8 @@ def get_certification(
 def create_certification(
     cert_in: CertificationCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create certification"""
     data = cert_in.model_dump()
@@ -390,6 +392,7 @@ def create_certification(
     data["status"] = CertificationStatus(data["status"])
 
     cert = OperatorCertification(**data)
+    cert.company_id = company_id
     db.add(cert)
     db.commit()
     db.refresh(cert)
@@ -401,10 +404,11 @@ def update_certification(
     cert_id: int,
     cert_in: CertificationUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update certification"""
-    cert = db.query(OperatorCertification).filter(OperatorCertification.id == cert_id).first()
+    cert = db.query(OperatorCertification).filter(OperatorCertification.id == cert_id, OperatorCertification.company_id == company_id).first()
     if not cert:
         raise HTTPException(status_code=404, detail="Certification not found")
 
@@ -426,10 +430,11 @@ def update_certification(
 def delete_certification(
     cert_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Delete certification"""
-    cert = db.query(OperatorCertification).filter(OperatorCertification.id == cert_id).first()
+    cert = db.query(OperatorCertification).filter(OperatorCertification.id == cert_id, OperatorCertification.company_id == company_id).first()
     if not cert:
         raise HTTPException(status_code=404, detail="Certification not found")
 
@@ -460,10 +465,11 @@ def list_training(
     date_to: Optional[date] = None,
     training_type: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List training records with filters"""
-    query = db.query(TrainingRecord)
+    query = db.query(TrainingRecord).filter(TrainingRecord.company_id == company_id)
 
     if user_id:
         query = query.filter(TrainingRecord.user_id == user_id)
@@ -482,12 +488,14 @@ def list_training(
 def create_training(
     training_in: TrainingCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create training record"""
     data = training_in.model_dump()
     data["recorded_by"] = current_user.id
     record = TrainingRecord(**data)
+    record.company_id = company_id
     db.add(record)
     db.commit()
     db.refresh(record)

@@ -3,7 +3,7 @@ from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.work_order import WorkOrder, WorkOrderStatus
@@ -78,9 +78,10 @@ def generate_shipment_number(db: Session) -> str:
 def list_shipments(
     status: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    query = db.query(Shipment).options(
+    query = db.query(Shipment).filter(Shipment.company_id == company_id).options(
         joinedload(Shipment.work_order)
     )
     
@@ -113,12 +114,13 @@ def list_shipments(
 def get_shipment(
     shipment_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get single shipment with full details"""
     shipment = db.query(Shipment).options(
         joinedload(Shipment.work_order).joinedload(WorkOrder.part)
-    ).filter(Shipment.id == shipment_id).first()
+    ).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
     
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
@@ -151,10 +153,11 @@ def get_shipment(
 @router.get("/ready-to-ship")
 def get_ready_to_ship(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get completed work orders ready to ship"""
-    work_orders = db.query(WorkOrder).options(
+    work_orders = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(
         joinedload(WorkOrder.part)
     ).filter(
         WorkOrder.status == WorkOrderStatus.COMPLETE
@@ -186,7 +189,8 @@ def get_ready_to_ship(
 def create_shipment(
     shipment_in: ShipmentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new shipment"""
     wo = db.query(WorkOrder).filter(WorkOrder.id == shipment_in.work_order_id).first()
@@ -213,7 +217,7 @@ def create_shipment(
         packing_slip_number=shipment_number,
         created_by=current_user.id
     )
-    
+    shipment.company_id = company_id
     db.add(shipment)
     db.commit()
     db.refresh(shipment)
@@ -240,10 +244,11 @@ def mark_shipped(
     shipment_id: int,
     tracking_number: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Mark shipment as shipped"""
-    shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
+    shipment = db.query(Shipment).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
     
@@ -268,11 +273,12 @@ def update_shipment(
     shipment_id: int,
     shipment_in: ShipmentUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     shipment = db.query(Shipment).options(
         joinedload(Shipment.work_order)
-    ).filter(Shipment.id == shipment_id).first()
+    ).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
     
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")

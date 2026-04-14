@@ -1,7 +1,8 @@
-from sqlalchemy import Column, Integer, String, Float, Text, Boolean, DateTime, JSON, Enum as SQLEnum, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Text, Boolean, DateTime, JSON, Enum as SQLEnum, ForeignKey, UniqueConstraint
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class ProcessType(str, enum.Enum):
@@ -48,7 +49,7 @@ class MachineType(str, enum.Enum):
     PUNCH_PRESS = "punch_press"
 
 
-class QuoteMaterial(Base):
+class QuoteMaterial(Base, TenantMixin):
     """Materials available for quoting with pricing"""
     __tablename__ = "quote_materials"
     
@@ -78,7 +79,7 @@ class QuoteMaterial(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class QuoteMachine(Base):
+class QuoteMachine(Base, TenantMixin):
     """Machine configurations for quoting"""
     __tablename__ = "quote_machines"
     
@@ -108,7 +109,7 @@ class QuoteMachine(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class QuoteFinish(Base):
+class QuoteFinish(Base, TenantMixin):
     """Finishing operations with pricing"""
     __tablename__ = "quote_finishes"
     
@@ -131,12 +132,15 @@ class QuoteFinish(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-class QuoteSettings(Base):
-    """Global quote settings"""
+class QuoteSettings(Base, TenantMixin):
+    """Per-company quote settings"""
     __tablename__ = "quote_settings"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'setting_key', name='uq_quote_settings_company_key'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    setting_key = Column(String(100), unique=True, nullable=False)
+    setting_key = Column(String(100), nullable=False)
     setting_value = Column(Text)
     setting_type = Column(String(50))  # number, text, json
     description = Column(Text)
@@ -152,7 +156,7 @@ class QuoteSettings(Base):
 # - tolerance_surcharges: {"+/-.005": 1.0, "+/-.001": 1.25, "+/-.0005": 1.5}
 
 
-class LaborRate(Base):
+class LaborRate(Base, TenantMixin):
     """Labor rates by job function/role"""
     __tablename__ = "labor_rates"
     
@@ -165,7 +169,7 @@ class LaborRate(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class OutsideService(Base):
+class OutsideService(Base, TenantMixin):
     """Outside/vendor services with default pricing"""
     __tablename__ = "outside_services"
     
@@ -183,7 +187,7 @@ class OutsideService(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class SettingsAuditLog(Base):
+class SettingsAuditLog(Base, TenantMixin):
     """Audit log for all settings changes (AS9100D compliance)"""
     __tablename__ = "settings_audit_log"
     

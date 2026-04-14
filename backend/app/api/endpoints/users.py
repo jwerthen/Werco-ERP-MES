@@ -6,7 +6,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.core.security import get_password_hash, verify_password
 from pydantic import BaseModel, EmailStr
@@ -107,10 +107,11 @@ def _generate_system_password() -> str:
 def list_users(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all users"""
-    query = db.query(User)
+    query = db.query(User).filter(User.company_id == company_id)
     if not include_inactive:
         query = query.filter(User.is_active == True)
     users = query.order_by(User.last_name, User.first_name).all()
@@ -127,10 +128,11 @@ def get_current_user_info(current_user: User = Depends(get_current_user)):
 def get_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get user by ID"""
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -140,15 +142,16 @@ def get_user(
 def create_user(
     user_in: UserCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new user (Admin only)"""
     # Check if email exists
-    if db.query(User).filter(User.email == user_in.email).first():
+    if db.query(User).filter(User.email == user_in.email, User.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     
     # Check if employee_id exists
-    if db.query(User).filter(User.employee_id == user_in.employee_id).first():
+    if db.query(User).filter(User.employee_id == user_in.employee_id, User.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Employee ID already exists")
     
     user = User(
@@ -160,6 +163,7 @@ def create_user(
         role=user_in.role,
         department=user_in.department,
     )
+    user.company_id = company_id
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -171,7 +175,8 @@ async def import_users_csv(
     file: UploadFile = File(...),
     default_password: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Import users from CSV (Admin only)."""
     if not file.filename or not file.filename.lower().endswith(".csv"):
@@ -201,11 +206,11 @@ async def import_users_csv(
 
     existing_employee_ids = {
         (value or "").strip().lower()
-        for (value,) in db.query(User.employee_id).all()
+        for (value,) in db.query(User.employee_id).filter(User.company_id == company_id).all()
     }
     existing_emails = {
         (value or "").strip().lower()
-        for (value,) in db.query(User.email).all()
+        for (value,) in db.query(User.email).filter(User.company_id == company_id).all()
     }
 
     errors: List[UserCsvImportError] = []
@@ -323,6 +328,7 @@ async def import_users_csv(
                 role=role,
                 department=department,
             )
+            user.company_id = company_id
             db.add(user)
             db.commit()
             db.refresh(user)
@@ -356,10 +362,11 @@ def update_user(
     user_id: int,
     user_in: UserUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a user (Admin only)"""
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -367,7 +374,7 @@ def update_user(
     
     # Check email uniqueness if changing
     if "email" in update_data and update_data["email"] != user.email:
-        if db.query(User).filter(User.email == update_data["email"]).first():
+        if db.query(User).filter(User.email == update_data["email"], User.company_id == company_id).first():
             raise HTTPException(status_code=400, detail="Email already registered")
     
     for field, value in update_data.items():
@@ -383,10 +390,11 @@ def reset_user_password(
     user_id: int,
     password_data: PasswordReset,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Reset a user's password (Admin only)"""
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -416,13 +424,14 @@ def change_own_password(
 def deactivate_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Deactivate a user (Admin only)"""
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
-    
-    user = db.query(User).filter(User.id == user_id).first()
+
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -436,10 +445,11 @@ def deactivate_user(
 def activate_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Reactivate a user (Admin only)"""
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     

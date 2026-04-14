@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class QuoteStatus(str, enum.Enum):
@@ -15,7 +16,7 @@ class QuoteStatus(str, enum.Enum):
     CONVERTED = "converted"
 
 
-class Quote(Base):
+class Quote(Base, TenantMixin):
     """Quote/Estimate for customer jobs"""
     __tablename__ = "quotes"
     
@@ -63,7 +64,7 @@ class Quote(Base):
     estimates = relationship("QuoteEstimate", back_populates="quote")
 
 
-class QuoteLine(Base):
+class QuoteLine(Base, TenantMixin):
     """Line items for a quote"""
     __tablename__ = "quote_lines"
     

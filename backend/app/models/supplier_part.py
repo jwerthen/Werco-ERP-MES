@@ -2,9 +2,10 @@ from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, DateTim
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
-class SupplierPartMapping(Base):
+class SupplierPartMapping(Base, TenantMixin):
     """Maps supplier/vendor part numbers to internal parts"""
     __tablename__ = "supplier_part_mappings"
     

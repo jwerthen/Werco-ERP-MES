@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.purchasing import (
     Vendor, PurchaseOrder, PurchaseOrderLine, POStatus, POReceipt, 
@@ -77,10 +77,11 @@ def log_audit(
 def get_open_purchase_orders(
     vendor_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get POs available for receiving (sent or partial status)"""
-    query = db.query(PurchaseOrder).options(
+    query = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == company_id).options(
         joinedload(PurchaseOrder.vendor),
         joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part)
     ).filter(
@@ -132,14 +133,15 @@ def get_open_purchase_orders(
 def get_purchase_order_for_receiving(
     po_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get full PO details for receiving"""
     po = db.query(PurchaseOrder).options(
         joinedload(PurchaseOrder.vendor),
         joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
         joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.receipts)
-    ).filter(PurchaseOrder.id == po_id).first()
+    ).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -192,7 +194,8 @@ def get_purchase_order_for_receiving(
 def receive_material(
     receipt_in: ReceiptCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Receive material against a PO line.
@@ -306,7 +309,8 @@ def receive_material(
 def get_inspection_queue(
     days_back: int = 30,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get items pending inspection, sorted by date received (oldest first)"""
     cutoff = datetime.utcnow() - timedelta(days=days_back)
@@ -351,7 +355,8 @@ def get_inspection_queue(
 def get_receipt_detail(
     receipt_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get full receipt details for inspection"""
     receipt = db.query(POReceipt).options(
@@ -407,7 +412,8 @@ def inspect_receipt(
     receipt_id: int,
     inspection: ReceiptInspection,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Complete inspection of a receipt.
@@ -625,7 +631,8 @@ def get_receiving_history(
     days: int = 30,
     status: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get receiving history with inspection results"""
     cutoff = datetime.utcnow() - timedelta(days=days)
@@ -672,7 +679,8 @@ def get_receiving_history(
 def get_receiving_stats(
     days: int = 30,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get receiving statistics for dashboard"""
     cutoff = datetime.utcnow() - timedelta(days=days)
@@ -724,7 +732,8 @@ def get_receiving_stats(
 @router.get("/locations")
 def get_receiving_locations(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get available locations for receiving"""
     locations = db.query(InventoryLocation).filter(

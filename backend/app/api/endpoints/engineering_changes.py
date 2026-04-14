@@ -7,7 +7,7 @@ from sqlalchemy import func, and_
 import json
 
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.engineering_change import (
     EngineeringChangeOrder, ECOApproval, ECOImplementationTask,
@@ -212,28 +212,33 @@ def get_eco_or_404(db: Session, eco_id: int) -> EngineeringChangeOrder:
 @router.get("/eco/dashboard", response_model=DashboardResponse)
 def get_eco_dashboard(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get ECO dashboard statistics"""
     now = datetime.utcnow()
     first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     pending_review = db.query(func.count(EngineeringChangeOrder.id)).filter(
+        EngineeringChangeOrder.company_id == company_id,
         EngineeringChangeOrder.status.in_([ECOStatus.SUBMITTED, ECOStatus.UNDER_REVIEW])
     ).scalar()
 
     in_implementation = db.query(func.count(EngineeringChangeOrder.id)).filter(
+        EngineeringChangeOrder.company_id == company_id,
         EngineeringChangeOrder.status == ECOStatus.IN_IMPLEMENTATION
     ).scalar()
 
     completed_this_month = db.query(func.count(EngineeringChangeOrder.id)).filter(
         and_(
+            EngineeringChangeOrder.company_id == company_id,
             EngineeringChangeOrder.status == ECOStatus.COMPLETED,
             EngineeringChangeOrder.completed_date >= first_of_month.date()
         )
     ).scalar()
 
     total_active = db.query(func.count(EngineeringChangeOrder.id)).filter(
+        EngineeringChangeOrder.company_id == company_id,
         EngineeringChangeOrder.status.notin_([ECOStatus.COMPLETED, ECOStatus.REJECTED, ECOStatus.CANCELLED])
     ).scalar()
 
@@ -293,10 +298,11 @@ def list_ecos(
     priority: Optional[ECOPriority] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all ECOs with optional filters"""
-    query = db.query(EngineeringChangeOrder).options(
+    query = db.query(EngineeringChangeOrder).filter(EngineeringChangeOrder.company_id == company_id).options(
         joinedload(EngineeringChangeOrder.requester),
         joinedload(EngineeringChangeOrder.assignee),
         joinedload(EngineeringChangeOrder.approver),
@@ -334,7 +340,8 @@ def get_eco(
 def create_eco(
     eco_in: ECOCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new Engineering Change Order"""
     data = eco_in.model_dump(exclude={"affected_parts", "affected_work_orders", "affected_documents"})
@@ -347,6 +354,7 @@ def create_eco(
         affected_work_orders=json.dumps(eco_in.affected_work_orders) if eco_in.affected_work_orders else None,
         affected_documents=json.dumps(eco_in.affected_documents) if eco_in.affected_documents else None,
     )
+    eco.company_id = company_id
     db.add(eco)
     db.commit()
     db.refresh(eco)

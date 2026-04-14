@@ -9,11 +9,30 @@ export interface User {
   department?: string;
   is_active: boolean;
   is_superuser: boolean;
+  company_id?: number;
+  company_name?: string;
   created_at: string;
   updated_at: string;
 }
 
-export type UserRole = 'admin' | 'manager' | 'supervisor' | 'operator' | 'quality' | 'shipping' | 'viewer';
+export type UserRole = 'platform_admin' | 'admin' | 'manager' | 'supervisor' | 'operator' | 'quality' | 'shipping' | 'viewer';
+
+export interface Company {
+  id: number;
+  name: string;
+  slug: string;
+  logo_url?: string;
+  is_active: boolean;
+  parent_company_id?: number;
+  timezone?: string;
+  address?: string;
+  phone?: string;
+  website?: string;
+  user_count?: number;
+  active_work_orders?: number;
+  created_at?: string;
+  updated_at?: string;
+}
 
 export interface WorkCenter {
   id: number;

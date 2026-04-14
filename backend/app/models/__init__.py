@@ -1,3 +1,4 @@
+from .company import Company
 from .user import User, UserRole
 from .work_center import WorkCenter
 from .part import Part, PartType, UnitOfMeasure
@@ -36,6 +37,7 @@ from .supplier_scorecard import SupplierScorecard, SupplierAudit, ApprovedSuppli
 from .qms_standard import QMSStandard, QMSClause, QMSClauseEvidence
 
 __all__ = [
+    "Company",
     "User", "UserRole",
     "WorkCenter",
     "Part", "PartType", "UnitOfMeasure",

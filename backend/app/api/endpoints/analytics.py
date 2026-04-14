@@ -10,7 +10,7 @@ import csv
 import io
 
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.analytics import ReportTemplate
 from app.services.analytics_service import AnalyticsService, get_date_range
@@ -150,13 +150,14 @@ def export_custom_report(
     template_id: int,
     format: str = Query("csv", description="Export format: csv, xlsx, pdf"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Export a custom report to file."""
-    template = db.query(ReportTemplate).filter(ReportTemplate.id == template_id).first()
+    template = db.query(ReportTemplate).filter(ReportTemplate.id == template_id, ReportTemplate.company_id == company_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Report template not found")
-    
+
     # Check access
     if not template.is_shared and template.created_by != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied to this report")
@@ -202,11 +203,13 @@ def _export_csv(data: List[dict], filename: str) -> StreamingResponse:
 @router.get("/custom-report/templates", response_model=List[ReportTemplateResponse])
 def list_report_templates(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List available report templates."""
     # User's own templates + shared templates
     templates = db.query(ReportTemplate).filter(
+        ReportTemplate.company_id == company_id,
         (ReportTemplate.created_by == current_user.id) |
         (ReportTemplate.is_shared == True)
     ).order_by(ReportTemplate.name).all()
@@ -218,7 +221,8 @@ def list_report_templates(
 def create_report_template(
     template: ReportTemplateCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Save a custom report template."""
     db_template = ReportTemplate(
@@ -232,6 +236,7 @@ def create_report_template(
         is_shared=template.is_shared,
         created_by=current_user.id
     )
+    db_template.company_id = company_id
     db.add(db_template)
     db.commit()
     db.refresh(db_template)
@@ -242,10 +247,11 @@ def create_report_template(
 def delete_report_template(
     template_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Delete a report template."""
-    template = db.query(ReportTemplate).filter(ReportTemplate.id == template_id).first()
+    template = db.query(ReportTemplate).filter(ReportTemplate.id == template_id, ReportTemplate.company_id == company_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     

@@ -2,7 +2,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.services.work_center_type_service import get_work_center_types
@@ -20,7 +20,8 @@ router = APIRouter()
 @router.get("/types")
 def list_work_center_types(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List available work center types"""
     return {"types": get_work_center_types(db)}
@@ -32,7 +33,8 @@ def list_work_centers(
     limit: int = 100,
     active_only: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all work centers (cached for 15 minutes)"""
     # Try cache first (only for default parameters)
@@ -40,8 +42,8 @@ def list_work_centers(
         cached = get_cached_work_centers_list()
         if cached is not None:
             return cached
-    
-    query = db.query(WorkCenter)
+
+    query = db.query(WorkCenter).filter(WorkCenter.company_id == company_id)
     if active_only:
         query = query.filter(WorkCenter.is_active == True)
     result = query.offset(skip).limit(limit).all()
@@ -79,17 +81,19 @@ def list_work_centers(
 def create_work_center(
     work_center_in: WorkCenterCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new work center"""
     # Check if code already exists
-    if db.query(WorkCenter).filter(WorkCenter.code == work_center_in.code).first():
+    if db.query(WorkCenter).filter(WorkCenter.code == work_center_in.code, WorkCenter.company_id == company_id).first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Work center code already exists"
         )
     
     work_center = WorkCenter(**work_center_in.model_dump())
+    work_center.company_id = company_id
     db.add(work_center)
     db.commit()
     db.refresh(work_center)
@@ -104,10 +108,11 @@ def create_work_center(
 def get_work_center(
     work_center_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a specific work center"""
-    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id).first()
+    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
     return work_center
@@ -118,10 +123,11 @@ def update_work_center(
     work_center_id: int,
     work_center_in: WorkCenterUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a work center"""
-    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id).first()
+    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
     
@@ -142,10 +148,11 @@ def update_work_center(
 def delete_work_center(
     work_center_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Soft delete a work center"""
-    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id).first()
+    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
     
@@ -163,17 +170,18 @@ def update_work_center_status(
     work_center_id: int,
     status: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update work center status (available, in_use, maintenance, offline)"""
     valid_statuses = ["available", "in_use", "maintenance", "offline"]
     if status not in valid_statuses:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail=f"Invalid status. Must be one of: {valid_statuses}"
         )
-    
-    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id).first()
+
+    work_center = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
     

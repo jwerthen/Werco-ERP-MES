@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class POStatus(str, enum.Enum):
@@ -44,7 +45,7 @@ class InspectionMethod(str, enum.Enum):
     SAMPLING = "sampling"
 
 
-class Vendor(Base):
+class Vendor(Base, TenantMixin):
     """Supplier/Vendor master"""
     __tablename__ = "vendors"
     
@@ -88,7 +89,7 @@ class Vendor(Base):
     documents = relationship("Document", back_populates="vendor")
 
 
-class PurchaseOrder(Base):
+class PurchaseOrder(Base, TenantMixin):
     """Purchase Order header"""
     __tablename__ = "purchase_orders"
     
@@ -132,7 +133,7 @@ class PurchaseOrder(Base):
     lines = relationship("PurchaseOrderLine", back_populates="purchase_order", cascade="all, delete-orphan")
 
 
-class PurchaseOrderLine(Base):
+class PurchaseOrderLine(Base, TenantMixin):
     """Purchase Order line item"""
     __tablename__ = "purchase_order_lines"
     
@@ -168,7 +169,7 @@ class ReceiptStatus(str, enum.Enum):
     QUARANTINE = "quarantine"
 
 
-class POReceipt(Base):
+class POReceipt(Base, TenantMixin):
     """Receipt against a PO line - tracks each delivery"""
     __tablename__ = "po_receipts"
     

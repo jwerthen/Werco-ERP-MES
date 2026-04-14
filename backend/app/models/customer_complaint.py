@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime, date
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class ComplaintStatus(str, enum.Enum):
@@ -31,7 +32,7 @@ class RMAStatus(str, enum.Enum):
     DENIED = "denied"
 
 
-class CustomerComplaint(Base):
+class CustomerComplaint(Base, TenantMixin):
     """Customer Complaint tracking for AS9100D compliance"""
     __tablename__ = "customer_complaints"
 
@@ -104,7 +105,7 @@ class CustomerComplaint(Base):
     rmas = relationship("ReturnMaterialAuthorization", back_populates="complaint")
 
 
-class ReturnMaterialAuthorization(Base):
+class ReturnMaterialAuthorization(Base, TenantMixin):
     """RMA - Return Material Authorization tracking"""
     __tablename__ = "return_material_authorizations"
 

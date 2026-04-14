@@ -2,6 +2,7 @@
 WebSocket connection manager for real-time updates.
 Handles broadcasting messages to connected clients.
 """
+from __future__ import annotations
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 from fastapi import WebSocket, WebSocketDisconnect

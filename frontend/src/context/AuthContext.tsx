@@ -123,8 +123,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       api.setToken(response.access_token);
     }
     setUser(response.user);
-    sessionStorage.setItem('user', JSON.stringify({ id: response.user.id, role: response.user.role, email: response.user.email }));
-    
+    sessionStorage.setItem('user', JSON.stringify({
+      id: response.user.id, role: response.user.role, email: response.user.email,
+      company_id: response.user.company_id, company_name: response.user.company_name,
+    }));
+
     // Load custom role permissions from backend (non-blocking)
     try {
       const permData = await api.getRolePermissions();
@@ -145,7 +148,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       api.setToken(response.access_token);
     }
     setUser(response.user);
-    sessionStorage.setItem('user', JSON.stringify({ id: response.user.id, role: response.user.role, email: response.user.email }));
+    sessionStorage.setItem('user', JSON.stringify({
+      id: response.user.id, role: response.user.role, email: response.user.email,
+      company_id: response.user.company_id, company_name: response.user.company_name,
+    }));
 
     try {
       const permData = await api.getRolePermissions();

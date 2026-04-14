@@ -31,7 +31,10 @@ class AuditLog(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     user_email = Column(String(255))  # Denormalized for historical record
     user_name = Column(String(255))
-    
+
+    # Tenant
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
+
     # What
     action = Column(String(100), nullable=False, index=True)  # CREATE, UPDATE, DELETE, LOGIN, LOGOUT, VIEW, EXPORT, etc.
     resource_type = Column(String(100), nullable=False, index=True)  # work_order, part, user, etc.

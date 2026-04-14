@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import and_
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.part import Part, PartType, UnitOfMeasure
@@ -542,7 +542,8 @@ def _create_from_import_payload(
 async def import_bom_preview(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Upload a BOM or single-part drawing (PDF/DOC/DOCX) and return a preview for review.
@@ -612,7 +613,8 @@ async def import_bom_preview(
 def import_bom_commit(
     payload: BOMImportCommitRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Commit a reviewed BOM/part import payload.
@@ -625,7 +627,8 @@ async def import_bom_or_part(
     file: UploadFile = File(...),
     create_missing_parts: bool = Form(True),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Upload a BOM or single-part drawing (PDF/DOC/DOCX) and create parts/BOM items.
@@ -798,11 +801,12 @@ def list_boms(
     status: Optional[str] = None,
     active_only: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all BOMs"""
     # Use selectinload to avoid N+1 queries for parts and items
-    query = db.query(BOM).options(
+    query = db.query(BOM).filter(BOM.company_id == company_id).options(
         selectinload(BOM.part),
         selectinload(BOM.items).selectinload(BOMItem.component_part),
     )
@@ -920,11 +924,12 @@ def list_boms(
 def create_bom(
     bom_in: BOMCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new BOM for a part"""
     # Check if part exists
-    part = db.query(Part).filter(Part.id == bom_in.part_id).first()
+    part = db.query(Part).filter(Part.id == bom_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
@@ -944,9 +949,10 @@ def create_bom(
         bom_type=bom_in.bom_type,
         created_by=current_user.id
     )
+    bom.company_id = company_id
     db.add(bom)
     db.flush()
-    
+
     # Add items
     for item_data in bom_in.items:
         # Validate component part exists
@@ -975,18 +981,19 @@ def create_bom(
 def get_bom(
     bom_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a specific BOM with all items"""
     try:
         bom = db.query(BOM).options(
             joinedload(BOM.part),
             joinedload(BOM.items).joinedload(BOMItem.component_part)
-        ).filter(BOM.id == bom_id).first()
-        
+        ).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
+
         if not bom:
             raise HTTPException(status_code=404, detail="BOM not found")
-        
+
         # Safely get part_type - handle both enum and string values
         part_type_val = "manufactured"
         if bom.part and bom.part.part_type:
@@ -1035,13 +1042,14 @@ def get_bom(
 def get_bom_by_part(
     part_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get the active BOM for a part"""
     bom = db.query(BOM).options(
         joinedload(BOM.part),
         joinedload(BOM.items).joinedload(BOMItem.component_part)
-    ).filter(BOM.part_id == part_id, BOM.is_active == True).first()
+    ).filter(BOM.part_id == part_id, BOM.company_id == company_id, BOM.is_active == True).first()
     
     if not bom:
         raise HTTPException(status_code=404, detail="No active BOM found for this part")
@@ -1054,13 +1062,14 @@ def update_bom(
     bom_id: int,
     bom_in: BOMUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a BOM"""
-    bom = db.query(BOM).filter(BOM.id == bom_id).first()
+    bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
-    
+
     update_data = bom_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(bom, field, value)
@@ -1074,13 +1083,14 @@ def update_bom(
 def release_bom(
     bom_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Release a BOM for production use"""
-    bom = db.query(BOM).filter(BOM.id == bom_id).first()
+    bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
-    
+
     if bom.status == "released":
         raise HTTPException(status_code=400, detail="BOM is already released")
     
@@ -1100,11 +1110,12 @@ def release_bom(
 def unrelease_bom(
     bom_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Unrelease a BOM to allow editing"""
     try:
-        bom = db.query(BOM).filter(BOM.id == bom_id).first()
+        bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
         if not bom:
             raise HTTPException(status_code=404, detail="BOM not found")
         if bom.status != "released":
@@ -1126,10 +1137,11 @@ def unrelease_bom(
 def delete_bom(
     bom_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Delete a BOM (only draft BOMs can be deleted)"""
-    bom = db.query(BOM).filter(BOM.id == bom_id).first()
+    bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
     
@@ -1150,11 +1162,12 @@ def add_bom_item(
     bom_id: int,
     item_in: BOMItemCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Add an item to a BOM"""
     try:
-        bom = db.query(BOM).filter(BOM.id == bom_id).first()
+        bom = db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == company_id).first()
         if not bom:
             raise HTTPException(status_code=404, detail="BOM not found")
         
@@ -1254,10 +1267,11 @@ def update_bom_item(
     item_id: int,
     item_in: BOMItemUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a BOM item"""
-    item = db.query(BOMItem).options(joinedload(BOMItem.component_part)).filter(BOMItem.id == item_id).first()
+    item = db.query(BOMItem).options(joinedload(BOMItem.component_part)).join(BOM).filter(BOMItem.id == item_id, BOM.company_id == company_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="BOM item not found")
     
@@ -1274,10 +1288,11 @@ def update_bom_item(
 def delete_bom_item(
     item_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Delete a BOM item"""
-    item = db.query(BOMItem).filter(BOMItem.id == item_id).first()
+    item = db.query(BOMItem).join(BOM).filter(BOMItem.id == item_id, BOM.company_id == company_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="BOM item not found")
     

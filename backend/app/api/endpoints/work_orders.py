@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import or_
 from pydantic import BaseModel, Field
 from app.db.database import get_db, atomic_transaction
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
@@ -72,14 +72,17 @@ def _release_next_group(work_order: WorkOrder, completed_op: WorkOrderOperation)
     if next_op:
         next_op.status = OperationStatus.READY
 
-def generate_work_order_number(db: Session) -> str:
+def generate_work_order_number(db: Session, company_id: int = None) -> str:
     """Generate next work order number (WO-YYYYMMDD-XXX)"""
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"WO-{today}-"
-    
-    last_wo = db.query(WorkOrder).filter(
+
+    query = db.query(WorkOrder).filter(
         WorkOrder.work_order_number.like(f"{prefix}%")
-    ).order_by(WorkOrder.work_order_number.desc()).first()
+    )
+    if company_id is not None:
+        query = query.filter(WorkOrder.company_id == company_id)
+    last_wo = query.order_by(WorkOrder.work_order_number.desc()).first()
     
     if last_wo:
         last_num = int(last_wo.work_order_number.split("-")[-1])
@@ -98,10 +101,11 @@ def list_work_orders(
     search: Optional[str] = None,
     include_deleted: bool = Query(False, description="Include soft-deleted work orders (admin only)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List work orders with summary info"""
-    query = db.query(WorkOrder).options(joinedload(WorkOrder.part))
+    query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(joinedload(WorkOrder.part))
     
     # Filter out soft-deleted unless explicitly requested by admin
     if not include_deleted or current_user.role != UserRole.ADMIN:
@@ -152,10 +156,11 @@ def preview_work_order_operations(
     part_id: int,
     quantity: float = 1,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Preview what operations would be generated for a part (for debugging)"""
-    part = db.query(Part).filter(Part.id == part_id).first()
+    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
@@ -322,20 +327,21 @@ def create_work_order(
     request: Request,
     auto_routing: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new work order. If auto_routing=True, operations are auto-generated from released routing."""
-    
+
     # Initialize audit service
     audit = AuditService(db, current_user, request)
-    
+
     # Verify part exists
-    part = db.query(Part).filter(Part.id == work_order_in.part_id).first()
+    part = db.query(Part).filter(Part.id == work_order_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    
+
     # Generate work order number
-    wo_number = generate_work_order_number(db)
+    wo_number = generate_work_order_number(db, company_id)
     
     # Create work order
     wo_data = work_order_in.model_dump(exclude={"operations"})
@@ -344,6 +350,7 @@ def create_work_order(
         work_order_number=wo_number,
         created_by=current_user.id
     )
+    work_order.company_id = company_id
     db.add(work_order)
     db.flush()  # Get the work order ID
     
@@ -352,7 +359,8 @@ def create_work_order(
     if auto_routing and not work_order_in.operations:
         if part.part_type == PartType.ASSEMBLY:
             _create_assembly_routing_operations(
-                db, work_order, float(work_order_in.quantity_ordered)
+                db, work_order, float(work_order_in.quantity_ordered),
+                company_id=company_id,
             )
         else:
             routing = db.query(Routing).options(
@@ -378,7 +386,8 @@ def create_work_order(
                         setup_time_hours=rop.setup_hours,
                         run_time_hours=float(rop.run_hours_per_unit or 0) * float(work_order_in.quantity_ordered),
                         status=OperationStatus.PENDING,
-                        operation_group=get_work_center_group(work_center) if work_center else None
+                        operation_group=get_work_center_group(work_center) if work_center else None,
+                        company_id=company_id,
                     )
                     db.add(wo_op)
     else:
@@ -386,6 +395,7 @@ def create_work_order(
         for op_data in work_order_in.operations:
             operation = WorkOrderOperation(
                 work_order_id=work_order.id,
+                company_id=company_id,
                 **op_data.model_dump()
             )
             db.add(operation)
@@ -422,7 +432,8 @@ def create_work_order(
 def _create_assembly_routing_operations(
     db: Session,
     work_order: WorkOrder,
-    wo_quantity: float
+    wo_quantity: float,
+    company_id: int = None,
 ):
     """Create assembly operations from the released routing only."""
 
@@ -456,7 +467,8 @@ def _create_assembly_routing_operations(
             setup_time_hours=rop.setup_hours,
             run_time_hours=float(rop.run_hours_per_unit or 0) * wo_quantity,
             status=OperationStatus.PENDING,
-            operation_group=get_work_center_group(work_center) if work_center else None
+            operation_group=get_work_center_group(work_center) if work_center else None,
+            company_id=company_id or work_order.company_id,
         )
         db.add(wo_op)
         sequence += 10
@@ -466,7 +478,8 @@ def _create_assembly_routing_operations(
 def get_work_order(
     work_order_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a specific work order with all operations"""
     work_order = db.query(WorkOrder).options(
@@ -475,7 +488,7 @@ def get_work_order(
             .selectinload(WorkOrderOperation.component_part),
         selectinload(WorkOrder.operations)
             .selectinload(WorkOrderOperation.work_center)
-    ).filter(WorkOrder.id == work_order_id).first()
+    ).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -514,12 +527,13 @@ def get_work_order(
 def get_work_order_by_number(
     wo_number: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a work order by work order number"""
     work_order = db.query(WorkOrder).options(
         joinedload(WorkOrder.operations)
-    ).filter(WorkOrder.work_order_number == wo_number).first()
+    ).filter(WorkOrder.work_order_number == wo_number, WorkOrder.company_id == company_id).first()
     
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -532,13 +546,14 @@ def update_work_order(
     work_order_in: WorkOrderUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a work order"""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
-    
+
     # Capture old values for audit
     audit = AuditService(db, current_user, request)
     old_values = {c.key: getattr(work_order, c.key) for c in work_order.__table__.columns}
@@ -585,11 +600,12 @@ def update_work_order_priority(
     priority_in: WorkOrderPriorityUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update only work order priority for quick dispatch changes."""
     work_order = db.query(WorkOrder).options(joinedload(WorkOrder.operations)).filter(
-        WorkOrder.id == work_order_id
+        WorkOrder.id == work_order_id, WorkOrder.company_id == company_id
     ).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -668,17 +684,18 @@ def delete_work_order(
     request: Request,
     hard_delete: bool = Query(False, description="Permanently delete (only for draft/cancelled WOs)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Soft delete or permanently delete a work order.
-    
+
     **Soft delete (default)**: Marks the work order as deleted but preserves data.
-    
+
     **Hard delete**: Only allowed for draft or cancelled work orders.
     Permanently removes the record and associated operations.
     """
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
@@ -749,13 +766,14 @@ def restore_work_order(
     work_order_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Restore a soft-deleted work order."""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
-    
+
     if not work_order.is_deleted:
         raise HTTPException(status_code=400, detail="Work order is not deleted")
     
@@ -777,10 +795,11 @@ def release_work_order(
     work_order_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Release a work order to production"""
-    work_order = db.query(WorkOrder).options(joinedload(WorkOrder.part)).filter(WorkOrder.id == work_order_id).first()
+    work_order = db.query(WorkOrder).options(joinedload(WorkOrder.part)).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
@@ -852,10 +871,11 @@ def release_work_order(
 def start_work_order(
     work_order_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Start a work order (set to in-progress)"""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
@@ -890,12 +910,13 @@ def start_work_order(
 def get_material_requirements(
     work_order_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get BOM material requirements for a work order with quantities calculated"""
     from app.models.bom import BOM, BOMItem
-    
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
@@ -963,10 +984,11 @@ def complete_work_order(
     quantity_complete: float,
     quantity_scrapped: float = 0,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Complete a work order"""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
     
@@ -1010,6 +1032,7 @@ def add_operation(
     
     operation = WorkOrderOperation(
         work_order_id=work_order_id,
+        company_id=work_order.company_id,
         **operation_in.model_dump()
     )
     db.add(operation)

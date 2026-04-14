@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import or_, func
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.part import Part, PartType, UnitOfMeasure
 from app.schemas.part import PartCreate, PartUpdate, PartResponse
@@ -22,21 +22,22 @@ def list_parts(
     active_only: bool = Query(True, description="Only return active parts"),
     include_deleted: bool = Query(False, description="Include soft-deleted parts (admin only)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Retrieve a list of parts with optional filtering and pagination.
-    
+
     - **skip**: Number of records to skip (for pagination)
     - **limit**: Maximum number of records to return (max 500)
     - **search**: Text search across part number, name, description, and customer part number
     - **part_type**: Filter by type (manufactured, purchased, assembly, raw_material)
     - **active_only**: When true, only returns active parts (default: true)
     - **include_deleted**: Include soft-deleted parts (admin only, default: false)
-    
+
     Returns parts ordered by part number.
     """
-    query = db.query(Part).options(
+    query = db.query(Part).filter(Part.company_id == company_id).options(
         selectinload(Part.bom),
         selectinload(Part.inventory_items)
     )
@@ -119,21 +120,22 @@ def create_part(
     part_in: PartCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Create a new part in the system.
-    
+
     **Required roles**: Admin, Manager, or Supervisor
-    
+
     The part number must be unique and will be automatically converted to uppercase.
-    
+
     **Returns**: The created part with system-generated ID and timestamps.
-    
+
     **Raises**:
     - 400: Part number already exists
     """
-    if db.query(Part).filter(Part.part_number == part_in.part_number).first():
+    if db.query(Part).filter(Part.part_number == part_in.part_number, Part.company_id == company_id).first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Part number already exists"
@@ -154,6 +156,7 @@ def create_part(
         data["unit_of_measure"] = uom_val.strip().lower()
 
     part = Part(**data, created_by=current_user.id)
+    part.company_id = company_id
     db.add(part)
     db.commit()
     db.refresh(part)
@@ -169,10 +172,11 @@ def create_part(
 def get_part(
     part_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a specific part"""
-    part = db.query(Part).filter(Part.id == part_id).first()
+    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     return part
@@ -182,10 +186,11 @@ def get_part(
 def get_part_by_number(
     part_number: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a part by part number"""
-    part = db.query(Part).filter(Part.part_number == part_number).first()
+    part = db.query(Part).filter(Part.part_number == part_number, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     return part
@@ -197,10 +202,11 @@ def update_part(
     part_in: PartUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a part"""
-    part = db.query(Part).filter(Part.id == part_id).first()
+    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
@@ -236,10 +242,11 @@ def create_new_revision(
     part_id: int,
     new_revision: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new revision of a part (for AS9100D revision control)"""
-    part = db.query(Part).filter(Part.id == part_id).first()
+    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
@@ -260,18 +267,19 @@ def delete_part(
     request: Request,
     hard_delete: bool = Query(False, description="Permanently delete the record (admin only, use with caution)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Soft delete a part (default) or permanently delete (hard_delete=true).
-    
+
     **Soft delete**: Marks the part as deleted but preserves data for recovery and audit trail.
     The part will be excluded from normal queries but can be restored.
-    
+
     **Hard delete**: Permanently removes the record. Use with extreme caution.
     Only available if no dependencies exist (work orders, BOMs, etc.).
     """
-    part = db.query(Part).filter(Part.id == part_id).first()
+    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
@@ -314,16 +322,17 @@ def restore_part(
     part_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Restore a soft-deleted part.
-    
+
     **Required roles**: Admin or Manager
-    
+
     Returns the part to active status and clears deletion metadata.
     """
-    part = db.query(Part).filter(Part.id == part_id).first()
+    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     
@@ -348,13 +357,15 @@ def generate_part_number(
     description: str = Query(..., min_length=3, description="Part description"),
     part_type: PartType = Query(..., description="Part type"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     if part_type not in [PartType.RAW_MATERIAL, PartType.HARDWARE, PartType.CONSUMABLE]:
         return {"suggested_part_number": None, "existing": False}
 
     normalized = " ".join(normalize_description(description).lower().split())
     existing = db.query(Part).filter(
+        Part.company_id == company_id,
         Part.part_type == part_type,
         func.lower(func.trim(Part.description)) == normalized
     ).first()

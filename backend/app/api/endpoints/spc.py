@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, and_
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.spc import (
     SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability, ChartType
@@ -215,10 +215,11 @@ def list_characteristics(
     part_id: Optional[int] = None,
     is_active: Optional[bool] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all SPC characteristics"""
-    query = db.query(SPCCharacteristic)
+    query = db.query(SPCCharacteristic).filter(SPCCharacteristic.company_id == company_id)
     if part_id is not None:
         query = query.filter(SPCCharacteristic.part_id == part_id)
     if is_active is not None:
@@ -230,10 +231,12 @@ def list_characteristics(
 def create_characteristic(
     data: CharacteristicCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new SPC characteristic"""
     char = SPCCharacteristic(**data.model_dump())
+    char.company_id = company_id
     db.add(char)
     db.commit()
     db.refresh(char)
@@ -244,10 +247,11 @@ def create_characteristic(
 def get_characteristic(
     char_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a single SPC characteristic"""
-    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == char_id).first()
+    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == char_id, SPCCharacteristic.company_id == company_id).first()
     if not char:
         raise HTTPException(status_code=404, detail="Characteristic not found")
     return char
@@ -258,10 +262,11 @@ def update_characteristic(
     char_id: int,
     data: CharacteristicUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update an SPC characteristic"""
-    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == char_id).first()
+    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == char_id, SPCCharacteristic.company_id == company_id).first()
     if not char:
         raise HTTPException(status_code=404, detail="Characteristic not found")
 

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 import io
 
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.models.part import Part, PartType
@@ -44,10 +44,11 @@ def export_work_orders(
     status: Optional[WorkOrderStatus] = Query(None, description="Filter by status"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Export work orders to CSV or Excel."""
-    query = db.query(WorkOrder).options(joinedload(WorkOrder.part))
+    query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(joinedload(WorkOrder.part))
     query = query.filter(WorkOrder.is_deleted == False)
     
     if start_date:
@@ -116,10 +117,11 @@ def export_parts(
     active_only: bool = Query(True, description="Only export active parts"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Export parts to CSV or Excel."""
-    query = db.query(Part).filter(Part.is_deleted == False)
+    query = db.query(Part).filter(Part.company_id == company_id, Part.is_deleted == False)
     
     if part_type:
         query = query.filter(Part.part_type == part_type)
@@ -183,10 +185,11 @@ def export_inventory(
     has_quantity: bool = Query(True, description="Only items with quantity > 0"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Export inventory to CSV or Excel."""
-    query = db.query(InventoryItem).options(joinedload(InventoryItem.part))
+    query = db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
     query = query.filter(InventoryItem.is_active == True)
     
     if warehouse:
@@ -253,10 +256,11 @@ def export_purchase_orders(
     vendor_id: Optional[int] = Query(None, description="Filter by vendor"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Export purchase orders to CSV or Excel."""
-    query = db.query(PurchaseOrder).options(
+    query = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == company_id).options(
         joinedload(PurchaseOrder.vendor),
         joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part)
     )
@@ -327,7 +331,8 @@ def export_purchase_order_lines(
     status: Optional[POStatus] = Query(None, description="Filter by PO status"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Export purchase order lines (detailed) to CSV or Excel."""
     query = db.query(PurchaseOrderLine).options(
@@ -399,10 +404,11 @@ def export_quotes(
     customer: Optional[str] = Query(None, description="Filter by customer name"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Export quotes to CSV or Excel."""
-    query = db.query(Quote).options(joinedload(Quote.lines))
+    query = db.query(Quote).filter(Quote.company_id == company_id).options(joinedload(Quote.lines))
     
     if start_date:
         query = query.filter(Quote.quote_date >= start_date)
@@ -470,10 +476,11 @@ def export_inventory_transactions(
     transaction_type: Optional[str] = Query(None, description="Filter by transaction type"),
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Export inventory transactions to CSV or Excel."""
-    query = db.query(InventoryTransaction).options(joinedload(InventoryTransaction.part))
+    query = db.query(InventoryTransaction).filter(InventoryTransaction.company_id == company_id).options(joinedload(InventoryTransaction.part))
     
     if start_date:
         query = query.filter(InventoryTransaction.created_at >= datetime.combine(start_date, datetime.min.time()))

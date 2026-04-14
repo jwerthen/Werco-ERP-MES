@@ -21,24 +21,28 @@ class TestSchedulingAPI:
             part_type="manufactured",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         wc10 = WorkCenter(
             code="SCHED-WC-10",
             name="Schedule WC 10",
             work_center_type="machining",
             is_active=True,
+            company_id=1,
         )
         wc20 = WorkCenter(
             code="SCHED-WC-20",
             name="Schedule WC 20",
             work_center_type="machining",
             is_active=True,
+            company_id=1,
         )
         wc30 = WorkCenter(
             code="SCHED-WC-30",
             name="Schedule WC 30",
             work_center_type="machining",
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([part, wc10, wc20, wc30])
         db_session.flush()
@@ -50,6 +54,7 @@ class TestSchedulingAPI:
             status="released",
             priority=5,
             due_date=date(2026, 2, 28),
+            company_id=1,
         )
         db_session.add(work_order)
         db_session.flush()
@@ -66,6 +71,7 @@ class TestSchedulingAPI:
             scheduled_end=datetime(2026, 2, 1, 12, 0, 0),
             setup_time_hours=1,
             run_time_hours=1,
+            company_id=1,
         )
         # Op 20 is current (first non-complete) and unscheduled
         op20 = WorkOrderOperation(
@@ -77,6 +83,7 @@ class TestSchedulingAPI:
             status=OperationStatus.PENDING,
             setup_time_hours=2,
             run_time_hours=6,
+            company_id=1,
         )
         # Op 30 has stale schedule that should be cleared
         op30 = WorkOrderOperation(
@@ -90,6 +97,7 @@ class TestSchedulingAPI:
             scheduled_end=datetime(2026, 2, 10, 12, 0, 0),
             setup_time_hours=1,
             run_time_hours=1,
+            company_id=1,
         )
         db_session.add_all([op10, op20, op30])
         db_session.commit()
@@ -132,6 +140,7 @@ class TestSchedulingAPI:
             part_type="manufactured",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         wc = WorkCenter(
             code="SCHED-WC-CAP",
@@ -139,6 +148,7 @@ class TestSchedulingAPI:
             work_center_type="machining",
             capacity_hours_per_day=8.0,
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([part, wc])
         db_session.flush()
@@ -150,6 +160,7 @@ class TestSchedulingAPI:
             status="released",
             priority=4,
             due_date=today + timedelta(days=5),
+            company_id=1,
         )
         target_work_order = WorkOrder(
             work_order_number="WO-SCHED-EARLIEST",
@@ -158,6 +169,7 @@ class TestSchedulingAPI:
             status="released",
             priority=2,
             due_date=today + timedelta(days=3),
+            company_id=1,
         )
         db_session.add_all([busy_work_order, target_work_order])
         db_session.flush()
@@ -173,6 +185,7 @@ class TestSchedulingAPI:
             scheduled_end=datetime.combine(today, datetime.min.time()),
             setup_time_hours=0,
             run_time_hours=8,
+            company_id=1,
         )
         target_op = WorkOrderOperation(
             work_order_id=target_work_order.id,
@@ -183,6 +196,7 @@ class TestSchedulingAPI:
             status=OperationStatus.PENDING,
             setup_time_hours=0,
             run_time_hours=4,
+            company_id=1,
         )
         db_session.add_all([busy_op, target_op])
         db_session.commit()
@@ -214,6 +228,7 @@ class TestSchedulingAPI:
             part_type="manufactured",
             unit_of_measure="each",
             is_active=True,
+            company_id=1,
         )
         wc = WorkCenter(
             code="SCHED-WC-HEAT",
@@ -221,6 +236,7 @@ class TestSchedulingAPI:
             work_center_type="machining",
             capacity_hours_per_day=4.0,
             is_active=True,
+            company_id=1,
         )
         db_session.add_all([part, wc])
         db_session.flush()
@@ -232,6 +248,7 @@ class TestSchedulingAPI:
             status="released",
             priority=3,
             due_date=start + timedelta(days=2),
+            company_id=1,
         )
         db_session.add(work_order)
         db_session.flush()
@@ -247,6 +264,7 @@ class TestSchedulingAPI:
             scheduled_end=datetime.combine(start, datetime.min.time()),
             setup_time_hours=0,
             run_time_hours=8,
+            company_id=1,
         )
         db_session.add(overloaded_op)
         db_session.commit()

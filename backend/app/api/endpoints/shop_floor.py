@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, func, case
 from pydantic import BaseModel
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
 from app.models.work_center import WorkCenter
@@ -67,7 +67,8 @@ def _has_incomplete_predecessors(
 @router.get("/my-active-job")
 def get_my_active_job(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get the current user's active time entries (clocked in jobs)"""
     active_entries = db.query(TimeEntry).filter(
@@ -113,7 +114,8 @@ def get_my_active_job(
 def clock_in(
     clock_in_data: ClockIn,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Clock in to a work order operation"""
     # Prevent duplicate clock-ins for the same operation
@@ -221,7 +223,8 @@ def clock_out(
     time_entry_id: int,
     clock_out_data: ClockOut,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Clock out from a work order operation"""
     time_entry = db.query(TimeEntry).filter(
@@ -354,13 +357,15 @@ def clock_out(
 def get_work_center_queue(
     work_center_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get operations queued at a work center"""
     operations = db.query(WorkOrderOperation).options(
         joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
-    ).filter(
+    ).join(WorkOrder).filter(
         and_(
+            WorkOrder.company_id == company_id,
             WorkOrderOperation.work_center_id == work_center_id,
             WorkOrderOperation.status.in_([OperationStatus.READY, OperationStatus.IN_PROGRESS])
         )
@@ -394,7 +399,8 @@ def shop_floor_dashboard(
     response: Response,
     if_none_match: Optional[str] = Header(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Get shop floor dashboard data with ETag support for conditional requests.
@@ -411,20 +417,23 @@ def shop_floor_dashboard(
     
     # Active work orders
     active_wos = db.query(WorkOrder).filter(
+        WorkOrder.company_id == company_id,
         WorkOrder.status == WorkOrderStatus.IN_PROGRESS
     ).count()
-    
+
     # Work orders due today
     due_today = db.query(WorkOrder).filter(
         and_(
+            WorkOrder.company_id == company_id,
             WorkOrder.due_date == date.today(),
             WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED])
         )
     ).count()
-    
+
     # Overdue work orders
     overdue = db.query(WorkOrder).filter(
         and_(
+            WorkOrder.company_id == company_id,
             WorkOrder.due_date < date.today(),
             WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED])
         )
@@ -456,7 +465,7 @@ def shop_floor_dashboard(
     }
     
     # Get work centers (single query)
-    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+    work_centers = db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True).all()
 
     active_entries = db.query(TimeEntry).options(
         joinedload(TimeEntry.user),
@@ -582,6 +591,7 @@ def shop_floor_dashboard(
     
     # Recent completions
     recent = db.query(WorkOrder).filter(
+        WorkOrder.company_id == company_id,
         WorkOrder.status == WorkOrderStatus.COMPLETE
     ).order_by(WorkOrder.actual_end.desc()).limit(5).all()
 
@@ -626,7 +636,8 @@ def shop_floor_dashboard(
 @router.get("/active-users")
 def get_active_shop_users(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get list of users currently clocked in"""
     active_entries = db.query(TimeEntry).options(
@@ -662,7 +673,8 @@ def get_all_operations(
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(50, ge=1, le=200, description="Items per page (max 200)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Get operations with filters and pagination for the shop floor view.
@@ -679,8 +691,9 @@ def get_all_operations(
         joinedload(WorkOrderOperation.work_center)
     ).join(WorkOrder)
     
-    # Exclude completed/cancelled work orders
+    # Scope to company and exclude completed/cancelled work orders
     query = query.filter(
+        WorkOrder.company_id == company_id,
         WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED])
     )
     
@@ -772,7 +785,8 @@ def get_all_operations(
 def start_operation(
     operation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Mark operation as in progress and create a time entry.
@@ -892,7 +906,8 @@ def complete_operation(
     operation_id: int,
     completion_data: OperationCompleteRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Mark operation as complete (full or partial).

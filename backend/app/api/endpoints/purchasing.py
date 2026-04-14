@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POStatus, POReceipt, ReceiptStatus
 from app.models.part import Part
@@ -26,9 +26,10 @@ def list_vendors(
     active_only: bool = True,
     approved_only: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    query = db.query(Vendor)
+    query = db.query(Vendor).filter(Vendor.company_id == company_id)
     if active_only:
         query = query.filter(Vendor.is_active == True)
     if approved_only:
@@ -40,13 +41,15 @@ def list_vendors(
 def create_vendor(
     vendor_in: VendorCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
-    existing = db.query(Vendor).filter(Vendor.code == vendor_in.code).first()
+    existing = db.query(Vendor).filter(Vendor.code == vendor_in.code, Vendor.company_id == company_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="Vendor code already exists")
     
     vendor = Vendor(**vendor_in.model_dump())
+    vendor.company_id = company_id
     if vendor.is_approved:
         vendor.approval_date = date.today()
     db.add(vendor)
@@ -59,9 +62,10 @@ def create_vendor(
 def get_vendor(
     vendor_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     return vendor
@@ -72,9 +76,10 @@ def update_vendor(
     vendor_id: int,
     vendor_in: VendorUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     
@@ -116,9 +121,10 @@ def list_purchase_orders(
     status: Optional[str] = None,
     vendor_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
-    query = db.query(PurchaseOrder).options(
+    query = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == company_id).options(
         joinedload(PurchaseOrder.vendor),
         selectinload(PurchaseOrder.lines)
     )
@@ -155,7 +161,8 @@ def list_purchase_orders(
 def create_purchase_order(
     po_in: POCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     # Verify vendor
     vendor = db.query(Vendor).filter(Vendor.id == po_in.vendor_id).first()
@@ -174,9 +181,10 @@ def create_purchase_order(
         notes=po_in.notes,
         created_by=current_user.id
     )
+    po.company_id = company_id
     db.add(po)
     db.flush()
-    
+
     # Add lines
     subtotal = 0.0
     for idx, line_data in enumerate(po_in.lines, 1):
@@ -210,12 +218,13 @@ def create_purchase_order(
 def get_purchase_order(
     po_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     po = db.query(PurchaseOrder).options(
         joinedload(PurchaseOrder.vendor),
         joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part)
-    ).filter(PurchaseOrder.id == po_id).first()
+    ).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -227,9 +236,10 @@ def update_purchase_order(
     po_id: int,
     po_in: POUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id).first()
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     
@@ -249,9 +259,10 @@ def update_purchase_order(
 def send_purchase_order(
     po_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id).first()
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     
@@ -270,9 +281,10 @@ def add_po_line(
     po_id: int,
     line_in: POLineCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id).first()
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     
@@ -332,13 +344,15 @@ def generate_receipt_number(db: Session) -> str:
 @router.get("/receiving/queue")
 def get_receiving_queue(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get PO lines awaiting receipt"""
     lines = db.query(PurchaseOrderLine).options(
         joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
         joinedload(PurchaseOrderLine.part)
     ).join(PurchaseOrder).filter(
+        PurchaseOrder.company_id == company_id,
         PurchaseOrder.status.in_([POStatus.SENT, POStatus.PARTIAL]),
         PurchaseOrderLine.is_closed == False,
         PurchaseOrderLine.quantity_received < PurchaseOrderLine.quantity_ordered
@@ -366,7 +380,8 @@ def get_receiving_queue(
 def receive_material(
     receipt_in: ReceiptCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Receive material against a PO line"""
     po_line = db.query(PurchaseOrderLine).options(
@@ -444,7 +459,8 @@ def receive_material(
 @router.get("/receiving/pending-inspection")
 def get_pending_inspection(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get receipts pending inspection"""
     receipts = db.query(POReceipt).options(
@@ -478,7 +494,8 @@ def inspect_receipt(
     receipt_id: int,
     inspection: ReceiptInspection,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Complete inspection of a receipt"""
     receipt = db.query(POReceipt).options(
@@ -557,7 +574,8 @@ def _add_to_inventory(db: Session, part_id: int, quantity: float, location: str,
 def get_receiving_history(
     days: int = 30,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get recent receiving history"""
     from datetime import timedelta

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 from pydantic import BaseModel
 from app.db.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.part import Part
 from app.models.work_order import WorkOrder
@@ -58,7 +58,8 @@ def global_search(
     limit: int = Query(default=20, le=50, description="Maximum results"),
     types: Optional[str] = Query(default=None, description="Comma-separated types to search"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Global search across all entities.
@@ -90,6 +91,7 @@ def global_search(
     # Search Parts
     if should_search("part"):
         parts = db.query(Part).filter(
+            Part.company_id == company_id,
             Part.is_active == True,
             or_(
                 func.lower(Part.part_number).like(search_term),
@@ -113,6 +115,7 @@ def global_search(
     # Search Work Orders
     if should_search("work_order"):
         work_orders = db.query(WorkOrder).filter(
+            WorkOrder.company_id == company_id,
             or_(
                 func.lower(WorkOrder.work_order_number).like(search_term),
                 func.lower(WorkOrder.customer_po).like(search_term),
@@ -135,6 +138,7 @@ def global_search(
     # Search Customers
     if should_search("customer"):
         customers = db.query(Customer).filter(
+            Customer.company_id == company_id,
             Customer.is_active == True,
             or_(
                 func.lower(Customer.name).like(search_term),
@@ -243,6 +247,7 @@ def global_search(
     # Search Purchase Orders
     if should_search("purchase_order"):
         pos = db.query(PurchaseOrder).filter(
+            PurchaseOrder.company_id == company_id,
             or_(
                 func.lower(PurchaseOrder.po_number).like(search_term),
             )
@@ -262,6 +267,7 @@ def global_search(
     # Search Quotes
     if should_search("quote"):
         quotes = db.query(Quote).filter(
+            Quote.company_id == company_id,
             or_(
                 func.lower(Quote.quote_number).like(search_term),
                 func.lower(Quote.customer_name).like(search_term),
@@ -307,13 +313,14 @@ def global_search(
 def get_recent_items(
     limit: int = Query(default=10, le=20),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get recently accessed/created items for quick access."""
     results = []
     
     # Recent work orders (last 5)
-    recent_wos = db.query(WorkOrder).order_by(
+    recent_wos = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).order_by(
         WorkOrder.updated_at.desc()
     ).limit(5).all()
     
@@ -329,6 +336,7 @@ def get_recent_items(
     
     # Recent parts (last 5)
     recent_parts = db.query(Part).filter(
+        Part.company_id == company_id,
         Part.is_active == True
     ).order_by(
         Part.updated_at.desc()

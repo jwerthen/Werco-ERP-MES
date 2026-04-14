@@ -24,6 +24,7 @@ os.environ["SENTRY_DSN"] = ""
 from app.main import app
 from app.core.security import create_access_token, get_password_hash
 from app.db.database import Base, get_db
+from app.models.company import Company
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
@@ -55,14 +56,26 @@ def db_session() -> Generator[Session, None, None]:
     """Create a fresh database session for each test."""
     # Create all tables
     Base.metadata.create_all(bind=engine)
-    
+
     session = TestingSessionLocal()
+    # Seed the default test company (required for all tenant-scoped models)
+    company = session.query(Company).filter(Company.id == 1).first()
+    if not company:
+        company = Company(id=1, name="Werco Manufacturing", slug="werco", is_active=True)
+        session.add(company)
+        session.commit()
     try:
         yield session
     finally:
         session.close()
         # Drop all tables after test
         Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture
+def test_company(db_session: Session) -> Company:
+    """Return the default test company."""
+    return db_session.query(Company).filter(Company.id == 1).first()
 
 
 @pytest.fixture(scope="function")
@@ -97,6 +110,7 @@ def test_user(db_session: Session) -> User:
         hashed_password=TEST_PASSWORD_HASH,
         role=UserRole.MANAGER,
         is_active=True,
+        company_id=1,
     )
     db_session.add(user)
     db_session.commit()
@@ -124,6 +138,7 @@ def admin_user(db_session: Session) -> User:
         hashed_password=TEST_PASSWORD_HASH,
         role=UserRole.ADMIN,
         is_active=True,
+        company_id=1,
     )
     db_session.add(user)
     db_session.commit()
@@ -142,6 +157,7 @@ def operator_user(db_session: Session) -> User:
         hashed_password=TEST_PASSWORD_HASH,
         role=UserRole.OPERATOR,
         is_active=True,
+        company_id=1,
     )
     db_session.add(user)
     db_session.commit()
@@ -160,6 +176,7 @@ def inactive_user(db_session: Session) -> User:
         hashed_password=TEST_PASSWORD_HASH,
         role=UserRole.OPERATOR,
         is_active=False,
+        company_id=1,
     )
     db_session.add(user)
     db_session.commit()
@@ -179,28 +196,28 @@ def inactive_user_credentials() -> dict:
 @pytest.fixture
 def auth_headers(test_user: User) -> dict:
     """Return authentication headers with test user token."""
-    access_token = create_access_token(subject=test_user.id)
+    access_token = create_access_token(subject=test_user.id, company_id=test_user.company_id)
     return {"Authorization": f"Bearer {access_token}", "X-Requested-With": "XMLHttpRequest"}
 
 
 @pytest.fixture
 def admin_headers(admin_user: User) -> dict:
     """Return authentication headers with admin user token."""
-    access_token = create_access_token(subject=admin_user.id)
+    access_token = create_access_token(subject=admin_user.id, company_id=admin_user.company_id)
     return {"Authorization": f"Bearer {access_token}", "X-Requested-With": "XMLHttpRequest"}
 
 
 @pytest.fixture
 def manager_headers(test_user: User) -> dict:
     """Return authentication headers with manager user token."""
-    access_token = create_access_token(subject=test_user.id)
+    access_token = create_access_token(subject=test_user.id, company_id=test_user.company_id)
     return {"Authorization": f"Bearer {access_token}", "X-Requested-With": "XMLHttpRequest"}
 
 
 @pytest.fixture
 def operator_headers(operator_user: User) -> dict:
     """Return authentication headers with operator user token."""
-    access_token = create_access_token(subject=operator_user.id)
+    access_token = create_access_token(subject=operator_user.id, company_id=operator_user.company_id)
     return {"Authorization": f"Bearer {access_token}", "X-Requested-With": "XMLHttpRequest"}
 
 
@@ -215,6 +232,7 @@ def created_user(db_session: Session) -> dict:
         hashed_password=TEST_PASSWORD_HASH,
         role=UserRole.OPERATOR,
         is_active=True,
+        company_id=1,
     )
     db_session.add(user)
     db_session.commit()
@@ -236,6 +254,7 @@ def test_work_center(db_session: Session) -> WorkCenter:
         description=fake.sentence(),
         hourly_rate=fake.pyfloat(min_value=50, max_value=150),
         is_active=True,
+        company_id=1,
     )
     db_session.add(work_center)
     db_session.commit()
@@ -253,6 +272,7 @@ def test_part(db_session: Session) -> Part:
         part_type="manufactured",
         unit_of_measure="each",
         is_active=True,
+        company_id=1,
     )
     db_session.add(part)
     db_session.commit()
@@ -271,6 +291,7 @@ def test_work_order(db_session: Session, test_part: Part, test_work_center: Work
         status="draft",
         priority=2,
         due_date=fake.date_this_year(after_today=True),
+        company_id=1,
     )
     db_session.add(work_order)
 
@@ -280,6 +301,7 @@ def test_work_order(db_session: Session, test_part: Part, test_work_center: Work
         work_center_id=test_work_center.id,
         sequence=10,
         name="Test Operation",
+        company_id=1,
     )
     db_session.add(operation)
     db_session.commit()
@@ -334,7 +356,8 @@ def test_vendor(db_session: Session):
         contact_name=fake.name(),
         email=fake.email(),
         phone=fake.phone_number(),
-        is_active=True
+        is_active=True,
+        company_id=1,
     )
     db_session.add(vendor)
     db_session.commit()
@@ -346,7 +369,7 @@ def test_vendor(db_session: Session):
 def vendor_factory(db_session: Session):
     """Factory for creating vendors."""
     from app.models.purchasing import Vendor
-    
+
     def create_vendor(name: str, code: str = None) -> Vendor:
         vendor = Vendor(
             name=name,
@@ -354,13 +377,14 @@ def vendor_factory(db_session: Session):
             contact_name=fake.name(),
             email=fake.email(),
             phone=fake.phone_number(),
-            is_active=True
+            is_active=True,
+            company_id=1,
         )
         db_session.add(vendor)
         db_session.commit()
         db_session.refresh(vendor)
         return vendor
-    
+
     return create_vendor
 
 
@@ -368,7 +392,7 @@ def vendor_factory(db_session: Session):
 def part_factory(db_session: Session):
     """Factory for creating parts."""
     from random import choice
-    
+
     def create_part(part_number: str, name: str = None) -> Part:
         part = Part(
             part_number=part_number,
@@ -376,7 +400,8 @@ def part_factory(db_session: Session):
             description=fake.sentence(),
             part_type=choice(["manufactured", "purchased"]),
             unit_of_measure="each",
-            is_active=True
+            is_active=True,
+            company_id=1,
         )
         db_session.add(part)
         db_session.commit()

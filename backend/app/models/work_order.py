@@ -1,9 +1,9 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, date
 import enum
 from app.db.database import Base
-from app.db.mixins import SoftDeleteMixin
+from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
 class WorkOrderStatus(str, enum.Enum):
@@ -24,12 +24,15 @@ class OperationStatus(str, enum.Enum):
     ON_HOLD = "on_hold"
 
 
-class WorkOrder(Base, SoftDeleteMixin):
+class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     """Manufacturing Work Order / Job"""
     __tablename__ = "work_orders"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'work_order_number', name='uq_work_orders_company_wo_number'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    work_order_number = Column(String(50), unique=True, index=True, nullable=False)
+    work_order_number = Column(String(50), index=True, nullable=False)
     
     # Part/Assembly being made
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=False)
@@ -84,7 +87,7 @@ class WorkOrder(Base, SoftDeleteMixin):
     time_entries = relationship("TimeEntry", back_populates="work_order")
 
 
-class WorkOrderOperation(Base):
+class WorkOrderOperation(Base, TenantMixin):
     """Individual operation/step in a work order routing"""
     __tablename__ = "work_order_operations"
     

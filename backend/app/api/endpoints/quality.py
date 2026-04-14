@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.quality import (
     NonConformanceReport, CorrectiveActionRequest, FirstArticleInspection,
@@ -44,10 +44,11 @@ def list_ncrs(
     status: Optional[NCRStatus] = None,
     part_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all NCRs"""
-    query = db.query(NonConformanceReport).options(joinedload(NonConformanceReport.part))
+    query = db.query(NonConformanceReport).filter(NonConformanceReport.company_id == company_id).options(joinedload(NonConformanceReport.part))
     
     if status:
         query = query.filter(NonConformanceReport.status == status)
@@ -61,7 +62,8 @@ def list_ncrs(
 def create_ncr(
     ncr_in: NCRCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new NCR"""
     ncr = NonConformanceReport(
@@ -70,6 +72,7 @@ def create_ncr(
         detected_by=current_user.id,
         detected_date=ncr_in.detected_date or date.today()
     )
+    ncr.company_id = company_id
     db.add(ncr)
     db.commit()
     db.refresh(ncr)
@@ -80,12 +83,13 @@ def create_ncr(
 def get_ncr(
     ncr_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get NCR details"""
     ncr = db.query(NonConformanceReport).options(
         joinedload(NonConformanceReport.part)
-    ).filter(NonConformanceReport.id == ncr_id).first()
+    ).filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id).first()
     
     if not ncr:
         raise HTTPException(status_code=404, detail="NCR not found")
@@ -97,10 +101,11 @@ def update_ncr(
     ncr_id: int,
     ncr_in: NCRUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update an NCR"""
-    ncr = db.query(NonConformanceReport).filter(NonConformanceReport.id == ncr_id).first()
+    ncr = db.query(NonConformanceReport).filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id).first()
     if not ncr:
         raise HTTPException(status_code=404, detail="NCR not found")
     
@@ -123,10 +128,11 @@ def update_ncr(
 def create_car_from_ncr(
     ncr_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a CAR from an NCR"""
-    ncr = db.query(NonConformanceReport).filter(NonConformanceReport.id == ncr_id).first()
+    ncr = db.query(NonConformanceReport).filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id).first()
     if not ncr:
         raise HTTPException(status_code=404, detail="NCR not found")
     
@@ -136,9 +142,10 @@ def create_car_from_ncr(
         problem_description=ncr.description,
         initiated_by=current_user.id
     )
+    car.company_id = company_id
     db.add(car)
     db.flush()
-    
+
     ncr.car_required = True
     ncr.car_id = car.id
     
@@ -169,10 +176,11 @@ def list_cars(
     limit: int = 100,
     status: Optional[CARStatus] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all CARs"""
-    query = db.query(CorrectiveActionRequest)
+    query = db.query(CorrectiveActionRequest).filter(CorrectiveActionRequest.company_id == company_id)
     
     if status:
         query = query.filter(CorrectiveActionRequest.status == status)
@@ -184,7 +192,8 @@ def list_cars(
 def create_car(
     car_in: CARCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new CAR"""
     car = CorrectiveActionRequest(
@@ -192,6 +201,7 @@ def create_car(
         **car_in.model_dump(),
         initiated_by=current_user.id
     )
+    car.company_id = company_id
     db.add(car)
     db.commit()
     db.refresh(car)
@@ -202,10 +212,11 @@ def create_car(
 def get_car(
     car_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get CAR details"""
-    car = db.query(CorrectiveActionRequest).filter(CorrectiveActionRequest.id == car_id).first()
+    car = db.query(CorrectiveActionRequest).filter(CorrectiveActionRequest.id == car_id, CorrectiveActionRequest.company_id == company_id).first()
     if not car:
         raise HTTPException(status_code=404, detail="CAR not found")
     return car
@@ -216,10 +227,11 @@ def update_car(
     car_id: int,
     car_in: CARUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a CAR"""
-    car = db.query(CorrectiveActionRequest).filter(CorrectiveActionRequest.id == car_id).first()
+    car = db.query(CorrectiveActionRequest).filter(CorrectiveActionRequest.id == car_id, CorrectiveActionRequest.company_id == company_id).first()
     if not car:
         raise HTTPException(status_code=404, detail="CAR not found")
     
@@ -263,10 +275,11 @@ def list_fais(
     status: Optional[FAIStatus] = None,
     part_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List all FAIs"""
-    query = db.query(FirstArticleInspection).options(
+    query = db.query(FirstArticleInspection).filter(FirstArticleInspection.company_id == company_id).options(
         joinedload(FirstArticleInspection.part),
         joinedload(FirstArticleInspection.characteristics)
     )
@@ -283,13 +296,15 @@ def list_fais(
 def create_fai(
     fai_in: FAICreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new FAI"""
     fai = FirstArticleInspection(
         fai_number=generate_fai_number(db),
         **fai_in.model_dump()
     )
+    fai.company_id = company_id
     db.add(fai)
     db.commit()
     db.refresh(fai)
@@ -300,13 +315,14 @@ def create_fai(
 def get_fai(
     fai_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get FAI details"""
     fai = db.query(FirstArticleInspection).options(
         joinedload(FirstArticleInspection.part),
         joinedload(FirstArticleInspection.characteristics)
-    ).filter(FirstArticleInspection.id == fai_id).first()
+    ).filter(FirstArticleInspection.id == fai_id, FirstArticleInspection.company_id == company_id).first()
     
     if not fai:
         raise HTTPException(status_code=404, detail="FAI not found")
@@ -318,10 +334,11 @@ def update_fai(
     fai_id: int,
     fai_in: FAIUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a FAI"""
-    fai = db.query(FirstArticleInspection).filter(FirstArticleInspection.id == fai_id).first()
+    fai = db.query(FirstArticleInspection).filter(FirstArticleInspection.id == fai_id, FirstArticleInspection.company_id == company_id).first()
     if not fai:
         raise HTTPException(status_code=404, detail="FAI not found")
     
@@ -345,10 +362,11 @@ def add_fai_characteristic(
     fai_id: int,
     char_in: FAICharacteristicCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Add a characteristic to FAI"""
-    fai = db.query(FirstArticleInspection).filter(FirstArticleInspection.id == fai_id).first()
+    fai = db.query(FirstArticleInspection).filter(FirstArticleInspection.id == fai_id, FirstArticleInspection.company_id == company_id).first()
     if not fai:
         raise HTTPException(status_code=404, detail="FAI not found")
     
@@ -368,10 +386,11 @@ def update_fai_characteristic(
     char_id: int,
     char_in: FAICharacteristicUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update/record measurement for a characteristic"""
-    fai = db.query(FirstArticleInspection).filter(FirstArticleInspection.id == fai_id).first()
+    fai = db.query(FirstArticleInspection).filter(FirstArticleInspection.id == fai_id, FirstArticleInspection.company_id == company_id).first()
     if not fai:
         raise HTTPException(status_code=404, detail="FAI not found")
     
@@ -417,7 +436,8 @@ def delete_fai_characteristic(
     fai_id: int,
     char_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Delete a characteristic"""
     char = db.query(FAICharacteristic).filter(
@@ -446,18 +466,22 @@ def delete_fai_characteristic(
 @router.get("/summary")
 def get_quality_summary(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get quality metrics summary"""
     open_ncrs = db.query(func.count(NonConformanceReport.id)).filter(
+        NonConformanceReport.company_id == company_id,
         NonConformanceReport.status.in_([NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION])
     ).scalar()
-    
+
     open_cars = db.query(func.count(CorrectiveActionRequest.id)).filter(
+        CorrectiveActionRequest.company_id == company_id,
         CorrectiveActionRequest.status.in_([CARStatus.OPEN, CARStatus.ROOT_CAUSE_ANALYSIS, CARStatus.CORRECTIVE_ACTION, CARStatus.VERIFICATION])
     ).scalar()
-    
+
     pending_fais = db.query(func.count(FirstArticleInspection.id)).filter(
+        FirstArticleInspection.company_id == company_id,
         FirstArticleInspection.status.in_([FAIStatus.PENDING, FAIStatus.IN_PROGRESS])
     ).scalar()
     
@@ -467,6 +491,7 @@ def get_quality_summary(
         NonConformanceReport.disposition,
         func.count(NonConformanceReport.id)
     ).filter(
+        NonConformanceReport.company_id == company_id,
         NonConformanceReport.created_at >= month_start
     ).group_by(NonConformanceReport.disposition).all()
     

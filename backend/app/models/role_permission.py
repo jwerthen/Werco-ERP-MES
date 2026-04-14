@@ -1,20 +1,25 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Enum as SQLEnum, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 from app.models.user import UserRole
 
 
-class RolePermission(Base):
+class RolePermission(Base, TenantMixin):
     """
     Stores customized permissions for each role.
     Allows admins to override the default permission matrix.
+    Per-company: each company can customize its own role permissions.
     """
     __tablename__ = "role_permissions"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'role', name='uq_role_permissions_company_role'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    role = Column(SQLEnum(UserRole), unique=True, nullable=False, index=True)
+    role = Column(SQLEnum(UserRole), nullable=False, index=True)
     permissions = Column(JSON, nullable=False, default=list)
     
     # Audit fields

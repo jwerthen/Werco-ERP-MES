@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class CertificationType(str, enum.Enum):
@@ -26,7 +27,7 @@ class CertificationStatus(str, enum.Enum):
     PENDING = "pending"
 
 
-class OperatorCertification(Base):
+class OperatorCertification(Base, TenantMixin):
     """Operator certification records"""
     __tablename__ = "operator_certifications"
 
@@ -53,7 +54,7 @@ class OperatorCertification(Base):
     verifier = relationship("User", foreign_keys=[verified_by])
 
 
-class TrainingRecord(Base):
+class TrainingRecord(Base, TenantMixin):
     """Training records for operators"""
     __tablename__ = "training_records"
 
@@ -81,7 +82,7 @@ class TrainingRecord(Base):
     work_center = relationship("WorkCenter")
 
 
-class SkillMatrix(Base):
+class SkillMatrix(Base, TenantMixin):
     """Links operators to work centers they are qualified for"""
     __tablename__ = "skill_matrix"
 

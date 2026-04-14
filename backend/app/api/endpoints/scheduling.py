@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
 from app.models.work_center import WorkCenter
@@ -234,10 +234,11 @@ def get_schedulable_work_orders(
     end_date: Optional[str] = None,
     work_center_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get work orders for scheduling view (shows WO with its current/first operation)"""
-    query = db.query(WorkOrder).options(
+    query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(
         joinedload(WorkOrder.part),
         joinedload(WorkOrder.operations)
     ).filter(
@@ -317,12 +318,14 @@ def get_scheduled_jobs(
     end_date: Optional[str] = None,
     work_center_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get all operations for scheduling view (legacy endpoint)"""
     query = db.query(WorkOrderOperation).options(
         joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
     ).join(WorkOrder).filter(
+        WorkOrder.company_id == company_id,
         WorkOrder.status.in_([
             WorkOrderStatus.RELEASED,
             WorkOrderStatus.IN_PROGRESS,
@@ -396,7 +399,8 @@ def schedule_work_order(
     work_order_id: int,
     schedule: WorkOrderScheduleUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     Schedule an entire work order by scheduling its first operation.
@@ -449,7 +453,8 @@ def schedule_work_order_earliest(
     work_order_id: int,
     request: EarliestScheduleRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Schedule a work order at the earliest available date with capacity."""
     work_order = _load_work_order_for_scheduling(db, work_order_id)
@@ -510,7 +515,8 @@ def schedule_operation(
     operation_id: int,
     schedule: ScheduleUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Schedule or reschedule an individual operation"""
     operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
@@ -563,7 +569,8 @@ def update_operation_work_center(
     operation_id: int,
     update: WorkCenterUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Move an operation to a different work center"""
     operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
@@ -641,11 +648,12 @@ def get_capacity_summary(
     start_date: str,
     end_date: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get capacity utilization by work center"""
     # Get all work centers
-    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True, WorkCenter.company_id == company_id).all()
     
     # Calculate scheduled hours per work center
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -687,7 +695,8 @@ def get_capacity_heatmap(
     end_date: str,
     work_center_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get per-day capacity utilization by work center with overload flags."""
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -695,7 +704,7 @@ def get_capacity_heatmap(
     if end < start:
         raise HTTPException(status_code=400, detail="end_date must be on or after start_date")
 
-    query = db.query(WorkCenter).filter(WorkCenter.is_active == True)
+    query = db.query(WorkCenter).filter(WorkCenter.is_active == True, WorkCenter.company_id == company_id)
     if work_center_id:
         query = query.filter(WorkCenter.id == work_center_id)
     work_centers = query.order_by(WorkCenter.code).all()
@@ -796,7 +805,8 @@ def get_capacity_heatmap(
 def auto_schedule_operations(
     work_center_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """DEPRECATED: Use /run endpoint instead"""
     # Legacy endpoint - redirect to new constraint-based scheduling
@@ -820,7 +830,8 @@ def auto_schedule_operations(
 def run_scheduling(
     request: SchedulingRunRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Run constraint-based scheduling algorithm"""
 
@@ -847,14 +858,15 @@ def run_scheduling(
 def get_scheduling_conflicts(
     work_center_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get current scheduling conflicts (over-capacity situations)"""
 
     scheduling_service = SchedulingService(db)
 
     # Initialize capacity for all work centers
-    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True, WorkCenter.company_id == company_id).all()
     scheduling_service._initialize_capacity(work_centers, 90)
 
     conflicts = scheduling_service.detect_conflicts(work_center_id)
@@ -866,7 +878,8 @@ def get_scheduling_conflicts(
 def get_load_chart(
     request: LoadChartRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get work center load chart data"""
 
@@ -893,7 +906,8 @@ def get_load_chart(
 def unschedule_work_order(
     work_order_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Clear the schedule for a work order (reset all non-complete operations)."""
     work_order = _load_work_order_for_scheduling(db, work_order_id)
@@ -942,7 +956,8 @@ def unschedule_work_order(
 def get_capacity_for_date(
     request: CapacityForDateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get capacity details for a specific work center on a specific date."""
     wc = _resolve_work_center(db, request.work_center_id)
@@ -992,7 +1007,8 @@ def get_capacity_for_date(
 def bulk_schedule_earliest(
     request: BulkScheduleEarliestRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Schedule multiple work orders at their earliest available capacity in one call."""
     results = []

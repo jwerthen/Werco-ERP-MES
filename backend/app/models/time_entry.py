@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class TimeEntryType(str, enum.Enum):
@@ -14,7 +15,7 @@ class TimeEntryType(str, enum.Enum):
     BREAK = "break"
 
 
-class TimeEntry(Base):
+class TimeEntry(Base, TenantMixin):
     """Time tracking for shop floor labor"""
     __tablename__ = "time_entries"
     

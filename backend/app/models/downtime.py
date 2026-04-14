@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class DowntimeCategory(str, enum.Enum):
@@ -25,7 +26,7 @@ class DowntimePlannedType(str, enum.Enum):
     UNPLANNED = "unplanned"
 
 
-class DowntimeEvent(Base):
+class DowntimeEvent(Base, TenantMixin):
     """Machine downtime event tracking for OEE and production analysis"""
     __tablename__ = "downtime_events"
 
@@ -57,7 +58,7 @@ class DowntimeEvent(Base):
     resolver = relationship("User", foreign_keys=[resolved_by])
 
 
-class DowntimeReasonCode(Base):
+class DowntimeReasonCode(Base, TenantMixin):
     """Predefined reason codes for categorizing downtime events"""
     __tablename__ = "downtime_reason_codes"
 

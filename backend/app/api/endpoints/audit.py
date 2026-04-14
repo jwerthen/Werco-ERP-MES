@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.db.database import get_db
-from app.api.deps import require_role
+from app.api.deps import require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.audit_log import AuditLog
 from app.services.audit_integrity_service import AuditIntegrityService
@@ -47,13 +47,14 @@ def list_audit_logs(
     limit: int = Query(default=100, le=500),
     offset: int = 0,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """
     List audit logs with filtering.
     Only accessible to Admin and Manager roles for security.
     """
-    query = db.query(AuditLog)
+    query = db.query(AuditLog).filter(AuditLog.company_id == company_id)
     
     if action:
         query = query.filter(AuditLog.action == action)
@@ -86,46 +87,52 @@ def list_audit_logs(
 def get_audit_summary(
     days: int = 30,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get summary of audit activity"""
     from sqlalchemy import func
-    
+
     cutoff = datetime.utcnow() - timedelta(days=days)
-    
+
     # Actions by type
     actions = db.query(
         AuditLog.action,
         func.count(AuditLog.id)
     ).filter(
+        AuditLog.company_id == company_id,
         AuditLog.timestamp >= cutoff
     ).group_by(AuditLog.action).all()
-    
+
     # Resources modified
     resources = db.query(
         AuditLog.resource_type,
         func.count(AuditLog.id)
     ).filter(
+        AuditLog.company_id == company_id,
         AuditLog.timestamp >= cutoff
     ).group_by(AuditLog.resource_type).all()
-    
+
     # Active users
     users = db.query(
         AuditLog.user_name,
         func.count(AuditLog.id)
     ).filter(
+        AuditLog.company_id == company_id,
         AuditLog.timestamp >= cutoff,
         AuditLog.user_name != None
     ).group_by(AuditLog.user_name).order_by(desc(func.count(AuditLog.id))).limit(10).all()
-    
+
     # Failed actions
     failed = db.query(func.count(AuditLog.id)).filter(
+        AuditLog.company_id == company_id,
         AuditLog.timestamp >= cutoff,
         AuditLog.success == "false"
     ).scalar() or 0
-    
+
     # Total count
     total = db.query(func.count(AuditLog.id)).filter(
+        AuditLog.company_id == company_id,
         AuditLog.timestamp >= cutoff
     ).scalar() or 0
     
@@ -142,20 +149,22 @@ def get_audit_summary(
 @router.get("/actions")
 def get_action_types(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get distinct action types for filtering"""
-    actions = db.query(AuditLog.action).distinct().all()
+    actions = db.query(AuditLog.action).filter(AuditLog.company_id == company_id).distinct().all()
     return [a[0] for a in actions if a[0]]
 
 
 @router.get("/resource-types")
 def get_resource_types(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get distinct resource types for filtering"""
-    types = db.query(AuditLog.resource_type).distinct().all()
+    types = db.query(AuditLog.resource_type).filter(AuditLog.company_id == company_id).distinct().all()
     return [t[0] for t in types if t[0]]
 
 

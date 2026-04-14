@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -6,6 +6,7 @@ from app.db.database import Base
 
 
 class UserRole(str, enum.Enum):
+    PLATFORM_ADMIN = "platform_admin"  # Werco oversight role — cross-company read access
     ADMIN = "admin"
     MANAGER = "manager"
     SUPERVISOR = "supervisor"
@@ -17,10 +18,15 @@ class UserRole(str, enum.Enum):
 
 class User(Base):
     __tablename__ = "users"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'email', name='uq_users_company_email'),
+        UniqueConstraint('company_id', 'employee_id', name='uq_users_company_employee_id'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    employee_id = Column(String(50), unique=True, index=True, nullable=False)
-    email = Column(String(255), unique=True, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    employee_id = Column(String(50), index=True, nullable=False)
+    email = Column(String(255), index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
@@ -40,6 +46,7 @@ class User(Base):
     created_by = Column(Integer, nullable=True)
     
     # Relationships
+    company = relationship("Company", back_populates="users")
     time_entries = relationship("TimeEntry", back_populates="user")
     notification_preference = relationship("NotificationPreference", back_populates="user", uselist=False)
 

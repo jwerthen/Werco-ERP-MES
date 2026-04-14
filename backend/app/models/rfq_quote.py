@@ -13,9 +13,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
-class RfqPackage(Base):
+class RfqPackage(Base, TenantMixin):
     """Uploaded RFQ package and file bundle for AI sheet-metal estimating."""
 
     __tablename__ = "rfq_packages"
@@ -39,7 +40,7 @@ class RfqPackage(Base):
     estimates = relationship("QuoteEstimate", back_populates="rfq_package", cascade="all, delete-orphan")
 
 
-class RfqPackageFile(Base):
+class RfqPackageFile(Base, TenantMixin):
     """Individual file inside an RFQ package."""
 
     __tablename__ = "rfq_package_files"
@@ -61,7 +62,7 @@ class RfqPackageFile(Base):
     rfq_package = relationship("RfqPackage", back_populates="files")
 
 
-class QuoteEstimate(Base):
+class QuoteEstimate(Base, TenantMixin):
     """Internal estimate generated from RFQ package parsing and costing."""
 
     __tablename__ = "quote_estimates"
@@ -100,7 +101,7 @@ class QuoteEstimate(Base):
     price_snapshots = relationship("PriceSnapshot", back_populates="quote_estimate", cascade="all, delete-orphan")
 
 
-class QuoteLineSummary(Base):
+class QuoteLineSummary(Base, TenantMixin):
     """Per-part summarized estimate output without operation-time line items."""
 
     __tablename__ = "quote_line_summaries"
@@ -129,7 +130,7 @@ class QuoteLineSummary(Base):
     quote_estimate = relationship("QuoteEstimate", back_populates="line_summaries")
 
 
-class PriceSnapshot(Base):
+class PriceSnapshot(Base, TenantMixin):
     """Price inputs used for estimate calculations and fallback cache tracking."""
 
     __tablename__ = "price_snapshots"

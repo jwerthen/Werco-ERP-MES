@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
 class ECOStatus(str, enum.Enum):
@@ -33,7 +34,7 @@ class ECOType(str, enum.Enum):
     QUALITY_IMPROVEMENT = "quality_improvement"
 
 
-class EngineeringChangeOrder(Base):
+class EngineeringChangeOrder(Base, TenantMixin):
     """Engineering Change Order (ECO/ECN) for AS9100D compliance"""
     __tablename__ = "engineering_change_orders"
 
@@ -87,7 +88,7 @@ class EngineeringChangeOrder(Base):
     implementation_tasks = relationship("ECOImplementationTask", back_populates="eco", cascade="all, delete-orphan")
 
 
-class ECOApproval(Base):
+class ECOApproval(Base, TenantMixin):
     """Approval workflow for ECOs"""
     __tablename__ = "eco_approvals"
 
@@ -105,7 +106,7 @@ class ECOApproval(Base):
     approver = relationship("User", backref="eco_approvals")
 
 
-class ECOImplementationTask(Base):
+class ECOImplementationTask(Base, TenantMixin):
     """Implementation tasks for ECOs"""
     __tablename__ = "eco_implementation_tasks"
 

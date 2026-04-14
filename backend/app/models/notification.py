@@ -2,9 +2,10 @@ from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Foreign
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.database import Base
+from app.db.mixins import TenantMixin
 
 
-class NotificationPreference(Base):
+class NotificationPreference(Base, TenantMixin):
     """User notification preferences"""
     __tablename__ = "notification_preferences"
 
@@ -31,7 +32,7 @@ class NotificationPreference(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
-class NotificationLog(Base):
+class NotificationLog(Base, TenantMixin):
     """Log of sent notifications"""
     __tablename__ = "notification_logs"
 
@@ -58,7 +59,7 @@ class NotificationLog(Base):
     user = relationship("User")
 
 
-class DigestQueue(Base):
+class DigestQueue(Base, TenantMixin):
     """Queue for digest notifications"""
     __tablename__ = "digest_queue"
 

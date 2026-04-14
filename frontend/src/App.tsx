@@ -1,6 +1,7 @@
 import React, { Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { CompanyProvider } from './context/CompanyContext';
 import { TourProvider } from './context/TourContext';
 import { KeyboardShortcutsProvider } from './context/KeyboardShortcutsContext';
 import { ToastProvider } from './components/ui/Toast';
@@ -14,6 +15,7 @@ import { lazyWithRetry } from './utils/lazyWithRetry';
 // Eagerly loaded - critical path
 import Login from './pages/Login';
 import Register from './pages/Register';
+import CompanyRegister from './pages/CompanyRegister';
 import Dashboard from './pages/Dashboard';
 import Unauthorized from './pages/Unauthorized';
 
@@ -62,6 +64,7 @@ const CustomerComplaints = lazyWithRetry(() => import('./pages/CustomerComplaint
 const ToolManagement = lazyWithRetry(() => import('./pages/ToolManagement'));
 const SupplierScorecards = lazyWithRetry(() => import('./pages/SupplierScorecards'));
 const QMSStandards = lazyWithRetry(() => import('./pages/QMSStandards'));
+const PlatformOverview = lazyWithRetry(() => import('./pages/PlatformOverview'));
 
 // Loading fallback for lazy-loaded pages
 const PageLoader = () => (
@@ -105,7 +108,7 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/login" />;
   }
   
-  if (user?.role !== 'admin' && !user?.is_superuser) {
+  if (user?.role !== 'admin' && user?.role !== 'platform_admin' && !user?.is_superuser) {
     return <Navigate to="/unauthorized" />;
   }
   
@@ -155,7 +158,17 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/register-company" element={<CompanyRegister />} />
       <Route path="/unauthorized" element={<Unauthorized />} />
+
+      {/* Platform Administration (platform admin only) */}
+      <Route path="/platform" element={
+        <AdminRoute>
+          <Layout>
+            <LazyRoute><PlatformOverview /></LazyRoute>
+          </Layout>
+        </AdminRoute>
+      } />
       
       {/* Dashboard - eagerly loaded */}
       <Route path="/" element={
@@ -615,16 +628,18 @@ function AppRoutes() {
 function App() {
   return (
     <AuthProvider>
-      <ToastProvider>
-        <TourProvider>
-          <Router>
-            <KeyboardShortcutsProvider>
-              <AppRoutes />
-              <TourHighlight />
-            </KeyboardShortcutsProvider>
-          </Router>
-        </TourProvider>
-      </ToastProvider>
+      <CompanyProvider>
+        <ToastProvider>
+          <TourProvider>
+            <Router>
+              <KeyboardShortcutsProvider>
+                <AppRoutes />
+                <TourHighlight />
+              </KeyboardShortcutsProvider>
+            </Router>
+          </TourProvider>
+        </ToastProvider>
+      </CompanyProvider>
     </AuthProvider>
   );
 }

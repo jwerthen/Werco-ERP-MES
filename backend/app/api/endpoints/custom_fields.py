@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, get_current_company_id
 from app.models.user import User, UserRole
 from app.models.custom_field import CustomFieldDefinition, CustomFieldValue, FieldType, EntityType
 from app.schemas.custom_field import (
@@ -21,10 +21,11 @@ def list_field_definitions(
     entity_type: Optional[EntityType] = None,
     active_only: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """List custom field definitions, optionally filtered by entity type"""
-    query = db.query(CustomFieldDefinition)
+    query = db.query(CustomFieldDefinition).filter(CustomFieldDefinition.company_id == company_id)
     
     if entity_type:
         query = query.filter(CustomFieldDefinition.entity_type == entity_type)
@@ -39,12 +40,14 @@ def list_field_definitions(
 def create_field_definition(
     field_in: CustomFieldDefinitionCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Create a new custom field definition"""
     # Check if field_key already exists for this entity type
     existing = db.query(CustomFieldDefinition).filter(
         and_(
+            CustomFieldDefinition.company_id == company_id,
             CustomFieldDefinition.field_key == field_in.field_key,
             CustomFieldDefinition.entity_type == field_in.entity_type
         )
@@ -60,6 +63,7 @@ def create_field_definition(
         **field_in.model_dump(),
         created_by=current_user.id
     )
+    field.company_id = company_id
     db.add(field)
     db.commit()
     db.refresh(field)
@@ -70,10 +74,11 @@ def create_field_definition(
 def get_field_definition(
     field_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get a specific field definition"""
-    field = db.query(CustomFieldDefinition).filter(CustomFieldDefinition.id == field_id).first()
+    field = db.query(CustomFieldDefinition).filter(CustomFieldDefinition.id == field_id, CustomFieldDefinition.company_id == company_id).first()
     if not field:
         raise HTTPException(status_code=404, detail="Field definition not found")
     return field
@@ -84,10 +89,11 @@ def update_field_definition(
     field_id: int,
     field_in: CustomFieldDefinitionUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Update a field definition"""
-    field = db.query(CustomFieldDefinition).filter(CustomFieldDefinition.id == field_id).first()
+    field = db.query(CustomFieldDefinition).filter(CustomFieldDefinition.id == field_id, CustomFieldDefinition.company_id == company_id).first()
     if not field:
         raise HTTPException(status_code=404, detail="Field definition not found")
     
@@ -104,10 +110,11 @@ def update_field_definition(
 def delete_field_definition(
     field_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN]))
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Soft delete (deactivate) a field definition"""
-    field = db.query(CustomFieldDefinition).filter(CustomFieldDefinition.id == field_id).first()
+    field = db.query(CustomFieldDefinition).filter(CustomFieldDefinition.id == field_id, CustomFieldDefinition.company_id == company_id).first()
     if not field:
         raise HTTPException(status_code=404, detail="Field definition not found")
     
