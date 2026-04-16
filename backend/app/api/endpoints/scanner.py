@@ -95,16 +95,18 @@ def lookup_barcode(
         joinedload(SupplierPartMapping.part),
         joinedload(SupplierPartMapping.vendor)
     ).filter(
+        SupplierPartMapping.company_id == company_id,
         SupplierPartMapping.supplier_part_number == code,
         SupplierPartMapping.is_active == True
     ).first()
-    
+
     if not mapping:
         # Try case-insensitive
         mapping = db.query(SupplierPartMapping).options(
             joinedload(SupplierPartMapping.part),
             joinedload(SupplierPartMapping.vendor)
         ).filter(
+            SupplierPartMapping.company_id == company_id,
             SupplierPartMapping.supplier_part_number.ilike(code),
             SupplierPartMapping.is_active == True
         ).first()
@@ -127,6 +129,7 @@ def lookup_barcode(
     
     # 2. Check internal part numbers
     part = db.query(Part).filter(
+        Part.company_id == company_id,
         or_(
             Part.part_number == code,
             Part.part_number.ilike(code)
@@ -152,6 +155,7 @@ def lookup_barcode(
         wo = db.query(WorkOrder).options(
             joinedload(WorkOrder.part)
         ).filter(
+            WorkOrder.company_id == company_id,
             WorkOrder.work_order_number.ilike(f"%{code}%")
         ).first()
         
@@ -235,24 +239,33 @@ def create_supplier_mapping(
     company_id: int = Depends(get_current_company_id)
 ):
     """Create a new supplier part mapping"""
-    # Verify part exists
-    part = db.query(Part).filter(Part.id == mapping_in.part_id).first()
+    # Verify part exists within the caller's company
+    part = db.query(Part).filter(
+        Part.id == mapping_in.part_id,
+        Part.company_id == company_id,
+    ).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    
-    # Check if mapping already exists
+
+    # Check if mapping already exists within this company
     existing = db.query(SupplierPartMapping).filter(
+        SupplierPartMapping.company_id == company_id,
         SupplierPartMapping.supplier_part_number == mapping_in.supplier_part_number,
         SupplierPartMapping.vendor_id == mapping_in.vendor_id,
         SupplierPartMapping.is_active == True
     ).first()
-    
+
     if existing:
         raise HTTPException(status_code=400, detail="Mapping already exists for this supplier part number")
-    
+
     vendor = None
     if mapping_in.vendor_id:
-        vendor = db.query(Vendor).filter(Vendor.id == mapping_in.vendor_id).first()
+        vendor = db.query(Vendor).filter(
+            Vendor.id == mapping_in.vendor_id,
+            Vendor.company_id == company_id,
+        ).first()
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
     
     mapping = SupplierPartMapping(
         supplier_part_number=mapping_in.supplier_part_number,

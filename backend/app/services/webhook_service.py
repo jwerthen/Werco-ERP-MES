@@ -1,3 +1,4 @@
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Dict, Optional
 from app.models.webhook import Webhook, WebhookDelivery
@@ -115,17 +116,22 @@ class WebhookService:
 
         self.db.add(delivery)
 
-        # Update webhook failure count
-        if not delivered:
-            webhook = self.db.query(Webhook).filter(Webhook.id == webhook_id).first()
-            if webhook:
+        # Update webhook failure tracking
+        webhook = self.db.query(Webhook).filter(Webhook.id == webhook_id).first()
+        if webhook:
+            if not delivered:
                 webhook.failed_deliveries += 1
                 webhook.last_failure = func.now()
 
-                # Disable webhook after too many failures
+                # Disable webhook after too many consecutive failures
                 if webhook.failed_deliveries >= 10:
                     webhook.is_active = False
                     logger.warning(f"Disabled webhook {webhook_id} after 10 consecutive failures")
+            else:
+                # Reset failure counter on successful delivery so transient
+                # outages don't permanently disable a healthy webhook.
+                if webhook.failed_deliveries:
+                    webhook.failed_deliveries = 0
 
         self.db.commit()
         self.db.refresh(delivery)
