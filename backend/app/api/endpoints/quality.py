@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.db.database import get_db
+from app.db.locks import acquire_generator_lock
 from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.quality import (
@@ -23,13 +24,17 @@ router = APIRouter()
 
 # ============== NCR Endpoints ==============
 
-def generate_ncr_number(db: Session) -> str:
+def generate_ncr_number(db: Session, company_id: int = None) -> str:
+    acquire_generator_lock(db, "ncr_number", company_id)
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"NCR-{today}-"
-    last = db.query(NonConformanceReport).filter(
+    query = db.query(NonConformanceReport).filter(
         NonConformanceReport.ncr_number.like(f"{prefix}%")
-    ).order_by(NonConformanceReport.ncr_number.desc()).first()
-    
+    )
+    if company_id is not None:
+        query = query.filter(NonConformanceReport.company_id == company_id)
+    last = query.order_by(NonConformanceReport.ncr_number.desc()).first()
+
     if last:
         num = int(last.ncr_number.split("-")[-1]) + 1
     else:
@@ -67,7 +72,7 @@ def create_ncr(
 ):
     """Create a new NCR"""
     ncr = NonConformanceReport(
-        ncr_number=generate_ncr_number(db),
+        ncr_number=generate_ncr_number(db, company_id),
         **ncr_in.model_dump(),
         detected_by=current_user.id,
         detected_date=ncr_in.detected_date or date.today()
@@ -137,7 +142,7 @@ def create_car_from_ncr(
         raise HTTPException(status_code=404, detail="NCR not found")
     
     car = CorrectiveActionRequest(
-        car_number=generate_car_number(db),
+        car_number=generate_car_number(db, company_id),
         title=f"CAR for {ncr.ncr_number}: {ncr.title}",
         problem_description=ncr.description,
         initiated_by=current_user.id
@@ -156,13 +161,17 @@ def create_car_from_ncr(
 
 # ============== CAR Endpoints ==============
 
-def generate_car_number(db: Session) -> str:
+def generate_car_number(db: Session, company_id: int = None) -> str:
+    acquire_generator_lock(db, "car_number", company_id)
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"CAR-{today}-"
-    last = db.query(CorrectiveActionRequest).filter(
+    query = db.query(CorrectiveActionRequest).filter(
         CorrectiveActionRequest.car_number.like(f"{prefix}%")
-    ).order_by(CorrectiveActionRequest.car_number.desc()).first()
-    
+    )
+    if company_id is not None:
+        query = query.filter(CorrectiveActionRequest.company_id == company_id)
+    last = query.order_by(CorrectiveActionRequest.car_number.desc()).first()
+
     if last:
         num = int(last.car_number.split("-")[-1]) + 1
     else:
@@ -197,7 +206,7 @@ def create_car(
 ):
     """Create a new CAR"""
     car = CorrectiveActionRequest(
-        car_number=generate_car_number(db),
+        car_number=generate_car_number(db, company_id),
         **car_in.model_dump(),
         initiated_by=current_user.id
     )
@@ -254,13 +263,17 @@ def update_car(
 
 # ============== FAI Endpoints ==============
 
-def generate_fai_number(db: Session) -> str:
+def generate_fai_number(db: Session, company_id: int = None) -> str:
+    acquire_generator_lock(db, "fai_number", company_id)
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"FAI-{today}-"
-    last = db.query(FirstArticleInspection).filter(
+    query = db.query(FirstArticleInspection).filter(
         FirstArticleInspection.fai_number.like(f"{prefix}%")
-    ).order_by(FirstArticleInspection.fai_number.desc()).first()
-    
+    )
+    if company_id is not None:
+        query = query.filter(FirstArticleInspection.company_id == company_id)
+    last = query.order_by(FirstArticleInspection.fai_number.desc()).first()
+
     if last:
         num = int(last.fai_number.split("-")[-1]) + 1
     else:
@@ -301,7 +314,7 @@ def create_fai(
 ):
     """Create a new FAI"""
     fai = FirstArticleInspection(
-        fai_number=generate_fai_number(db),
+        fai_number=generate_fai_number(db, company_id),
         **fai_in.model_dump()
     )
     fai.company_id = company_id

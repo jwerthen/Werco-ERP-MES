@@ -216,8 +216,25 @@ def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
     if not normalized_input:
         return None
 
-    # Fallback path for kiosk badge IDs: compare normalized values.
-    candidates = db.query(User).all()
+    # Fallback path for kiosk badge IDs: narrow in SQL first so we don't
+    # load the entire user table on every login.
+    # normalized_input is always 4 digits of zero-padded trailing digits.
+    # A stored employee_id ("339", "0339", "EMP-00339") can match the same
+    # normalized value, so we probe with the digit-core (leading zeros
+    # stripped). For the degenerate "0000" case we fall back to matching
+    # any row whose employee_id contains a zero. limit(50) bounds worst
+    # case; if you have 50+ duplicates the existing 409 conflict path
+    # already tells the admin to clean up.
+    core_digits = normalized_input.lstrip("0") or normalized_input[-1:]
+    candidates = (
+        db.query(User)
+        .filter(
+            User.employee_id.isnot(None),
+            User.employee_id.ilike(f"%{core_digits}%"),
+        )
+        .limit(50)
+        .all()
+    )
     matches = [
         u for u in candidates
         if _normalize_employee_id(u.employee_id) == normalized_input

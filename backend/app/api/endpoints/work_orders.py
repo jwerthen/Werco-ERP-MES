@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import or_
 from pydantic import BaseModel, Field
 from app.db.database import get_db, atomic_transaction
+from app.db.locks import acquire_generator_lock
 from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
@@ -73,7 +74,14 @@ def _release_next_group(work_order: WorkOrder, completed_op: WorkOrderOperation)
         next_op.status = OperationStatus.READY
 
 def generate_work_order_number(db: Session, company_id: int = None) -> str:
-    """Generate next work order number (WO-YYYYMMDD-XXX)"""
+    """Generate next work order number (WO-YYYYMMDD-XXX)
+
+    Holds a Postgres advisory lock for the duration of the transaction so
+    two concurrent creates can't read the same "last number" and produce
+    duplicate work order numbers. No-op on non-Postgres (tests).
+    """
+    acquire_generator_lock(db, "work_order_number", company_id)
+
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"WO-{today}-"
 

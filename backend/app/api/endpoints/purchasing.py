@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func
 from app.db.database import get_db
+from app.db.locks import acquire_generator_lock
 from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POStatus, POReceipt, ReceiptStatus
@@ -99,20 +100,29 @@ def update_vendor(
 
 # ============ PURCHASE ORDERS ============
 
-def generate_po_number(db: Session) -> str:
+def generate_po_number(db: Session, company_id: int = None) -> str:
+    """Generate next PO number (PO-YYYYMMDD-XXX).
+
+    Holds an advisory lock so concurrent creates can't collide.
+    """
+    acquire_generator_lock(db, "po_number", company_id)
+
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"PO-{today}-"
-    
-    last_po = db.query(PurchaseOrder).filter(
+
+    query = db.query(PurchaseOrder).filter(
         PurchaseOrder.po_number.like(f"{prefix}%")
-    ).order_by(PurchaseOrder.po_number.desc()).first()
-    
+    )
+    if company_id is not None:
+        query = query.filter(PurchaseOrder.company_id == company_id)
+    last_po = query.order_by(PurchaseOrder.po_number.desc()).first()
+
     if last_po:
         last_num = int(last_po.po_number.split("-")[-1])
         new_num = last_num + 1
     else:
         new_num = 1
-    
+
     return f"{prefix}{new_num:03d}"
 
 
@@ -169,8 +179,8 @@ def create_purchase_order(
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     
-    po_number = generate_po_number(db)
-    
+    po_number = generate_po_number(db, company_id)
+
     po = PurchaseOrder(
         po_number=po_number,
         vendor_id=po_in.vendor_id,
@@ -324,20 +334,29 @@ def add_po_line(
 
 # ============ RECEIVING ============
 
-def generate_receipt_number(db: Session) -> str:
+def generate_receipt_number(db: Session, company_id: int = None) -> str:
+    """Generate next receipt number (RCV-YYYYMMDD-XXX).
+
+    Holds an advisory lock so concurrent creates can't collide.
+    """
+    acquire_generator_lock(db, "receipt_number", company_id)
+
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"RCV-{today}-"
-    
-    last = db.query(POReceipt).filter(
+
+    query = db.query(POReceipt).filter(
         POReceipt.receipt_number.like(f"{prefix}%")
-    ).order_by(POReceipt.receipt_number.desc()).first()
-    
+    )
+    if company_id is not None:
+        query = query.filter(POReceipt.company_id == company_id)
+    last = query.order_by(POReceipt.receipt_number.desc()).first()
+
     if last:
         last_num = int(last.receipt_number.split("-")[-1])
         new_num = last_num + 1
     else:
         new_num = 1
-    
+
     return f"{prefix}{new_num:03d}"
 
 
@@ -402,7 +421,7 @@ def receive_material(
         if not location:
             raise HTTPException(status_code=404, detail="Location not found")
     
-    receipt_number = generate_receipt_number(db)
+    receipt_number = generate_receipt_number(db, company_id)
     
     receipt = POReceipt(
         receipt_number=receipt_number,

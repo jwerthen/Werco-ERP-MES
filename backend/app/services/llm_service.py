@@ -10,6 +10,10 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# Hard cap on Anthropic API calls. Without this the SDK can hang an
+# entire request thread if the upstream API is slow or unreachable.
+LLM_API_TIMEOUT_SECONDS = 60.0
+
 # Extraction schema for LLM
 EXTRACTION_SCHEMA = """
 {
@@ -131,7 +135,7 @@ Document Text:
 Return ONLY the JSON object, no other text."""
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key, timeout=LLM_API_TIMEOUT_SECONDS)
 
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -233,7 +237,7 @@ Purchase Order Text:
 Return ONLY the JSON object, no other text."""
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key, timeout=LLM_API_TIMEOUT_SECONDS)
         
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
