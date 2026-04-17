@@ -71,26 +71,31 @@ def get_my_active_job(
     company_id: int = Depends(get_current_company_id)
 ):
     """Get the current user's active time entries (clocked in jobs)"""
-    active_entries = db.query(TimeEntry).filter(
-        and_(
-            TimeEntry.user_id == current_user.id,
-            TimeEntry.clock_out.is_(None)
+    # Eager-load operation, work_order, and work_order.part in a single
+    # query so we don't issue 2*N extra SELECTs iterating active entries.
+    active_entries = (
+        db.query(TimeEntry)
+        .options(
+            joinedload(TimeEntry.operation),
+            joinedload(TimeEntry.work_order).joinedload(WorkOrder.part),
         )
-    ).all()
-    
+        .filter(
+            and_(
+                TimeEntry.user_id == current_user.id,
+                TimeEntry.clock_out.is_(None),
+            )
+        )
+        .all()
+    )
+
     if not active_entries:
         return {"active_jobs": [], "active_job": None}
 
     jobs = []
     for entry in active_entries:
-        operation = db.query(WorkOrderOperation).filter(
-            WorkOrderOperation.id == entry.operation_id
-        ).first()
-        
-        work_order = db.query(WorkOrder).options(
-            joinedload(WorkOrder.part)
-        ).filter(WorkOrder.id == entry.work_order_id).first()
-        
+        operation = entry.operation
+        work_order = entry.work_order
+
         jobs.append({
             "time_entry_id": entry.id,
             "clock_in": to_utc_iso(entry.clock_in),
@@ -103,10 +108,10 @@ def get_my_active_job(
             "quantity_ordered": float(work_order.quantity_ordered) if work_order and work_order.quantity_ordered else 0,
             "quantity_complete": float(operation.quantity_complete) if operation and operation.quantity_complete else 0,
         })
-    
+
     return {
         "active_jobs": jobs,
-        "active_job": jobs[0] if jobs else None
+        "active_job": jobs[0] if jobs else None,
     }
 
 

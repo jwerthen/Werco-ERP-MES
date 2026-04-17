@@ -416,8 +416,8 @@ export default function WorkOrderDetail() {
                   </tr>
                 </thead>
                 <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                  {activeUsersOnWorkOrder.map((entry, index) => (
-                    <tr key={`${entry.user_id}-${entry.operation || 'op'}-${index}`} className="hover:bg-slate-800/50">
+                  {activeUsersOnWorkOrder.map((entry) => (
+                    <tr key={`${entry.user_id}-${entry.clock_in ?? ''}-${entry.operation ?? 'op'}`} className="hover:bg-slate-800/50">
                       <td className="px-4 py-3 text-sm font-medium text-white">
                         {entry.user_name || userNameById[entry.user_id] || `User #${entry.user_id}`}
                       </td>
