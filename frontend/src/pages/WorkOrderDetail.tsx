@@ -220,14 +220,41 @@ export default function WorkOrderDetail() {
     }
   };
 
+  /**
+   * Parse a string from prompt() as a non-negative quantity. Returns null
+   * (with a user-facing alert) if the input isn't a finite number or
+   * exceeds `max`. Keeps garbage out of the completion API — the server
+   * validates too, but surfacing the error client-side avoids a round-trip
+   * for something that should obviously be rejected.
+   */
+  const parseQty = (raw: string | null, label: string, max?: number): number | null => {
+    if (raw === null) return null; // user cancelled
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n < 0) {
+      alert(`${label} must be a non-negative number`);
+      return null;
+    }
+    if (max !== undefined && n > max) {
+      alert(`${label} cannot exceed ${max}`);
+      return null;
+    }
+    return n;
+  };
+
   const handleComplete = async () => {
-    const qtyComplete = prompt(`Enter quantity completed (ordered: ${workOrder!.quantity_ordered}):`, workOrder!.quantity_ordered.toString());
-    if (!qtyComplete) return;
-    
-    const qtyScrapped = prompt('Enter quantity scrapped (if any):', '0');
-    
+    const ordered = workOrder!.quantity_ordered;
+    const qtyCompleteRaw = prompt(`Enter quantity completed (ordered: ${ordered}):`, ordered.toString());
+    const qtyComplete = parseQty(qtyCompleteRaw, 'Quantity completed', ordered);
+    if (qtyComplete === null) return;
+
+    const qtyScrappedRaw = prompt('Enter quantity scrapped (if any):', '0');
+    const qtyScrapped = parseQty(qtyScrappedRaw ?? '0', 'Quantity scrapped');
+    if (qtyScrapped === null) return;
+
     try {
-      await api.completeWorkOrder(workOrder!.id, parseFloat(qtyComplete), parseFloat(qtyScrapped || '0'));
+      await api.completeWorkOrder(workOrder!.id, qtyComplete, qtyScrapped);
       loadWorkOrder();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to complete work order');
@@ -235,13 +262,17 @@ export default function WorkOrderDetail() {
   };
 
   const handleCompleteOperation = async (operationId: number, opName: string) => {
-    const qtyComplete = prompt(`Complete operation "${opName}"\nEnter quantity completed:`, workOrder!.quantity_ordered.toString());
-    if (!qtyComplete) return;
-    
-    const qtyScrapped = prompt('Enter quantity scrapped (if any):', '0');
-    
+    const ordered = workOrder!.quantity_ordered;
+    const qtyCompleteRaw = prompt(`Complete operation "${opName}"\nEnter quantity completed:`, ordered.toString());
+    const qtyComplete = parseQty(qtyCompleteRaw, 'Quantity completed', ordered);
+    if (qtyComplete === null) return;
+
+    const qtyScrappedRaw = prompt('Enter quantity scrapped (if any):', '0');
+    const qtyScrapped = parseQty(qtyScrappedRaw ?? '0', 'Quantity scrapped');
+    if (qtyScrapped === null) return;
+
     try {
-      await api.completeWOOperation(operationId, parseFloat(qtyComplete), parseFloat(qtyScrapped || '0'));
+      await api.completeWOOperation(operationId, qtyComplete, qtyScrapped);
       loadWorkOrder();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to complete operation');

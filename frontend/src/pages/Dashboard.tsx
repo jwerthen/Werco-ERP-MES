@@ -127,12 +127,21 @@ export default function Dashboard() {
     }
     
     try {
-      // Use cached request for dashboard (supports ETag/304)
+      // Use cached request for dashboard (supports ETag/304). Widget data
+      // is fetched in parallel; individual widget failures degrade to a
+      // safe default rather than taking the whole dashboard down. Log
+      // the underlying error so failures are observable during triage
+      // instead of silently disappearing.
+      const logAndFallback = <T,>(widget: string, fallback: T) => (err: unknown): T => {
+        // eslint-disable-next-line no-console
+        console.error(`Dashboard widget "${widget}" failed to load:`, err);
+        return fallback;
+      };
       const [dashboardResult, qualitySummary, equipmentDueData, lowStockData] = await Promise.all([
         api.getDashboardWithCache(),
-        api.getQualitySummary().catch(() => ({ open_ncrs: 0 })),
-        api.getEquipmentDueSoon(30).catch(() => []),
-        api.getLowStockAlerts().catch(() => [])
+        api.getQualitySummary().catch(logAndFallback('quality summary', { open_ncrs: 0 })),
+        api.getEquipmentDueSoon(30).catch(logAndFallback('equipment due soon', [])),
+        api.getLowStockAlerts().catch(logAndFallback('low stock alerts', []))
       ]);
       
       // Only update state if data actually changed (prevents unnecessary re-renders)

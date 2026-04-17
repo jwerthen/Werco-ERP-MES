@@ -102,10 +102,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Check for existing token on mount
     const token = sessionStorage.getItem('token');
     const savedUser = sessionStorage.getItem('user');
-    
+
     if (token && savedUser) {
       try {
-        setUser(JSON.parse(savedUser));
+        const parsed = JSON.parse(savedUser);
+        // Validate minimum shape — JSON.parse succeeding is not enough, we
+        // also need id/email/role to avoid booting the app with a partial
+        // or corrupted user object that would blow up downstream.
+        if (
+          parsed &&
+          typeof parsed === 'object' &&
+          typeof parsed.id !== 'undefined' &&
+          typeof parsed.email === 'string' &&
+          typeof parsed.role === 'string'
+        ) {
+          setUser(parsed);
+        } else {
+          throw new Error('Stored user is missing required fields');
+        }
       } catch {
         sessionStorage.removeItem('user');
         sessionStorage.removeItem('token');

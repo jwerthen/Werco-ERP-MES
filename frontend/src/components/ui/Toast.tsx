@@ -13,6 +13,11 @@ interface ToastContextValue {
 
 const ToastContext = createContext<ToastContextValue>({ showToast: () => {} });
 
+// Module-scoped monotonic counter so toast IDs are guaranteed unique even
+// when several toasts fire in the same millisecond. Date.now() + Math.random()
+// is collision-prone under bursts.
+let nextToastId = 0;
+
 export function useToast() {
   return useContext(ToastContext);
 }
@@ -21,7 +26,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const showToast = useCallback((type: Toast['type'], message: string) => {
-    const id = Date.now() + Math.random();
+    const id = ++nextToastId;
     setToasts(prev => [...prev, { id, type, message }]);
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
