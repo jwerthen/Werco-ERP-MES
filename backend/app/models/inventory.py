@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Float, Text, ForeignKey, Enum as SQLEnum, Boolean, Date
+from sqlalchemy import Column, Integer, String, DateTime, Float, Text, ForeignKey, Enum as SQLEnum, Boolean, Date, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, date
 import enum
@@ -37,9 +37,12 @@ class CycleCountStatus(str, enum.Enum):
 class InventoryLocation(Base, TenantMixin):
     """Warehouse locations/bins"""
     __tablename__ = "inventory_locations"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_inventory_locations_company_code'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(50), unique=True, index=True, nullable=False)  # e.g., WH1-A-01-01
+    code = Column(String(50), index=True, nullable=False)  # e.g., WH1-A-01-01
     name = Column(String(255))
     
     # Hierarchy
@@ -71,9 +74,12 @@ class InventoryLocation(Base, TenantMixin):
 class CycleCount(Base, TenantMixin):
     """Cycle count session"""
     __tablename__ = "cycle_counts"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'count_number', name='uq_cycle_counts_company_count_number'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    count_number = Column(String(50), unique=True, index=True, nullable=False)
+    count_number = Column(String(50), index=True, nullable=False)
     
     # Scope
     location_id = Column(Integer, ForeignKey("inventory_locations.id"), nullable=True)

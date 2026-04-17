@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -48,9 +48,12 @@ class InspectionMethod(str, enum.Enum):
 class Vendor(Base, TenantMixin):
     """Supplier/Vendor master"""
     __tablename__ = "vendors"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_vendors_company_code'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(50), unique=True, index=True, nullable=False)
+    code = Column(String(50), index=True, nullable=False)
     name = Column(String(255), nullable=False)
     
     # Contact info
@@ -92,9 +95,12 @@ class Vendor(Base, TenantMixin):
 class PurchaseOrder(Base, TenantMixin):
     """Purchase Order header"""
     __tablename__ = "purchase_orders"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'po_number', name='uq_purchase_orders_company_po_number'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    po_number = Column(String(50), unique=True, index=True, nullable=False)
+    po_number = Column(String(50), index=True, nullable=False)
     
     vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=False)
     
@@ -172,9 +178,12 @@ class ReceiptStatus(str, enum.Enum):
 class POReceipt(Base, TenantMixin):
     """Receipt against a PO line - tracks each delivery"""
     __tablename__ = "po_receipts"
-    
+    __table_args__ = (
+        UniqueConstraint('company_id', 'receipt_number', name='uq_po_receipts_company_receipt_number'),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    receipt_number = Column(String(50), unique=True, index=True, nullable=False)
+    receipt_number = Column(String(50), index=True, nullable=False)
     
     po_line_id = Column(Integer, ForeignKey("purchase_order_lines.id"), nullable=False)
     

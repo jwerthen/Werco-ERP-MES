@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Text
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Text, ForeignKey
 from sqlalchemy.sql import func
 from app.db.database import Base
 from app.db.mixins import TenantMixin
@@ -36,7 +36,12 @@ class WebhookDelivery(Base, TenantMixin):
     __tablename__ = "webhook_deliveries"
 
     id = Column(Integer, primary_key=True, index=True)
-    webhook_id = Column(Integer, nullable=False, index=True)
+    webhook_id = Column(
+        Integer,
+        ForeignKey("webhooks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     event = Column(String(100), index=True, nullable=False)
 
     # Payload
