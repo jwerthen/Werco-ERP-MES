@@ -1,6 +1,6 @@
 from typing import List, Optional
 from datetime import datetime, date
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, and_
 from app.db.database import get_db, atomic_transaction
@@ -18,48 +18,58 @@ router = APIRouter()
 
 @router.get("/low-stock")
 def get_low_stock_alerts(
+    limit: int = Query(500, le=2000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id)
 ):
-    """Get parts with inventory below reorder point"""
-    # Get all parts with reorder points set
-    parts_with_reorder = db.query(Part).filter(
-        Part.company_id == company_id,
-        Part.reorder_point > 0,
-        Part.is_active == True
-    ).all()
-    if not parts_with_reorder:
-        return []
+    """Get parts with inventory below reorder point.
 
-    # Aggregate inventory quantities in a single query
-    totals = db.query(
-        InventoryItem.part_id,
-        func.sum(InventoryItem.quantity_on_hand).label("total_qty")
-    ).filter(
-        InventoryItem.is_active == True,
-        InventoryItem.part_id.in_([p.id for p in parts_with_reorder])
-    ).group_by(InventoryItem.part_id).all()
+    Filter is applied in SQL so we don't load the full parts catalog into
+    memory. A hard limit bounds the response size; the frontend paginates
+    display in any case.
+    """
+    # Subquery: sum of on-hand quantity per active inventory row, by part.
+    qty_subq = (
+        db.query(
+            InventoryItem.part_id.label("pid"),
+            func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0).label("total_qty"),
+        )
+        .filter(InventoryItem.is_active == True)
+        .group_by(InventoryItem.part_id)
+        .subquery()
+    )
 
-    totals_by_part_id = {row.part_id: float(row.total_qty or 0) for row in totals}
+    total_qty_col = func.coalesce(qty_subq.c.total_qty, 0)
+
+    rows = (
+        db.query(Part, total_qty_col.label("total_qty"))
+        .outerjoin(qty_subq, Part.id == qty_subq.c.pid)
+        .filter(
+            Part.company_id == company_id,
+            Part.is_active == True,
+            Part.reorder_point > 0,
+            total_qty_col <= Part.reorder_point,
+        )
+        .limit(limit)
+        .all()
+    )
 
     alerts = []
-    for part in parts_with_reorder:
-        total_qty = totals_by_part_id.get(part.id, 0.0)
+    for part, total_qty in rows:
+        total_qty = float(total_qty or 0)
+        alerts.append({
+            "part_id": part.id,
+            "part_number": part.part_number,
+            "part_name": part.name,
+            "quantity_on_hand": total_qty,
+            "reorder_point": part.reorder_point,
+            "reorder_quantity": part.reorder_quantity,
+            "safety_stock": part.safety_stock,
+            "shortage": part.reorder_point - total_qty,
+            "is_critical": total_qty <= (part.safety_stock or 0),
+        })
 
-        if total_qty <= part.reorder_point:
-            alerts.append({
-                "part_id": part.id,
-                "part_number": part.part_number,
-                "part_name": part.name,
-                "quantity_on_hand": total_qty,
-                "reorder_point": part.reorder_point,
-                "reorder_quantity": part.reorder_quantity,
-                "safety_stock": part.safety_stock,
-                "shortage": part.reorder_point - total_qty,
-                "is_critical": total_qty <= part.safety_stock
-            })
-    
     # Sort by critical first, then by shortage
     alerts.sort(key=lambda x: (not x["is_critical"], -x["shortage"]))
     return alerts

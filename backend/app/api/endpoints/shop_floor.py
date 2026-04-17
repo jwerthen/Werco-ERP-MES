@@ -240,9 +240,39 @@ def clock_out(
     if time_entry.clock_out:
         raise HTTPException(status_code=400, detail="Already clocked out")
 
+    if not time_entry.clock_in:
+        # Defensive: every row should have clock_in because the insert
+        # happens at clock-in time, but don't 500 if a bad row slipped in.
+        raise HTTPException(status_code=500, detail="Time entry is missing clock_in")
+
     if clock_out_data.quantity_produced < 0 or clock_out_data.quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="Quantities cannot be negative")
-    
+
+    # Look up related work order / operation BEFORE mutating the time entry
+    # so we can return a clean 404 instead of leaving a half-updated row
+    # in the session if the referenced work order was deleted.
+    work_order = db.query(WorkOrder).filter(
+        WorkOrder.id == time_entry.work_order_id
+    ).first()
+    if not work_order:
+        raise HTTPException(
+            status_code=404,
+            detail="Work order for this time entry no longer exists",
+        )
+
+    operation = None
+    if time_entry.operation_id is not None:
+        operation = db.query(WorkOrderOperation).filter(
+            WorkOrderOperation.id == time_entry.operation_id
+        ).first()
+        if not operation:
+            raise HTTPException(
+                status_code=404,
+                detail="Operation for this time entry no longer exists",
+            )
+        if (operation.quantity_complete + clock_out_data.quantity_produced) > work_order.quantity_ordered:
+            raise HTTPException(status_code=400, detail="Quantity produced exceeds quantity ordered")
+
     # Update time entry
     time_entry.clock_out = datetime.utcnow()
     time_entry.duration_hours = (time_entry.clock_out - time_entry.clock_in).total_seconds() / 3600
@@ -250,34 +280,20 @@ def clock_out(
     time_entry.quantity_scrapped = clock_out_data.quantity_scrapped
     time_entry.scrap_reason = clock_out_data.scrap_reason
     time_entry.notes = clock_out_data.notes or time_entry.notes
-    
-    # Update work order totals
-    work_order = db.query(WorkOrder).filter(
-        WorkOrder.id == time_entry.work_order_id
-    ).first()
-    
-    # Update operation actual hours
-    operation = db.query(WorkOrderOperation).filter(
-        WorkOrderOperation.id == time_entry.operation_id
-    ).first()
-    
-    if operation:
-        if work_order and (operation.quantity_complete + clock_out_data.quantity_produced) > work_order.quantity_ordered:
-            raise HTTPException(status_code=400, detail="Quantity produced exceeds quantity ordered")
 
+    if operation:
         if time_entry.entry_type == TimeEntryType.SETUP:
             operation.actual_setup_hours += time_entry.duration_hours
         else:
             operation.actual_run_hours += time_entry.duration_hours
-        
+
         operation.quantity_complete += clock_out_data.quantity_produced
         operation.quantity_scrapped += clock_out_data.quantity_scrapped
-    
-    if work_order:
-        work_order.actual_hours += time_entry.duration_hours
-    
+
+    work_order.actual_hours += time_entry.duration_hours
+
     # Update statuses if operation complete
-    if operation and work_order:
+    if operation:
         is_fully_complete = operation.quantity_complete >= work_order.quantity_ordered
 
         if is_fully_complete:
@@ -331,25 +347,24 @@ def clock_out(
                 "user_id": current_user.id,
             }
         )
-    if work_order:
-        safe_broadcast(
-            broadcast_work_order_update,
-            work_order.id,
-            {
-                "event": "clock_out",
-                "operation_id": operation.id if operation else None,
-                "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
-            }
-        )
-        safe_broadcast(
-            broadcast_dashboard_update,
-            {
-                "event": "clock_out",
-                "work_order_id": work_order.id,
-                "operation_id": operation.id if operation else None,
-            }
-        )
-    
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "clock_out",
+            "operation_id": operation.id if operation else None,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "clock_out",
+            "work_order_id": work_order.id,
+            "operation_id": operation.id if operation else None,
+        }
+    )
+
     return time_entry
 
 

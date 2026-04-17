@@ -1,6 +1,6 @@
 from typing import Optional
 from datetime import datetime, timedelta, date
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.db.database import get_db
@@ -157,16 +157,25 @@ def get_inventory_value(
 @router.get("/vendor-performance")
 def get_vendor_performance(
     days: int = 90,
+    skip: int = 0,
+    limit: int = Query(100, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id)
 ):
     """Get vendor performance metrics"""
     from app.models.purchasing import Vendor, PurchaseOrderLine
-    
+
     cutoff = datetime.utcnow() - timedelta(days=days)
-    
-    vendors = db.query(Vendor).filter(Vendor.is_active == True).all()
+
+    vendors = (
+        db.query(Vendor)
+        .filter(Vendor.company_id == company_id, Vendor.is_active == True)
+        .order_by(Vendor.name)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     
     result = []
     for vendor in vendors:
@@ -208,16 +217,25 @@ def get_vendor_performance(
 @router.get("/work-center-utilization")
 def get_work_center_utilization(
     days: int = 30,
+    skip: int = 0,
+    limit: int = Query(100, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id)
 ):
     """Get work center utilization"""
     from app.models.work_center import WorkCenter
-    
+
     cutoff = datetime.utcnow() - timedelta(days=days)
-    
-    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+
+    work_centers = (
+        db.query(WorkCenter)
+        .filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True)
+        .order_by(WorkCenter.name)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     
     result = []
     for wc in work_centers:
