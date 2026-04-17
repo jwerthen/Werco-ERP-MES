@@ -55,6 +55,8 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     # Customer/Sales Order reference
     customer_name = Column(String(255))
     customer_po = Column(String(100))
+    po_line_item = Column(String(50), nullable=True)
+    po_date = Column(Date, nullable=True)
     sales_order_id = Column(Integer, nullable=True)
     
     # Lot/Serial tracking for AS9100D traceability
