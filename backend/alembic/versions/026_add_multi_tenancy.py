@@ -140,9 +140,28 @@ def upgrade() -> None:
     op.execute("INSERT INTO companies (id, name, slug, is_active) VALUES (1, 'Werco Manufacturing', 'werco', true)")
     op.execute("SELECT setval('companies_id_seq', 1)")
 
-    # 3. Add PLATFORM_ADMIN to the UserRole enum
-    # PostgreSQL requires explicit ALTER TYPE for enums
-    op.execute("ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'platform_admin' BEFORE 'admin'")
+    # 3. Add PLATFORM_ADMIN to the UserRole enum.
+    # Prod DBs were created with SQLAlchemy default behavior that stores enum
+    # *names* (uppercase: 'ADMIN', 'MANAGER', ...) rather than the Python
+    # `.value` strings (lowercase: 'admin', 'manager', ...). Detect which
+    # case the existing enum uses and add the new value in the matching case
+    # so the BEFORE clause resolves correctly on both styles.
+    conn = op.get_bind()
+    labels = {
+        row[0] for row in conn.execute(sa.text(
+            "SELECT enumlabel FROM pg_enum e "
+            "JOIN pg_type t ON t.oid = e.enumtypid "
+            "WHERE t.typname = 'userrole'"
+        )).fetchall()
+    }
+    if 'ADMIN' in labels:
+        op.execute("ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'PLATFORM_ADMIN' BEFORE 'ADMIN'")
+    elif 'admin' in labels:
+        op.execute("ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'platform_admin' BEFORE 'admin'")
+    else:
+        raise RuntimeError(
+            f"userrole enum has neither ADMIN nor admin label; found {labels!r}"
+        )
 
     # 4. Add company_id to all tables (with DEFAULT 1 for existing data)
     for table in TENANT_TABLES:
