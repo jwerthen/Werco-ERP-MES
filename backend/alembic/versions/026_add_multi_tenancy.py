@@ -196,22 +196,16 @@ def upgrade() -> None:
     op.create_foreign_key('fk_audit_logs_company_id', 'audit_logs', 'companies', ['company_id'], ['id'])
     op.create_index('ix_audit_logs_company_id', 'audit_logs', ['company_id'])
 
-    # 8. Drop old unique constraints and create compound ones
+    # 8. Drop old unique constraints and create compound ones.
+    # Using IF EXISTS rather than try/except: a failed DROP inside Postgres'
+    # transactional DDL aborts the whole transaction, after which every
+    # subsequent statement raises "current transaction is aborted" and the
+    # migration never finishes — leaving the container stuck in a
+    # restart/healthcheck loop.
     for table, old_idx, new_constraint, columns in UNIQUE_CONSTRAINT_CHANGES:
-        # Try to drop the old unique index/constraint
-        try:
-            op.drop_index(old_idx, table_name=table)
-        except Exception:
-            pass
-        try:
-            op.drop_constraint(old_idx, table, type_='unique')
-        except Exception:
-            pass
-        # Also try the common SQLAlchemy auto-generated names
-        try:
-            op.drop_constraint(f'{table}_{columns[-1]}_key', table, type_='unique')
-        except Exception:
-            pass
+        op.execute(f'DROP INDEX IF EXISTS {old_idx}')
+        op.execute(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {old_idx}')
+        op.execute(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_{columns[-1]}_key')
 
         # Create new compound unique constraint
         op.create_unique_constraint(new_constraint, table, columns)
