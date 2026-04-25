@@ -1,6 +1,6 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "Dockerfile"
+dockerfilePath = "backend/Dockerfile"
 watchPatterns = ["**/*"]
 
 # NOTE: Ensure the backend service's "Root Directory" setting in Railway dashboard
