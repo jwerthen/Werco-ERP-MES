@@ -45,23 +45,18 @@ UNIQUE_CONSTRAINT_CHANGES = [
 
 
 def upgrade() -> None:
-    # 1. Convert global uniques to compound (company_id, <col>)
+    # 1. Convert global uniques to compound (company_id, <col>).
+    # Drop each of the common storage shapes the old unique could have:
+    # a plain unique index, a unique constraint sharing the index name,
+    # or the PG auto-generated <table>_<col>_key constraint. Use raw
+    # IF EXISTS rather than try/except — a failed DROP inside Postgres'
+    # transactional DDL aborts the whole transaction and every subsequent
+    # statement raises "current transaction is aborted", which leaves the
+    # container stuck looping on failed healthchecks.
     for table, old_idx, new_constraint, columns in UNIQUE_CONSTRAINT_CHANGES:
-        # Try each of the common ways the old unique could be stored: a
-        # unique index, a unique constraint named like the index, or the
-        # PG auto-generated <table>_<col>_key constraint.
-        try:
-            op.drop_index(old_idx, table_name=table)
-        except Exception:
-            pass
-        try:
-            op.drop_constraint(old_idx, table, type_='unique')
-        except Exception:
-            pass
-        try:
-            op.drop_constraint(f'{table}_{columns[-1]}_key', table, type_='unique')
-        except Exception:
-            pass
+        op.execute(f'DROP INDEX IF EXISTS {old_idx}')
+        op.execute(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {old_idx}')
+        op.execute(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_{columns[-1]}_key')
 
         op.create_unique_constraint(new_constraint, table, columns)
 
@@ -107,9 +102,6 @@ def downgrade() -> None:
 
     # Restore old global unique constraints
     for table, old_idx, new_constraint, columns in UNIQUE_CONSTRAINT_CHANGES:
-        try:
-            op.drop_index(f'ix_{table}_{columns[-1]}', table_name=table)
-        except Exception:
-            pass
+        op.execute(f'DROP INDEX IF EXISTS ix_{table}_{columns[-1]}')
         op.drop_constraint(new_constraint, table, type_='unique')
         op.create_index(old_idx, table, [columns[-1]], unique=True)
