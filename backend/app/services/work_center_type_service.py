@@ -25,8 +25,8 @@ def normalize_work_center_type(value: str) -> str:
     if not value:
         return ""
     val = value.strip().lower()
-    val = re.sub(r"[^a-z0-9\\s_-]", "", val)
-    val = re.sub(r"[\\s-]+", "_", val)
+    val = re.sub(r"[^a-z0-9\s_-]", "", val)
+    val = re.sub(r"[\s-]+", "_", val)
     return val.strip("_")
 
 

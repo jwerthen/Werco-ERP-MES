@@ -237,10 +237,17 @@ export default function AdminSettings() {
       .replace(/^_+|_+$/g, '');
   };
 
+  const WORK_CENTER_TYPE_ACRONYMS = new Set(['cnc', 'cmm', 'edm', 'tig', 'mig', 'qa', 'qc', 'nc']);
   const formatWorkCenterTypeLabel = (value: string) =>
     value
-      .replace(/_/g, ' ')
-      .replace(/\b\w/g, (char) => char.toUpperCase());
+      .split('_')
+      .filter(Boolean)
+      .map((word) =>
+        WORK_CENTER_TYPE_ACRONYMS.has(word.toLowerCase())
+          ? word.toUpperCase()
+          : word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+      )
+      .join(' ');
 
   const saveWorkCenterTypes = async (nextTypes: string[]) => {
     try {
