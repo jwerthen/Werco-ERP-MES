@@ -38,15 +38,19 @@ def log_change(
     entity_id: int,
     entity_name: str,
     action: str,
-    user_id: int,
+    current_user: User,
     field_changed: str = None,
     old_value: any = None,
     new_value: any = None,
     ip_address: str = None,
-    company_id: int = None
 ):
-    """Log a settings change for audit purposes"""
-    kwargs = dict(
+    """Log a settings change for audit purposes.
+
+    SettingsAuditLog has a NOT NULL company_id (TenantMixin), so the
+    user's company_id is always written from current_user — callers
+    cannot forget to pass it.
+    """
+    audit = SettingsAuditLog(
         entity_type=entity_type,
         entity_id=entity_id,
         entity_name=entity_name,
@@ -54,12 +58,10 @@ def log_change(
         field_changed=field_changed,
         old_value=json.dumps(old_value) if old_value is not None else None,
         new_value=json.dumps(new_value) if new_value is not None else None,
-        changed_by=user_id,
+        changed_by=current_user.id,
         ip_address=ip_address,
+        company_id=current_user.company_id,
     )
-    if company_id is not None:
-        kwargs["company_id"] = company_id
-    audit = SettingsAuditLog(**kwargs)
     db.add(audit)
 
 
@@ -106,7 +108,7 @@ def create_material(
     db.refresh(material)
     
     log_change(db, "material", material.id, material.name, "create",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     
     return material
@@ -131,7 +133,7 @@ def update_material(
         old_value = getattr(material, field)
         if old_value != value:
             log_change(db, "material", material.id, material.name, "update",
-                      current_user.id, field, old_value, value, get_client_ip(request))
+                      current_user, field, old_value, value, get_client_ip(request))
         setattr(material, field, value)
     
     db.commit()
@@ -154,7 +156,7 @@ def delete_material(
     
     material.is_active = False
     log_change(db, "material", material.id, material.name, "delete",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     return {"status": "ok", "message": f"Material '{material.name}' deactivated"}
 
@@ -194,7 +196,7 @@ def create_machine(
     db.refresh(machine)
     
     log_change(db, "machine", machine.id, machine.name, "create",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     
     return machine
@@ -219,7 +221,7 @@ def update_machine(
         old_value = getattr(machine, field)
         if old_value != value:
             log_change(db, "machine", machine.id, machine.name, "update",
-                      current_user.id, field, old_value, value, get_client_ip(request))
+                      current_user, field, old_value, value, get_client_ip(request))
         setattr(machine, field, value)
     
     db.commit()
@@ -242,7 +244,7 @@ def delete_machine(
     
     machine.is_active = False
     log_change(db, "machine", machine.id, machine.name, "delete",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     return {"status": "ok", "message": f"Machine '{machine.name}' deactivated"}
 
@@ -282,7 +284,7 @@ def create_finish(
     db.refresh(finish)
     
     log_change(db, "finish", finish.id, finish.name, "create",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     
     return finish
@@ -307,7 +309,7 @@ def update_finish(
         old_value = getattr(finish, field)
         if old_value != value:
             log_change(db, "finish", finish.id, finish.name, "update",
-                      current_user.id, field, old_value, value, get_client_ip(request))
+                      current_user, field, old_value, value, get_client_ip(request))
         setattr(finish, field, value)
     
     db.commit()
@@ -330,7 +332,7 @@ def delete_finish(
     
     finish.is_active = False
     log_change(db, "finish", finish.id, finish.name, "delete",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     return {"status": "ok", "message": f"Finish '{finish.name}' deactivated"}
 
@@ -367,7 +369,7 @@ def create_labor_rate(
     db.refresh(labor_rate)
     
     log_change(db, "labor_rate", labor_rate.id, labor_rate.name, "create",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     
     return labor_rate
@@ -392,7 +394,7 @@ def update_labor_rate(
         old_value = getattr(labor_rate, field)
         if old_value != value:
             log_change(db, "labor_rate", labor_rate.id, labor_rate.name, "update",
-                      current_user.id, field, old_value, value, get_client_ip(request))
+                      current_user, field, old_value, value, get_client_ip(request))
         setattr(labor_rate, field, value)
     
     db.commit()
@@ -415,7 +417,7 @@ def delete_labor_rate(
     
     labor_rate.is_active = False
     log_change(db, "labor_rate", labor_rate.id, labor_rate.name, "delete",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     return {"status": "ok", "message": f"Labor rate '{labor_rate.name}' deactivated"}
 
@@ -454,7 +456,7 @@ def update_work_center_rate(
     wc.hourly_rate = data.hourly_rate
     
     log_change(db, "work_center_rate", wc.id, wc.name, "update",
-               current_user.id, "hourly_rate", old_rate, data.hourly_rate, get_client_ip(request))
+               current_user, "hourly_rate", old_rate, data.hourly_rate, get_client_ip(request))
     
     db.commit()
     db.refresh(wc)
@@ -504,7 +506,7 @@ def update_work_center_types_admin(
         0,
         "work_center_types",
         "update",
-        current_user.id,
+        current_user,
         "types",
         old_types,
         types,
@@ -549,7 +551,7 @@ def create_outside_service(
     db.refresh(service)
     
     log_change(db, "outside_service", service.id, service.name, "create",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     
     return service
@@ -574,7 +576,7 @@ def update_outside_service(
         old_value = getattr(service, field)
         if old_value != value:
             log_change(db, "outside_service", service.id, service.name, "update",
-                      current_user.id, field, old_value, value, get_client_ip(request))
+                      current_user, field, old_value, value, get_client_ip(request))
         setattr(service, field, value)
     
     db.commit()
@@ -597,7 +599,7 @@ def delete_outside_service(
     
     service.is_active = False
     log_change(db, "outside_service", service.id, service.name, "delete",
-               current_user.id, ip_address=get_client_ip(request))
+               current_user, ip_address=get_client_ip(request))
     db.commit()
     return {"status": "ok", "message": f"Outside service '{service.name}' deactivated"}
 
@@ -653,7 +655,7 @@ def update_overhead_setting(
         db.add(setting)
     
     log_change(db, "overhead", None, key, "update" if old_value else "create",
-               current_user.id, "setting_value", old_value, data.value, get_client_ip(request))
+               current_user, "setting_value", old_value, data.value, get_client_ip(request))
     
     db.commit()
     return {"status": "ok", "key": key, "value": data.value}
@@ -926,7 +928,7 @@ def update_role_permissions(
     # Log the change
     log_change(
         db, "role_permission", stored.id if stored.id else 0, role,
-        "update", current_user.id,
+        "update", current_user,
         field_changed="permissions",
         old_value=old_permissions,
         new_value=permissions,
@@ -961,7 +963,7 @@ def reset_role_permissions(
         
         log_change(
             db, "role_permission", stored.id, role,
-            "reset", current_user.id,
+            "reset", current_user,
             field_changed="permissions",
             old_value=old_permissions,
             new_value=DEFAULT_ROLE_PERMISSIONS.get(user_role, []),
