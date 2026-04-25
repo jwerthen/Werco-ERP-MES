@@ -470,7 +470,12 @@ def list_work_center_types_admin(
     company_id: int = Depends(get_current_company_id)
 ):
     """List allowed work center types"""
-    types = get_work_center_types(db, include_in_use=False)
+    # Include in-use types so the admin UI always shows the real types
+    # currently referenced by work_centers, even if the saved JSON is stale
+    # or got corrupted by a prior bad write. Without this, the UI can omit
+    # in-use types, and every save then 400s on the "Cannot remove types in
+    # use" guard in the PUT below.
+    types = get_work_center_types(db, include_in_use=True)
     in_use = get_in_use_work_center_types(db)
     return {"types": types, "in_use": in_use}
 
