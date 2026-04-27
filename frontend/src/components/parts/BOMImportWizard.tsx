@@ -112,11 +112,10 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
     if (!preview) return;
     setLoading(true);
     try {
-      const items = preview.raw_columns?.length ? derivedItems : preview.items;
       const result = await api.commitBOMImport({
         document_type: preview.document_type,
         assembly: preview.assembly,
-        items,
+        items: derivedItems,
         create_missing_parts: createMissingParts,
       });
       if (result.warnings?.length) {
@@ -139,7 +138,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
     }
   };
 
-  const displayItems = preview?.raw_columns?.length ? derivedItems : (preview?.items || []);
+  const displayItems = derivedItems;
 
   // ── Render ───────────────────────────────────────────────────────────
 
