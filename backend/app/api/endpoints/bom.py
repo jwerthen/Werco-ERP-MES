@@ -198,10 +198,15 @@ def _ensure_part(
     drawing_number: Optional[str],
     unit_of_measure: Optional[str],
     create_missing: bool,
-    fallback_index: int
+    fallback_index: int,
+    company_id: int,
+    created_by: Optional[int] = None
 ) -> Tuple[Optional[Part], Optional[str], bool]:
     if part_number:
-        existing = db.query(Part).filter(Part.part_number == part_number).first()
+        existing = db.query(Part).filter(
+            Part.part_number == part_number,
+            Part.company_id == company_id
+        ).first()
         if existing:
             return existing, None, False
     if not create_missing:
@@ -222,7 +227,9 @@ def _ensure_part(
         description=description,
         part_type=normalized_type,
         unit_of_measure=_normalize_uom(unit_of_measure),
-        drawing_number=drawing_number
+        drawing_number=drawing_number,
+        company_id=company_id,
+        created_by=created_by
     )
     db.add(part)
     db.flush()
@@ -398,7 +405,8 @@ def _items_from_table(
 def _create_from_import_payload(
     payload: BOMImportCommitRequest,
     db: Session,
-    current_user: User
+    current_user: User,
+    company_id: int
 ) -> BOMImportResponse:
     items = payload.items or []
     doc_type = (payload.document_type or ("bom" if items else "part")).lower()
@@ -422,7 +430,10 @@ def _create_from_import_payload(
     if assembly_part_type not in {p.value for p in PartType}:
         assembly_part_type = PartType.ASSEMBLY.value if doc_type == "bom" else PartType.MANUFACTURED.value
 
-    existing_part = db.query(Part).filter(Part.part_number == assembly_number).first()
+    existing_part = db.query(Part).filter(
+        Part.part_number == assembly_number,
+        Part.company_id == company_id
+    ).first()
     if existing_part:
         assembly_part = existing_part
     else:
@@ -434,7 +445,8 @@ def _create_from_import_payload(
             part_type=assembly_part_type,
             unit_of_measure=UnitOfMeasure.EACH.value,
             drawing_number=assembly_drawing,
-            created_by=current_user.id
+            created_by=current_user.id,
+            company_id=company_id
         )
         db.add(assembly_part)
         db.flush()
@@ -456,7 +468,11 @@ def _create_from_import_payload(
             warnings=warnings
         )
 
-    existing_bom = db.query(BOM).filter(BOM.part_id == assembly_part.id, BOM.is_active == True).first()
+    existing_bom = db.query(BOM).filter(
+        BOM.part_id == assembly_part.id,
+        BOM.company_id == company_id,
+        BOM.is_active == True
+    ).first()
     if existing_bom:
         raise HTTPException(status_code=400, detail="A BOM already exists for this assembly part")
 
@@ -466,7 +482,8 @@ def _create_from_import_payload(
         description=assembly_description,
         status="draft",
         bom_type="standard",
-        created_by=current_user.id
+        created_by=current_user.id,
+        company_id=company_id
     )
     db.add(bom)
     db.flush()
@@ -496,7 +513,9 @@ def _create_from_import_payload(
             None,
             uom,
             payload.create_missing_parts,
-            idx
+            idx,
+            company_id=company_id,
+            created_by=current_user.id
         )
         if missing:
             missing_parts.append(missing)
@@ -619,7 +638,7 @@ def import_bom_commit(
     """
     Commit a reviewed BOM/part import payload.
     """
-    return _create_from_import_payload(payload, db, current_user)
+    return _create_from_import_payload(payload, db, current_user, company_id)
 
 
 @router.post("/import", response_model=BOMImportResponse, status_code=status.HTTP_201_CREATED)
@@ -676,7 +695,10 @@ async def import_bom_or_part(
         assembly_part_type = PartType.ASSEMBLY.value if doc_type == "bom" else PartType.MANUFACTURED.value
 
     # Get or create assembly part
-    existing_part = db.query(Part).filter(Part.part_number == assembly_number).first()
+    existing_part = db.query(Part).filter(
+        Part.part_number == assembly_number,
+        Part.company_id == company_id
+    ).first()
     if existing_part:
         assembly_part = existing_part
     else:
@@ -688,7 +710,8 @@ async def import_bom_or_part(
             part_type=assembly_part_type,
             unit_of_measure=UnitOfMeasure.EACH.value,
             drawing_number=assembly_drawing,
-            created_by=current_user.id
+            created_by=current_user.id,
+            company_id=company_id
         )
         db.add(assembly_part)
         db.flush()
@@ -711,7 +734,11 @@ async def import_bom_or_part(
         )
 
     # If BOM already exists for assembly part, block import
-    existing_bom = db.query(BOM).filter(BOM.part_id == assembly_part.id, BOM.is_active == True).first()
+    existing_bom = db.query(BOM).filter(
+        BOM.part_id == assembly_part.id,
+        BOM.company_id == company_id,
+        BOM.is_active == True
+    ).first()
     if existing_bom:
         raise HTTPException(status_code=400, detail="A BOM already exists for this assembly part")
 
@@ -721,7 +748,8 @@ async def import_bom_or_part(
         description=assembly_description,
         status="draft",
         bom_type="standard",
-        created_by=current_user.id
+        created_by=current_user.id,
+        company_id=company_id
     )
     db.add(bom)
     db.flush()
@@ -751,7 +779,9 @@ async def import_bom_or_part(
             None,
             uom,
             create_missing_parts,
-            idx
+            idx,
+            company_id=company_id,
+            created_by=current_user.id
         )
         if missing:
             missing_parts.append(missing)
