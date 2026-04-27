@@ -534,7 +534,8 @@ def _create_from_import_payload(
             unit_of_measure=_normalize_uom(uom),
             reference_designator=item.reference_designator,
             find_number=item.find_number,
-            notes=item.notes
+            notes=item.notes,
+            company_id=company_id
         )
         db.add(bom_item)
         created_bom_items += 1
@@ -801,7 +802,8 @@ async def import_bom_or_part(
             unit_of_measure=_normalize_uom(uom),
             reference_designator=item.get("reference_designator"),
             find_number=item.get("find_number"),
-            notes=item.get("notes")
+            notes=item.get("notes"),
+            company_id=company_id
         )
         db.add(bom_item)
         created_bom_items += 1
@@ -996,10 +998,11 @@ def create_bom(
         
         item = BOMItem(
             bom_id=bom.id,
+            company_id=company_id,
             **item_data.model_dump()
         )
         db.add(item)
-    
+
     db.commit()
     db.refresh(bom)
     
@@ -1241,7 +1244,7 @@ def add_bom_item(
             elif isinstance(val, str):
                 item_data['line_type'] = val.lower()
         
-        item = BOMItem(bom_id=bom_id, **item_data)
+        item = BOMItem(bom_id=bom_id, company_id=company_id, **item_data)
         db.add(item)
         db.commit()
         db.refresh(item)
