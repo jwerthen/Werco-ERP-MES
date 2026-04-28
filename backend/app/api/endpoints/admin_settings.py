@@ -477,8 +477,8 @@ def list_work_center_types_admin(
     # or got corrupted by a prior bad write. Without this, the UI can omit
     # in-use types, and every save then 400s on the "Cannot remove types in
     # use" guard in the PUT below.
-    types = get_work_center_types(db, include_in_use=True)
-    in_use = get_in_use_work_center_types(db)
+    types = get_work_center_types(db, include_in_use=True, company_id=company_id)
+    in_use = get_in_use_work_center_types(db, company_id=company_id)
     return {"types": types, "in_use": in_use}
 
 
@@ -491,15 +491,15 @@ def update_work_center_types_admin(
     company_id: int = Depends(get_current_company_id)
 ):
     """Update allowed work center types"""
-    old_types = get_work_center_types(db, include_in_use=False)
-    in_use = get_in_use_work_center_types(db)
+    old_types = get_work_center_types(db, include_in_use=False, company_id=company_id)
+    in_use = get_in_use_work_center_types(db, company_id=company_id)
     missing_in_use = [t for t in in_use if t not in (data.types or [])]
     if missing_in_use:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot remove types in use: {', '.join(missing_in_use)}"
         )
-    types = set_work_center_types(db, data.types)
+    types = set_work_center_types(db, data.types, company_id=company_id)
     log_change(
         db,
         "work_center_types",

@@ -24,7 +24,7 @@ def list_work_center_types(
     company_id: int = Depends(get_current_company_id)
 ):
     """List available work center types"""
-    return {"types": get_work_center_types(db)}
+    return {"types": get_work_center_types(db, company_id=company_id)}
 
 
 @router.get("/", response_model=List[WorkCenterResponse])

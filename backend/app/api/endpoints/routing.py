@@ -20,6 +20,7 @@ from app.schemas.routing_generation import (
     RoutingGenerationResult, RoutingCreateFromGeneration,
     DrawingExtractionInfo, ProposedOperation,
 )
+from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +118,17 @@ async def generate_routing_from_drawing(
             "Creating a new routing will require deactivating the existing one first."
         )
 
-    # Build work_centers_by_type lookup from active work centers
-    active_wcs = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+    # Build work_centers_by_type lookup from this company's active work centers.
+    allowed_work_center_types = get_work_center_types(db, include_in_use=True, company_id=company_id)
+    active_wcs = db.query(WorkCenter).filter(
+        WorkCenter.company_id == company_id,
+        WorkCenter.is_active == True,
+    ).all()
     work_centers_by_type: Dict[str, List[Dict[str, Any]]] = {}
     for wc in active_wcs:
-        wc_type = wc.work_center_type
+        wc_type = normalize_work_center_type(wc.work_center_type or "")
+        if not wc_type:
+            continue
         if wc_type not in work_centers_by_type:
             work_centers_by_type[wc_type] = []
         work_centers_by_type[wc_type].append({"id": wc.id, "name": wc.name, "code": wc.code})
@@ -178,6 +185,7 @@ async def generate_routing_from_drawing(
         geometry=geometry,
         work_centers_by_type=work_centers_by_type,
         is_ocr=is_ocr,
+        work_center_types=allowed_work_center_types,
     )
 
     if gen_result.get("_error"):
