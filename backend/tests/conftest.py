@@ -1,4 +1,5 @@
 import os
+from datetime import date, timedelta
 from typing import Generator
 
 import pytest
@@ -290,7 +291,7 @@ def test_work_order(db_session: Session, test_part: Part, test_work_center: Work
         quantity_ordered=fake.pyint(min_value=10, max_value=1000),
         status="draft",
         priority=2,
-        due_date=fake.date_this_year(after_today=True),
+        due_date=date.today() + timedelta(days=30),
         company_id=1,
     )
     db_session.add(work_order)
@@ -317,7 +318,7 @@ def sample_work_order_data(test_part: Part):
         "quantity_ordered": fake.pyint(min_value=10, max_value=1000),
         "customer_name": fake.company(),
         "priority": 2,
-        "due_date": fake.date_this_year(after_today=True).isoformat(),
+        "due_date": (date.today() + timedelta(days=30)).isoformat(),
     }
 
 

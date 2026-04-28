@@ -40,7 +40,7 @@ test.describe('Authentication', () => {
     await loginAs(page, TEST_USERS.admin);
     
     // Should be on dashboard
-    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page).toHaveURL(/\/$/);
     
     // Dashboard elements should be visible
     await expect(page.locator('text=/dashboard|overview/i').first()).toBeVisible();
@@ -66,7 +66,7 @@ test.describe('Authentication', () => {
     await expect(page).toHaveURL(/\/login/);
     
     // Trying to access protected page should redirect to login
-    await page.goto('/dashboard');
+    await page.goto('/parts');
     await expect(page).toHaveURL(/\/login/);
   });
 
@@ -82,20 +82,20 @@ test.describe('Authentication', () => {
 test.describe('Role-Based Access', () => {
   test('admin can access admin settings', async ({ page }) => {
     await loginAs(page, TEST_USERS.admin);
-    await page.goto('/admin');
+    await page.goto('/admin/settings');
     
     // Should be able to access admin page
-    await expect(page).toHaveURL(/\/admin/);
+    await expect(page).toHaveURL(/\/admin\/settings/);
     await expect(page.locator('text=/settings|configuration/i').first()).toBeVisible();
   });
 
   test('operator cannot access admin settings', async ({ page }) => {
     await loginAs(page, TEST_USERS.operator);
-    await page.goto('/admin');
+    await page.goto('/admin/settings');
     
     // Should see unauthorized or be redirected
     const isUnauthorized = await page.locator('text=/unauthorized|access denied|forbidden/i').isVisible().catch(() => false);
-    const isRedirected = await page.url().includes('/unauthorized') || await page.url().includes('/dashboard');
+    const isRedirected = await page.url().includes('/unauthorized') || /\/$/.test(new URL(page.url()).pathname);
     
     expect(isUnauthorized || isRedirected).toBe(true);
   });

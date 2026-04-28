@@ -32,8 +32,8 @@ export const Skeleton: React.FC<SkeletonProps> = ({
   );
 };
 
-// Text line skeleton (used internally by SkeletonCard)
-const SkeletonText: React.FC<{ lines?: number; className?: string }> = ({
+// Text line skeleton
+export const SkeletonText: React.FC<{ lines?: number; className?: string }> = ({
   lines = 1, 
   className = '' 
 }) => (
@@ -47,8 +47,28 @@ const SkeletonText: React.FC<{ lines?: number; className?: string }> = ({
   </div>
 );
 
-// Badge/tag skeleton (used internally by SkeletonCard)
-const SkeletonBadge: React.FC = () => (
+export const SkeletonAvatar: React.FC<{ size?: 'sm' | 'md' | 'lg'; className?: string }> = ({
+  size = 'md',
+  className = '',
+}) => {
+  const sizes = {
+    sm: 'h-8 w-8',
+    md: 'h-10 w-10',
+    lg: 'h-12 w-12',
+  };
+
+  return <Skeleton className={`${sizes[size]} rounded-full ${className}`} />;
+};
+
+export const SkeletonButton: React.FC<{ width?: string; className?: string }> = ({
+  width = 'w-24',
+  className = '',
+}) => (
+  <Skeleton className={`h-9 ${width} rounded-md ${className}`} />
+);
+
+// Badge/tag skeleton
+export const SkeletonBadge: React.FC = () => (
   <Skeleton className="h-6 w-16 rounded-full" />
 );
 
@@ -66,8 +86,8 @@ export const SkeletonCard: React.FC<{ className?: string }> = ({ className = '' 
   </div>
 );
 
-// Table row skeleton (used internally by SkeletonTable)
-const SkeletonTableRow: React.FC<{ columns: number }> = ({ columns }) => (
+// Table row skeleton
+export const SkeletonTableRow: React.FC<{ columns: number }> = ({ columns }) => (
   <tr className="animate-pulse">
     {Array.from({ length: columns }).map((_, i) => (
       <td key={i} className="px-4 py-4">

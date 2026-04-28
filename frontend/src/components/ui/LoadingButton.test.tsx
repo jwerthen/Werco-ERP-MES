@@ -55,7 +55,7 @@ describe('LoadingButton', () => {
 
     it('renders secondary variant', () => {
       render(<LoadingButton variant="secondary">Secondary</LoadingButton>);
-      expect(screen.getByRole('button')).toHaveClass('bg-gray-100');
+      expect(screen.getByRole('button')).toHaveClass('bg-slate-700');
     });
 
     it('renders danger variant', () => {

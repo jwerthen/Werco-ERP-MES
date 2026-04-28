@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 
 // ============================================================================
@@ -81,3 +81,61 @@ export function useFormErrorMapping({
   return { mapApiErrorToForm };
 }
 
+type AsyncValidator<T> = (value: T) => Promise<string | null>;
+
+export function useAsyncValidation<T = string>(
+  validateFn: AsyncValidator<T>,
+  debounceMs = 500
+) {
+  const [isValidating, setIsValidating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sequenceRef = useRef(0);
+
+  const clearPending = useCallback(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+  }, []);
+
+  const validate = useCallback(
+    (value: T) => {
+      clearPending();
+      setIsValidating(true);
+      const sequence = ++sequenceRef.current;
+      let cancelled = false;
+
+      timeoutRef.current = setTimeout(async () => {
+        try {
+          const validationError = await validateFn(value);
+          if (!cancelled && sequence === sequenceRef.current) {
+            setError(validationError);
+          }
+        } catch {
+          if (!cancelled && sequence === sequenceRef.current) {
+            setError('Validation failed');
+          }
+        } finally {
+          if (!cancelled && sequence === sequenceRef.current) {
+            setIsValidating(false);
+            timeoutRef.current = null;
+          }
+        }
+      }, debounceMs);
+
+      return () => {
+        cancelled = true;
+        clearPending();
+        if (sequence === sequenceRef.current) {
+          setIsValidating(false);
+        }
+      };
+    },
+    [clearPending, debounceMs, validateFn]
+  );
+
+  useEffect(() => clearPending, [clearPending]);
+
+  return { isValidating, error, validate };
+}

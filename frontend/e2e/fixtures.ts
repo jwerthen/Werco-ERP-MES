@@ -57,17 +57,15 @@ export async function loginAs(page: Page, user: typeof TEST_USERS.admin) {
   await page.fill('input[type="password"]', user.secret);
   await page.click('button[type="submit"]');
   
-  // Wait for redirect to dashboard
-  await page.waitForURL('**/dashboard', { timeout: 10000 });
+  // Wait for redirect to the app dashboard.
+  await page.waitForURL('**/', { timeout: 10000 });
 }
 
 /**
  * Logout current user
  */
 export async function logout(page: Page) {
-  // Click user menu and logout
-  await page.click('[data-testid="user-menu"]');
-  await page.click('text=Logout');
+  await page.click('button[title="Sign out"]');
   await page.waitForURL('**/login');
 }
 

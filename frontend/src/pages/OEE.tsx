@@ -466,7 +466,7 @@ export default function OEE() {
               <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#94a3b8' }} />
               <Tooltip
                 contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
-                formatter={(value: number, name: string) => [`${value.toFixed(1)}%`, name]}
+                formatter={(value: number | undefined, name: string | undefined) => [`${(value ?? 0).toFixed(1)}%`, name ?? '']}
                 labelFormatter={(label) => {
                   const d = new Date(label);
                   return d.toLocaleDateString();
@@ -492,7 +492,7 @@ export default function OEE() {
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
               <XAxis dataKey="name" angle={-35} textAnchor="end" interval={0} height={60} tick={{ fontSize: 11, fill: '#94a3b8' }} />
               <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#94a3b8' }} />
-              <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} formatter={(value: number) => [`${value}%`]} />
+              <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} formatter={(value: number | undefined) => [`${value ?? 0}%`]} />
               <Legend />
               <ReferenceLine y={85} stroke="#ef4444" strokeDasharray="5 5" label={{ value: '85% Target', position: 'right', fontSize: 10 }} />
               <Bar dataKey="oee" fill="#2563eb" name="OEE" radius={[4, 4, 0, 0]} />

@@ -28,7 +28,7 @@ describe('Skeleton Components', () => {
   describe('Skeleton', () => {
     it('renders with default props', () => {
       render(<Skeleton />);
-      expect(screen.getByTestId('skeleton')).toHaveClass('animate-pulse', 'bg-gray-200', 'rounded');
+      expect(screen.getByTestId('skeleton')).toHaveClass('animate-pulse', 'bg-slate-700', 'rounded');
     });
 
     it('applies custom className', () => {
@@ -105,7 +105,7 @@ describe('Skeleton Components', () => {
     it('renders card with skeleton content', () => {
       render(<SkeletonCard />);
       const card = screen.getByTestId('skeleton-card');
-      expect(card).toHaveClass('bg-white');
+      expect(card).toHaveClass('bg-[#151b28]');
       expect(card).toHaveClass('rounded-lg');
     });
 
@@ -149,7 +149,7 @@ describe('Skeleton Components', () => {
     it('renders stat card skeleton', () => {
       render(<SkeletonStatCard />);
       const card = screen.getByTestId('skeleton-stat-card');
-      expect(card).toHaveClass('bg-white');
+      expect(card).toHaveClass('bg-[#151b28]');
       expect(card).toHaveClass('animate-pulse');
     });
   });

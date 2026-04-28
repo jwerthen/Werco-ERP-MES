@@ -5,6 +5,13 @@
  */
 
 import { test, expect, TEST_USERS, loginAs } from './fixtures';
+import type { Page } from '@playwright/test';
+
+async function openCreatePartForm(page: Page) {
+  await page.goto('/parts');
+  await page.locator('button, a').filter({ hasText: /new|create|add/i }).first().click();
+  await expect(page.locator('form')).toBeVisible();
+}
 
 test.describe('Parts List', () => {
   test.beforeEach(async ({ page }) => {
@@ -73,7 +80,7 @@ test.describe('Part Creation', () => {
   });
 
   test('part creation form has required fields', async ({ page }) => {
-    await page.goto('/parts/new');
+    await openCreatePartForm(page);
     
     // Should have part number field
     await expect(page.locator('input[name*="part" i][name*="number" i], label:has-text("Part Number") + input')).toBeVisible({ timeout: 5000 });
@@ -86,7 +93,7 @@ test.describe('Part Creation', () => {
   });
 
   test('shows validation errors for empty submission', async ({ page }) => {
-    await page.goto('/parts/new');
+    await openCreatePartForm(page);
     
     // Submit empty form
     const submitBtn = page.locator('button[type="submit"], button').filter({ hasText: /create|save|submit/i }).first();
@@ -97,7 +104,7 @@ test.describe('Part Creation', () => {
   });
 
   test('part number must be unique', async ({ page }) => {
-    await page.goto('/parts/new');
+    await openCreatePartForm(page);
     
     // Fill with existing part number (if we know one)
     await page.fill('input[name*="part" i][name*="number" i], label:has-text("Part Number") + input', 'TEST-001');

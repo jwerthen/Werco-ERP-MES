@@ -1817,7 +1817,7 @@ class ApiService {
 
   // Search
   async search(query: string, type?: string) {
-    const response = await this.api.get('/search', { params: { q: query, type } });
+    const response = await this.api.get('/search/', { params: { q: query, type } });
     return response.data;
   }
 

@@ -88,7 +88,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
-  const debounceRef = useRef<NodeJS.Timeout>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recentFetchRef = useRef<number>(0);
   const searchSeqRef = useRef(0);
 

@@ -165,7 +165,7 @@ test.describe('Shop Floor Navigation', () => {
   });
 
   test('can navigate to shop floor from sidebar', async ({ page }) => {
-    await page.goto('/dashboard');
+    await page.goto('/');
     
     // Click shop floor link in nav
     const shopFloorLink = page.locator('nav a, aside a').filter({ hasText: /shop.*floor/i }).first();

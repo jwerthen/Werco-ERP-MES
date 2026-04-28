@@ -459,7 +459,7 @@ export default function JobCosting() {
                 <YAxis fontSize={12} tick={{ fill: '#94a3b8' }} tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} />
                 <Tooltip
                   contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
-                  formatter={(value: number) => fmt(value)}
+                  formatter={(value: number | undefined) => fmt(value ?? 0)}
                   labelStyle={{ fontWeight: 600 }}
                 />
                 <Legend />

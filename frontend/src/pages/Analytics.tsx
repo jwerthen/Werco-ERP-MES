@@ -630,7 +630,7 @@ export default function Analytics() {
                     <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                     <Tooltip
                       contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
-                      formatter={(value: number) => [value.toLocaleString(), '']}
+                      formatter={(value: number | undefined) => [(value ?? 0).toLocaleString(), '']}
                       labelFormatter={(label) => formatCentralDate(String(label))}
                     />
                     <Line 
@@ -767,7 +767,7 @@ export default function Analytics() {
                         <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
                           contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
-                          formatter={(value: number) => [`${value.toFixed(1)}%`, '']}
+                          formatter={(value: number | undefined) => [`${(value ?? 0).toFixed(1)}%`, '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
                         <Line type="monotone" dataKey="oee" name="OEE" stroke="#1B4D9C" strokeWidth={2} dot={false} />
@@ -793,7 +793,7 @@ export default function Analytics() {
                         <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
                           contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
-                          formatter={(value: number) => [value.toLocaleString(), '']}
+                          formatter={(value: number | undefined) => [(value ?? 0).toLocaleString(), '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
                         <Line type="monotone" dataKey="units_produced" name="Units Produced" stroke="#1B4D9C" strokeWidth={2} dot={false} />
@@ -872,7 +872,7 @@ export default function Analytics() {
                         <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
                           contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
-                          formatter={(value: number) => [value.toLocaleString(), '']}
+                          formatter={(value: number | undefined) => [(value ?? 0).toLocaleString(), '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
                         <Line type="monotone" dataKey="defect_rate" name="Defect Rate" stroke="#C8352B" strokeWidth={2} dot={false} />

@@ -56,7 +56,7 @@ export function ProtectedRoute({
   requireAdmin,
   loginPath = '/login',
   unauthorizedPath = '/unauthorized',
-}: ProtectedRouteProps): JSX.Element {
+}: ProtectedRouteProps): React.ReactElement {
   const { isAuthenticated, isLoading } = useAuth();
   const { can, canAny, canAll, isAdmin } = usePermissions();
   const location = useLocation();
@@ -103,14 +103,14 @@ export function ProtectedRoute({
 /**
  * Route that requires authentication only (no specific permissions)
  */
-export function AuthenticatedRoute({ children }: { children: ReactNode }): JSX.Element {
+export function AuthenticatedRoute({ children }: { children: ReactNode }): React.ReactElement {
   return <ProtectedRoute>{children}</ProtectedRoute>;
 }
 
 /**
  * Route that requires admin access
  */
-export function AdminRoute({ children }: { children: ReactNode }): JSX.Element {
+export function AdminRoute({ children }: { children: ReactNode }): React.ReactElement {
   return <ProtectedRoute requireAdmin>{children}</ProtectedRoute>;
 }
 

@@ -53,29 +53,21 @@ export enum OperationStatus {
 // ============================================================================
 
 const partNumberSchema = z
-  .string({
-    required_error: 'Part number required',
-    invalid_type_error: 'Part number must be a string'
-  })
+  .string({ error: 'Part number required' })
   .min(3, 'Part number must be at least 3 characters')
   .max(50, 'Part number must be at most 50 characters')
   .regex(/^[A-Z0-9-]+$/, 'Only letters, numbers, and dashes allowed')
   .transform((v: string) => v.toUpperCase().trim());
 
 const revisionSchema = z
-  .string({
-    required_error: 'Revision required',
-    invalid_type_error: 'Revision must be a string'
-  })
+  .string({ error: 'Revision required' })
   .min(1, 'Revision required (at least 1 character)')
   .max(20, 'Revision must be at most 20 characters')
   .regex(/^[A-Z0-9]+$/, 'Letters and numbers only')
   .transform((v: string) => v.toUpperCase().trim());
 
 const nameSchema = z
-  .string({
-    required_error: 'Name required'
-  })
+  .string({ error: 'Name required' })
   .min(2, 'Name must be at least 2 characters')
   .max(255, 'Name must be at most 255 characters');
 
@@ -91,10 +83,7 @@ const descriptionLongSchema = z
   .optional();
 
 const moneySchema = z
-  .number({
-    required_error: 'Amount required',
-    invalid_type_error: 'Amount must be a number'
-  })
+  .number({ error: 'Amount required' })
   .min(0, 'Amount must be positive or zero')
   .max(999999.99, 'Maximum $999,999.99')
   .multipleOf(0.01, 'Maximum 2 decimal places');
@@ -117,9 +106,7 @@ const nonNegativeIntegerSchema = z
   .min(0, 'Must be 0 or greater');
 
 const emailSchema = z
-  .string({
-    required_error: 'Email required'
-  })
+  .string({ error: 'Email required' })
   .email('Enter a valid email address')
   .max(255, 'Email must be at most 255 characters');
 
@@ -134,14 +121,8 @@ export const partSchema = z.object({
   revision: revisionSchema,
   name: nameSchema,
   description: descriptionShortSchema,
-  part_type: z.nativeEnum(PartType, {
-    required_error: 'Select a part type',
-    invalid_type_error: 'Invalid part type'
-  }),
-  unit_of_measure: z.nativeEnum(UnitOfMeasure, {
-    required_error: 'Select a unit of measure',
-    invalid_type_error: 'Invalid unit of measure'
-  }),
+  part_type: z.nativeEnum(PartType, { error: 'Select a part type' }),
+  unit_of_measure: z.nativeEnum(UnitOfMeasure, { error: 'Select a unit of measure' }),
 
   // Costs
   standard_cost: moneySchema.optional().default(0),
@@ -284,18 +265,13 @@ export function calculatePasswordStrength(password: string): {
 export const userSchema = z.object({
   email: emailSchema,
   employee_id: z
-    .string({
-      required_error: 'Employee ID required'
-    })
+    .string({ error: 'Employee ID required' })
     .min(1, 'Employee ID required')
     .max(50, 'Must be at most 50 characters')
     .regex(/^[A-Za-z0-9\-_]+$/, 'Letters, numbers, hyphens, and underscores only'),
   first_name: firstNameSchema,
   last_name: lastNameSchema,
-  role: z.nativeEnum(UserRole, {
-    required_error: 'Select a role',
-    invalid_type_error: 'Invalid role'
-  }),
+  role: z.nativeEnum(UserRole, { error: 'Select a role' }),
   department: z.string().max(100).optional(),
   password: passwordStrengthSchema,
 });
@@ -311,9 +287,7 @@ export const userLoginSchema = z.object({
 
 export const vendorSchema = z.object({
   code: z
-    .string({
-      required_error: 'Vendor code required'
-    })
+    .string({ error: 'Vendor code required' })
     .min(2, 'Code must be at least 2 characters')
     .max(20, 'Code must be at most 20 characters')
     .regex(/^[A-Z0-9-]+$/, 'Letters, numbers, and dashes only')

@@ -451,7 +451,7 @@ export default function DowntimeTracking() {
                 stroke="#334155"
               />
               <YAxis label={{ value: 'Hours', angle: -90, position: 'insideLeft', fill: '#94a3b8' }} tick={{ fill: '#94a3b8' }} stroke="#334155" />
-              <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} formatter={(value: number) => [`${value}h`, 'Downtime']} />
+              <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} formatter={(value: number | undefined) => [`${value ?? 0}h`, 'Downtime']} />
               <Bar dataKey="hours" fill="#ef4444" radius={[4, 4, 0, 0]}>
                 {paretoData.map((entry, index) => (
                   <Cell key={`cell-${index}`} fill={index === 0 ? '#ef4444' : index < 3 ? '#f97316' : '#fbbf24'} />
