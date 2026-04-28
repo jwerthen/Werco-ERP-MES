@@ -107,7 +107,9 @@ async def generate_routing_from_drawing(
     # Check for existing active routing (warn but don't block)
     existing_routing_warning = None
     existing = db.query(Routing).filter(
-        Routing.part_id == part_id, Routing.is_active == True
+        Routing.part_id == part_id,
+        Routing.company_id == company_id,
+        Routing.is_active == True,
     ).first()
     if existing:
         existing_routing_warning = (
@@ -257,7 +259,9 @@ def create_routing_from_generation(
 
     # Check for existing active routing
     existing = db.query(Routing).filter(
-        Routing.part_id == data.part_id, Routing.is_active == True
+        Routing.part_id == data.part_id,
+        Routing.company_id == company_id,
+        Routing.is_active == True,
     ).first()
     if existing:
         raise HTTPException(
@@ -267,7 +271,10 @@ def create_routing_from_generation(
 
     # Validate all work_center_ids exist
     for op in data.operations:
-        wc = db.query(WorkCenter).filter(WorkCenter.id == op.work_center_id).first()
+        wc = db.query(WorkCenter).filter(
+            WorkCenter.id == op.work_center_id,
+            WorkCenter.company_id == company_id,
+        ).first()
         if not wc:
             raise HTTPException(
                 status_code=400,
@@ -291,7 +298,7 @@ def create_routing_from_generation(
         op_dict = op_data.model_dump()
         if not op_dict.get("operation_number"):
             op_dict["operation_number"] = f"Op {op_dict['sequence']}"
-        operation = RoutingOperation(routing_id=routing.id, **op_dict)
+        operation = RoutingOperation(routing_id=routing.id, company_id=company_id, **op_dict)
         db.add(operation)
 
     db.flush()
@@ -306,7 +313,7 @@ def create_routing_from_generation(
             joinedload(Routing.part),
             joinedload(Routing.operations).joinedload(RoutingOperation.work_center),
         )
-        .filter(Routing.id == routing.id)
+        .filter(Routing.id == routing.id, Routing.company_id == company_id)
         .first()
     )
 
@@ -377,6 +384,7 @@ def create_routing(
     # Check for existing active routing
     existing = db.query(Routing).filter(
         Routing.part_id == routing_in.part_id,
+        Routing.company_id == company_id,
         Routing.is_active == True
     ).first()
     
@@ -460,7 +468,7 @@ def update_routing(
     return db.query(Routing).options(
         joinedload(Routing.part),
         joinedload(Routing.operations).joinedload(RoutingOperation.work_center)
-    ).filter(Routing.id == routing_id).first()
+    ).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
 
 
 @router.post("/{routing_id}/release")
@@ -537,7 +545,10 @@ def add_operation(
         raise HTTPException(status_code=400, detail="Cannot modify released routing")
 
     # Verify work center exists
-    work_center = db.query(WorkCenter).filter(WorkCenter.id == operation_in.work_center_id).first()
+    work_center = db.query(WorkCenter).filter(
+        WorkCenter.id == operation_in.work_center_id,
+        WorkCenter.company_id == company_id,
+    ).first()
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
     
@@ -548,6 +559,7 @@ def add_operation(
     
     operation = RoutingOperation(
         routing_id=routing_id,
+        company_id=company_id,
         **op_data
     )
     db.add(operation)
@@ -597,7 +609,10 @@ def update_operation(
     
     # Verify work center if changing
     if "work_center_id" in update_data:
-        work_center = db.query(WorkCenter).filter(WorkCenter.id == update_data["work_center_id"]).first()
+        work_center = db.query(WorkCenter).filter(
+            WorkCenter.id == update_data["work_center_id"],
+            WorkCenter.company_id == company_id,
+        ).first()
         if not work_center:
             raise HTTPException(status_code=404, detail="Work center not found")
     
@@ -698,7 +713,7 @@ def copy_routing(
         raise HTTPException(status_code=404, detail="Source routing not found")
     
     # Check target part exists
-    target_part = db.query(Part).filter(Part.id == target_part_id).first()
+    target_part = db.query(Part).filter(Part.id == target_part_id, Part.company_id == company_id).first()
     if not target_part:
         raise HTTPException(status_code=404, detail="Target part not found")
     
@@ -718,6 +733,7 @@ def copy_routing(
     for op in source.operations:
         new_op = RoutingOperation(
             routing_id=new_routing.id,
+            company_id=company_id,
             sequence=op.sequence,
             operation_number=op.operation_number,
             name=op.name,

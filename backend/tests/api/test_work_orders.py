@@ -298,13 +298,13 @@ class TestWorkOrdersAPI:
         )
 
         routing_one = Routing(
-            part_id=component_one.id, revision="A", status="released", is_active=True
+            part_id=component_one.id, revision="A", status="released", is_active=True, company_id=1
         )
         routing_two = Routing(
-            part_id=component_two.id, revision="A", status="released", is_active=True
+            part_id=component_two.id, revision="A", status="released", is_active=True, company_id=1
         )
         assembly_routing = Routing(
-            part_id=assembly.id, revision="A", status="released", is_active=True
+            part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1
         )
         db_session.add_all([routing_one, routing_two, assembly_routing])
         db_session.flush()
@@ -320,6 +320,7 @@ class TestWorkOrdersAPI:
                     setup_hours=0,
                     run_hours_per_unit=0.1,
                     is_active=True,
+                    company_id=1,
                 ),
                 RoutingOperation(
                     routing_id=routing_one.id,
@@ -330,6 +331,7 @@ class TestWorkOrdersAPI:
                     setup_hours=0,
                     run_hours_per_unit=0.1,
                     is_active=True,
+                    company_id=1,
                 ),
                 RoutingOperation(
                     routing_id=routing_two.id,
@@ -340,6 +342,7 @@ class TestWorkOrdersAPI:
                     setup_hours=0,
                     run_hours_per_unit=0.1,
                     is_active=True,
+                    company_id=1,
                 ),
                 RoutingOperation(
                     routing_id=assembly_routing.id,
@@ -350,6 +353,7 @@ class TestWorkOrdersAPI:
                     setup_hours=0,
                     run_hours_per_unit=0.2,
                     is_active=True,
+                    company_id=1,
                 ),
                 RoutingOperation(
                     routing_id=assembly_routing.id,
@@ -361,6 +365,7 @@ class TestWorkOrdersAPI:
                     run_hours_per_unit=0.05,
                     is_active=True,
                     is_inspection_point=True,
+                    company_id=1,
                 ),
             ]
         )
@@ -447,10 +452,10 @@ class TestWorkOrdersAPI:
         )
 
         component_routing = Routing(
-            part_id=component.id, revision="A", status="released", is_active=True
+            part_id=component.id, revision="A", status="released", is_active=True, company_id=1
         )
         assembly_routing = Routing(
-            part_id=assembly.id, revision="A", status="released", is_active=True
+            part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1
         )
         db_session.add_all([component_routing, assembly_routing])
         db_session.flush()
@@ -466,6 +471,7 @@ class TestWorkOrdersAPI:
                     setup_hours=0,
                     run_hours_per_unit=0.1,
                     is_active=True,
+                    company_id=1,
                 ),
                 RoutingOperation(
                     routing_id=assembly_routing.id,
@@ -477,6 +483,7 @@ class TestWorkOrdersAPI:
                     run_hours_per_unit=0.05,
                     is_active=True,
                     is_inspection_point=True,
+                    company_id=1,
                 ),
                 RoutingOperation(
                     routing_id=assembly_routing.id,
@@ -487,6 +494,7 @@ class TestWorkOrdersAPI:
                     setup_hours=0,
                     run_hours_per_unit=0.2,
                     is_active=True,
+                    company_id=1,
                 ),
             ]
         )
@@ -565,7 +573,7 @@ class TestWorkOrdersAPI:
         )
 
         assembly_routing = Routing(
-            part_id=assembly.id, revision="A", status="released", is_active=True
+            part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1
         )
         db_session.add(assembly_routing)
         db_session.flush()
@@ -580,6 +588,7 @@ class TestWorkOrdersAPI:
                     setup_hours=0,
                     run_hours_per_unit=0.1,
                     is_active=True,
+                    company_id=1,
                 ),
                 RoutingOperation(
                     routing_id=assembly_routing.id,
@@ -590,6 +599,7 @@ class TestWorkOrdersAPI:
                     setup_hours=0,
                     run_hours_per_unit=0.1,
                     is_active=True,
+                    company_id=1,
                 ),
             ]
         )

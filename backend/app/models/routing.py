@@ -2,10 +2,10 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, 
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.db.database import Base
-from app.db.mixins import SoftDeleteMixin
+from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
-class Routing(Base, SoftDeleteMixin):
+class Routing(Base, SoftDeleteMixin, TenantMixin):
     """Master routing for a part - defines standard manufacturing process"""
     __tablename__ = "routings"
     
@@ -40,7 +40,7 @@ class Routing(Base, SoftDeleteMixin):
     operations = relationship("RoutingOperation", back_populates="routing", cascade="all, delete-orphan", order_by="RoutingOperation.sequence")
 
 
-class RoutingOperation(Base):
+class RoutingOperation(Base, TenantMixin):
     """Individual operation step in a routing"""
     __tablename__ = "routing_operations"
     
