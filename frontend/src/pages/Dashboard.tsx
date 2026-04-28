@@ -307,10 +307,10 @@ export default function Dashboard() {
             <p className="page-subtitle">Live view of shop activity, staffing, and job progress</p>
             {/* Refresh indicator */}
             {isRefreshing && (
-              <ArrowPathIcon className="h-4 w-4 text-surface-400 animate-spin" />
+              <ArrowPathIcon className="h-4 w-4 text-slate-500 animate-spin" />
             )}
             {lastUpdated && !isRefreshing && (
-              <span className="text-xs text-surface-400">
+              <span className="text-xs text-slate-500">
                 Updated {formatCentralTime(lastUpdated, { timeZoneName: 'short' })}
               </span>
             )}
@@ -482,8 +482,8 @@ export default function Dashboard() {
             {Object.entries(assignmentsByWorkCenter).map(([workCenterName, assignments]) => (
               <div key={workCenterName}>
                 <div className="mb-3">
-                  <h3 className="text-lg font-semibold text-surface-900">{workCenterName}</h3>
-                  <p className="text-sm text-surface-500">
+                  <h3 className="text-lg font-semibold text-white">{workCenterName}</h3>
+                  <p className="text-sm text-slate-400">
                     {assignments.length} active assignment{assignments.length === 1 ? '' : 's'}
                   </p>
                 </div>
@@ -500,10 +500,10 @@ export default function Dashboard() {
             ))}
           </div>
         ) : (
-          <div className="rounded-2xl border border-dashed border-surface-300 bg-surface-50 px-6 py-12 text-center">
-            <UserGroupIcon className="mx-auto h-10 w-10 text-surface-400" />
-            <p className="mt-4 text-lg font-medium text-surface-700">No one is clocked into a job right now</p>
-            <p className="mt-2 text-sm text-surface-500">
+          <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/40 px-6 py-12 text-center">
+            <UserGroupIcon className="mx-auto h-10 w-10 text-slate-500" />
+            <p className="mt-4 text-lg font-medium text-slate-300">No one is clocked into a job right now</p>
+            <p className="mt-2 text-sm text-slate-400">
               Signed-in users still appear in the live presence panel, but there are no active time entries right now.
             </p>
           </div>
@@ -532,8 +532,8 @@ export default function Dashboard() {
               <div 
                 key={wc.id} 
                 className={`
-                  rounded-xl border border-surface-200 p-4 transition-all duration-200
-                  hover:shadow-card-hover hover:border-surface-300
+                  rounded-xl border border-slate-700 p-4 transition-all duration-200
+                  hover:shadow-card-hover hover:border-slate-700
                   ${statusStyle.bg}
                 `}
               >
@@ -547,28 +547,28 @@ export default function Dashboard() {
                   <div className={`w-2 h-8 rounded-full ${typeColor}`} />
                 </div>
                 
-                <h3 className="font-semibold text-surface-900 mb-1">{wc.name}</h3>
-                <p className="text-xs text-surface-500 capitalize mb-3">
+                <h3 className="font-semibold text-white mb-1">{wc.name}</h3>
+                <p className="text-xs text-slate-400 capitalize mb-3">
                   {wc.type.replace('_', ' ')}
                 </p>
                 
                 <div className="grid grid-cols-3 gap-3 text-sm">
                   <div>
-                    <p className="text-surface-500">Active</p>
-                    <p className="font-semibold text-surface-900">{wc.active_operations}</p>
+                    <p className="text-slate-400">Active</p>
+                    <p className="font-semibold text-white">{wc.active_operations}</p>
                   </div>
                   <div>
-                    <p className="text-surface-500">Queue</p>
-                    <p className="font-semibold text-surface-900">{wc.queued_operations}</p>
+                    <p className="text-slate-400">Queue</p>
+                    <p className="font-semibold text-white">{wc.queued_operations}</p>
                   </div>
                   <div>
-                    <p className="text-surface-500">People</p>
-                    <p className="font-semibold text-surface-900">{wc.active_people_count}</p>
+                    <p className="text-slate-400">People</p>
+                    <p className="font-semibold text-white">{wc.active_people_count}</p>
                   </div>
                 </div>
 
                 <div className="mt-4 border-t border-slate-700 pt-4">
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-surface-500">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
                     Active People
                   </p>
                   {wc.active_people.length > 0 ? (
@@ -577,19 +577,19 @@ export default function Dashboard() {
                         <div key={`${wc.id}-${person.user_id}-${person.clock_in}`} className="rounded-lg bg-[#151b28]/70 p-3">
                           <div className="flex items-center justify-between gap-3">
                             <div>
-                              <p className="font-medium text-surface-800">{person.name}</p>
-                              <p className="text-xs text-surface-500">{person.employee_id}</p>
+                              <p className="font-medium text-slate-200">{person.name}</p>
+                              <p className="text-xs text-slate-400">{person.employee_id}</p>
                             </div>
-                            <p className="text-xs text-surface-500">{formatElapsed(person.clock_in, nowMs)}</p>
+                            <p className="text-xs text-slate-400">{formatElapsed(person.clock_in, nowMs)}</p>
                           </div>
-                          <p className="mt-2 text-sm text-surface-600">
+                          <p className="mt-2 text-sm text-slate-300">
                             {person.work_order_number} • {person.operation_name}
                           </p>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-sm text-surface-500">No one is clocked into this work center.</p>
+                    <p className="text-sm text-slate-400">No one is clocked into this work center.</p>
                   )}
                 </div>
               </div>
@@ -619,7 +619,7 @@ export default function Dashboard() {
             )}
           </div>
         ) : (
-          <p className="text-sm text-surface-500">No active signed-in sessions detected.</p>
+          <p className="text-sm text-slate-400">No active signed-in sessions detected.</p>
         )}
       </div>
       </div>
@@ -637,7 +637,7 @@ export default function Dashboard() {
         </div>
         
         {data?.recent_completions.length ? (
-          <div className="divide-y divide-surface-100">
+          <div className="divide-y divide-slate-700">
             {data.recent_completions.map((completion, index) => (
               <div 
                 key={index} 
@@ -648,25 +648,25 @@ export default function Dashboard() {
                     <CheckCircleSolid className="h-5 w-5 text-emerald-600" />
                   </div>
                   <div>
-                    <p className="font-semibold text-surface-900">{completion.work_order_number}</p>
-                    <p className="text-sm text-surface-500">Completed</p>
+                    <p className="font-semibold text-white">{completion.work_order_number}</p>
+                    <p className="text-sm text-slate-400">Completed</p>
                   </div>
                 </div>
                 <div className="text-right">
-                  <p className="font-semibold text-surface-900 tabular-nums">
+                  <p className="font-semibold text-white tabular-nums">
                     {completion.quantity_complete} units
                   </p>
-                  <p className="text-sm text-surface-500">Quantity</p>
+                  <p className="text-sm text-slate-400">Quantity</p>
                 </div>
               </div>
             ))}
           </div>
         ) : (
           <div className="text-center py-12">
-            <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
-              <ClipboardDocumentListIcon className="h-8 w-8 text-surface-400" />
+            <div className="p-4 rounded-full bg-slate-800/60 w-fit mx-auto mb-4">
+              <ClipboardDocumentListIcon className="h-8 w-8 text-slate-500" />
             </div>
-            <p className="text-surface-500">No recent completions</p>
+            <p className="text-slate-400">No recent completions</p>
           </div>
         )}
       </div>
@@ -682,19 +682,19 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
   const isOverdue = Boolean(dueDate && isDateBeforeTodayInCentral(dueDate));
 
   return (
-    <div className="rounded-2xl border border-surface-200 bg-[#151b28] p-5 shadow-sm">
+    <div className="rounded-2xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-lg font-semibold text-surface-900">{assignment.user.name}</h3>
-            <span className="rounded-full bg-surface-100 px-2.5 py-1 text-xs font-medium text-surface-600">
+            <h3 className="text-lg font-semibold text-white">{assignment.user.name}</h3>
+            <span className="rounded-full bg-slate-800/60 px-2.5 py-1 text-xs font-medium text-slate-300">
               {assignment.user.employee_id}
             </span>
             <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${getRoleBadgeClass(assignment.user.role)}`}>
               {assignment.user.role.replace('_', ' ')}
             </span>
           </div>
-          <p className="mt-1 text-sm text-surface-500">
+          <p className="mt-1 text-sm text-slate-400">
             {assignment.work_center.name}
             {assignment.user.department ? ` • ${assignment.user.department}` : ''}
           </p>
@@ -707,7 +707,7 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
       <div className="mt-4 rounded-xl bg-slate-800/50 p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm text-surface-500">Work order</p>
+            <p className="text-sm text-slate-400">Work order</p>
             <Link
               to={`/work-orders/${assignment.work_order.id}`}
               className="text-lg font-semibold text-werco-700 hover:text-werco-800"
@@ -721,39 +721,39 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
             </span>
           ) : null}
         </div>
-        <p className="mt-1 text-sm text-surface-700">
+        <p className="mt-1 text-sm text-slate-300">
           {assignment.work_order.part_number}
           {assignment.work_order.part_name ? ` • ${assignment.work_order.part_name}` : ''}
         </p>
-        <p className="mt-2 text-sm text-surface-600">
+        <p className="mt-2 text-sm text-slate-300">
           {assignment.operation.operation_number ? `${assignment.operation.operation_number} • ` : ''}
           {assignment.operation.name}
         </p>
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-        <div className="rounded-xl border border-surface-200 p-3">
-          <p className="text-surface-500">Started</p>
-          <p className="mt-1 font-semibold text-surface-900">{formatCentralTime(assignment.clock_in)}</p>
-          <p className="mt-1 text-xs text-surface-500">{formatElapsed(assignment.clock_in, nowMs)} elapsed</p>
+        <div className="rounded-xl border border-slate-700 p-3">
+          <p className="text-slate-400">Started</p>
+          <p className="mt-1 font-semibold text-white">{formatCentralTime(assignment.clock_in)}</p>
+          <p className="mt-1 text-xs text-slate-400">{formatElapsed(assignment.clock_in, nowMs)} elapsed</p>
         </div>
-        <div className="rounded-xl border border-surface-200 p-3">
-          <p className="text-surface-500">Due</p>
-          <p className={`mt-1 font-semibold ${isOverdue ? 'text-red-600' : 'text-surface-900'}`}>
+        <div className="rounded-xl border border-slate-700 p-3">
+          <p className="text-slate-400">Due</p>
+          <p className={`mt-1 font-semibold ${isOverdue ? 'text-red-600' : 'text-white'}`}>
             {dueDate ? formatCentralDate(dueDate, { year: undefined }) : 'No due date'}
           </p>
-          <p className="mt-1 text-xs text-surface-500">{assignment.work_order.customer_name || 'No customer specified'}</p>
+          <p className="mt-1 text-xs text-slate-400">{assignment.work_order.customer_name || 'No customer specified'}</p>
         </div>
       </div>
 
       <div className="mt-4">
         <div className="mb-1 flex items-center justify-between text-sm">
-          <span className="text-surface-500">Progress</span>
-          <span className="font-medium text-surface-700">
+          <span className="text-slate-400">Progress</span>
+          <span className="font-medium text-slate-300">
             {completeQty}/{orderedQty || 0} ({progress}%)
           </span>
         </div>
-        <div className="h-2 rounded-full bg-surface-200">
+        <div className="h-2 rounded-full bg-slate-800">
           <div className="h-2 rounded-full bg-werco-500 transition-all" style={{ width: `${progress}%` }} />
         </div>
       </div>
@@ -763,16 +763,16 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
 
 function SignedInUserRow({ user }: { user: SignedInUserStatus }) {
   return (
-    <div className="rounded-xl border border-surface-200 bg-[#151b28] p-4">
+    <div className="rounded-xl border border-slate-700 bg-[#151b28] p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-semibold text-surface-900">{user.name}</h3>
-            <span className="rounded-full bg-surface-100 px-2 py-0.5 text-xs font-medium text-surface-600">
+            <h3 className="font-semibold text-white">{user.name}</h3>
+            <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-xs font-medium text-slate-300">
               {user.employee_id}
             </span>
           </div>
-          <p className="mt-1 text-sm text-surface-500">
+          <p className="mt-1 text-sm text-slate-400">
             {user.role.replace('_', ' ')}
             {user.department ? ` • ${user.department}` : ''}
           </p>
@@ -782,25 +782,25 @@ function SignedInUserRow({ user }: { user: SignedInUserStatus }) {
         </span>
       </div>
 
-      <div className="mt-3 space-y-1 text-sm text-surface-600">
+      <div className="mt-3 space-y-1 text-sm text-slate-300">
         <p>
-          Active jobs: <span className="font-medium text-surface-800">{user.active_job_count}</span>
+          Active jobs: <span className="font-medium text-slate-200">{user.active_job_count}</span>
         </p>
         <p>
           Work centers:{' '}
-          <span className="font-medium text-surface-800">
+          <span className="font-medium text-slate-200">
             {user.active_work_centers.length ? user.active_work_centers.join(', ') : 'No active assignment'}
           </span>
         </p>
         <p>
           Work orders:{' '}
-          <span className="font-medium text-surface-800">
+          <span className="font-medium text-slate-200">
             {user.active_work_orders.length ? user.active_work_orders.join(', ') : 'No active assignment'}
           </span>
         </p>
         <p>
           Connected:{' '}
-          <span className="font-medium text-surface-800">
+          <span className="font-medium text-slate-200">
             {user.connected_since ? formatCentralTime(user.connected_since, { timeZoneName: 'short' }) : 'Unknown'}
           </span>
         </p>
@@ -830,7 +830,7 @@ function StatCard({ icon: Icon, iconBg, iconColor, label, value, valueColor, sub
       <div className="flex-1 min-w-0">
         <p className="stat-label">{label}</p>
         <p className={`stat-value ${valueColor || ''}`}>{value}</p>
-        {subtitle && <p className="text-xs text-surface-400 mt-0.5">{subtitle}</p>}
+        {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
       </div>
     </div>
   );

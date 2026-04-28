@@ -61,6 +61,13 @@ interface CustomerOption {
   name: string;
 }
 
+interface PartReadiness {
+  ready: boolean;
+  blockers: string[];
+  warnings: string[];
+  checks: Record<string, string>;
+}
+
 export default function WorkOrderNew() {
   const navigate = useNavigate();
   const [parts, setParts] = useState<Part[]>([]);
@@ -76,6 +83,7 @@ export default function WorkOrderNew() {
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const [creatingCustomer, setCreatingCustomer] = useState(false);
   const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
+  const [partReadiness, setPartReadiness] = useState<PartReadiness | null>(null);
 
   const [form, setForm] = useState({
     part_id: 0,
@@ -94,7 +102,7 @@ export default function WorkOrderNew() {
   const loadInitialData = async () => {
     try {
       const [partsRes, wcRes] = await Promise.all([
-        api.getParts({ active_only: true }),
+        api.getParts({ active_only: true, include_bom_components: false }),
         api.getWorkCenters(),
       ]);
       setParts(partsRes);
@@ -199,6 +207,7 @@ export default function WorkOrderNew() {
     setRouting(null);
     setOperations([]);
     setShowManualEntry(false);
+    setPartReadiness(null);
 
     if (!partId) return;
 
@@ -207,6 +216,13 @@ export default function WorkOrderNew() {
 
     setLoadingRouting(true);
     try {
+      try {
+        setPartReadiness(await api.getPartReadiness(partId));
+      } catch (readinessErr) {
+        console.error('Failed to load part readiness:', readinessErr);
+        setPartReadiness(null);
+      }
+
       if (isAssembly) {
         // For assemblies, use the preview endpoint to get combined operations from BOM components
         const previewRes = await api.previewWorkOrderOperations(partId, form.quantity_ordered);
@@ -366,6 +382,10 @@ export default function WorkOrderNew() {
       alert('Please select a part');
       return;
     }
+    if (partReadiness?.blockers.length) {
+      alert(`This part is not ready for a work order:\n\n${partReadiness.blockers.join('\n')}`);
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -425,12 +445,12 @@ export default function WorkOrderNew() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold text-surface-900 mb-6">New Work Order</h1>
+      <h1 className="text-2xl font-bold text-white mb-6">New Work Order</h1>
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Basic Info Card */}
         <div className="card">
-          <h2 className="text-lg font-semibold text-surface-900 mb-4">Work Order Details</h2>
+          <h2 className="text-lg font-semibold text-white mb-4">Work Order Details</h2>
           
           <div className="space-y-4">
             <div>
@@ -603,10 +623,33 @@ export default function WorkOrderNew() {
           </div>
         </div>
 
+        {partReadiness && (partReadiness.blockers.length > 0 || partReadiness.warnings.length > 0) && (
+          <div className="bg-[#151b28] border border-amber-500/30 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <ExclamationTriangleIcon className="h-5 w-5 text-amber-300 mt-0.5" />
+              <div>
+                <div className="font-semibold text-white">Work order readiness</div>
+                <div className="mt-2 space-y-1 text-sm text-slate-300">
+                  {[...partReadiness.blockers, ...partReadiness.warnings].map((message) => (
+                    <div key={message}>{message}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {partReadiness?.ready && partReadiness.warnings.length === 0 && (
+          <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-center gap-2 text-sm text-emerald-200">
+            <CheckCircleIcon className="h-5 w-5" />
+            Selected part is ready for a work order.
+          </div>
+        )}
+
         {/* Operations Card */}
         <div className="card">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-surface-900">Operations</h2>
+            <h2 className="text-lg font-semibold text-white">Operations</h2>
             {operations.length > 0 && (
               <button
                 type="button"
@@ -622,12 +665,12 @@ export default function WorkOrderNew() {
           {loadingRouting && (
             <div className="flex items-center justify-center py-8">
               <div className="spinner h-8 w-8"></div>
-              <span className="ml-3 text-surface-500">Loading routing...</span>
+              <span className="ml-3 text-slate-400">Loading routing...</span>
             </div>
           )}
 
           {!loadingRouting && form.part_id === 0 && (
-            <div className="flex items-center gap-3 p-4 bg-surface-50 rounded-xl text-surface-500">
+            <div className="flex items-center gap-3 p-4 bg-slate-900/40 rounded-xl text-slate-400">
               <InformationCircleIcon className="h-5 w-5 flex-shrink-0" />
               <span>Select a part to see available operations</span>
             </div>
@@ -710,7 +753,7 @@ export default function WorkOrderNew() {
                           <button
                             type="button"
                             onClick={() => removeOperation(index)}
-                            className="p-1.5 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/100/10"
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-500/100/10"
                           >
                             <TrashIcon className="h-4 w-4" />
                           </button>
@@ -742,7 +785,7 @@ export default function WorkOrderNew() {
                 <button
                   type="button"
                   onClick={addManualOperation}
-                  className="w-full py-8 border-2 border-dashed border-surface-300 rounded-xl text-surface-500 hover:border-werco-400 hover:text-werco-600 transition-colors"
+                  className="w-full py-8 border-2 border-dashed border-slate-700 rounded-xl text-slate-400 hover:border-werco-400 hover:text-werco-600 transition-colors"
                 >
                   <PlusIcon className="h-6 w-6 mx-auto mb-2" />
                   Add First Operation
@@ -814,7 +857,7 @@ export default function WorkOrderNew() {
                             <button
                               type="button"
                               onClick={() => removeOperation(index)}
-                              className="p-1.5 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/100/10"
+                              className="p-1.5 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-500/100/10"
                             >
                               <TrashIcon className="h-4 w-4" />
                             </button>

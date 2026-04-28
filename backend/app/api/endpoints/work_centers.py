@@ -1,11 +1,14 @@
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+import csv
+import io
+from typing import List, Optional
+from fastapi import APIRouter, Depends, File, HTTPException, status, UploadFile
 from sqlalchemy.orm import Session
+from pydantic import BaseModel, ValidationError
 from app.db.database import get_db
 from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.services.work_center_type_service import get_work_center_types
+from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
 from app.schemas.work_center import WorkCenterCreate, WorkCenterUpdate, WorkCenterResponse
 from app.core.cache import (
     cache, CacheKeys, CacheTTL,
@@ -15,6 +18,53 @@ from app.core.realtime import safe_broadcast
 from app.core.websocket import broadcast_dashboard_update, broadcast_shop_floor_update
 
 router = APIRouter()
+
+
+class WorkCenterCsvImportError(BaseModel):
+    row: int
+    code: Optional[str] = None
+    reason: str
+
+
+class WorkCenterCsvImportResponse(BaseModel):
+    imported_count: int
+    skipped_count: int
+    total_rows: int
+    created_ids: List[int]
+    errors: List[WorkCenterCsvImportError]
+
+
+def _normalize_csv_header(value: str) -> str:
+    return value.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _csv_row(raw_row: dict, header_map: dict) -> dict:
+    row = {}
+    for raw_key, raw_value in raw_row.items():
+        if not raw_key:
+            continue
+        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
+    return row
+
+
+def _parse_bool(value: str, default: bool = False) -> bool:
+    if value == "":
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "y", "active"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "inactive"}:
+        return False
+    raise ValueError(f"Invalid boolean value '{value}'")
+
+
+def _parse_float(value: str, field_name: str, default: float = 0.0) -> float:
+    if value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a number") from exc
 
 
 @router.get("/types")
@@ -102,6 +152,111 @@ def create_work_center(
     invalidate_work_centers_cache()
     
     return work_center
+
+
+@router.post("/import-csv", response_model=WorkCenterCsvImportResponse)
+async def import_work_centers_csv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Import work centers from CSV with row-level errors."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
+
+    try:
+        decoded_content = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
+
+    reader = csv.DictReader(io.StringIO(decoded_content))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV must include a header row")
+
+    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
+    required_headers = {"code", "name", "work_center_type"}
+    missing_headers = sorted(required_headers - set(header_map.values()))
+    if missing_headers:
+        raise HTTPException(status_code=400, detail=f"Missing required CSV columns: {', '.join(missing_headers)}")
+
+    existing_codes = {
+        (value or "").strip().upper()
+        for (value,) in db.query(WorkCenter.code).filter(WorkCenter.company_id == company_id).all()
+    }
+    valid_types = set(get_work_center_types(db, company_id=company_id))
+    valid_statuses = {"available", "in_use", "maintenance", "offline"}
+
+    errors: List[WorkCenterCsvImportError] = []
+    created_ids: List[int] = []
+    total_rows = 0
+
+    for row_number, raw_row in enumerate(reader, start=2):
+        row = _csv_row(raw_row, header_map)
+        if not any(row.values()):
+            continue
+
+        total_rows += 1
+        code = row.get("code", "").upper()
+        work_center_type = normalize_work_center_type(row.get("work_center_type", ""))
+        current_status = row.get("current_status") or "available"
+
+        try:
+            if not code:
+                raise ValueError("code is required")
+            if code in existing_codes:
+                raise ValueError("Work center code already exists")
+            if work_center_type not in valid_types:
+                raise ValueError(f"Invalid work_center_type '{work_center_type}'")
+            if current_status not in valid_statuses:
+                raise ValueError(f"Invalid current_status '{current_status}'")
+
+            work_center_in = WorkCenterCreate(
+                code=code,
+                name=row.get("name", ""),
+                work_center_type=work_center_type,
+                description=row.get("description") or None,
+                hourly_rate=_parse_float(row.get("hourly_rate", ""), "hourly_rate"),
+                capacity_hours_per_day=_parse_float(row.get("capacity_hours_per_day", ""), "capacity_hours_per_day", 8.0),
+                efficiency_factor=_parse_float(row.get("efficiency_factor", ""), "efficiency_factor", 1.0),
+                building=row.get("building") or None,
+                area=row.get("area") or None,
+            )
+        except (ValueError, ValidationError) as exc:
+            errors.append(WorkCenterCsvImportError(row=row_number, code=code or None, reason=str(exc)))
+            continue
+
+        try:
+            work_center = WorkCenter(**work_center_in.model_dump())
+            work_center.company_id = company_id
+            work_center.current_status = current_status
+            work_center.is_active = _parse_bool(row.get("is_active", ""), True)
+            work_center.availability_rate = _parse_float(row.get("availability_rate", ""), "availability_rate", 100.0)
+            db.add(work_center)
+            db.commit()
+            db.refresh(work_center)
+        except Exception as exc:
+            db.rollback()
+            errors.append(WorkCenterCsvImportError(row=row_number, code=code, reason=str(exc)))
+            continue
+
+        existing_codes.add(work_center.code.upper())
+        created_ids.append(work_center.id)
+
+    if created_ids:
+        invalidate_work_centers_cache()
+
+    return WorkCenterCsvImportResponse(
+        imported_count=len(created_ids),
+        skipped_count=len(errors),
+        total_rows=total_rows,
+        created_ids=created_ids,
+        errors=errors,
+    )
 
 
 @router.get("/{work_center_id}", response_model=WorkCenterResponse)

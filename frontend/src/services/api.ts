@@ -337,6 +337,15 @@ class ApiService {
     return response.data;
   }
 
+  async importWorkCentersCsv(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post('/work-centers/import-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  }
+
   async updateWorkCenter(id: number, data: WorkCenterUpdate): Promise<WorkCenter> {
     const response = await this.api.put<WorkCenter>(`/work-centers/${id}`, data);
     return response.data;
@@ -371,6 +380,15 @@ class ApiService {
 
   async createPart(data: PartCreate): Promise<Part> {
     const response = await this.api.post<Part>('/parts/', data);
+    return response.data;
+  }
+
+  async importPartsCsv(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post('/parts/import-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
     return response.data;
   }
 
@@ -578,6 +596,21 @@ class ApiService {
     return response.data;
   }
 
+  async getSetupHealth() {
+    const response = await this.api.get('/setup/health');
+    return response.data;
+  }
+
+  async getPartReadiness(partId: number) {
+    const response = await this.api.get(`/setup/readiness/part/${partId}`);
+    return response.data;
+  }
+
+  async getNotificationLogs(params?: { limit?: number; status?: string }) {
+    const response = await this.api.get('/notifications/logs', { params });
+    return response.data;
+  }
+
   async getDashboard() {
     const response = await this.api.get('/shop-floor/dashboard');
     return response.data;
@@ -704,7 +737,7 @@ class ApiService {
   }
 
   // Routing
-  async getRoutings(params?: { part_id?: number; status?: string; active_only?: boolean }) {
+  async getRoutings(params?: { part_id?: number; status?: string; active_only?: boolean; include_bom_components?: boolean }) {
     const response = await this.api.get('/routing/', { params });
     return response.data;
   }
@@ -897,6 +930,15 @@ class ApiService {
 
   async createVendor(data: any) {
     const response = await this.api.post('/purchasing/vendors', data);
+    return response.data;
+  }
+
+  async importVendorsCsv(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post('/purchasing/vendors/import-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
     return response.data;
   }
 
@@ -1245,6 +1287,15 @@ class ApiService {
 
   async createCustomer(data: CustomerCreate) {
     const response = await this.api.post('/customers/', data);
+    return response.data;
+  }
+
+  async importCustomersCsv(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post('/customers/import-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
     return response.data;
   }
 

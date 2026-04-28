@@ -1,7 +1,10 @@
+import csv
+import io
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, status, Query, Request, UploadFile
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import or_, func
+from pydantic import BaseModel, ValidationError
 from app.db.database import get_db
 from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
@@ -12,6 +15,62 @@ from app.services.audit_service import AuditService
 from app.services.part_number_service import generate_werco_part_number, normalize_description
 
 router = APIRouter()
+
+
+class PartCsvImportError(BaseModel):
+    row: int
+    part_number: Optional[str] = None
+    reason: str
+
+
+class PartCsvImportResponse(BaseModel):
+    imported_count: int
+    skipped_count: int
+    total_rows: int
+    created_ids: List[int]
+    errors: List[PartCsvImportError]
+
+
+def _normalize_csv_header(value: str) -> str:
+    return value.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _csv_row(raw_row: dict, header_map: dict) -> dict:
+    row = {}
+    for raw_key, raw_value in raw_row.items():
+        if not raw_key:
+            continue
+        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
+    return row
+
+
+def _parse_bool(value: str, default: bool = False) -> bool:
+    if value == "":
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "y", "active"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "inactive"}:
+        return False
+    raise ValueError(f"Invalid boolean value '{value}'")
+
+
+def _parse_float(value: str, field_name: str, default: float = 0.0) -> float:
+    if value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a number") from exc
+
+
+def _parse_int(value: str, field_name: str, default: int = 0) -> int:
+    if value == "":
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
 
 
 @router.get("/", response_model=List[PartResponse], summary="List all parts")
@@ -179,6 +238,110 @@ def create_part(
     audit.log_create("part", part.id, part.part_number, new_values=part)
     
     return part
+
+
+@router.post("/import-csv", response_model=PartCsvImportResponse)
+async def import_parts_csv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Import part master records from CSV with row-level errors."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
+
+    try:
+        decoded_content = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
+
+    reader = csv.DictReader(io.StringIO(decoded_content))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV must include a header row")
+
+    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
+    required_headers = {"part_number", "name", "part_type"}
+    missing_headers = sorted(required_headers - set(header_map.values()))
+    if missing_headers:
+        raise HTTPException(status_code=400, detail=f"Missing required CSV columns: {', '.join(missing_headers)}")
+
+    existing_part_numbers = {
+        (value or "").strip().upper()
+        for (value,) in db.query(Part.part_number).filter(Part.company_id == company_id).all()
+    }
+
+    errors: List[PartCsvImportError] = []
+    created_ids: List[int] = []
+    total_rows = 0
+
+    for row_number, raw_row in enumerate(reader, start=2):
+        row = _csv_row(raw_row, header_map)
+        if not any(row.values()):
+            continue
+
+        total_rows += 1
+        part_number = row.get("part_number", "").upper()
+
+        try:
+            if not part_number:
+                raise ValueError("part_number is required")
+            if part_number in existing_part_numbers:
+                raise ValueError("Part number already exists")
+
+            part_in = PartCreate(
+                part_number=part_number,
+                revision=row.get("revision") or "A",
+                name=row.get("name", ""),
+                description=row.get("description") or None,
+                part_type=row.get("part_type", ""),
+                unit_of_measure=row.get("unit_of_measure") or row.get("uom") or UnitOfMeasure.EACH.value,
+                standard_cost=_parse_float(row.get("standard_cost", ""), "standard_cost"),
+                material_cost=_parse_float(row.get("material_cost", ""), "material_cost"),
+                labor_cost=_parse_float(row.get("labor_cost", ""), "labor_cost"),
+                overhead_cost=_parse_float(row.get("overhead_cost", ""), "overhead_cost"),
+                lead_time_days=_parse_int(row.get("lead_time_days", ""), "lead_time_days"),
+                safety_stock=_parse_float(row.get("safety_stock", ""), "safety_stock"),
+                reorder_point=_parse_float(row.get("reorder_point", ""), "reorder_point"),
+                reorder_quantity=_parse_float(row.get("reorder_quantity", ""), "reorder_quantity"),
+                is_critical=_parse_bool(row.get("is_critical", ""), False),
+                requires_inspection=_parse_bool(row.get("requires_inspection", ""), True),
+                inspection_requirements=row.get("inspection_requirements") or None,
+                customer_name=row.get("customer_name") or None,
+                customer_part_number=row.get("customer_part_number") or None,
+                drawing_number=row.get("drawing_number") or None,
+            )
+        except (ValueError, ValidationError) as exc:
+            errors.append(PartCsvImportError(row=row_number, part_number=part_number or None, reason=str(exc)))
+            continue
+
+        try:
+            part = Part(**part_in.model_dump(), created_by=current_user.id)
+            part.company_id = company_id
+            part.is_active = _parse_bool(row.get("is_active", ""), True)
+            part.status = row.get("status") or "active"
+            db.add(part)
+            db.commit()
+            db.refresh(part)
+        except Exception as exc:
+            db.rollback()
+            errors.append(PartCsvImportError(row=row_number, part_number=part_number, reason=str(exc)))
+            continue
+
+        existing_part_numbers.add(part.part_number.upper())
+        created_ids.append(part.id)
+
+    return PartCsvImportResponse(
+        imported_count=len(created_ids),
+        skipped_count=len(errors),
+        total_rows=total_rows,
+        created_ids=created_ids,
+        errors=errors,
+    )
 
 
 @router.get("/{part_id}", response_model=PartResponse)

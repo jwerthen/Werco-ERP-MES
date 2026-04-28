@@ -11,6 +11,7 @@ from app.models.user import User, UserRole
 from app.models.routing import Routing, RoutingOperation
 from app.models.part import Part
 from app.models.work_center import WorkCenter
+from app.models.bom import BOM, BOMItem
 from app.schemas.routing import (
     RoutingCreate, RoutingUpdate, RoutingResponse, RoutingListResponse,
     RoutingOperationCreate, RoutingOperationUpdate, RoutingOperationResponse,
@@ -335,6 +336,7 @@ def list_routings(
     part_id: Optional[int] = None,
     status: Optional[str] = None,
     active_only: bool = True,
+    include_bom_components: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id)
@@ -347,6 +349,16 @@ def list_routings(
     
     if part_id:
         query = query.filter(Routing.part_id == part_id)
+    elif not include_bom_components:
+        component_part_ids = (
+            db.query(BOMItem.component_part_id)
+            .join(BOM, BOM.id == BOMItem.bom_id)
+            .filter(
+                BOM.company_id == company_id,
+                BOM.is_active == True,
+            )
+        )
+        query = query.filter(~Routing.part_id.in_(component_part_ids))
     
     if status:
         query = query.filter(Routing.status == status)

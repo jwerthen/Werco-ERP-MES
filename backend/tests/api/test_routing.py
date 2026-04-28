@@ -3,6 +3,7 @@ from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.models.bom import BOM, BOMItem
 from app.models.part import Part
 from app.models.routing import Routing, RoutingOperation
 from app.models.work_center import WorkCenter
@@ -63,3 +64,65 @@ class TestRoutingAPI:
         data = response.json()
         assert data["part_id"] == part.id
         assert data["operations"][0]["name"] == "Machine Part"
+
+    def test_list_routings_hides_bom_components_by_default(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """Routing list should show parent assemblies, not their BOM component parts."""
+        assembly = Part(
+            part_number="ASM-ROUTE-001",
+            name="Routing Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        component = Part(
+            part_number="COMP-ROUTE-001",
+            name="Routing Component",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([assembly, component])
+        db_session.flush()
+
+        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
+        db_session.add(bom)
+        db_session.flush()
+        db_session.add(
+            BOMItem(
+                bom_id=bom.id,
+                component_part_id=component.id,
+                item_number=10,
+                quantity=1,
+                item_type="make",
+                line_type="component",
+                company_id=1,
+            )
+        )
+        db_session.add_all(
+            [
+                Routing(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1),
+                Routing(part_id=component.id, revision="A", status="released", is_active=True, company_id=1),
+            ]
+        )
+        db_session.commit()
+
+        response = client.get("/api/v1/routing/", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        part_ids = {routing["part_id"] for routing in response.json()}
+        assert assembly.id in part_ids
+        assert component.id not in part_ids
+
+        include_response = client.get(
+            "/api/v1/routing/",
+            params={"include_bom_components": True},
+            headers=auth_headers,
+        )
+
+        assert include_response.status_code == status.HTTP_200_OK
+        included_part_ids = {routing["part_id"] for routing in include_response.json()}
+        assert component.id in included_part_ids

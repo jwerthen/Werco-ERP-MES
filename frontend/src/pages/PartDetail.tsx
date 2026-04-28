@@ -16,6 +16,8 @@ import {
   ListBulletIcon,
   WrenchScrewdriverIcon,
   PencilIcon,
+  CheckCircleIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
 
 const TABS: Tab[] = [
@@ -23,6 +25,13 @@ const TABS: Tab[] = [
   { id: 'bom', label: 'Bill of Materials', icon: ListBulletIcon },
   { id: 'routing', label: 'Routing', icon: WrenchScrewdriverIcon },
 ];
+
+interface PartReadiness {
+  ready: boolean;
+  blockers: string[];
+  warnings: string[];
+  checks: Record<string, string>;
+}
 
 export default function PartDetail() {
   const { id } = useParams<{ id: string }>();
@@ -33,6 +42,7 @@ export default function PartDetail() {
   const [part, setPart] = useState<Part | null>(null);
   const [bom, setBom] = useState<BOM | null>(null);
   const [routing, setRouting] = useState<Routing | null>(null);
+  const [readiness, setReadiness] = useState<PartReadiness | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState(searchParams.get('tab') || 'overview');
 
@@ -66,14 +76,23 @@ export default function PartDetail() {
     }
   }, [partId]);
 
+  const loadReadiness = useCallback(async () => {
+    try {
+      const data = await api.getPartReadiness(partId);
+      setReadiness(data);
+    } catch {
+      setReadiness(null);
+    }
+  }, [partId]);
+
   useEffect(() => {
     async function load() {
       setLoading(true);
-      await Promise.all([loadPart(), loadBOM(), loadRouting()]);
+      await Promise.all([loadPart(), loadBOM(), loadRouting(), loadReadiness()]);
       setLoading(false);
     }
     load();
-  }, [loadPart, loadBOM, loadRouting]);
+  }, [loadPart, loadBOM, loadRouting, loadReadiness]);
 
   const handleTabChange = (tabId: string) => {
     setActiveTab(tabId);
@@ -168,6 +187,29 @@ export default function PartDetail() {
           </div>
         </div>
       </div>
+
+      {readiness && (readiness.blockers.length > 0 || readiness.warnings.length > 0) && (
+        <div className="bg-[#151b28] border border-amber-500/30 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <ExclamationTriangleIcon className="h-5 w-5 text-amber-300 mt-0.5" />
+            <div className="min-w-0">
+              <div className="font-semibold text-white">Readiness needs attention</div>
+              <div className="mt-2 space-y-1 text-sm text-slate-300">
+                {[...readiness.blockers, ...readiness.warnings].map((message) => (
+                  <div key={message}>{message}</div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {readiness?.ready && readiness.warnings.length === 0 && (
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-center gap-2 text-sm text-emerald-200">
+          <CheckCircleIcon className="h-5 w-5" />
+          This part has the required active production data for its type.
+        </div>
+      )}
 
       {/* Tabs */}
       <Tabs tabs={tabs} activeTab={activeTab} onChange={handleTabChange} />

@@ -1,7 +1,10 @@
+import csv
+import io
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
+from pydantic import BaseModel, EmailStr, ValidationError
 from app.db.database import get_db
 from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
@@ -9,7 +12,6 @@ from app.models.customer import Customer
 from app.services.audit_service import AuditService
 from app.models.part import Part, PartType
 from app.models.work_order import WorkOrder, WorkOrderStatus
-from pydantic import BaseModel, EmailStr
 from datetime import datetime
 
 router = APIRouter()
@@ -84,7 +86,46 @@ class CustomerResponse(BaseModel):
         from_attributes = True
 
 
-def generate_customer_code(db: Session, name: str) -> str:
+class CustomerCsvImportError(BaseModel):
+    row: int
+    name: Optional[str] = None
+    code: Optional[str] = None
+    reason: str
+
+
+class CustomerCsvImportResponse(BaseModel):
+    imported_count: int
+    skipped_count: int
+    total_rows: int
+    created_ids: List[int]
+    errors: List[CustomerCsvImportError]
+
+
+def _normalize_csv_header(value: str) -> str:
+    return value.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _csv_row(raw_row: dict, header_map: dict) -> dict:
+    row = {}
+    for raw_key, raw_value in raw_row.items():
+        if not raw_key:
+            continue
+        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
+    return row
+
+
+def _parse_bool(value: str, default: bool = False) -> bool:
+    if value == "":
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "y"}:
+        return True
+    if normalized in {"false", "0", "no", "n"}:
+        return False
+    raise ValueError(f"Invalid boolean value '{value}'")
+
+
+def generate_customer_code(db: Session, name: str, company_id: Optional[int] = None) -> str:
     """Generate a customer code from name"""
     # Take first 3 chars of name, uppercase
     base = "".join(c for c in name.upper() if c.isalnum())[:3]
@@ -92,7 +133,10 @@ def generate_customer_code(db: Session, name: str) -> str:
         base = base.ljust(3, "X")
 
     # Find next number
-    existing = db.query(Customer).filter(Customer.code.like(f"{base}%")).count()
+    query = db.query(Customer).filter(Customer.code.like(f"{base}%"))
+    if company_id is not None:
+        query = query.filter(Customer.company_id == company_id)
+    existing = query.count()
     return f"{base}{existing + 1:03d}"
 
 
@@ -140,6 +184,16 @@ def list_customer_names(
     return [{"id": c.id, "name": c.name} for c in customers]
 
 
+@router.post("/import-csv", response_model=CustomerCsvImportResponse)
+async def import_customers_csv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    return await _import_customers_csv_impl(file, db, current_user, company_id)
+
+
 @router.get("/{customer_id}", response_model=CustomerResponse)
 def get_customer(
     customer_id: int,
@@ -152,6 +206,118 @@ def get_customer(
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     return customer
+
+
+async def _import_customers_csv_impl(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Import customer master records from CSV with row-level errors."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
+
+    try:
+        decoded_content = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
+
+    reader = csv.DictReader(io.StringIO(decoded_content))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV must include a header row")
+
+    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
+    if "name" not in set(header_map.values()):
+        raise HTTPException(status_code=400, detail="Missing required CSV columns: name")
+
+    existing_names = {
+        (value or "").strip().lower()
+        for (value,) in db.query(Customer.name).filter(Customer.company_id == company_id).all()
+    }
+    existing_codes = {
+        (value or "").strip().lower()
+        for (value,) in db.query(Customer.code).filter(Customer.company_id == company_id).all()
+        if value
+    }
+
+    errors: List[CustomerCsvImportError] = []
+    created_ids: List[int] = []
+    total_rows = 0
+
+    for row_number, raw_row in enumerate(reader, start=2):
+        row = _csv_row(raw_row, header_map)
+        if not any(row.values()):
+            continue
+
+        total_rows += 1
+        name = row.get("name", "")
+        code = row.get("code", "")
+
+        try:
+            if not name:
+                raise ValueError("name is required")
+            if name.lower() in existing_names:
+                raise ValueError("Customer name already exists")
+            if code and code.lower() in existing_codes:
+                raise ValueError("Customer code already exists")
+
+            customer_in = CustomerCreate(
+                name=name,
+                code=code or None,
+                contact_name=row.get("contact_name") or None,
+                email=row.get("email") or None,
+                phone=row.get("phone") or None,
+                address_line1=row.get("address_line1") or None,
+                address_line2=row.get("address_line2") or None,
+                city=row.get("city") or None,
+                state=row.get("state") or None,
+                zip_code=row.get("zip_code") or row.get("postal_code") or None,
+                country=row.get("country") or "USA",
+                ship_to_name=row.get("ship_to_name") or None,
+                ship_address_line1=row.get("ship_address_line1") or None,
+                ship_city=row.get("ship_city") or None,
+                ship_state=row.get("ship_state") or None,
+                ship_zip_code=row.get("ship_zip_code") or None,
+                payment_terms=row.get("payment_terms") or "Net 30",
+                requires_coc=_parse_bool(row.get("requires_coc", ""), True),
+                requires_fai=_parse_bool(row.get("requires_fai", ""), False),
+                special_requirements=row.get("special_requirements") or None,
+                notes=row.get("notes") or None,
+            )
+        except (ValueError, ValidationError) as exc:
+            errors.append(CustomerCsvImportError(row=row_number, name=name or None, code=code or None, reason=str(exc)))
+            continue
+
+        try:
+            customer_code = customer_in.code or generate_customer_code(db, customer_in.name, company_id)
+            customer = Customer(**customer_in.model_dump(exclude={"code"}), code=customer_code)
+            customer.company_id = company_id
+            customer.is_active = _parse_bool(row.get("is_active", ""), True)
+            db.add(customer)
+            db.commit()
+            db.refresh(customer)
+        except Exception as exc:
+            db.rollback()
+            errors.append(CustomerCsvImportError(row=row_number, name=name, code=code or None, reason=str(exc)))
+            continue
+
+        existing_names.add(customer.name.lower())
+        if customer.code:
+            existing_codes.add(customer.code.lower())
+        created_ids.append(customer.id)
+
+    return CustomerCsvImportResponse(
+        imported_count=len(created_ids),
+        skipped_count=len(errors),
+        total_rows=total_rows,
+        created_ids=created_ids,
+        errors=errors,
+    )
 
 
 @router.get("/{customer_id}/stats")
@@ -297,7 +463,7 @@ def create_customer(
     if db.query(Customer).filter(Customer.name == customer_in.name, Customer.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Customer name already exists")
 
-    code = customer_in.code or generate_customer_code(db, customer_in.name)
+    code = customer_in.code or generate_customer_code(db, customer_in.name, company_id)
 
     customer = Customer(**customer_in.model_dump(exclude={"code"}), code=code)
     customer.company_id = company_id

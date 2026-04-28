@@ -44,6 +44,9 @@ import {
   Cog6ToothIcon,
   MagnifyingGlassIcon,
   StopIcon,
+  ArrowUpTrayIcon,
+  RocketLaunchIcon,
+  BellAlertIcon,
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -61,6 +64,7 @@ interface NavItem {
 
 const navigation: NavItem[] = [
   { name: 'Dashboard', href: '/', icon: HomeIcon },
+  { name: 'Action Inbox', href: '/action-inbox', icon: BellAlertIcon },
   {
     name: 'Shop Floor',
     icon: WrenchScrewdriverIcon,
@@ -133,6 +137,8 @@ const navigation: NavItem[] = [
     name: 'Administration',
     icon: Cog6ToothIcon,
     children: [
+      { name: 'Setup Wizard', href: '/setup', icon: RocketLaunchIcon },
+      { name: 'Import Center', href: '/import-center', icon: ArrowUpTrayIcon },
       { name: 'Work Centers', href: '/work-centers', icon: CogIcon },
       { name: 'Users', href: '/users', icon: UsersIcon },
       { name: 'Operator Certifications', href: '/certifications', icon: ShieldCheckIcon },

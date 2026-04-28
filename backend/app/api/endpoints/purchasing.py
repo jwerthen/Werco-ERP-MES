@@ -1,8 +1,11 @@
+import csv
+import io
 from typing import List, Optional
 from datetime import datetime, date
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func
+from pydantic import BaseModel, ValidationError
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
 from app.api.deps import get_current_user, get_current_company_id, require_role
@@ -18,6 +21,66 @@ from app.schemas.purchasing import (
 )
 
 router = APIRouter()
+
+
+class VendorCsvImportError(BaseModel):
+    row: int
+    code: Optional[str] = None
+    name: Optional[str] = None
+    reason: str
+
+
+class VendorCsvImportResponse(BaseModel):
+    imported_count: int
+    skipped_count: int
+    total_rows: int
+    created_ids: List[int]
+    errors: List[VendorCsvImportError]
+
+
+def _normalize_csv_header(value: str) -> str:
+    return value.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _csv_row(raw_row: dict, header_map: dict) -> dict:
+    row = {}
+    for raw_key, raw_value in raw_row.items():
+        if not raw_key:
+            continue
+        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
+    return row
+
+
+def _parse_bool(value: str, default: bool = False) -> bool:
+    if value == "":
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "y", "approved"}:
+        return True
+    if normalized in {"false", "0", "no", "n"}:
+        return False
+    raise ValueError(f"Invalid boolean value '{value}'")
+
+
+def _parse_int(value: str, field_name: str, default: int = 0) -> int:
+    if value == "":
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+
+
+def _generate_vendor_code(db: Session, name: str, company_id: int) -> str:
+    base = "".join(c for c in name.upper() if c.isalnum())[:3]
+    if len(base) < 3:
+        base = base.ljust(3, "X")
+    existing = (
+        db.query(Vendor)
+        .filter(Vendor.company_id == company_id, Vendor.code.like(f"{base}%"))
+        .count()
+    )
+    return f"{base}{existing + 1:03d}"
 
 
 # ============ VENDORS ============
@@ -57,6 +120,109 @@ def create_vendor(
     db.commit()
     db.refresh(vendor)
     return vendor
+
+
+@router.post("/vendors/import-csv", response_model=VendorCsvImportResponse)
+async def import_vendors_csv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Import vendor master records from CSV with row-level errors."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
+
+    try:
+        decoded_content = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
+
+    reader = csv.DictReader(io.StringIO(decoded_content))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV must include a header row")
+
+    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
+    if "name" not in set(header_map.values()):
+        raise HTTPException(status_code=400, detail="Missing required CSV columns: name")
+
+    existing_codes = {
+        (value or "").strip().upper()
+        for (value,) in db.query(Vendor.code).filter(Vendor.company_id == company_id).all()
+    }
+
+    errors: List[VendorCsvImportError] = []
+    created_ids: List[int] = []
+    total_rows = 0
+
+    for row_number, raw_row in enumerate(reader, start=2):
+        row = _csv_row(raw_row, header_map)
+        if not any(row.values()):
+            continue
+
+        total_rows += 1
+        name = row.get("name", "")
+        code = (row.get("code") or "").upper()
+
+        try:
+            if not name:
+                raise ValueError("name is required")
+            if not code:
+                code = _generate_vendor_code(db, name, company_id)
+            if code in existing_codes:
+                raise ValueError("Vendor code already exists")
+
+            vendor_in = VendorCreate(
+                code=code,
+                name=name,
+                contact_name=row.get("contact_name") or None,
+                email=row.get("email") or None,
+                phone=row.get("phone") or None,
+                address_line1=row.get("address_line1") or None,
+                address_line2=row.get("address_line2") or None,
+                city=row.get("city") or None,
+                state=(row.get("state") or "").upper() or None,
+                postal_code=row.get("postal_code") or row.get("zip_code") or None,
+                country=row.get("country") or "US",
+                payment_terms=row.get("payment_terms") or None,
+                lead_time_days=_parse_int(row.get("lead_time_days", ""), "lead_time_days", 14),
+                is_approved=_parse_bool(row.get("is_approved", ""), False),
+                is_as9100_certified=_parse_bool(row.get("is_as9100_certified", ""), False),
+                is_iso9001_certified=_parse_bool(row.get("is_iso9001_certified", ""), False),
+                notes=row.get("notes") or None,
+            )
+        except (ValueError, ValidationError) as exc:
+            errors.append(VendorCsvImportError(row=row_number, code=code or None, name=name or None, reason=str(exc)))
+            continue
+
+        try:
+            vendor = Vendor(**vendor_in.model_dump())
+            vendor.company_id = company_id
+            vendor.is_active = _parse_bool(row.get("is_active", ""), True)
+            if vendor.is_approved:
+                vendor.approval_date = date.today()
+            db.add(vendor)
+            db.commit()
+            db.refresh(vendor)
+        except Exception as exc:
+            db.rollback()
+            errors.append(VendorCsvImportError(row=row_number, code=code, name=name, reason=str(exc)))
+            continue
+
+        existing_codes.add(vendor.code.upper())
+        created_ids.append(vendor.id)
+
+    return VendorCsvImportResponse(
+        imported_count=len(created_ids),
+        skipped_count=len(errors),
+        total_rows=total_rows,
+        created_ids=created_ids,
+        errors=errors,
+    )
 
 
 @router.get("/vendors/{vendor_id}", response_model=VendorResponse)

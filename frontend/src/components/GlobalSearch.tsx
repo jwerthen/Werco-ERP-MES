@@ -28,6 +28,10 @@ import {
   ClockIcon,
   XMarkIcon,
   ArchiveBoxIcon,
+  ArrowUpTrayIcon,
+  PlusCircleIcon,
+  RocketLaunchIcon,
+  BellAlertIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
 
@@ -51,6 +55,10 @@ const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   truck: TruckIcon,
   currency: CurrencyDollarIcon,
   archive: ArchiveBoxIcon,
+  upload: ArrowUpTrayIcon,
+  plus: PlusCircleIcon,
+  rocket: RocketLaunchIcon,
+  bell: BellAlertIcon,
 };
 
 // Type labels and colors
@@ -65,14 +73,69 @@ const typeConfig: Record<string, { label: string; color: string }> = {
   purchase_order: { label: 'PO', color: 'bg-red-500/20 text-red-300 border border-red-500/30' },
   quote: { label: 'Quote', color: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' },
   inventory: { label: 'Inventory', color: 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' },
+  action: { label: 'Action', color: 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' },
 };
 
 // Navigation items for quick access
 const quickActions = [
+  { name: 'Action Inbox', url: '/action-inbox', icon: BellAlertIcon },
+  { name: 'Setup Wizard', url: '/setup', icon: RocketLaunchIcon },
+  { name: 'Import Center', url: '/import-center', icon: ArrowUpTrayIcon },
   { name: 'Traceability', url: '/traceability', icon: DocumentDuplicateIcon },
   { name: 'Purchasing', url: '/purchasing', icon: TruckIcon },
   { name: 'Customers', url: '/customers', icon: BuildingOfficeIcon },
   { name: 'Quotes', url: '/quotes', icon: CurrencyDollarIcon },
+];
+
+const commandActions: SearchResult[] = [
+  {
+    id: -6,
+    type: 'action',
+    title: 'Open Action Inbox',
+    subtitle: 'Review setup gaps, master-data issues, and notification activity',
+    url: '/action-inbox',
+    icon: 'bell',
+  },
+  {
+    id: -1,
+    type: 'action',
+    title: 'Open Setup Wizard',
+    subtitle: 'Onboarding checklist, master-data health, and readiness gaps',
+    url: '/setup',
+    icon: 'rocket',
+  },
+  {
+    id: -2,
+    type: 'action',
+    title: 'Import Employees',
+    subtitle: 'Mass upload an employee list from CSV',
+    url: '/import-center?type=employees',
+    icon: 'upload',
+  },
+  {
+    id: -3,
+    type: 'action',
+    title: 'Import Parts',
+    subtitle: 'Download the parts template and continue import prep',
+    url: '/import-center?type=parts',
+    icon: 'upload',
+  },
+  {
+    id: -4,
+    type: 'action',
+    title: 'Create Work Order',
+    subtitle: 'Start a new work order after readiness checks',
+    url: '/work-orders/new',
+    icon: 'plus',
+  },
+  {
+    id: -5,
+    type: 'action',
+    title: 'Generate Routings',
+    subtitle: 'Create routings for top-level make parts only',
+    url: '/routing',
+    icon: 'list',
+  },
 ];
 
 interface GlobalSearchProps {
@@ -169,7 +232,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
 
   // Keyboard navigation
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    const items = query ? results : recentItems;
+    const items = query ? displayResults : recentItems;
 
     switch (e.key) {
       case 'ArrowDown':
@@ -192,7 +255,13 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
     }
   };
 
-  const displayResults = query ? results : recentItems;
+  const normalizedQuery = query.trim().toLowerCase();
+  const matchingCommandActions = normalizedQuery
+    ? commandActions.filter((action) =>
+        `${action.title} ${action.subtitle || ''}`.toLowerCase().includes(normalizedQuery)
+      )
+    : [];
+  const displayResults = query ? [...matchingCommandActions, ...results] : recentItems;
   const showQuickActions = !query && recentItems.length === 0;
 
   return (
@@ -321,7 +390,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                 )}
 
                 {/* No Results */}
-                {!isLoading && query && results.length === 0 && (
+                {!isLoading && query && displayResults.length === 0 && (
                   <div className="py-12 text-center">
                     <MagnifyingGlassIcon className="mx-auto h-10 w-10 text-base-content/40" />
                     <p className="mt-3 text-base-content/70">No results found for "{query}"</p>

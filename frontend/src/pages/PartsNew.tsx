@@ -11,13 +11,31 @@ import {
   PlusIcon,
   MagnifyingGlassIcon,
   ArrowUpTrayIcon,
+  ArrowDownTrayIcon,
+  BookmarkIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  ClipboardDocumentListIcon,
   Squares2X2Icon,
   ListBulletIcon as ListIcon,
+  TrashIcon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline';
 
 type ViewMode = 'table' | 'grid';
+
+const SAVED_FILTERS_KEY = 'werco.parts.savedFilters.v1';
+
+interface SavedPartFilter {
+  id: string;
+  name: string;
+  search: string;
+  typeFilter: string;
+  statusFilter: string;
+  showBOMComponents: boolean;
+  viewMode: ViewMode;
+  createdAt: string;
+}
 
 interface BOMComponentPart {
   id: number;
@@ -56,6 +74,8 @@ export default function PartsPage() {
   const [expandedParts, setExpandedParts] = useState<Set<number>>(new Set());
   const [bomData, setBomData] = useState<Record<number, BOMItemSummary[]>>({});
   const [componentPartIds, setComponentPartIds] = useState<Set<number>>(new Set());
+  const [savedFilters, setSavedFilters] = useState<SavedPartFilter[]>([]);
+  const [selectedPartIds, setSelectedPartIds] = useState<Set<number>>(new Set());
 
   // Create form
   const [createForm, setCreateForm] = useState({
@@ -113,6 +133,15 @@ export default function PartsPage() {
     loadParts();
   }, [loadParts]);
 
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(SAVED_FILTERS_KEY);
+      if (stored) setSavedFilters(JSON.parse(stored));
+    } catch {
+      setSavedFilters([]);
+    }
+  }, []);
+
   const filteredParts = useMemo(() => {
     let result = parts;
     if (search) {
@@ -142,6 +171,21 @@ export default function PartsPage() {
   }), [parts]);
 
   const getPartById = useCallback((partId: number) => parts.find(p => p.id === partId), [parts]);
+  const selectedParts = useMemo(() => parts.filter(part => selectedPartIds.has(part.id)), [parts, selectedPartIds]);
+  const visibleSelectedCount = useMemo(
+    () => filteredParts.filter(part => selectedPartIds.has(part.id)).length,
+    [filteredParts, selectedPartIds]
+  );
+  const allVisibleSelected = filteredParts.length > 0 && visibleSelectedCount === filteredParts.length;
+  const hasActiveFilters = Boolean(search || typeFilter || statusFilter || showBOMComponents);
+
+  useEffect(() => {
+    setSelectedPartIds(prev => {
+      const validIds = new Set(parts.map(part => part.id));
+      const next = new Set(Array.from(prev).filter(id => validIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [parts]);
 
   const toggleExpanded = useCallback((partId: number, event: React.MouseEvent) => {
     event.stopPropagation();
@@ -152,6 +196,122 @@ export default function PartsPage() {
       return next;
     });
   }, []);
+
+  const persistSavedFilters = (filters: SavedPartFilter[]) => {
+    setSavedFilters(filters);
+    window.localStorage.setItem(SAVED_FILTERS_KEY, JSON.stringify(filters));
+  };
+
+  const saveCurrentFilter = () => {
+    const name = window.prompt('Name this parts filter', search || typeFilter || statusFilter || 'Parts filter');
+    if (!name?.trim()) return;
+
+    const nextFilter: SavedPartFilter = {
+      id: `${Date.now()}`,
+      name: name.trim(),
+      search,
+      typeFilter,
+      statusFilter,
+      showBOMComponents,
+      viewMode,
+      createdAt: new Date().toISOString(),
+    };
+    persistSavedFilters([nextFilter, ...savedFilters].slice(0, 12));
+    showToast('success', `Saved filter "${nextFilter.name}"`);
+  };
+
+  const applySavedFilter = (filter: SavedPartFilter) => {
+    setSearch(filter.search);
+    setTypeFilter(filter.typeFilter);
+    setStatusFilter(filter.statusFilter);
+    setShowBOMComponents(filter.showBOMComponents);
+    setViewMode(filter.viewMode);
+    showToast('success', `Applied "${filter.name}"`);
+  };
+
+  const deleteSavedFilter = (filterId: string, event: React.MouseEvent) => {
+    event.stopPropagation();
+    persistSavedFilters(savedFilters.filter(filter => filter.id !== filterId));
+  };
+
+  const clearFilters = () => {
+    setSearch('');
+    setTypeFilter('');
+    setStatusFilter('');
+    setShowBOMComponents(false);
+  };
+
+  const toggleSelectedPart = (partId: number, event: React.MouseEvent | React.ChangeEvent<HTMLInputElement>) => {
+    event.stopPropagation();
+    setSelectedPartIds(prev => {
+      const next = new Set(prev);
+      if (next.has(partId)) next.delete(partId);
+      else next.add(partId);
+      return next;
+    });
+  };
+
+  const toggleAllVisible = (event: React.ChangeEvent<HTMLInputElement>) => {
+    event.stopPropagation();
+    setSelectedPartIds(prev => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        filteredParts.forEach(part => next.delete(part.id));
+      } else {
+        filteredParts.forEach(part => next.add(part.id));
+      }
+      return next;
+    });
+  };
+
+  const buildPartsCsv = (rows: Part[]) => {
+    const headers = [
+      'part_number',
+      'name',
+      'revision',
+      'part_type',
+      'status',
+      'customer_name',
+      'customer_part_number',
+      'drawing_number',
+      'standard_cost',
+      'is_critical',
+      'requires_inspection',
+    ];
+    const escapeCell = (value: unknown) => {
+      const text = String(value ?? '');
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    return [
+      headers.join(','),
+      ...rows.map(part => headers.map(header => escapeCell((part as unknown as Record<string, unknown>)[header])).join(',')),
+    ].join('\n');
+  };
+
+  const exportSelectedParts = () => {
+    if (selectedParts.length === 0) return;
+    const blob = new Blob([buildPartsCsv(selectedParts)], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `werco-selected-parts-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast('success', `Exported ${selectedParts.length} part${selectedParts.length !== 1 ? 's' : ''}`);
+  };
+
+  const copySelectedParts = async () => {
+    if (selectedParts.length === 0) return;
+    const text = selectedParts
+      .map(part => `${part.part_number}\t${part.revision}\t${part.name}\t${part.part_type}\t${part.status}`)
+      .join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('success', `Copied ${selectedParts.length} part${selectedParts.length !== 1 ? 's' : ''}`);
+    } catch {
+      showToast('error', 'Could not copy selected parts');
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -254,10 +414,83 @@ export default function PartsPage() {
         </div>
       </div>
 
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={saveCurrentFilter}
+            className="btn-secondary flex items-center gap-2 text-sm"
+          >
+            <BookmarkIcon className="h-4 w-4" />
+            Save Filter
+          </button>
+          {hasActiveFilters && (
+            <button type="button" onClick={clearFilters} className="btn-secondary flex items-center gap-2 text-sm">
+              <XMarkIcon className="h-4 w-4" />
+              Clear
+            </button>
+          )}
+        </div>
+        {savedFilters.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-slate-500">Saved</span>
+            {savedFilters.map(filter => (
+              <div
+                key={filter.id}
+                className="inline-flex items-center rounded-lg border border-slate-700 bg-slate-900/60 text-sm text-slate-200"
+              >
+                <button
+                  type="button"
+                  onClick={() => applySavedFilter(filter)}
+                  className="px-2.5 py-1.5 hover:text-white"
+                  title={`Apply ${filter.name}`}
+                >
+                  {filter.name}
+                </button>
+                <button
+                  type="button"
+                  onClick={event => deleteSavedFilter(filter.id, event)}
+                  className="mr-1 rounded p-1 text-slate-500 hover:bg-slate-800 hover:text-red-300"
+                  aria-label={`Delete ${filter.name}`}
+                  title={`Delete ${filter.name}`}
+                >
+                  <TrashIcon className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {!search && !showBOMComponents && componentPartIds.size > 0 && (
         <div className="text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 px-3 py-2 rounded-lg">
           {componentPartIds.size} component part{componentPartIds.size !== 1 ? 's are' : ' is'} hidden under assembly rows.
           Check "Show BOM components as top-level parts" to see all parts.
+        </div>
+      )}
+
+      {selectedParts.length > 0 && (
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3">
+          <div className="text-sm text-cyan-100">
+            <span className="font-semibold">{selectedParts.length}</span> part{selectedParts.length !== 1 ? 's' : ''} selected
+            {visibleSelectedCount !== selectedParts.length && (
+              <span className="text-cyan-200/70"> · {visibleSelectedCount} visible in current filter</span>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={copySelectedParts} className="btn-secondary flex items-center gap-2 text-sm">
+              <ClipboardDocumentListIcon className="h-4 w-4" />
+              Copy List
+            </button>
+            <button type="button" onClick={exportSelectedParts} className="btn-secondary flex items-center gap-2 text-sm">
+              <ArrowDownTrayIcon className="h-4 w-4" />
+              Export CSV
+            </button>
+            <button type="button" onClick={() => setSelectedPartIds(new Set())} className="btn-secondary flex items-center gap-2 text-sm">
+              <XMarkIcon className="h-4 w-4" />
+              Clear Selection
+            </button>
+          </div>
         </div>
       )}
 
@@ -268,6 +501,15 @@ export default function PartsPage() {
             <table className="min-w-full divide-y divide-slate-700">
               <thead className="bg-slate-800/50">
                 <tr>
+                  <th className="px-4 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleAllVisible}
+                      className="rounded border-slate-600 bg-slate-900 text-cyan-500"
+                      aria-label="Select all visible parts"
+                    />
+                  </th>
                   <th className="px-4 py-3 w-10" />
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part #</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
@@ -289,6 +531,15 @@ export default function PartsPage() {
                         onClick={() => navigate(`/parts/${part.id}`)}
                         className="hover:bg-slate-800/50 cursor-pointer transition-colors"
                       >
+                        <td className="px-4 py-3" onClick={event => event.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={selectedPartIds.has(part.id)}
+                            onChange={event => toggleSelectedPart(part.id, event)}
+                            className="rounded border-slate-600 bg-slate-900 text-cyan-500"
+                            aria-label={`Select part ${part.part_number}`}
+                          />
+                        </td>
                         <td className="px-4 py-3">
                           {bomItems.length > 0 ? (
                             <button
@@ -348,6 +599,7 @@ export default function PartsPage() {
                             className="bg-slate-900/30 hover:bg-slate-800/50 cursor-pointer transition-colors"
                           >
                             <td className="px-4 py-2" />
+                            <td className="px-4 py-2" />
                             <td className="px-4 py-2 pl-8">
                               <div className="flex items-center gap-2">
                                 <span className="text-slate-600">└</span>
@@ -401,7 +653,17 @@ export default function PartsPage() {
               className="card cursor-pointer hover:shadow-md hover:border-werco-navy-200 transition-all border border-slate-700 p-4"
             >
               <div className="flex items-start justify-between mb-2">
-                <span className="font-semibold text-werco-navy-600 text-sm">{part.part_number}</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedPartIds.has(part.id)}
+                    onClick={event => event.stopPropagation()}
+                    onChange={event => toggleSelectedPart(part.id, event)}
+                    className="rounded border-slate-600 bg-slate-900 text-cyan-500"
+                    aria-label={`Select part ${part.part_number}`}
+                  />
+                  <span className="font-semibold text-werco-navy-600 text-sm">{part.part_number}</span>
+                </div>
                 <StatusBadge status={part.status} />
               </div>
               <h3 className="text-sm font-medium text-white mb-1 line-clamp-2">{part.name}</h3>

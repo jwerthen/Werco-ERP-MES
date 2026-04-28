@@ -31,6 +31,9 @@ const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
 const PartEdit = lazyWithRetry(() => import('./pages/PartEdit'));
 const BOM = lazyWithRetry(() => import('./pages/BOM'));
 const Routing = lazyWithRetry(() => import('./pages/Routing'));
+const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
+const ImportCenter = lazyWithRetry(() => import('./pages/ImportCenter'));
+const ActionInbox = lazyWithRetry(() => import('./pages/ActionInbox'));
 const Warehouse = lazyWithRetry(() => import('./pages/Warehouse'));
 const MRP = lazyWithRetry(() => import('./pages/MRP'));
 const Quality = lazyWithRetry(() => import('./pages/Quality'));
@@ -268,6 +271,27 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><Routing /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/setup" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><SetupWizard /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/import-center" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><ImportCenter /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/action-inbox" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><ActionInbox /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />
