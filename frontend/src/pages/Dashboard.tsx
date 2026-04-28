@@ -567,7 +567,7 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <div className="mt-4 border-t border-white/60 pt-4">
+                <div className="mt-4 border-t border-slate-700 pt-4">
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-surface-500">
                     Active People
                   </p>
