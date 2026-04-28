@@ -185,6 +185,8 @@ export default function BOMPage() {
 
   const loadData = async () => {
     try {
+      const requestedBOMId = Number(new URLSearchParams(window.location.search).get('id') || 0);
+
       // Load BOMs and parts separately so one failure doesn't block the other
       const [bomsResult, partsResult] = await Promise.allSettled([
         api.getBOMs({ active_only: true }),
@@ -192,7 +194,25 @@ export default function BOMPage() {
       ]);
       
       if (bomsResult.status === 'fulfilled') {
-        setBoms(bomsResult.value);
+        const loadedBOMs = bomsResult.value;
+        setBoms(loadedBOMs);
+
+        if (requestedBOMId) {
+          const matchingBOM = loadedBOMs.find((bom: BOM) => bom.id === requestedBOMId);
+          if (matchingBOM) {
+            setSelectedBOM(matchingBOM);
+            setViewMode('single');
+          } else {
+            try {
+              const fetchedBOM = await api.getBOM(requestedBOMId);
+              setSelectedBOM(fetchedBOM);
+              setBoms([...loadedBOMs.filter((bom: BOM) => bom.id !== fetchedBOM.id), fetchedBOM]);
+              setViewMode('single');
+            } catch (err) {
+              console.error('Failed to load requested BOM:', err);
+            }
+          }
+        }
       } else {
         console.error('Failed to load BOMs:', bomsResult.reason);
       }

@@ -11,12 +11,34 @@ import {
   PlusIcon,
   MagnifyingGlassIcon,
   ArrowUpTrayIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
   Squares2X2Icon,
   ListBulletIcon as ListIcon,
 } from '@heroicons/react/24/outline';
 
 type ViewMode = 'table' | 'grid';
+
+interface BOMComponentPart {
+  id: number;
+  part_number: string;
+  name: string;
+  revision: string;
+  part_type: PartType;
+}
+
+interface BOMItemSummary {
+  id: number;
+  component_part_id: number;
+  quantity: number;
+  item_number: number;
+  component_part?: BOMComponentPart;
+}
+
+interface BOMSummary {
+  part_id: number;
+  items?: BOMItemSummary[];
+}
 
 export default function PartsPage() {
   const navigate = useNavigate();
@@ -30,6 +52,10 @@ export default function PartsPage() {
   const [viewMode, setViewMode] = useState<ViewMode>('table');
   const [showImport, setShowImport] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showBOMComponents, setShowBOMComponents] = useState(false);
+  const [expandedParts, setExpandedParts] = useState<Set<number>>(new Set());
+  const [bomData, setBomData] = useState<Record<number, BOMItemSummary[]>>({});
+  const [componentPartIds, setComponentPartIds] = useState<Set<number>>(new Set());
 
   // Create form
   const [createForm, setCreateForm] = useState({
@@ -50,8 +76,31 @@ export default function PartsPage() {
     try {
       const params: any = {};
       if (typeFilter) params.part_type = typeFilter;
-      const data = await api.getParts(params);
-      setParts(data);
+      const [partsResult, bomsResult] = await Promise.allSettled([
+        api.getParts(params),
+        api.getBOMs({ active_only: true }),
+      ]);
+
+      if (partsResult.status === 'fulfilled') {
+        setParts(partsResult.value);
+      } else {
+        throw partsResult.reason;
+      }
+
+      if (bomsResult.status === 'fulfilled') {
+        const componentIds = new Set<number>();
+        const bomMap: Record<number, BOMItemSummary[]> = {};
+        (bomsResult.value as BOMSummary[]).forEach(bom => {
+          const items = bom.items || [];
+          bomMap[bom.part_id] = items;
+          items.forEach(item => componentIds.add(item.component_part_id));
+        });
+        setBomData(bomMap);
+        setComponentPartIds(componentIds);
+      } else {
+        setBomData({});
+        setComponentPartIds(new Set());
+      }
     } catch {
       showToast('error', 'Failed to load parts');
     } finally {
@@ -78,8 +127,11 @@ export default function PartsPage() {
     if (statusFilter) {
       result = result.filter(p => p.status === statusFilter);
     }
+    if (!search && !showBOMComponents && componentPartIds.size > 0) {
+      result = result.filter(p => !componentPartIds.has(p.id));
+    }
     return result;
-  }, [parts, search, statusFilter]);
+  }, [parts, search, statusFilter, showBOMComponents, componentPartIds]);
 
   const stats = useMemo(() => ({
     total: parts.length,
@@ -87,6 +139,18 @@ export default function PartsPage() {
     manufactured: parts.filter(p => p.part_type === 'manufactured' || p.part_type === 'assembly').length,
     critical: parts.filter(p => p.is_critical).length,
   }), [parts]);
+
+  const getPartById = useCallback((partId: number) => parts.find(p => p.id === partId), [parts]);
+
+  const toggleExpanded = useCallback((partId: number, event: React.MouseEvent) => {
+    event.stopPropagation();
+    setExpandedParts(prev => {
+      const next = new Set(prev);
+      if (next.has(partId)) next.delete(partId);
+      else next.add(partId);
+      return next;
+    });
+  }, []);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -160,6 +224,15 @@ export default function PartsPage() {
             <option value="obsolete">Obsolete</option>
             <option value="pending_approval">Pending</option>
           </select>
+          <label className="flex items-center gap-2 text-sm text-slate-300 whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={showBOMComponents}
+              onChange={e => setShowBOMComponents(e.target.checked)}
+              className="rounded border-slate-600 text-werco-navy-400"
+            />
+            Show BOM components as top-level parts
+          </label>
           {/* View toggle */}
           <div className="flex rounded-lg border border-slate-600 overflow-hidden">
             <button
@@ -180,6 +253,13 @@ export default function PartsPage() {
         </div>
       </div>
 
+      {!search && !showBOMComponents && componentPartIds.size > 0 && (
+        <div className="text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 px-3 py-2 rounded-lg">
+          {componentPartIds.size} component part{componentPartIds.size !== 1 ? 's are' : ' is'} hidden under assembly rows.
+          Check "Show BOM components as top-level parts" to see all parts.
+        </div>
+      )}
+
       {/* Table View */}
       {viewMode === 'table' && (
         <div className="card overflow-hidden p-0">
@@ -187,6 +267,7 @@ export default function PartsPage() {
             <table className="min-w-full divide-y divide-slate-700">
               <thead className="bg-slate-800/50">
                 <tr>
+                  <th className="px-4 py-3 w-10" />
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part #</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
@@ -198,44 +279,106 @@ export default function PartsPage() {
                 </tr>
               </thead>
               <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                {filteredParts.map(part => (
-                  <tr
-                    key={part.id}
-                    onClick={() => navigate(`/parts/${part.id}`)}
-                    className="hover:bg-slate-800/50 cursor-pointer transition-colors"
-                  >
-                    <td className="px-4 py-3">
-                      <span className="font-medium text-werco-navy-600">{part.part_number}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="text-sm">{part.name}</div>
-                      {part.customer_part_number && (
-                        <div className="text-xs text-slate-500">Cust P/N: {part.customer_part_number}</div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-slate-400">{part.customer_name || '-'}</td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${partTypeColors[part.part_type]}`}>
-                        {part.part_type.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-center text-sm font-medium">{part.revision}</td>
-                    <td className="px-4 py-3 text-right text-sm">${Number(part.standard_cost || 0).toFixed(2)}</td>
-                    <td className="px-4 py-3 text-center">
-                      <div className="flex items-center justify-center gap-1.5">
-                        <StatusBadge status={part.status} />
-                        {part.is_critical && (
-                          <span className="inline-flex px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 text-[10px] font-semibold">
-                            CRIT
+                {filteredParts.map(part => {
+                  const bomItems = bomData[part.id] || [];
+                  const isExpanded = expandedParts.has(part.id);
+                  return (
+                    <React.Fragment key={part.id}>
+                      <tr
+                        onClick={() => navigate(`/parts/${part.id}`)}
+                        className="hover:bg-slate-800/50 cursor-pointer transition-colors"
+                      >
+                        <td className="px-4 py-3">
+                          {bomItems.length > 0 ? (
+                            <button
+                              type="button"
+                              onClick={event => toggleExpanded(part.id, event)}
+                              className="text-slate-500 hover:text-slate-200"
+                              title={isExpanded ? 'Collapse BOM' : 'Expand BOM'}
+                            >
+                              {isExpanded ? (
+                                <ChevronDownIcon className="h-4 w-4" />
+                              ) : (
+                                <ChevronRightIcon className="h-4 w-4" />
+                              )}
+                            </button>
+                          ) : null}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="font-medium text-werco-navy-600">{part.part_number}</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="text-sm">{part.name}</div>
+                          {part.customer_part_number && (
+                            <div className="text-xs text-slate-500">Cust P/N: {part.customer_part_number}</div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-slate-400">{part.customer_name || '-'}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${partTypeColors[part.part_type]}`}>
+                            {part.part_type.replace('_', ' ')}
                           </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <ChevronRightIcon className="h-4 w-4 text-slate-500" />
-                    </td>
-                  </tr>
-                ))}
+                        </td>
+                        <td className="px-4 py-3 text-center text-sm font-medium">{part.revision}</td>
+                        <td className="px-4 py-3 text-right text-sm">${Number(part.standard_cost || 0).toFixed(2)}</td>
+                        <td className="px-4 py-3 text-center">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <StatusBadge status={part.status} />
+                            {part.is_critical && (
+                              <span className="inline-flex px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 text-[10px] font-semibold">
+                                CRIT
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <ChevronRightIcon className="h-4 w-4 text-slate-500" />
+                        </td>
+                      </tr>
+                      {isExpanded && bomItems.map(item => {
+                        const fullComponentPart = getPartById(item.component_part_id);
+                        const componentPart = item.component_part || fullComponentPart;
+                        const componentCustomer = fullComponentPart?.customer_name;
+                        const componentCost = fullComponentPart?.standard_cost || 0;
+                        return (
+                          <tr
+                            key={`${part.id}-${item.id}`}
+                            onClick={() => componentPart && navigate(`/parts/${componentPart.id}`)}
+                            className="bg-slate-900/30 hover:bg-slate-800/50 cursor-pointer transition-colors"
+                          >
+                            <td className="px-4 py-2" />
+                            <td className="px-4 py-2 pl-8">
+                              <div className="flex items-center gap-2">
+                                <span className="text-slate-600">└</span>
+                                <span className="text-sm font-medium text-werco-navy-400">
+                                  {componentPart?.part_number || `Part #${item.component_part_id}`}
+                                </span>
+                                <span className="text-[10px] bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded">
+                                  x{item.quantity}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-2 text-sm text-slate-300">{componentPart?.name || '-'}</td>
+                            <td className="px-4 py-2 text-sm text-slate-500">{componentCustomer || '-'}</td>
+                            <td className="px-4 py-2">
+                              {componentPart && (
+                                <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${partTypeColors[componentPart.part_type]}`}>
+                                  {componentPart.part_type.replace('_', ' ')}
+                                </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-center text-sm">{componentPart?.revision || '-'}</td>
+                            <td className="px-4 py-2 text-right text-sm">${Number(componentCost || 0).toFixed(2)}</td>
+                            <td className="px-4 py-2 text-center text-xs text-slate-500">BOM item</td>
+                            <td className="px-4 py-2 text-right">
+                              {componentPart && <ChevronRightIcon className="h-4 w-4 text-slate-600" />}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

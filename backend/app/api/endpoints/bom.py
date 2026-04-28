@@ -166,16 +166,32 @@ def _infer_part_type(line_type: str, item_type: str, description: str) -> str:
         return PartType.CONSUMABLE.value
     if line_type == BOMLineType.REFERENCE.value:
         return PartType.PURCHASED.value
-    if line_type == BOMLineType.COMPONENT.value:
-        return PartType.MANUFACTURED.value
     text = (description or "").lower()
+    if item_type == BOMItemType.PHANTOM.value:
+        return PartType.ASSEMBLY.value
     if item_type == BOMItemType.MAKE.value:
         if "assembly" in text or "assy" in text:
             return PartType.ASSEMBLY.value
         return PartType.MANUFACTURED.value
-    if item_type == BOMItemType.PHANTOM.value:
-        return PartType.ASSEMBLY.value
     return PartType.PURCHASED.value
+
+
+def _part_type_value(value: Optional[Any]) -> Optional[str]:
+    if value is None:
+        return None
+    if hasattr(value, "value"):
+        return str(value.value).strip().lower()
+    return str(value).strip().lower()
+
+
+def _resolve_import_parent_part_type(doc_type: str, extracted_type: Optional[str]) -> str:
+    if doc_type == "bom":
+        return PartType.ASSEMBLY.value
+
+    normalized = (extracted_type or PartType.MANUFACTURED.value).strip().lower()
+    if normalized not in {p.value for p in PartType}:
+        return PartType.MANUFACTURED.value
+    return normalized
 
 
 def _safe_part_number(value: Optional[str]) -> Optional[str]:
@@ -426,9 +442,7 @@ def _create_from_import_payload(
     assembly_description = (assembly.description or assembly.name or "").strip()
     assembly_revision = (assembly.revision or "A").strip()
     assembly_drawing = _safe_part_number(assembly.drawing_number)
-    assembly_part_type = (assembly.part_type or ("assembly" if doc_type == "bom" else "manufactured")).strip().lower()
-    if assembly_part_type not in {p.value for p in PartType}:
-        assembly_part_type = PartType.ASSEMBLY.value if doc_type == "bom" else PartType.MANUFACTURED.value
+    assembly_part_type = _resolve_import_parent_part_type(doc_type, assembly.part_type)
 
     existing_part = db.query(Part).filter(
         Part.part_number == assembly_number,
@@ -436,6 +450,8 @@ def _create_from_import_payload(
     ).first()
     if existing_part:
         assembly_part = existing_part
+        if doc_type == "bom" and _part_type_value(assembly_part.part_type) != PartType.ASSEMBLY.value:
+            assembly_part.part_type = PartType.ASSEMBLY.value
     else:
         assembly_part = Part(
             part_number=assembly_number,
@@ -691,9 +707,7 @@ async def import_bom_or_part(
     assembly_description = (assembly.get("description") or assembly.get("name") or "").strip()
     assembly_revision = (assembly.get("revision") or "A").strip()
     assembly_drawing = _safe_part_number(assembly.get("drawing_number"))
-    assembly_part_type = (assembly.get("part_type") or ("assembly" if doc_type == "bom" else "manufactured")).strip().lower()
-    if assembly_part_type not in {p.value for p in PartType}:
-        assembly_part_type = PartType.ASSEMBLY.value if doc_type == "bom" else PartType.MANUFACTURED.value
+    assembly_part_type = _resolve_import_parent_part_type(doc_type, assembly.get("part_type"))
 
     # Get or create assembly part
     existing_part = db.query(Part).filter(
@@ -702,6 +716,8 @@ async def import_bom_or_part(
     ).first()
     if existing_part:
         assembly_part = existing_part
+        if doc_type == "bom" and _part_type_value(assembly_part.part_type) != PartType.ASSEMBLY.value:
+            assembly_part.part_type = PartType.ASSEMBLY.value
     else:
         assembly_part = Part(
             part_number=assembly_number,
