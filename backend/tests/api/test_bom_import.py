@@ -66,3 +66,14 @@ class TestBOMImport:
         items = db_session.query(BOMItem).filter(BOMItem.bom_id == bom.id).all()
         assert bom.part_id == assembly.id
         assert {item.component_part_id for item in items} == {make_component.id, buy_component.id}
+
+        bom_response = client.get(f"/api/v1/bom/by-part/{assembly.id}", headers=auth_headers)
+        assert bom_response.status_code == status.HTTP_200_OK
+
+        bom_data = bom_response.json()
+        assert bom_data["id"] == bom.id
+        assert bom_data["part_id"] == assembly.id
+        assert {item["component_part_id"] for item in bom_data["items"]} == {
+            make_component.id,
+            buy_component.id,
+        }

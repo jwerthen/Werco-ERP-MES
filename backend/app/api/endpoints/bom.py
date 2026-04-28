@@ -1023,7 +1023,7 @@ def create_bom(
     db.refresh(bom)
     
     # Return with full response
-    return get_bom(bom.id, db, current_user)
+    return get_bom(bom.id, db, current_user, company_id)
 
 
 @router.get("/{bom_id}", response_model=BOMResponse)
@@ -1056,6 +1056,7 @@ def get_bom(
         if component_ids:
             existing_boms = db.query(BOM.part_id).filter(
                 BOM.part_id.in_(component_ids),
+                BOM.company_id == company_id,
                 BOM.is_active == True
             ).all()
             has_bom_by_part_id = {row.part_id: True for row in existing_boms}
@@ -1103,7 +1104,7 @@ def get_bom_by_part(
     if not bom:
         raise HTTPException(status_code=404, detail="No active BOM found for this part")
     
-    return get_bom(bom.id, db, current_user)
+    return get_bom(bom.id, db, current_user, company_id)
 
 
 @router.put("/{bom_id}", response_model=BOMResponse)
@@ -1125,7 +1126,7 @@ def update_bom(
     
     db.commit()
     db.refresh(bom)
-    return get_bom(bom.id, db, current_user)
+    return get_bom(bom.id, db, current_user, company_id)
 
 
 @router.post("/{bom_id}/release")
