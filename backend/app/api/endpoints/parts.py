@@ -6,6 +6,7 @@ from app.db.database import get_db
 from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.models.user import User, UserRole
 from app.models.part import Part, PartType, UnitOfMeasure
+from app.models.bom import BOM, BOMItem
 from app.schemas.part import PartCreate, PartUpdate, PartResponse
 from app.services.audit_service import AuditService
 from app.services.part_number_service import generate_werco_part_number, normalize_description
@@ -20,6 +21,7 @@ def list_parts(
     search: Optional[str] = Query(None, description="Search in part number, name, description, or customer part number"),
     part_type: Optional[PartType] = Query(None, description="Filter by part type (manufactured, purchased, assembly, raw_material)"),
     active_only: bool = Query(True, description="Only return active parts"),
+    include_bom_components: bool = Query(True, description="Include parts used as active BOM components"),
     include_deleted: bool = Query(False, description="Include soft-deleted parts (admin only)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -51,6 +53,17 @@ def list_parts(
     
     if part_type:
         query = query.filter(Part.part_type == part_type)
+
+    if not include_bom_components:
+        component_part_ids = (
+            db.query(BOMItem.component_part_id)
+            .join(BOM, BOM.id == BOMItem.bom_id)
+            .filter(
+                BOM.company_id == company_id,
+                BOM.is_active == True,
+            )
+        )
+        query = query.filter(~Part.id.in_(component_part_ids))
     
     if search:
         search_filter = f"%{search}%"

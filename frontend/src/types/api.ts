@@ -75,7 +75,9 @@ export interface PartListParams {
   search?: string;
   part_type?: PartType;
   active_only?: boolean;
+  include_bom_components?: boolean;
   limit?: number;
+  skip?: number;
   offset?: number;
 }
 
@@ -462,4 +464,3 @@ export interface AutoLinkSummary {
   total_evidence_updated: number;
   compliance_summary: Record<string, number>;
 }
-

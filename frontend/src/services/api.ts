@@ -392,7 +392,7 @@ class ApiService {
   }
 
   // BOM (Bill of Materials)
-  async getBOMs(params?: { status?: string; active_only?: boolean }) {
+  async getBOMs(params?: { status?: string; active_only?: boolean; skip?: number; limit?: number }) {
     const response = await this.api.get('/bom/', { params });
     return response.data;
   }

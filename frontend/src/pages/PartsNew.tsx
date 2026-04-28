@@ -74,11 +74,12 @@ export default function PartsPage() {
 
   const loadParts = useCallback(async () => {
     try {
-      const params: any = {};
+      setLoading(true);
+      const params: any = { include_bom_components: showBOMComponents };
       if (typeFilter) params.part_type = typeFilter;
       const [partsResult, bomsResult] = await Promise.allSettled([
         api.getParts(params),
-        api.getBOMs({ active_only: true }),
+        api.getBOMs({ active_only: true, limit: 5000 }),
       ]);
 
       if (partsResult.status === 'fulfilled') {
@@ -106,7 +107,7 @@ export default function PartsPage() {
     } finally {
       setLoading(false);
     }
-  }, [typeFilter, showToast]);
+  }, [typeFilter, showBOMComponents, showToast]);
 
   useEffect(() => {
     loadParts();

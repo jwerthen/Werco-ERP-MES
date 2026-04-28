@@ -1,7 +1,9 @@
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
+from app.models.bom import BOM, BOMItem
 from app.models.part import Part
 
 
@@ -91,6 +93,69 @@ class TestPartsAPI:
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert all(item["part_type"] == test_part.part_type.value for item in data)
+
+    def test_hide_active_bom_components(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """Parts used in active BOMs can be hidden from the top-level parts list."""
+        assembly = Part(
+            part_number="ASM-HIDE-001",
+            name="Top Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        component = Part(
+            part_number="CMP-HIDE-001",
+            name="Nested Component",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([assembly, component])
+        db_session.flush()
+
+        bom = BOM(
+            part_id=assembly.id,
+            revision="A",
+            status="released",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(bom)
+        db_session.flush()
+        db_session.add(
+            BOMItem(
+                bom_id=bom.id,
+                component_part_id=component.id,
+                item_number=10,
+                quantity=1,
+                item_type="make",
+                line_type="component",
+                company_id=1,
+            )
+        )
+        db_session.commit()
+
+        response = client.get(
+            "/api/v1/parts/?include_bom_components=false&limit=500",
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_200_OK
+        part_numbers = {part["part_number"] for part in response.json()}
+        assert assembly.part_number in part_numbers
+        assert component.part_number not in part_numbers
+
+        response = client.get(
+            "/api/v1/parts/?include_bom_components=true&limit=500",
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_200_OK
+        part_numbers = {part["part_number"] for part in response.json()}
+        assert assembly.part_number in part_numbers
+        assert component.part_number in part_numbers
 
 
 @pytest.mark.api
