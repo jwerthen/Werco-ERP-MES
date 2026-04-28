@@ -6,7 +6,7 @@
 # =========================
 # Frontend image
 # =========================
-FROM node:18-alpine AS frontend-build
+FROM node:20.19-alpine AS frontend-build
 
 WORKDIR /app
 
@@ -28,7 +28,7 @@ RUN if [ -z "$REACT_APP_API_URL" ]; then echo "REACT_APP_API_URL is required at 
 # Build the app
 RUN npm run build
 
-FROM node:18-alpine AS frontend
+FROM node:20.19-alpine AS frontend
 
 WORKDIR /app
 

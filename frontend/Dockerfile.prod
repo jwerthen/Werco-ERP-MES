@@ -2,7 +2,7 @@
 # Multi-stage build for optimized production image
 
 # Build stage
-FROM node:18-alpine AS build
+FROM node:20.19-alpine AS build
 
 WORKDIR /app
 
@@ -19,6 +19,8 @@ RUN echo "$CACHEBUST" > /tmp/frontend-cachebust
 # Copy only the files needed for the production build.
 COPY public ./public
 COPY src ./src
+COPY index.html ./
+COPY vite.config.ts ./
 COPY tsconfig.json ./
 COPY tailwind.config.js ./
 COPY postcss.config.js ./

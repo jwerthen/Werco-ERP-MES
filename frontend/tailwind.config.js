@@ -203,29 +203,5 @@ module.exports = {
       },
     },
   },
-  plugins: [require('daisyui')],
-  daisyui: {
-    // Prefix DaisyUI utilities to avoid collisions with existing .btn/.card/.alert/.modal classes.
-    prefix: 'du-',
-    base: false,
-    logs: false,
-    themes: [
-      {
-        werco: {
-          primary: '#1B4D9C',
-          secondary: '#3366FF',
-          accent: '#C8352B',
-          neutral: '#0f172a',
-          'base-100': '#0f1419',
-          'base-200': '#1a1f2e',
-          'base-300': '#252b3b',
-          'base-content': '#e2e8f0',
-          info: '#3b82f6',
-          success: '#10b981',
-          warning: '#f59e0b',
-          error: '#ef4444',
-        },
-      },
-    ],
-  },
+  plugins: [],
 };
