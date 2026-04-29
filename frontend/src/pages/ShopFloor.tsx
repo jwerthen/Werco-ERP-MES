@@ -454,7 +454,7 @@ export default function ShopFloor() {
               px-5 py-3 rounded-xl font-semibold transition-all duration-200 
               ${selectedWorkCenter === wc.id
                 ? 'bg-werco-600 text-white shadow-md shadow-werco-600/30'
-                : 'bg-[#151b28] text-surface-700 border border-surface-200 hover:border-werco-300 hover:bg-werco-50'
+                : 'bg-[#151b28] text-slate-200 border border-slate-700 hover:border-werco-400 hover:bg-werco-500/10'
               }
             `}
           >
@@ -888,4 +888,3 @@ export default function ShopFloor() {
     </div>
   );
 }
-

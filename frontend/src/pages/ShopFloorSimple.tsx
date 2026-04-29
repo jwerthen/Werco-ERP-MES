@@ -793,7 +793,9 @@ export default function ShopFloorSimple() {
                 type="button"
                 onClick={() => focusOperations(bucket.id)}
                 className={`relative text-left rounded-2xl border px-5 py-4 transition hover:shadow-md ${
-                  workCenterId === bucket.id ? 'border-werco-500 bg-werco-50 shadow-sm' : 'border-slate-700 bg-emerald-500/10/30'
+                  workCenterId === bucket.id
+                    ? 'border-werco-500 bg-werco-500/15 shadow-sm shadow-werco-500/20 ring-1 ring-werco-500/40'
+                    : 'border-slate-700 bg-[#0b1118] hover:border-slate-500 hover:bg-slate-900/70'
                 }`}
               >
                 <div className="flex items-center gap-2 text-xs font-semibold">

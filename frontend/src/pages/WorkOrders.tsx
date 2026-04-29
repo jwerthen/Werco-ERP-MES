@@ -40,6 +40,25 @@ const EXCLUDED_PART_TYPES = ['purchased', 'hardware', 'raw_material'];
 
 type GroupBy = 'none' | 'customer' | 'part' | 'status';
 
+const statusOptions: { value: string; label: string }[] = [
+  { value: '', label: 'All Active' },
+  { value: 'draft', label: 'Draft' },
+  { value: 'released', label: 'Released' },
+  { value: 'in_progress', label: 'In Progress' },
+  { value: 'on_hold', label: 'On Hold' },
+  { value: 'complete', label: 'Complete' },
+  { value: 'closed', label: 'Closed' },
+];
+
+const groupOptions: { value: GroupBy; label: string }[] = [
+  { value: 'none', label: 'No Grouping' },
+  { value: 'customer', label: 'By Customer' },
+  { value: 'part', label: 'By Part' },
+  { value: 'status', label: 'By Status' },
+];
+
+const formatStatusLabel = (status: string) => status.replace('_', ' ');
+
 export default function WorkOrders() {
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -222,61 +241,53 @@ export default function WorkOrders() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5 sm:space-y-6">
       {/* Page Header */}
-      <div className="page-header">
-        <div>
+      <div className="page-header mb-0">
+        <div className="min-w-0">
           <h1 className="page-title">Work Orders</h1>
           <p className="page-subtitle">Manage and track manufacturing orders</p>
         </div>
-        <div className="page-actions" data-tour="wo-create">
-          <Link to="/work-orders/new" className="btn-primary">
-            <PlusIcon className="h-5 w-5 mr-2" />
+        <div className="page-actions w-full sm:w-auto" data-tour="wo-create">
+          <Link to="/work-orders/new" className="btn-primary w-full sm:w-auto">
+            <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
             New Work Order
           </Link>
         </div>
       </div>
 
       {/* Quick Stats */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="card-compact flex items-center gap-4">
-          <div className={`p-3 rounded-xl ${stats.overdue > 0 ? 'bg-red-500/20' : 'bg-emerald-500/20'}`}>
-            <ExclamationTriangleIcon className={`h-6 w-6 ${stats.overdue > 0 ? 'text-red-600' : 'text-emerald-600'}`} />
-          </div>
-          <div>
-            <p className={`text-2xl font-bold ${stats.overdue > 0 ? 'text-red-600' : 'text-surface-900'}`}>
-              {stats.overdue}
-            </p>
-            <p className="text-sm text-surface-500">Overdue</p>
-          </div>
-        </div>
-        <div className="card-compact flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-blue-500/20">
-            <Squares2X2Icon className="h-6 w-6 text-blue-600" />
-          </div>
-          <div>
-            <p className="text-2xl font-bold text-surface-900">{stats.inProgress}</p>
-            <p className="text-sm text-surface-500">In Progress</p>
-          </div>
-        </div>
-        <div className="card-compact flex items-center gap-4">
-          <div className={`p-3 rounded-xl ${stats.dueToday > 0 ? 'bg-amber-500/20' : 'bg-surface-100'}`}>
-            <ClockIcon className={`h-6 w-6 ${stats.dueToday > 0 ? 'text-amber-600' : 'text-surface-500'}`} />
-          </div>
-          <div>
-            <p className={`text-2xl font-bold ${stats.dueToday > 0 ? 'text-amber-600' : 'text-surface-900'}`}>
-              {stats.dueToday}
-            </p>
-            <p className="text-sm text-surface-500">Due Today</p>
-          </div>
-        </div>
+      <div className="grid grid-cols-3 gap-2 sm:gap-4">
+        <WorkOrderStatCard
+          label="Overdue"
+          value={stats.overdue}
+          icon={ExclamationTriangleIcon}
+          iconClassName={stats.overdue > 0 ? 'text-red-500' : 'text-emerald-400'}
+          iconBgClassName={stats.overdue > 0 ? 'bg-red-500/20' : 'bg-emerald-500/20'}
+          valueClassName={stats.overdue > 0 ? 'text-red-500' : 'text-surface-900'}
+        />
+        <WorkOrderStatCard
+          label="In Progress"
+          value={stats.inProgress}
+          icon={Squares2X2Icon}
+          iconClassName="text-blue-400"
+          iconBgClassName="bg-blue-500/20"
+        />
+        <WorkOrderStatCard
+          label="Due Today"
+          value={stats.dueToday}
+          icon={ClockIcon}
+          iconClassName={stats.dueToday > 0 ? 'text-amber-400' : 'text-surface-500'}
+          iconBgClassName={stats.dueToday > 0 ? 'bg-amber-500/20' : 'bg-surface-100'}
+          valueClassName={stats.dueToday > 0 ? 'text-amber-400' : 'text-surface-900'}
+        />
       </div>
 
       {/* Filters */}
-      <div className="card" data-tour="wo-filters">
-        <div className="flex flex-col lg:flex-row gap-4">
+      <div className="card p-4 sm:p-6" data-tour="wo-filters">
+        <div className="grid grid-cols-1 xs:grid-cols-2 lg:grid-cols-[minmax(18rem,1fr)_11rem_13rem_11rem] gap-3 sm:gap-4">
           {/* Search */}
-          <div className="relative flex-1">
+          <div className="relative min-w-0 xs:col-span-2 lg:col-span-1">
             <MagnifyingGlassIcon className="h-5 w-5 absolute left-4 top-1/2 transform -translate-y-1/2 text-surface-400" />
             <input
               type="text"
@@ -291,22 +302,22 @@ export default function WorkOrders() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="input w-full lg:w-44"
+            className="input px-3 text-sm sm:px-4 sm:text-base"
+            aria-label="Status filter"
           >
-            <option value="">All Active</option>
-            <option value="draft">Draft</option>
-            <option value="released">Released</option>
-            <option value="in_progress">In Progress</option>
-            <option value="on_hold">On Hold</option>
-            <option value="complete">Complete</option>
-            <option value="closed">Closed</option>
+            {statusOptions.map(option => (
+              <option key={option.value || 'all'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
           
           {/* Customer Filter */}
           <select
             value={customerFilter}
             onChange={(e) => setCustomerFilter(e.target.value)}
-            className="input w-full lg:w-52"
+            className="input px-3 text-sm sm:px-4 sm:text-base"
+            aria-label="Customer filter"
           >
             <option value="">All Customers</option>
             {customers.map(c => (
@@ -318,17 +329,19 @@ export default function WorkOrders() {
           <select
             value={groupBy}
             onChange={(e) => setGroupBy(e.target.value as GroupBy)}
-            className="input w-full lg:w-44"
+            className="input px-3 text-sm sm:px-4 sm:text-base xs:col-span-2 lg:col-span-1"
+            aria-label="Group work orders"
           >
-            <option value="none">No Grouping</option>
-            <option value="customer">By Customer</option>
-            <option value="part">By Part</option>
-            <option value="status">By Status</option>
+            {groupOptions.map(option => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </div>
         
         {/* Toggle Options */}
-        <div className="flex items-center justify-between mt-4 pt-4 border-t border-surface-200">
+        <div className="flex flex-col xs:flex-row xs:items-center xs:justify-between gap-3 mt-4 pt-4 border-t border-surface-200">
           <label className="flex items-center gap-2 cursor-pointer group">
             <input
               type="checkbox"
@@ -338,8 +351,13 @@ export default function WorkOrders() {
             />
             <span className="text-sm text-surface-600 group-hover:text-surface-900">Hide COTS/Hardware</span>
           </label>
-          <span className="text-sm text-surface-500">
-            Showing <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {workOrders.length} work orders
+          <span className="text-sm text-surface-500 xs:text-right">
+            <span className="sm:hidden">
+              <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {workOrders.length} shown
+            </span>
+            <span className="hidden sm:inline">
+              Showing <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {workOrders.length} work orders
+            </span>
           </span>
         </div>
       </div>
@@ -347,51 +365,246 @@ export default function WorkOrders() {
       {/* Work Orders List */}
       {groupBy !== 'none' && groupedWorkOrders ? (
         // Grouped View
-        <div className="space-y-4">
+        <div className="space-y-4" data-tour="wo-list">
           {groupedWorkOrders.map(([groupName, orders]) => (
             <div key={groupName} className="card card-flush overflow-hidden">
-              <div className="bg-surface-50 px-6 py-4 border-b border-surface-200">
+              <div className="bg-surface-50 px-4 py-3 sm:px-6 sm:py-4 border-b border-surface-200">
                 <div className="flex items-center justify-between">
                   <h3 className="font-semibold text-surface-900 capitalize">
-                    {groupBy === 'status' ? groupName.replace('_', ' ') : groupName}
+                    {groupBy === 'status' ? formatStatusLabel(groupName) : groupName}
                   </h3>
                   <span className="badge badge-neutral">
                     {orders.length} order{orders.length !== 1 ? 's' : ''}
                   </span>
                 </div>
               </div>
-              <WorkOrderTable 
-                workOrders={orders} 
-                hideColumn={groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined}
+              <div className="hidden lg:block">
+                <WorkOrderTable
+                  workOrders={orders}
+                  hideColumn={groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined}
+                  onDelete={handleDelete}
+                  onRelease={handleRelease}
+                  releasingIds={releasingIds}
+                />
+              </div>
+              <WorkOrderMobileList
+                workOrders={orders}
                 onDelete={handleDelete}
                 onRelease={handleRelease}
                 releasingIds={releasingIds}
+                className="lg:hidden p-3"
               />
             </div>
           ))}
+          {filteredWorkOrders.length === 0 && <WorkOrdersEmptyState />}
         </div>
       ) : (
-        // Flat Table View
-        <div className="card card-flush overflow-hidden" data-tour="wo-list">
-          <WorkOrderTable
+        // Flat Responsive View
+        <div data-tour="wo-list">
+          <div className="hidden lg:block card card-flush overflow-hidden">
+            <WorkOrderTable
+              workOrders={filteredWorkOrders}
+              onDelete={handleDelete}
+              onRelease={handleRelease}
+              releasingIds={releasingIds}
+            />
+          </div>
+
+          <WorkOrderMobileList
             workOrders={filteredWorkOrders}
             onDelete={handleDelete}
             onRelease={handleRelease}
             releasingIds={releasingIds}
+            className="lg:hidden"
           />
-          
-          {filteredWorkOrders.length === 0 && (
-            <div className="text-center py-16">
-              <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
-                <ListBulletIcon className="h-8 w-8 text-surface-400" />
-              </div>
-              <p className="text-surface-600 font-medium">No work orders found</p>
-              <p className="text-sm text-surface-500 mt-1">Try adjusting your filters</p>
-            </div>
-          )}
+
+          {filteredWorkOrders.length === 0 && <WorkOrdersEmptyState />}
         </div>
       )}
     </div>
+  );
+}
+
+interface WorkOrderStatCardProps {
+  label: string;
+  value: number;
+  icon: React.ComponentType<{ className?: string }>;
+  iconClassName: string;
+  iconBgClassName: string;
+  valueClassName?: string;
+}
+
+function WorkOrderStatCard({
+  label,
+  value,
+  icon: Icon,
+  iconClassName,
+  iconBgClassName,
+  valueClassName = 'text-surface-900',
+}: WorkOrderStatCardProps) {
+  return (
+    <div className="card-compact min-w-0 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+      <div className={`w-10 h-10 sm:w-12 sm:h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${iconBgClassName}`}>
+        <Icon className={`h-5 w-5 sm:h-6 sm:w-6 ${iconClassName}`} />
+      </div>
+      <div className="min-w-0">
+        <p className={`text-xl sm:text-2xl font-bold tabular-nums leading-none ${valueClassName}`}>{value}</p>
+        <p className="text-[11px] sm:text-sm leading-tight text-surface-500 mt-1 break-words">{label}</p>
+      </div>
+    </div>
+  );
+}
+
+function WorkOrdersEmptyState() {
+  return (
+    <div className="card text-center py-12 sm:py-16">
+      <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
+        <ListBulletIcon className="h-8 w-8 text-surface-400" />
+      </div>
+      <p className="text-surface-600 font-medium">No work orders found</p>
+      <p className="text-sm text-surface-500 mt-1">Try adjusting your filters</p>
+    </div>
+  );
+}
+
+function isWorkOrderOverdue(wo: WorkOrderSummary) {
+  return Boolean(
+    wo.due_date &&
+    isDateBeforeTodayInCentral(wo.due_date) &&
+    !['complete', 'closed', 'cancelled'].includes(wo.status)
+  );
+}
+
+interface WorkOrderMobileListProps {
+  workOrders: WorkOrderSummary[];
+  onDelete?: (wo: WorkOrderSummary) => void;
+  onRelease?: (wo: WorkOrderSummary) => void;
+  releasingIds?: Set<number>;
+  className?: string;
+}
+
+function WorkOrderMobileList({ workOrders, onDelete, onRelease, releasingIds, className = '' }: WorkOrderMobileListProps) {
+  if (workOrders.length === 0) return null;
+
+  return (
+    <div className={`space-y-3 ${className}`}>
+      {workOrders.map((wo) => (
+        <WorkOrderMobileCard
+          key={wo.id}
+          workOrder={wo}
+          onDelete={onDelete}
+          onRelease={onRelease}
+          isReleasing={Boolean(releasingIds?.has(wo.id))}
+        />
+      ))}
+    </div>
+  );
+}
+
+interface WorkOrderMobileCardProps {
+  workOrder: WorkOrderSummary;
+  onDelete?: (wo: WorkOrderSummary) => void;
+  onRelease?: (wo: WorkOrderSummary) => void;
+  isReleasing?: boolean;
+}
+
+function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }: WorkOrderMobileCardProps) {
+  const status = statusConfig[wo.status] || statusConfig.draft;
+  const priority = priorityConfig[wo.priority] || priorityConfig[4];
+  const overdue = isWorkOrderOverdue(wo);
+  const canRelease = onRelease && wo.status === 'draft';
+  const canDelete = onDelete && (wo.status === 'draft' || wo.status === 'cancelled');
+  const progress = wo.quantity_ordered > 0
+    ? Math.min(100, (wo.quantity_complete / wo.quantity_ordered) * 100)
+    : 0;
+
+  return (
+    <article className={`mobile-card ${overdue ? 'border-red-500/50 bg-red-500/5' : ''}`}>
+      <div className="px-4 py-3 border-b border-slate-700/50 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Link
+            to={`/work-orders/${wo.id}`}
+            className="block font-semibold text-werco-400 hover:text-werco-300 truncate"
+          >
+            {wo.work_order_number}
+          </Link>
+          <p className="text-sm text-surface-500 truncate mt-0.5">{wo.customer_name || 'No Customer'}</p>
+        </div>
+        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold capitalize flex-shrink-0 ${status.bg} ${status.text}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`}></span>
+          {formatStatusLabel(wo.status)}
+        </span>
+      </div>
+
+      <div className="px-4 py-3 space-y-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-surface-900 truncate">{wo.part_number || 'No part number'}</p>
+          <p className="text-sm text-surface-500 line-clamp-2">{wo.part_name || 'No part description'}</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-surface-500">Due</p>
+            <p className={`text-sm font-semibold mt-0.5 ${overdue ? 'text-red-400' : 'text-surface-800'}`}>
+              {wo.due_date ? formatCentralDate(wo.due_date) : 'No date'}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-wide text-surface-500">Priority</p>
+            <span className={`badge mt-1 ${priority.bg} ${priority.text}`}>P{wo.priority}</span>
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs uppercase tracking-wide text-surface-500">Quantity</p>
+            <p className="text-sm font-semibold text-surface-800 tabular-nums">
+              {wo.quantity_complete}/{wo.quantity_ordered}
+            </p>
+          </div>
+          <div className="mt-2 h-2 bg-surface-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-werco-500 rounded-full transition-all"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 py-3 bg-slate-800/50 border-t border-slate-700/50 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          {overdue && <span className="badge badge-danger">Overdue</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          {canRelease && (
+            <button
+              onClick={() => onRelease?.(wo)}
+              disabled={isReleasing}
+              className="btn-success btn-sm"
+            >
+              <CheckCircleIcon className="h-4 w-4 mr-1" />
+              Release
+            </button>
+          )}
+          {canDelete && (
+            <button
+              onClick={() => onDelete?.(wo)}
+              className="btn-ghost btn-sm text-red-300 hover:text-red-200"
+            >
+              <TrashIcon className="h-4 w-4 mr-1" />
+              Delete
+            </button>
+          )}
+          <Link
+            to={`/work-orders/${wo.id}`}
+            className="btn-secondary btn-sm"
+          >
+            Details
+            <ChevronRightIcon className="h-4 w-4 ml-1" />
+          </Link>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -406,11 +619,7 @@ interface WorkOrderTableProps {
 
 function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasingIds }: WorkOrderTableProps) {
   const isOverdue = (wo: WorkOrderSummary) => {
-    return Boolean(
-      wo.due_date &&
-      isDateBeforeTodayInCentral(wo.due_date) &&
-      !['complete', 'closed', 'cancelled'].includes(wo.status)
-    );
+    return isWorkOrderOverdue(wo);
   };
 
   return (
@@ -436,7 +645,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
             const isReleasing = releasingIds?.has(wo.id);
             
             return (
-              <tr key={wo.id} className={overdue ? 'bg-red-500/10/50' : ''}>
+              <tr key={wo.id} className={overdue ? 'bg-red-500/10' : ''}>
                 <td>
                   <Link 
                     to={`/work-orders/${wo.id}`} 
@@ -485,7 +694,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
                 <td>
                   <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${status.bg} ${status.text}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`}></span>
-                    {wo.status.replace('_', ' ')}
+                    {formatStatusLabel(wo.status)}
                   </span>
                 </td>
                 <td>
@@ -494,7 +703,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
                       <button
                         onClick={() => onRelease(wo)}
                         disabled={isReleasing}
-                        className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/100/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Release"
                       >
                         <CheckCircleIcon className="h-4 w-4" />
@@ -503,7 +712,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
                     {onDelete && (wo.status === 'draft' || wo.status === 'cancelled') && (
                       <button 
                         onClick={() => onDelete(wo)}
-                        className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/100/10 transition-colors"
+                        className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors"
                         title="Delete"
                       >
                         <TrashIcon className="h-4 w-4" />
