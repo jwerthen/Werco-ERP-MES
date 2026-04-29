@@ -77,6 +77,7 @@ export default function WorkCenters() {
       if (editingWc) {
         const updatePayload = {
           name: formData.name,
+          work_center_type: formData.work_center_type,
           description: formData.description,
           hourly_rate: formData.hourly_rate,
           capacity_hours_per_day: formData.capacity_hours_per_day,

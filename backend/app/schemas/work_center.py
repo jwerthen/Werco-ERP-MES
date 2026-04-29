@@ -20,6 +20,7 @@ class WorkCenterCreate(WorkCenterBase):
 class WorkCenterUpdate(BaseModel):
     version: int  # Required for optimistic locking
     name: Optional[str] = None
+    work_center_type: Optional[str] = None
     description: Optional[str] = None
     hourly_rate: Optional[float] = None
     capacity_hours_per_day: Optional[float] = None
