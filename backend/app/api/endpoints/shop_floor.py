@@ -77,6 +77,7 @@ def get_my_active_job(
         db.query(TimeEntry)
         .options(
             joinedload(TimeEntry.operation),
+            joinedload(TimeEntry.work_center),
             joinedload(TimeEntry.work_order).joinedload(WorkOrder.part),
         )
         .filter(
@@ -100,11 +101,15 @@ def get_my_active_job(
             "time_entry_id": entry.id,
             "clock_in": to_utc_iso(entry.clock_in),
             "entry_type": entry.entry_type,
+            "work_order_id": entry.work_order_id,
+            "operation_id": entry.operation_id,
+            "work_center_id": entry.work_center_id,
             "work_order_number": work_order.work_order_number if work_order else None,
             "part_number": work_order.part.part_number if work_order and work_order.part else None,
             "part_name": work_order.part.name if work_order and work_order.part else None,
             "operation_name": operation.name if operation else None,
             "operation_number": operation.operation_number if operation else None,
+            "work_center_name": entry.work_center.name if entry.work_center else None,
             "quantity_ordered": float(work_order.quantity_ordered) if work_order and work_order.quantity_ordered else 0,
             "quantity_complete": float(operation.quantity_complete) if operation and operation.quantity_complete else 0,
         })

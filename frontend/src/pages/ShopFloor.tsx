@@ -12,6 +12,7 @@ import {
   getDateSortValue,
   isDateBeforeTodayInCentral,
 } from '../utils/centralTime';
+import { useToast } from '../components/ui/Toast';
 import {
   PlayIcon,
   StopIcon,
@@ -24,7 +25,7 @@ import {
   ChevronRightIcon,
 } from '@heroicons/react/24/solid';
 import { QueueListIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
-import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
+import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
 
 interface WorkOrderDetails {
   id: number;
@@ -51,6 +52,7 @@ const WORK_CENTER_STORAGE_KEY = 'shop_floor_work_center_id';
 
 export default function ShopFloor() {
   const { can } = usePermissions();
+  const { showToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
@@ -73,8 +75,12 @@ export default function ShopFloor() {
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
+  const [clockingInOperationId, setClockingInOperationId] = useState<number | null>(null);
+  const [clockingOut, setClockingOut] = useState(false);
   const [priorityReason, setPriorityReason] = useState('');
+  const [notice, setNotice] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  const isKiosk = useMemo(() => isKioskMode(location.pathname, location.search), [location.pathname, location.search]);
   const kioskParams = useMemo(() => {
     return {
       dept: getKioskDept(location.search),
@@ -90,6 +96,16 @@ export default function ShopFloor() {
     return buildWsUrl(`/ws/shop-floor/${selectedWorkCenter}`, { token });
   }, [selectedWorkCenter]);
   const canEditPriority = can('work_orders:edit');
+
+  const notify = useCallback((type: 'success' | 'error' | 'info', message: string) => {
+    setNotice({ type, message });
+    showToast(type, message);
+  }, [showToast]);
+
+  useEffect(() => {
+    if (!isKiosk) return;
+    navigate(`/shop-floor/operations${location.search || '?kiosk=1'}`, { replace: true });
+  }, [isKiosk, location.search, navigate]);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -168,10 +184,11 @@ export default function ShopFloor() {
   });
 
   useEffect(() => {
+    if (isKiosk) return;
     loadInitialData();
     const interval = setInterval(checkActiveJob, 10000);
     return () => clearInterval(interval);
-  }, [checkActiveJob, loadInitialData]);
+  }, [checkActiveJob, isKiosk, loadInitialData]);
 
   useEffect(() => {
     return () => {
@@ -232,23 +249,30 @@ export default function ShopFloor() {
   };
 
   const handleClockIn = async (item: QueueItem) => {
+    if (!selectedWorkCenter || clockingInOperationId) return;
+
+    setClockingInOperationId(item.operation_id);
     try {
       await api.clockIn({
         work_order_id: item.work_order_id,
         operation_id: item.operation_id,
-        work_center_id: selectedWorkCenter!,
+        work_center_id: selectedWorkCenter,
         entry_type: 'run'
       });
       await checkActiveJob();
-      loadQueue(selectedWorkCenter!);
+      await loadQueue(selectedWorkCenter);
+      notify('success', `Clocked in to ${item.work_order_number}`);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to clock in');
+      notify('error', err.response?.data?.detail || 'Failed to clock in');
+    } finally {
+      setClockingInOperationId(null);
     }
   };
 
   const handleClockOut = async () => {
-    if (!clockOutJob) return;
+    if (!clockOutJob || clockingOut) return;
 
+    setClockingOut(true);
     try {
       await api.clockOut(clockOutJob.time_entry_id, {
         quantity_produced: clockOutData.quantity_produced,
@@ -260,10 +284,13 @@ export default function ShopFloor() {
       setClockOutModal(false);
       setClockOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
       if (selectedWorkCenter) {
-        loadQueue(selectedWorkCenter);
+        await loadQueue(selectedWorkCenter);
       }
+      notify('success', `Clocked out of ${clockOutJob.work_order_number}`);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to clock out');
+      notify('error', err.response?.data?.detail || 'Failed to clock out');
+    } finally {
+      setClockingOut(false);
     }
   };
 
@@ -328,6 +355,7 @@ export default function ShopFloor() {
 
     const existing = queue.find((item) => item.work_order_id === workOrderId);
     if (!existing || existing.priority === priority) return;
+    if (updatingPriorityWorkOrderId) return;
 
     setUpdatingPriorityWorkOrderId(workOrderId);
     try {
@@ -341,12 +369,24 @@ export default function ShopFloor() {
       if (reason) {
         setPriorityReason('');
       }
+      notify('success', `Updated ${existing.work_order_number} to priority ${priority}`);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to update priority');
+      notify('error', err.response?.data?.detail || 'Failed to update priority');
     } finally {
       setUpdatingPriorityWorkOrderId(null);
     }
   };
+
+  if (isKiosk) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <div className="spinner h-12 w-12 mx-auto mb-4"></div>
+          <p className="text-surface-500">Opening mobile shop floor...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -361,6 +401,29 @@ export default function ShopFloor() {
 
   return (
     <div className="space-y-6">
+      {notice && (
+        <div
+          className={`rounded-xl border px-4 py-3 flex items-start justify-between gap-4 ${
+            notice.type === 'success'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+              : notice.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+          }`}
+          role="status"
+        >
+          <p className="text-sm font-medium">{notice.message}</p>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className="rounded-md p-1 text-current opacity-70 hover:opacity-100"
+            aria-label="Dismiss notification"
+          >
+            <XMarkIcon className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {/* Page Header */}
       <div className="page-header">
         <div>
@@ -508,7 +571,7 @@ export default function ShopFloor() {
               Job Queue
             </h2>
             <p className="text-sm text-surface-500">
-              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} â€¢ {sortedQueue.length} job{sortedQueue.length !== 1 ? 's' : ''}
+              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} &bull; {sortedQueue.length} job{sortedQueue.length !== 1 ? 's' : ''}
             </p>
           </div>
           {canEditPriority && (
@@ -580,9 +643,9 @@ export default function ShopFloor() {
                               value={item.priority}
                               onClick={(e) => e.stopPropagation()}
                               onChange={(e) => handlePriorityChange(item.work_order_id, e.target.value)}
-                              disabled={updatingPriorityWorkOrderId === item.work_order_id}
+                              disabled={updatingPriorityWorkOrderId !== null}
                               className={`px-2 py-1 rounded text-xs font-bold border border-transparent ${getPriorityClasses(item.priority)}`}
-                              title="Update priority"
+                              title={updatingPriorityWorkOrderId === item.work_order_id ? 'Updating priority...' : 'Update priority'}
                             >
                               {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
                                 <option key={p} value={p}>
@@ -629,7 +692,7 @@ export default function ShopFloor() {
                         </td>
                         <td>
                           <span className={`text-sm font-medium ${isOverdue ? 'text-red-600' : 'text-surface-700'}`}>
-                            {item.due_date ? formatCentralDate(item.due_date, { year: undefined }) : 'â€"'}
+                            {item.due_date ? formatCentralDate(item.due_date, { year: undefined }) : '\u2014'}
                           </span>
                           {isOverdue && (
                             <span className="block text-xs text-red-500 font-medium">OVERDUE</span>
@@ -661,10 +724,15 @@ export default function ShopFloor() {
                           ) : (
                             <button
                               onClick={() => handleClockIn(item)}
+                              disabled={clockingInOperationId !== null}
                               className="btn-success btn-sm w-full"
                             >
-                              <PlayIcon className="h-4 w-4 mr-1.5" />
-                              Start
+                              {clockingInOperationId === item.operation_id ? (
+                                <ArrowPathIcon className="h-4 w-4 mr-1.5 animate-spin" />
+                              ) : (
+                                <PlayIcon className="h-4 w-4 mr-1.5" />
+                              )}
+                              {clockingInOperationId === item.operation_id ? 'Starting...' : 'Start'}
                             </button>
                           )}
                         </td>
@@ -698,11 +766,11 @@ export default function ShopFloor() {
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                     <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer</p>
-                                      <p className="font-semibold text-surface-900">{details.customer_name || 'â€"'}</p>
+                                      <p className="font-semibold text-surface-900">{details.customer_name || '\u2014'}</p>
                                     </div>
                                     <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer PO</p>
-                                      <p className="font-semibold text-surface-900">{details.customer_po || 'â€"'}</p>
+                                      <p className="font-semibold text-surface-900">{details.customer_po || '\u2014'}</p>
                                     </div>
                                     <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Qty Complete / Ordered</p>
@@ -713,7 +781,7 @@ export default function ShopFloor() {
                                     <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Due Date</p>
                                       <p className="font-semibold text-surface-900">
-                                        {details.due_date ? formatCentralDate(details.due_date) : 'â€"'}
+                                        {details.due_date ? formatCentralDate(details.due_date) : '\u2014'}
                                       </p>
                                     </div>
                                   </div>
@@ -764,8 +832,8 @@ export default function ShopFloor() {
                                                   {op.status.replace('_', ' ')}
                                                 </span>
                                               </td>
-                                              <td className="px-4 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || 'â€"'}</td>
-                                              <td className="px-4 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || 'â€"'}</td>
+                                              <td className="px-4 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || '\u2014'}</td>
+                                              <td className="px-4 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || '\u2014'}</td>
                                             </tr>
                                           ))}
                                         </tbody>
@@ -802,6 +870,7 @@ export default function ShopFloor() {
               <h3 className="text-lg font-semibold text-surface-900">Clock Out</h3>
               <button 
                 onClick={closeClockOutModal}
+                disabled={clockingOut}
                 className="p-2 rounded-lg text-surface-400 hover:text-surface-600 hover:bg-surface-100"
               >
                 <XMarkIcon className="h-5 w-5" />
@@ -870,16 +939,22 @@ export default function ShopFloor() {
             <div className="modal-footer">
               <button
                 onClick={closeClockOutModal}
+                disabled={clockingOut}
                 className="btn-secondary"
               >
                 Cancel
               </button>
               <button
                 onClick={handleClockOut}
+                disabled={clockingOut}
                 className="btn-primary"
               >
-                <CheckCircleIcon className="h-5 w-5 mr-2" />
-                Complete Clock Out
+                {clockingOut ? (
+                  <ArrowPathIcon className="h-5 w-5 mr-2 animate-spin" />
+                ) : (
+                  <CheckCircleIcon className="h-5 w-5 mr-2" />
+                )}
+                {clockingOut ? 'Saving...' : 'Complete Clock Out'}
               </button>
             </div>
           </div>

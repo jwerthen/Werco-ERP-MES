@@ -279,11 +279,15 @@ export interface ActiveJob {
   time_entry_id: number;
   clock_in: string;
   entry_type: TimeEntryType;
+  work_order_id?: number;
+  operation_id?: number;
+  work_center_id?: number;
   work_order_number?: string;
   part_number?: string;
   part_name?: string;
   operation_name?: string;
   operation_number?: string;
+  work_center_name?: string;
   quantity_ordered?: number;
   quantity_complete?: number;
 }

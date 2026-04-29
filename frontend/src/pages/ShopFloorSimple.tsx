@@ -1,11 +1,14 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
+import { ActiveJob } from '../types';
 import { calculateDispatchScore } from '../utils/dispatchScore';
 import {
   formatCentralDate,
   formatCentralDateTime,
+  formatCentralTime,
   getDateSortValue,
   isDateBeforeTodayInCentral,
   isDateTodayInCentral,
@@ -23,7 +26,7 @@ import {
   ClockIcon,
   CubeIcon,
 } from '@heroicons/react/24/solid';
-import { FunnelIcon } from '@heroicons/react/24/outline';
+import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 
 interface Operation {
@@ -79,6 +82,7 @@ export default function ShopFloorSimple() {
   const location = useLocation();
   const [operations, setOperations] = useState<Operation[]>([]);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
+  const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -97,15 +101,17 @@ export default function ShopFloorSimple() {
   const [actionableOnly, setActionableOnly] = useState(false);
   
   // Modal states
-  const [completeModal, setCompleteModal] = useState<Operation | null>(null);
+  const [checkOutModal, setCheckOutModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
   const [detailsModal, setDetailsModal] = useState<any | null>(null);
-  const [completeQty, setCompleteQty] = useState(0);
-  const [completeNotes, setCompleteNotes] = useState('');
+  const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
   const [priorityReason, setPriorityReason] = useState('');
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [showMobileCenters, setShowMobileCenters] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
+  const [scannerCode, setScannerCode] = useState('');
+  const [nowMs, setNowMs] = useState(() => Date.now());
   
   // Toast notifications
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -159,6 +165,15 @@ export default function ShopFloorSimple() {
     }
   }, []);
 
+  const loadActiveJobs = useCallback(async () => {
+    try {
+      const response = await api.getMyActiveJob();
+      setActiveJobs(response.active_jobs || (response.active_job ? [response.active_job] : []));
+    } catch (err) {
+      console.error('Failed to load active jobs:', err);
+    }
+  }, []);
+
   const loadWorkCenters = useCallback(async () => {
     try {
       const response = await api.getWorkCenters();
@@ -198,12 +213,15 @@ export default function ShopFloorSimple() {
     const init = async () => {
       setLoading(true);
       await loadWorkCenters();
-      await loadOperations();
-      await loadDashboardCounts();
+      await Promise.all([
+        loadOperations(),
+        loadDashboardCounts(),
+        loadActiveJobs(),
+      ]);
       setLoading(false);
     };
     init();
-  }, [loadDashboardCounts, loadOperations, loadWorkCenters]);
+  }, [loadActiveJobs, loadDashboardCounts, loadOperations, loadWorkCenters]);
 
   useEffect(() => {
     if (!loading) {
@@ -216,14 +234,23 @@ export default function ShopFloorSimple() {
     const interval = setInterval(() => {
       loadOperations();
       loadDashboardCounts();
+      loadActiveJobs();
     }, 30000);
     return () => clearInterval(interval);
-  }, [loadOperations, loadDashboardCounts]);
+  }, [loadOperations, loadDashboardCounts, loadActiveJobs]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNowMs(Date.now()), 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await loadOperations();
-    await loadDashboardCounts();
+    await Promise.all([
+      loadOperations(),
+      loadDashboardCounts(),
+      loadActiveJobs(),
+    ]);
     setRefreshing(false);
   };
 
@@ -353,46 +380,163 @@ export default function ShopFloorSimple() {
     return ranked.slice(0, 5);
   }, [sortedVisibleOperations]);
 
+  const selectedWorkCenter = useMemo(
+    () => workCenters.find((wc) => wc.id === workCenterId) || null,
+    [workCenters, workCenterId]
+  );
+
+  const primaryActiveJob = useMemo(() => activeJobs[0] || null, [activeJobs]);
+
+  const getActiveJobForOperation = useCallback(
+    (operation: Operation) =>
+      activeJobs.find((job) => {
+        if (job.operation_id && job.operation_id === operation.id) return true;
+        return (
+          job.work_order_id === operation.work_order_id &&
+          String(job.operation_number || '') === String(operation.operation_number || '')
+        );
+      }) || null,
+    [activeJobs]
+  );
+
+  const getElapsedTime = useCallback((clockIn?: string) => {
+    if (!clockIn) return '0m';
+    const startMs = new Date(clockIn).getTime();
+    if (Number.isNaN(startMs)) return '0m';
+    const diffMs = Math.max(0, nowMs - startMs);
+    const hours = Math.floor(diffMs / 3600000);
+    const minutes = Math.floor((diffMs % 3600000) / 60000);
+    return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+  }, [nowMs]);
+
+  const getRemainingQuantity = useCallback((operation: Operation) => {
+    return Math.max(0, Number(operation.quantity_ordered || 0) - Number(operation.quantity_complete || 0));
+  }, []);
+
   // Action handlers
-  const handleStart = async (operation: Operation) => {
+  const handleCheckIn = async (operation: Operation) => {
     setActionLoading(operation.id);
     try {
-      await api.startOperation(operation.id);
-      showToast('success', `Started ${operation.operation_number} - ${operation.operation_name}`);
-      await loadOperations();
+      if (operation.status === 'in_progress' || operation.status === 'on_hold') {
+        if (!operation.work_center_id) {
+          throw new Error('Operation is missing a work center');
+        }
+        if (operation.status === 'on_hold') {
+          await api.resumeOperation(operation.id);
+        }
+        await api.clockIn({
+          work_order_id: operation.work_order_id,
+          operation_id: operation.id,
+          work_center_id: operation.work_center_id,
+          entry_type: 'run',
+        });
+      } else {
+        await api.startOperation(operation.id);
+      }
+      showToast('success', `Checked in to ${operation.work_order_number}`);
+      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to start operation');
+      showToast('error', err.response?.data?.detail || err.message || 'Failed to check in');
     } finally {
       setActionLoading(null);
     }
   };
 
-  const handleOpenComplete = (operation: Operation) => {
-    setCompleteModal(operation);
-    setCompleteQty(operation.quantity_complete);
-    setCompleteNotes('');
+  const handleOpenCheckOut = (operation: Operation, job: ActiveJob) => {
+    setCheckOutModal({ operation, job });
+    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   };
 
-  const handleComplete = async () => {
-    if (!completeModal) return;
-    
-    setActionLoading(completeModal.id);
+  const getOperationForActiveJob = (job: ActiveJob): Operation => {
+    const matchingOperation = operations.find((op) => getActiveJobForOperation(op)?.time_entry_id === job.time_entry_id);
+    if (matchingOperation) return matchingOperation;
+
+    return {
+      id: job.operation_id || job.time_entry_id,
+      work_order_id: job.work_order_id || 0,
+      work_order_number: job.work_order_number || 'Current job',
+      part_number: job.part_number || null,
+      part_name: job.part_name || null,
+      operation_number: job.operation_number || '',
+      operation_name: job.operation_name || 'Operation',
+      description: null,
+      work_center_id: job.work_center_id || null,
+      work_center_name: job.work_center_name || null,
+      status: 'in_progress',
+      quantity_ordered: job.quantity_ordered || 0,
+      quantity_complete: job.quantity_complete || 0,
+      quantity_scrapped: 0,
+      priority: 5,
+      due_date: null,
+      customer_name: null,
+      customer_po: null,
+      actual_start: job.clock_in,
+      setup_instructions: null,
+      run_instructions: null,
+      requires_inspection: false,
+    };
+  };
+
+  const handleOpenActiveJobCheckOut = (job: ActiveJob) => {
+    handleOpenCheckOut(getOperationForActiveJob(job), job);
+  };
+
+  const closeCheckOutModal = () => {
+    setCheckOutModal(null);
+    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
+  };
+
+  const adjustGoodQuantity = (delta: number) => {
+    setCheckOutData((prev) => ({
+      ...prev,
+      quantity_produced: Math.max(0, Number(prev.quantity_produced || 0) + delta),
+    }));
+  };
+
+  const handleClockOut = async () => {
+    if (!checkOutModal) return;
+
+    setActionLoading(checkOutModal.operation.id);
     try {
-      const result = await api.completeOperation(completeModal.id, {
-        quantity_complete: completeQty,
-        notes: completeNotes || undefined,
+      await api.clockOut(checkOutModal.job.time_entry_id, {
+        quantity_produced: Number(checkOutData.quantity_produced || 0),
+        quantity_scrapped: Number(checkOutData.quantity_scrapped || 0),
+        notes: checkOutData.notes || undefined,
       });
-      
-      if (result.is_fully_complete) {
-        showToast('success', `Completed ${completeModal.operation_number} - All ${completeQty} units done!`);
-      } else {
-        showToast('info', `Progress updated: ${completeQty} / ${completeModal.quantity_ordered} complete`);
-      }
-      
-      setCompleteModal(null);
-      await loadOperations();
+      showToast('success', `Checked out of ${checkOutModal.operation.work_order_number}`);
+      closeCheckOutModal();
+      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to update progress');
+      showToast('error', err.response?.data?.detail || 'Failed to check out');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleScannerSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const code = scannerCode.trim();
+    if (!code) return;
+
+    setActionLoading(-1);
+    try {
+      const result = await api.scannerLookup(code);
+      const nextSearch =
+        result?.work_order?.work_order_number ||
+        result?.work_order_number ||
+        result?.part?.part_number ||
+        result?.part_number ||
+        code;
+      setSearch(nextSearch);
+      setShowScanner(false);
+      setScannerCode('');
+      showToast('success', `Found ${nextSearch}`);
+      setTimeout(() => operationsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+    } catch (err: any) {
+      setSearch(code);
+      setShowScanner(false);
+      setScannerCode('');
+      showToast('info', 'Showing scanned code in search');
     } finally {
       setActionLoading(null);
     }
@@ -415,19 +559,6 @@ export default function ShopFloorSimple() {
       await loadOperations();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to hold operation');
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleResume = async (operationId: number) => {
-    setActionLoading(operationId);
-    try {
-      await api.resumeOperation(operationId);
-      showToast('success', 'Operation resumed');
-      await loadOperations();
-    } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to resume operation');
     } finally {
       setActionLoading(null);
     }
@@ -472,7 +603,7 @@ export default function ShopFloorSimple() {
   return (
     <div className="space-y-6">
       {/* Toast Notifications */}
-      <div className="fixed top-4 right-4 z-50 space-y-2">
+      <div className="fixed top-4 left-4 right-4 z-50 space-y-2 md:left-auto">
         {toasts.map(toast => (
           <div
             key={toast.id}
@@ -492,22 +623,83 @@ export default function ShopFloorSimple() {
 
       {/* Mobile Header */}
       <div className="md:hidden space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3">
           <div>
             <h1 className="text-xl font-bold text-white flex items-center gap-2">
               <WrenchScrewdriverIcon className="h-6 w-6 text-werco-600" />
               Shop Floor
             </h1>
-            <p className="text-xs text-slate-400">Check in/out fast on mobile</p>
+            <p className="text-xs text-slate-400">
+              {selectedWorkCenter ? `${selectedWorkCenter.name} station` : 'All stations'}
+            </p>
           </div>
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="btn-secondary px-3 py-2 text-xs"
-          >
-            <ArrowPathIcon className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowScanner((prev) => !prev)}
+              className={`btn-secondary min-h-11 px-3 text-xs ${showScanner ? 'bg-werco-50 text-werco-700' : ''}`}
+              aria-label="Scan traveler"
+            >
+              <QrCodeIcon className="h-4 w-4" />
+              <span className="ml-1.5">Scan</span>
+            </button>
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="btn-secondary min-h-11 px-3 text-xs"
+              aria-label="Refresh jobs"
+            >
+              <ArrowPathIcon className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
         </div>
+        {primaryActiveJob && (
+          <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-4 shadow-lg shadow-emerald-950/20">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">Checked in</p>
+                <p className="mt-1 truncate text-base font-bold text-white">
+                  {primaryActiveJob.work_order_number || 'Current job'} - {primaryActiveJob.operation_name || 'Operation'}
+                </p>
+                <p className="mt-1 text-xs text-emerald-100/80">
+                  {primaryActiveJob.work_center_name || selectedWorkCenter?.name || 'Shop floor'} &middot; {getElapsedTime(primaryActiveJob.clock_in)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleOpenActiveJobCheckOut(primaryActiveJob)}
+                disabled={actionLoading !== null}
+                className="btn-success min-h-11 shrink-0 px-4 text-sm"
+              >
+                Check Out
+              </button>
+            </div>
+          </div>
+        )}
+        {showScanner && (
+          <form onSubmit={handleScannerSubmit} className="card-compact space-y-3">
+            <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Scan Traveler
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={scannerCode}
+                onChange={(e) => setScannerCode(e.target.value)}
+                className="input h-12 flex-1 text-base"
+                placeholder="Scan or enter traveler code"
+                autoFocus
+              />
+              <button
+                type="submit"
+                disabled={actionLoading === -1 || !scannerCode.trim()}
+                className="btn-primary min-h-12 px-4"
+              >
+                {actionLoading === -1 ? <ArrowPathIcon className="h-5 w-5 animate-spin" /> : 'Find'}
+              </button>
+            </div>
+          </form>
+        )}
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
             <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
@@ -522,7 +714,8 @@ export default function ShopFloorSimple() {
           <button
             type="button"
             onClick={() => setShowMobileFilters((prev) => !prev)}
-            className={`btn-secondary px-3 py-2 text-xs ${showMobileFilters ? 'bg-werco-50 text-werco-700' : ''}`}
+            className={`btn-secondary min-h-11 px-3 text-xs ${showMobileFilters ? 'bg-werco-50 text-werco-700' : ''}`}
+            aria-label="Filter jobs"
           >
             <FunnelIcon className="h-4 w-4" />
           </button>
@@ -571,7 +764,7 @@ export default function ShopFloorSimple() {
               <button
                 type="button"
                 onClick={() => setDueTodayOnly((prev) => !prev)}
-                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                className={`min-h-11 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
                   dueTodayOnly ? 'border-blue-500 bg-blue-500/20 text-blue-400' : 'border-slate-700 text-slate-400'
                 }`}
               >
@@ -580,7 +773,7 @@ export default function ShopFloorSimple() {
               <button
                 type="button"
                 onClick={() => setActionableOnly((prev) => !prev)}
-                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                className={`min-h-11 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
                   actionableOnly ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-slate-700 text-slate-400'
                 }`}
               >
@@ -598,7 +791,7 @@ export default function ShopFloorSimple() {
             <WrenchScrewdriverIcon className="h-8 w-8 text-werco-600" />
             Shop Floor Operations
           </h1>
-          <p className="page-subtitle">Start and complete work order operations</p>
+          <p className="page-subtitle">Check in and out of work order operations</p>
         </div>
         <div className="page-actions">
           <button 
@@ -611,6 +804,27 @@ export default function ShopFloorSimple() {
           </button>
         </div>
       </div>
+
+      {primaryActiveJob && (
+        <div className="hidden md:flex items-center justify-between gap-4 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-5 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-emerald-300">You are checked into</p>
+            <p className="mt-1 text-lg font-bold text-white">
+              {primaryActiveJob.work_order_number || 'Current job'} - {primaryActiveJob.operation_name || 'Operation'}
+            </p>
+            <p className="mt-1 text-sm text-emerald-100/80">
+              {primaryActiveJob.work_center_name || selectedWorkCenter?.name || 'Shop floor'} &middot; {getElapsedTime(primaryActiveJob.clock_in)}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleOpenActiveJobCheckOut(primaryActiveJob)}
+            className="btn-success min-h-11 px-5"
+          >
+            Check Out
+          </button>
+        </div>
+      )}
 
       {/* Filters (desktop) */}
       <div className="card hidden md:block" data-tour="sf-clock">
@@ -677,6 +891,26 @@ export default function ShopFloorSimple() {
 
       {/* Work Cell Buckets */}
       <div className="space-y-4">
+        <div className="md:hidden rounded-2xl border border-slate-700 bg-[#151b28] p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Station</p>
+              <p className="mt-1 truncate text-lg font-bold text-white">
+                {selectedWorkCenter?.name || 'All Work Centers'}
+              </p>
+              <p className="mt-1 text-xs text-slate-400">
+                {selectedWorkCenter ? 'Locked to this work center' : 'Choose a station for the cleanest queue'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowMobileCenters((prev) => !prev)}
+              className="btn-secondary min-h-11 shrink-0 px-4 text-sm"
+            >
+              Change
+            </button>
+          </div>
+        </div>
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
             <h2 className="text-lg font-semibold text-white">Work Center Status</h2>
@@ -688,7 +922,7 @@ export default function ShopFloorSimple() {
               onClick={() => setShowMobileCenters((prev) => !prev)}
               className="md:hidden text-sm font-semibold text-werco-700 hover:text-werco-800"
             >
-              {showMobileCenters ? 'Hide Centers' : 'Show Centers'}
+              {showMobileCenters ? 'Hide Stations' : 'Change Station'}
             </button>
             <button
               type="button"
@@ -706,7 +940,7 @@ export default function ShopFloorSimple() {
               setStatusFilter('');
               setActionableOnly(false);
             }}
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+            className={`min-h-11 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
               statusFilter === '' ? 'border-werco-500 bg-werco-50 text-werco-700' : 'border-slate-700 text-slate-400 hover:border-werco-300'
             }`}
           >
@@ -718,7 +952,7 @@ export default function ShopFloorSimple() {
               setStatusFilter('pending');
               setActionableOnly(false);
             }}
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+            className={`min-h-11 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
               statusFilter === 'pending' ? 'border-slate-500 bg-slate-800 text-slate-300' : 'border-slate-700 text-slate-400 hover:border-slate-400'
             }`}
           >
@@ -730,7 +964,7 @@ export default function ShopFloorSimple() {
               setStatusFilter('in_progress');
               setActionableOnly(false);
             }}
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+            className={`min-h-11 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
               statusFilter === 'in_progress' ? 'border-amber-500 bg-amber-500/20 text-amber-400' : 'border-slate-700 text-slate-400 hover:border-amber-300'
             }`}
           >
@@ -742,7 +976,7 @@ export default function ShopFloorSimple() {
               setStatusFilter('on_hold');
               setActionableOnly(false);
             }}
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+            className={`min-h-11 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
               statusFilter === 'on_hold' ? 'border-red-500 bg-red-500/20 text-red-400' : 'border-slate-700 text-slate-400 hover:border-red-300'
             }`}
           >
@@ -754,7 +988,7 @@ export default function ShopFloorSimple() {
               setStatusFilter('ready');
               setActionableOnly(false);
             }}
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+            className={`min-h-11 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
               statusFilter === 'ready' ? 'border-blue-500 bg-blue-500/20 text-blue-400' : 'border-slate-700 text-slate-400 hover:border-blue-300'
             }`}
           >
@@ -763,7 +997,7 @@ export default function ShopFloorSimple() {
           <button
             type="button"
             onClick={() => setDueTodayOnly((prev) => !prev)}
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+            className={`min-h-11 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
               dueTodayOnly ? 'border-blue-500 bg-blue-500/20 text-blue-400' : 'border-slate-700 text-slate-400 hover:border-blue-300'
             }`}
           >
@@ -827,9 +1061,64 @@ export default function ShopFloorSimple() {
         </div>
       </div>
 
+      {/* Mobile Next Job */}
+      {priorityFocusQueue[0] && (
+        <div className="md:hidden rounded-2xl border border-werco-500/30 bg-werco-500/10 p-4">
+          {(() => {
+            const op = priorityFocusQueue[0];
+            const activeJob = getActiveJobForOperation(op);
+            const overdue = isOverdue(op.due_date);
+            return (
+              <div className="space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-werco-300">
+                      Next Recommended Job
+                    </p>
+                    <p className="mt-1 text-lg font-bold text-white">{op.work_order_number}</p>
+                    <p className="text-sm text-slate-300">
+                      {op.operation_number} - {op.operation_name}
+                    </p>
+                  </div>
+                  <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${getPriorityClasses(op.priority)}`}>
+                    P{op.priority}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-sm text-slate-400">
+                  <span>{op.part_number || 'No part'}</span>
+                  <span className={overdue ? 'font-semibold text-red-400' : ''}>
+                    {op.due_date ? `Due ${formatCentralDate(op.due_date, { year: undefined })}` : 'No due date'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => activeJob ? handleOpenCheckOut(op, activeJob) : handleCheckIn(op)}
+                  disabled={actionLoading === op.id}
+                  className={`min-h-12 w-full ${activeJob ? 'btn-success' : 'btn-primary'}`}
+                >
+                  {actionLoading === op.id ? (
+                    <ArrowPathIcon className="h-5 w-5 animate-spin" />
+                  ) : activeJob ? (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      Check Out
+                    </>
+                  ) : (
+                    <>
+                      <PlayIcon className="h-5 w-5 mr-2" />
+                      Check In
+                    </>
+                  )}
+                </button>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* Priority Focus Queue */}
       {priorityFocusQueue.length > 0 && (
-        <div className="card">
+        <div className="card hidden md:block">
           <div className="flex items-center justify-between mb-3">
             <div>
               <h2 className="text-lg font-semibold text-white">Most Important Next</h2>
@@ -845,7 +1134,7 @@ export default function ShopFloorSimple() {
                   type="button"
                   onClick={() => handleViewDetails(op)}
                   className={`rounded-xl border p-3 text-left transition ${
-                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/100/20' : 'border-slate-700 bg-[#151b28] hover:bg-slate-800/50'
+                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/20' : 'border-slate-700 bg-[#151b28] hover:bg-slate-800/50'
                   }`}
                 >
                   <div className="flex items-center justify-between mb-2">
@@ -881,11 +1170,12 @@ export default function ShopFloorSimple() {
               ? (op.quantity_complete / op.quantity_ordered) * 100 
               : 0;
             const overdue = isOverdue(op.due_date);
+            const activeJob = getActiveJobForOperation(op);
             
             return (
               <div 
                 key={op.id} 
-                className={`card hover:shadow-lg transition-shadow ${overdue ? 'border-red-300 bg-red-500/10/30' : ''}`}
+                className={`card hover:shadow-lg transition-shadow ${overdue ? 'border-red-500/30 bg-red-500/10' : ''}`}
               >
                 {/* Header */}
                 <div className="flex items-start justify-between mb-3">
@@ -974,10 +1264,10 @@ export default function ShopFloorSimple() {
                 
                 {/* Action Buttons */}
                 <div className="flex flex-col sm:flex-row gap-2" data-tour="sf-complete">
-                  {/* Start Button - visible when pending or ready */}
-                  {(op.status === 'pending' || op.status === 'ready') && (
+                  {/* Check In Button */}
+                  {(op.status === 'pending' || op.status === 'ready' || (op.status === 'in_progress' && !activeJob)) && (
                     <button
-                      onClick={() => handleStart(op)}
+                      onClick={() => handleCheckIn(op)}
                       disabled={actionLoading === op.id}
                       className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full"
                     >
@@ -986,17 +1276,16 @@ export default function ShopFloorSimple() {
                       ) : (
                         <>
                           <PlayIcon className="h-4 w-4 mr-1.5" />
-                          <span className="hidden sm:inline">Start Operation</span>
-                          <span className="sm:hidden">Check In</span>
+                          <span>Check In</span>
                         </>
                       )}
                     </button>
                   )}
                   
-                  {/* Complete Button - visible when in progress */}
-                  {op.status === 'in_progress' && (
+                  {/* Check Out Button */}
+                  {op.status === 'in_progress' && activeJob && (
                     <button
-                      onClick={() => handleOpenComplete(op)}
+                      onClick={() => handleOpenCheckOut(op, activeJob)}
                       disabled={actionLoading === op.id}
                       className="flex-1 btn-success text-base sm:text-sm py-3 sm:py-2.5 w-full"
                     >
@@ -1005,8 +1294,7 @@ export default function ShopFloorSimple() {
                       ) : (
                         <>
                           <CheckCircleIcon className="h-4 w-4 mr-1.5" />
-                          <span className="hidden sm:inline">Mark Complete</span>
-                          <span className="sm:hidden">Check Out</span>
+                          <span>Check Out</span>
                         </>
                       )}
                     </button>
@@ -1021,13 +1309,14 @@ export default function ShopFloorSimple() {
                       title="Put on Hold"
                     >
                       <PauseIcon className="h-4 w-4" />
+                      <span className="ml-1.5">Hold</span>
                     </button>
                   )}
                   
                   {/* Resume Button - visible when on hold */}
                   {op.status === 'on_hold' && (
                     <button
-                      onClick={() => handleResume(op.id)}
+                      onClick={() => handleCheckIn(op)}
                       disabled={actionLoading === op.id}
                       className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full"
                     >
@@ -1036,8 +1325,7 @@ export default function ShopFloorSimple() {
                       ) : (
                         <>
                           <PlayIcon className="h-4 w-4 mr-1.5" />
-                          <span className="hidden sm:inline">Resume</span>
-                          <span className="sm:hidden">Check In</span>
+                          <span>Check In</span>
                         </>
                       )}
                     </button>
@@ -1050,6 +1338,7 @@ export default function ShopFloorSimple() {
                     title="View Details"
                   >
                     <EyeIcon className="h-4 w-4" />
+                    <span className="ml-1.5">Details</span>
                   </button>
                 </div>
               </div>
@@ -1058,13 +1347,13 @@ export default function ShopFloorSimple() {
         </div>
       )}
 
-      {/* Complete Operation Modal */}
-      {completeModal && (
-        <div className="modal-overlay" onClick={() => setCompleteModal(null)}>
+      {/* Check Out Modal */}
+      {checkOutModal && createPortal((
+        <div className="modal-overlay" onClick={closeCheckOutModal}>
           <div className="modal max-w-md" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h3 className="text-lg font-semibold">Mark Complete</h3>
-              <button onClick={() => setCompleteModal(null)} className="p-2 rounded-lg hover:bg-slate-800">
+              <h3 className="text-lg font-semibold">Check Out</h3>
+              <button onClick={closeCheckOutModal} className="p-2 rounded-lg hover:bg-slate-800">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
@@ -1073,70 +1362,109 @@ export default function ShopFloorSimple() {
               <div className="bg-slate-800/50 rounded-lg p-4">
                 <p className="text-sm text-slate-400">Operation</p>
                 <p className="font-semibold text-white">
-                  {completeModal.operation_number} - {completeModal.operation_name}
+                  {checkOutModal.operation.operation_number} - {checkOutModal.operation.operation_name}
                 </p>
                 <p className="text-sm text-slate-400 mt-1">
-                  {completeModal.work_order_number} • {completeModal.part_number}
+                  {checkOutModal.operation.work_order_number} &middot; {checkOutModal.operation.part_number}
+                </p>
+                <p className="mt-2 text-xs text-slate-400">
+                  Started {formatCentralTime(checkOutModal.job.clock_in)} &middot; {getElapsedTime(checkOutModal.job.clock_in)}
                 </p>
               </div>
               
               <div>
-                <label className="label">Quantity Complete</label>
-                <div className="flex items-center gap-3">
+                <label className="label">Good parts this session</label>
+                <div className="flex items-center gap-2">
                   <input
                     type="number"
+                    inputMode="decimal"
                     min={0}
-                    max={completeModal.quantity_ordered}
-                    value={completeQty}
-                    onChange={(e) => setCompleteQty(Number(e.target.value))}
-                    className="input text-center text-2xl font-bold flex-1"
+                    value={checkOutData.quantity_produced}
+                    onChange={(e) => setCheckOutData({ ...checkOutData, quantity_produced: Number(e.target.value) || 0 })}
+                    className="input h-14 flex-1 text-center text-2xl font-bold"
+                    autoFocus
                   />
-                  <span className="text-slate-400">/ {completeModal.quantity_ordered}</span>
                 </div>
-                <p className="text-sm text-slate-400 mt-1">
-                  {completeQty >= completeModal.quantity_ordered 
-                    ? '✓ This will mark the operation as COMPLETE'
-                    : 'Partial completion - operation will remain IN PROGRESS'}
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  {[1, 5, 10].map((amount) => (
+                    <button
+                      key={amount}
+                      type="button"
+                      onClick={() => adjustGoodQuantity(amount)}
+                      className="btn-secondary min-h-11 px-2 text-sm"
+                    >
+                      +{amount}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setCheckOutData({
+                      ...checkOutData,
+                      quantity_produced: getRemainingQuantity(checkOutModal.operation),
+                    })}
+                    className="btn-secondary col-span-3 min-h-11 px-2 text-sm"
+                  >
+                    Remaining
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-slate-400">
+                  Remaining: {getRemainingQuantity(checkOutModal.operation)}
                 </p>
+              </div>
+
+              <div>
+                <label className="label">Scrap</label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  value={checkOutData.quantity_scrapped}
+                  onChange={(e) => setCheckOutData({ ...checkOutData, quantity_scrapped: Number(e.target.value) || 0 })}
+                  className="input h-12 text-center text-lg font-semibold"
+                />
               </div>
               
               <div>
                 <label className="label">Notes (optional)</label>
                 <textarea
-                  value={completeNotes}
-                  onChange={(e) => setCompleteNotes(e.target.value)}
+                  value={checkOutData.notes}
+                  onChange={(e) => setCheckOutData({ ...checkOutData, notes: e.target.value })}
                   className="input"
                   rows={3}
-                  placeholder="Any issues, observations, or notes..."
+                  placeholder="Issues, observations, or notes from this session..."
                 />
               </div>
             </div>
             
             <div className="modal-footer">
-              <button onClick={() => setCompleteModal(null)} className="btn-secondary">
+              <button onClick={closeCheckOutModal} className="btn-secondary">
                 Cancel
               </button>
               <button
-                onClick={handleComplete}
-                disabled={actionLoading === completeModal.id || completeQty < 0}
+                onClick={handleClockOut}
+                disabled={
+                  actionLoading === checkOutModal.operation.id ||
+                  checkOutData.quantity_produced < 0 ||
+                  checkOutData.quantity_scrapped < 0
+                }
                 className="btn-success"
               >
-                {actionLoading === completeModal.id ? (
+                {actionLoading === checkOutModal.operation.id ? (
                   <ArrowPathIcon className="h-5 w-5 animate-spin" />
                 ) : (
                   <>
                     <CheckCircleIcon className="h-5 w-5 mr-2" />
-                    Confirm Complete
+                    End time and save
                   </>
                 )}
               </button>
             </div>
           </div>
         </div>
-      )}
+      ), document.body)}
 
       {/* Operation Details Modal */}
-      {detailsModal && (
+      {detailsModal && createPortal((
         <div className="modal-overlay" onClick={() => setDetailsModal(null)}>
           <div className="modal max-w-2xl" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
@@ -1259,7 +1587,7 @@ export default function ShopFloorSimple() {
             </div>
           </div>
         </div>
-      )}
+      ), document.body)}
 
       <style>{`
         @keyframes slide-in {

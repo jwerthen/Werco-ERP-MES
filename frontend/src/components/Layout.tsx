@@ -366,6 +366,14 @@ export default function Layout({ children }: LayoutProps) {
   );
 
   const isOperator = user?.role === 'operator';
+  const operatorDisplayName = useMemo(() => {
+    const name = [user?.first_name, user?.last_name].filter(Boolean).join(' ').trim();
+    return name || user?.email || 'Operator';
+  }, [user?.email, user?.first_name, user?.last_name]);
+  const operatorInitials = useMemo(() => {
+    const initials = `${user?.first_name?.[0] || ''}${user?.last_name?.[0] || ''}`.trim();
+    return initials || operatorDisplayName.slice(0, 2).toUpperCase();
+  }, [operatorDisplayName, user?.first_name, user?.last_name]);
 
   const visibleNavigation = useMemo(() => {
     if (isKiosk) {
@@ -515,56 +523,83 @@ export default function Layout({ children }: LayoutProps) {
               <h1 className="text-lg font-semibold text-slate-100">{pageTitle}</h1>
             </div>
 
-            {/* Mobile logo */}
-            <div className="lg:hidden">
-              <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-10 w-auto brightness-0 invert" />
+            {/* Mobile logo / kiosk operator identity */}
+            <div className="lg:hidden flex-1 min-w-0 px-3">
+              {isShopFloorKiosk ? (
+                <div className="flex items-center justify-center gap-2 min-w-0">
+                  <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-werco-navy-600 to-blue-700 flex items-center justify-center text-white font-semibold text-sm shadow-md flex-shrink-0">
+                    {operatorInitials}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[11px] leading-3 font-medium uppercase tracking-wide text-slate-400">Signed in</p>
+                    <p className="text-sm leading-5 font-semibold text-slate-100 truncate">{operatorDisplayName}</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex justify-center">
+                  <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-10 w-auto brightness-0 invert" />
+                </div>
+              )}
             </div>
 
             {/* Right side actions */}
             <div className="flex items-center gap-2" data-tour="user-menu">
-              {/* Company switcher (platform admins) */}
-              <CompanySwitcher />
+              {isShopFloorKiosk && (
+                <button
+                  onClick={() => setLogoutModalOpen(true)}
+                  className="lg:hidden inline-flex items-center gap-1.5 min-h-11 px-3 rounded-xl text-sm font-semibold text-white bg-red-600 hover:bg-red-500 active:bg-red-700 transition-colors shadow-sm"
+                  aria-label="Sign out"
+                >
+                  <ArrowRightOnRectangleIcon className="h-5 w-5" />
+                  <span>Sign out</span>
+                </button>
+              )}
 
-              {/* Quick search button */}
-              <button
-                onClick={globalSearch.open}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-all duration-200 border border-slate-600"
-                title="Search (Ctrl+K)"
-                data-tour="search"
-              >
-                <MagnifyingGlassIcon className="h-4 w-4" />
-                <span className="hidden md:inline text-sm">Search...</span>
-                <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 text-xs font-medium text-slate-500 bg-slate-700 rounded">
-                  Ctrl+K
-                </kbd>
-              </button>
+              <div className={`${isShopFloorKiosk ? 'hidden lg:flex' : 'flex'} items-center gap-2`}>
+                {/* Company switcher (platform admins) */}
+                <CompanySwitcher />
 
-              {/* Keyboard shortcuts help */}
-              <button
-                onClick={keyboardShortcuts.showHelp}
-                className="hidden md:flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-all duration-200"
-                title="Keyboard shortcuts (Ctrl+/)"
-                aria-label="Show keyboard shortcuts"
-              >
-                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"
-                  />
-                </svg>
-              </button>
+                {/* Quick search button */}
+                <button
+                  onClick={globalSearch.open}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-all duration-200 border border-slate-600"
+                  title="Search (Ctrl+K)"
+                  data-tour="search"
+                >
+                  <MagnifyingGlassIcon className="h-4 w-4" />
+                  <span className="hidden md:inline text-sm">Search...</span>
+                  <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 text-xs font-medium text-slate-500 bg-slate-700 rounded">
+                    Ctrl+K
+                  </kbd>
+                </button>
 
-              {/* Help & Tours menu */}
-              <div className="hidden lg:block">
-                <TourMenu />
-              </div>
+                {/* Keyboard shortcuts help */}
+                <button
+                  onClick={keyboardShortcuts.showHelp}
+                  className="hidden md:flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-all duration-200"
+                  title="Keyboard shortcuts (Ctrl+/)"
+                  aria-label="Show keyboard shortcuts"
+                >
+                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"
+                    />
+                  </svg>
+                </button>
 
-              {/* User avatar (mobile) */}
-              <div className="lg:hidden flex items-center">
-                <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-werco-navy-600 to-blue-700 flex items-center justify-center text-white font-medium text-sm shadow-md">
-                  {user?.first_name?.[0]}
-                  {user?.last_name?.[0]}
+                {/* Help & Tours menu */}
+                <div className="hidden lg:block">
+                  <TourMenu />
+                </div>
+
+                {/* User avatar (mobile) */}
+                <div className="lg:hidden flex items-center">
+                  <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-werco-navy-600 to-blue-700 flex items-center justify-center text-white font-medium text-sm shadow-md">
+                    {user?.first_name?.[0]}
+                    {user?.last_name?.[0]}
+                  </div>
                 </div>
               </div>
             </div>

@@ -52,7 +52,7 @@ const defaultNavItems: NavItem[] = [
 const operatorNavItems: NavItem[] = [
   {
     name: 'My Jobs',
-    href: '/shop-floor',
+    href: '/shop-floor/operations?kiosk=1',
     icon: WrenchScrewdriverIcon,
     activeIcon: WrenchScrewdriverIconSolid,
   },
@@ -75,8 +75,21 @@ export default function BottomNav({ onMenuClick }: BottomNavProps) {
   const navItems = isOperator ? operatorNavItems : defaultNavItems;
 
   const isActive = (href: string) => {
-    if (href === '/') return location.pathname === '/';
-    return location.pathname.startsWith(href);
+    const [path, query] = href.split('?');
+    if (path === '/') return location.pathname === '/';
+
+    if (query) {
+      if (location.pathname !== path) return false;
+      const expectedParams = new URLSearchParams(query);
+      const currentParams = new URLSearchParams(location.search);
+      let matches = true;
+      expectedParams.forEach((value, key) => {
+        if (currentParams.get(key) !== value) matches = false;
+      });
+      return matches;
+    }
+
+    return location.pathname === path || location.pathname.startsWith(`${path}/`);
   };
 
   return (
