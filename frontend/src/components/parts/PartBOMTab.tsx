@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
-import { Part } from '../../types';
+import { Part, PartType } from '../../types';
 import {
   BOM, BOMItem, LineType, lineTypeColors, lineTypeLabels,
 } from '../../types/engineering';
@@ -38,6 +38,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
 
   // Add item state
   const [showAddItem, setShowAddItem] = useState(false);
+  const [showNewPart, setShowNewPart] = useState(false);
   const [allParts, setAllParts] = useState<Part[]>([]);
   const [partSearch, setPartSearch] = useState('');
   const [newItem, setNewItem] = useState({
@@ -52,6 +53,13 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
     notes: '',
     torque_spec: '',
     installation_notes: '',
+  });
+  const [newPart, setNewPart] = useState({
+    part_number: '',
+    name: '',
+    part_type: 'manufactured' as PartType,
+    revision: 'A',
+    description: '',
   });
 
   // Import state
@@ -87,14 +95,15 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
 
   const filteredParts = useMemo(() => {
     const search = partSearch.trim().toLowerCase();
-    if (!search) return allParts.slice(0, 50);
-    return allParts
+    const candidateParts = allParts.filter(p => p.id !== part.id);
+    if (!search) return candidateParts.slice(0, 50);
+    return candidateParts
       .filter(p =>
         p.part_number.toLowerCase().includes(search) ||
         p.name.toLowerCase().includes(search)
       )
       .slice(0, 50);
-  }, [allParts, partSearch]);
+  }, [allParts, part.id, partSearch]);
 
   // ── Actions ────────────────────────────────────────────────────────────
 
@@ -134,6 +143,27 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       }));
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to add item');
+    }
+  };
+
+  const handleCreateNewPart = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const createdPart = await api.createPart(newPart);
+      setAllParts(prev => [...prev, createdPart]);
+      setNewItem(prev => ({ ...prev, component_part_id: createdPart.id }));
+      setPartSearch(`${createdPart.part_number} - ${createdPart.name}`);
+      setShowNewPart(false);
+      setNewPart({
+        part_number: '',
+        name: '',
+        part_type: 'manufactured',
+        revision: 'A',
+        description: '',
+      });
+      showToast('success', `Part ${createdPart.part_number} created`);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to create part');
     }
   };
 
@@ -355,7 +385,18 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       {showAddItem && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAddItem(false)}>
           <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-white mb-4">Add BOM Item</h3>
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <h3 className="text-lg font-semibold text-white">Add BOM Item</h3>
+              <button
+                type="button"
+                onClick={() => setShowNewPart(true)}
+                className="btn-secondary btn-sm flex items-center gap-1"
+                title="Create a new component part"
+              >
+                <PlusIcon className="h-4 w-4" />
+                New Part
+              </button>
+            </div>
             <form onSubmit={handleAddItem} className="space-y-4">
               {/* Part Search */}
               <div>
@@ -389,6 +430,11 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                         <span className="text-slate-400 ml-2">{p.name}</span>
                       </button>
                     ))}
+                    {filteredParts.length === 0 && (
+                      <div className="px-3 py-3 text-sm text-slate-400 text-center">
+                        No parts found.
+                      </div>
+                    )}
                   </div>
                 )}
                 {newItem.component_part_id > 0 && (
@@ -475,6 +521,87 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                 </button>
                 <button type="submit" className="btn-primary" disabled={newItem.component_part_id <= 0}>
                   Add Item
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* New Part Modal */}
+      {showNewPart && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]" onClick={() => setShowNewPart(false)}>
+          <div className="bg-[#151b28] rounded-xl p-6 max-w-md w-full mx-4 shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-white mb-4">Create New Part</h3>
+            <form onSubmit={handleCreateNewPart} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Part Number *</label>
+                  <input
+                    type="text"
+                    value={newPart.part_number}
+                    onChange={e => setNewPart(prev => ({ ...prev, part_number: e.target.value.toUpperCase() }))}
+                    className="input"
+                    required
+                    autoFocus
+                  />
+                </div>
+                <div>
+                  <label className="label">Revision</label>
+                  <input
+                    type="text"
+                    value={newPart.revision}
+                    onChange={e => setNewPart(prev => ({ ...prev, revision: e.target.value.toUpperCase() }))}
+                    className="input"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="label">Name *</label>
+                <input
+                  type="text"
+                  value={newPart.name}
+                  onChange={e => setNewPart(prev => ({ ...prev, name: e.target.value }))}
+                  className="input"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="label">Type *</label>
+                <select
+                  value={newPart.part_type}
+                  onChange={e => setNewPart(prev => ({ ...prev, part_type: e.target.value as PartType }))}
+                  className="input"
+                  required
+                >
+                  <option value="manufactured">Manufactured</option>
+                  <option value="purchased">Purchased</option>
+                  <option value="assembly">Assembly</option>
+                  <option value="raw_material">Raw Material</option>
+                  <option value="hardware">Hardware</option>
+                  <option value="consumable">Consumable</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="label">Description</label>
+                <textarea
+                  value={newPart.description}
+                  onChange={e => setNewPart(prev => ({ ...prev, description: e.target.value }))}
+                  className="input"
+                  rows={2}
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button type="button" onClick={() => setShowNewPart(false)} className="btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary">
+                  Create & Select
                 </button>
               </div>
             </form>

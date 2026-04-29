@@ -40,6 +40,24 @@ class TestPartsAPI:
         assert data["name"] == sample_part_data["name"]
         assert data["part_type"] == sample_part_data["part_type"]
 
+    def test_create_part_allows_customer_hash_numbers(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """Customer part numbers can include # characters."""
+        response = client.post(
+            "/api/v1/parts/",
+            headers=auth_headers,
+            json={
+                "part_number": "M#Z-72S-63S-QS-J-2410048-HSG",
+                "name": "Miratech Housing",
+                "part_type": "assembly",
+                "unit_of_measure": "each",
+            },
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.json()["part_number"] == "M#Z-72S-63S-QS-J-2410048-HSG"
+
     def test_create_part_unauthorized(self, client: TestClient, sample_part_data: dict):
         """Test creating a part without authentication."""
         response = client.post("/api/v1/parts/", json=sample_part_data)

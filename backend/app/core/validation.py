@@ -10,8 +10,8 @@ from pydantic import Field
 PartNumber = Annotated[str, Field(
     min_length=3,
     max_length=50,
-    pattern=r'^[A-Za-z0-9\-_\.]+$',
-    description="Part number: 3-50 chars, alphanumeric + dashes/underscores/dots"
+    pattern=r'^[A-Za-z0-9\-_\.#]+$',
+    description="Part number: 3-50 chars, alphanumeric + dashes/underscores/dots/#"
 )]
 
 Revision = Annotated[str, Field(
