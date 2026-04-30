@@ -474,7 +474,11 @@ def shop_floor_dashboard(
         func.sum(
             case((WorkOrderOperation.status == OperationStatus.READY, 1), else_=0)
         ).label('queued_count')
+    ).join(
+        WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id
     ).filter(
+        WorkOrder.company_id == company_id,
+        WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
         WorkOrderOperation.work_center_id.isnot(None)
     ).group_by(
         WorkOrderOperation.work_center_id

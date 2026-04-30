@@ -384,6 +384,10 @@ export default function ShopFloorSimple() {
     () => workCenters.find((wc) => wc.id === workCenterId) || null,
     [workCenters, workCenterId]
   );
+  const queuedOperationsAcrossCenters = useMemo(
+    () => workCenterBuckets.reduce((total, bucket) => total + bucket.open + bucket.inProgress, 0),
+    [workCenterBuckets]
+  );
 
   const primaryActiveJob = useMemo(() => activeJobs[0] || null, [activeJobs]);
 
@@ -532,7 +536,7 @@ export default function ShopFloorSimple() {
       setScannerCode('');
       showToast('success', `Found ${nextSearch}`);
       setTimeout(() => operationsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
-    } catch (err: any) {
+    } catch {
       setSearch(code);
       setShowScanner(false);
       setScannerCode('');
@@ -546,7 +550,7 @@ export default function ShopFloorSimple() {
     try {
       const details = await api.getOperationDetails(operation.id);
       setDetailsModal(details);
-    } catch (err: any) {
+    } catch {
       showToast('error', 'Failed to load operation details');
     }
   };
@@ -1159,8 +1163,23 @@ export default function ShopFloorSimple() {
       {sortedVisibleOperations.length === 0 ? (
         <div className="card text-center py-16">
           <CubeIcon className="h-12 w-12 text-slate-400 mx-auto mb-4" />
-          <p className="text-slate-400 font-medium">No operations found</p>
-          <p className="text-sm text-slate-400 mt-1">Try adjusting your filters</p>
+          <p className="text-slate-300 font-medium">
+            {selectedWorkCenter ? `No operations found for ${selectedWorkCenter.name}` : 'No operations found'}
+          </p>
+          <p className="text-sm text-slate-400 mt-1">
+            {selectedWorkCenter && queuedOperationsAcrossCenters > 0
+              ? 'Other work centers have queued work. View all operations or choose a different station.'
+              : 'Try adjusting your filters'}
+          </p>
+          {selectedWorkCenter && (
+            <button
+              type="button"
+              onClick={() => focusOperations('')}
+              className="btn-secondary mt-4"
+            >
+              View All Operations
+            </button>
+          )}
         </div>
       ) : (
         <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
