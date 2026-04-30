@@ -286,7 +286,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                             />
                           </td>
                           <td className="px-3 py-2">
-                            <input className="input w-20 py-1 text-sm text-right" type="number" step="0.001" value={item.quantity ?? 1}
+                            <input className="input w-20 py-1 text-sm text-right" type="number" step="1" value={item.quantity ?? 1}
                               onChange={e => { const next = [...displayItems]; next[idx] = { ...next[idx], quantity: parseFloat(e.target.value) }; setDerivedItems(next); }}
                             />
                           </td>

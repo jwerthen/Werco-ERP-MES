@@ -597,7 +597,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                     value={newItem.item_number}
                     onChange={e => setNewItem(prev => ({ ...prev, item_number: parseInt(e.target.value) || 0 }))}
                     className="input"
-                    step={10}
+                    step={1}
                   />
                 </div>
                 <div>
@@ -607,7 +607,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                     value={newItem.quantity}
                     onChange={e => setNewItem(prev => ({ ...prev, quantity: parseFloat(e.target.value) || 0 }))}
                     className="input"
-                    step="0.001"
+                    step="1"
                     min="0"
                   />
                 </div>
@@ -720,7 +720,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             value={row.item_number}
                             onChange={e => updateBatchRow(row.id, 'item_number', parseInt(e.target.value) || 0)}
                             className="input py-1.5 px-2 text-sm"
-                            step={10}
+                            step={1}
                             min={10}
                           />
                         </td>
@@ -792,7 +792,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                             value={row.quantity}
                             onChange={e => updateBatchRow(row.id, 'quantity', e.target.value)}
                             className="input w-32 py-1.5 px-3 text-sm text-right"
-                            step="0.001"
+                            step="1"
                             min="0"
                           />
                         </td>

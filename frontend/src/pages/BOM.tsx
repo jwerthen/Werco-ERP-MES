@@ -1109,7 +1109,7 @@ export default function BOMPage() {
                           <input
                             className="input w-24 text-right"
                             type="number"
-                            step="0.001"
+                            step="1"
                             value={item.quantity ?? 1}
                             onChange={(e) => {
                               const value = parseFloat(e.target.value);
@@ -1350,7 +1350,7 @@ export default function BOMPage() {
                       <label className="label">Quantity</label>
                       <input
                         type="number"
-                        step="0.001"
+                        step="1"
                         min="0"
                         value={newItem.quantity}
                         onChange={(e) => setNewItem({ ...newItem, quantity: parseFloat(e.target.value) })}
