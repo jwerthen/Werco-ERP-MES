@@ -51,7 +51,7 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Basic Information */}
       <div className="card">
-        <h3 className="text-base font-semibold text-gray-900 mb-4">Basic Information</h3>
+        <h3 className="text-base font-semibold text-white mb-4">Basic Information</h3>
         <dl className="space-y-3">
           <Field label="Part Number" value={part.part_number} />
           <Field label="Revision" value={part.revision} />
@@ -91,7 +91,7 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
 
       {/* Costing */}
       <div className="card">
-        <h3 className="text-base font-semibold text-gray-900 mb-4">Costing</h3>
+        <h3 className="text-base font-semibold text-white mb-4">Costing</h3>
         <dl className="space-y-3">
           <EditableField
             label="Standard Cost"
@@ -109,7 +109,7 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
           />
         </dl>
 
-        <h3 className="text-base font-semibold text-gray-900 mb-4 mt-6">Customer Information</h3>
+        <h3 className="text-base font-semibold text-white mb-4 mt-6">Customer Information</h3>
         <dl className="space-y-3">
           <EditableField
             label="Customer"
@@ -152,7 +152,7 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
 
       {/* Quality / AS9100D */}
       <div className="card">
-        <h3 className="text-base font-semibold text-gray-900 mb-4">Quality (AS9100D)</h3>
+        <h3 className="text-base font-semibold text-white mb-4">Quality (AS9100D)</h3>
         <dl className="space-y-3">
           <Field label="Critical Characteristic">
             <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${
@@ -173,7 +173,7 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
 
       {/* Metadata */}
       <div className="card">
-        <h3 className="text-base font-semibold text-gray-900 mb-4">Metadata</h3>
+        <h3 className="text-base font-semibold text-white mb-4">Metadata</h3>
         <dl className="space-y-3">
           <Field label="Status" value={part.status} />
           <Field label="Active" value={part.is_active ? 'Yes' : 'No'} />
@@ -189,9 +189,9 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
 
 function Field({ label, value, children }: { label: string; value?: string; children?: React.ReactNode }) {
   return (
-    <div className="flex items-start justify-between py-2 border-b border-gray-100 last:border-0">
-      <dt className="text-sm text-gray-500 min-w-[120px]">{label}</dt>
-      <dd className="text-sm text-gray-900 text-right">{children || value || <span className="text-gray-400">-</span>}</dd>
+    <div className="flex items-start justify-between gap-4 py-2 border-b border-slate-700/70 last:border-0">
+      <dt className="text-sm text-slate-400 min-w-[120px]">{label}</dt>
+      <dd className="text-sm text-slate-100 text-right break-words">{children || value || <span className="text-slate-500">-</span>}</dd>
     </div>
   );
 }
@@ -220,12 +220,12 @@ function EditableField({
   const isEditing = editing === field;
 
   return (
-    <div className="flex items-start justify-between py-2 border-b border-gray-100 last:border-0 group">
-      <dt className="text-sm text-gray-500 min-w-[120px]">{label}</dt>
-      <dd className="text-sm text-gray-900 text-right flex items-center gap-1">
+    <div className="flex items-start justify-between gap-4 py-2 border-b border-slate-700/70 last:border-0 group">
+      <dt className="text-sm text-slate-400 min-w-[120px]">{label}</dt>
+      <dd className="text-sm text-slate-100 text-right flex items-center justify-end gap-1 min-w-0">
         {isEditing ? (
           <div className="flex items-center gap-1">
-            {prefix && <span className="text-gray-500">{prefix}</span>}
+            {prefix && <span className="text-slate-400">{prefix}</span>}
             {multiline ? (
               <textarea
                 value={editValue}
@@ -246,19 +246,19 @@ function EditableField({
                 autoFocus
               />
             )}
-            <button onClick={() => onSave(field)} className="text-green-600 hover:text-green-700 p-0.5">
+            <button onClick={() => onSave(field)} className="text-emerald-400 hover:text-emerald-300 p-0.5">
               <CheckIcon className="h-4 w-4" />
             </button>
-            <button onClick={onCancel} className="text-gray-400 hover:text-gray-600 p-0.5">
+            <button onClick={onCancel} className="text-slate-500 hover:text-slate-200 p-0.5">
               <XMarkIcon className="h-4 w-4" />
             </button>
           </div>
         ) : (
           <>
-            <span>{prefix}{value || <span className="text-gray-400">-</span>}</span>
+            <span className="break-words">{prefix}{value || <span className="text-slate-500">-</span>}</span>
             <button
               onClick={() => onStart(field, value)}
-              className="text-gray-300 hover:text-werco-navy-600 p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+              className="text-slate-600 hover:text-cyan-300 p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
               title={`Edit ${label}`}
             >
               <PencilIcon className="h-3.5 w-3.5" />
