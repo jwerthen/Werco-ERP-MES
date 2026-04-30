@@ -8,6 +8,8 @@ import {
   PlusIcon,
   TrashIcon,
   ChevronDownIcon,
+  MagnifyingGlassIcon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline';
 
 interface Part {
@@ -16,6 +18,48 @@ interface Part {
   name: string;
   part_type: string;
   customer_name?: string;
+  customer_part_number?: string;
+  revision?: string;
+  description?: string;
+}
+
+interface BOMComponentPart {
+  id: number;
+  part_number: string;
+  name: string;
+  revision?: string;
+  part_type: string;
+  has_bom?: boolean;
+}
+
+interface BOMItem {
+  component_part_id: number;
+  quantity: number;
+  item_type?: string;
+  line_type?: string;
+  component_part?: BOMComponentPart | null;
+}
+
+interface BOMSummary {
+  id: number;
+  part_id: number;
+  revision: string;
+  part?: {
+    id: number;
+    part_number: string;
+    name: string;
+    revision?: string;
+    part_type: string;
+  } | null;
+  items?: BOMItem[];
+}
+
+interface ComponentUsage {
+  assemblyPartNumber: string;
+  assemblyName: string;
+  quantity: number;
+  itemType?: string;
+  lineType?: string;
 }
 
 interface WorkCenter {
@@ -71,6 +115,7 @@ interface PartReadiness {
 export default function WorkOrderNew() {
   const navigate = useNavigate();
   const [parts, setParts] = useState<Part[]>([]);
+  const [activeBOMs, setActiveBOMs] = useState<BOMSummary[]>([]);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -84,6 +129,9 @@ export default function WorkOrderNew() {
   const [creatingCustomer, setCreatingCustomer] = useState(false);
   const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
   const [partReadiness, setPartReadiness] = useState<PartReadiness | null>(null);
+  const [partSearch, setPartSearch] = useState('');
+  const [showPartDropdown, setShowPartDropdown] = useState(false);
+  const [highlightedPartIndex, setHighlightedPartIndex] = useState(-1);
 
   const [form, setForm] = useState({
     part_id: 0,
@@ -101,11 +149,13 @@ export default function WorkOrderNew() {
 
   const loadInitialData = async () => {
     try {
-      const [partsRes, wcRes] = await Promise.all([
-        api.getParts({ active_only: true, include_bom_components: false }),
+      const [partsRes, bomRes, wcRes] = await Promise.all([
+        api.getParts({ active_only: true, include_bom_components: true, limit: 500 }),
+        api.getBOMs({ active_only: true, limit: 500 }),
         api.getWorkCenters(),
       ]);
       setParts(partsRes);
+      setActiveBOMs(bomRes);
       setWorkCenters(wcRes);
       try {
         const customers = await api.getCustomerNames();
@@ -119,6 +169,161 @@ export default function WorkOrderNew() {
       setLoading(false);
     }
   };
+
+  const componentUsageByPartId = useMemo(() => {
+    const usage = new Map<number, ComponentUsage[]>();
+
+    activeBOMs.forEach((bom) => {
+      if (!bom.part || !bom.items) return;
+
+      bom.items.forEach((item) => {
+        if (!item.component_part_id) return;
+        const existing = usage.get(item.component_part_id) || [];
+        existing.push({
+          assemblyPartNumber: bom.part?.part_number || '',
+          assemblyName: bom.part?.name || '',
+          quantity: item.quantity || 1,
+          itemType: item.item_type,
+          lineType: item.line_type,
+        });
+        usage.set(item.component_part_id, existing);
+      });
+    });
+
+    return usage;
+  }, [activeBOMs]);
+
+  const selectedPart = useMemo(
+    () => parts.find((part) => part.id === form.part_id) || null,
+    [parts, form.part_id]
+  );
+
+  const normalizedPartSearch = partSearch.trim().toLowerCase();
+  const workOrderPartOptions = useMemo(() => {
+    const eligibleParts = parts.filter((part) => ['assembly', 'manufactured'].includes(part.part_type));
+
+    const scored = eligibleParts
+      .map((part) => {
+        const usage = componentUsageByPartId.get(part.id) || [];
+        const usageText = usage
+          .map((item) => `${item.assemblyPartNumber} ${item.assemblyName}`)
+          .join(' ');
+        const searchable = [
+          part.part_number,
+          part.name,
+          part.description,
+          part.customer_part_number,
+          part.customer_name,
+          part.part_type,
+          usageText,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+
+        if (normalizedPartSearch && !searchable.includes(normalizedPartSearch)) {
+          return null;
+        }
+
+        const partNumber = part.part_number.toLowerCase();
+        const name = part.name.toLowerCase();
+        let score = 4;
+        if (!normalizedPartSearch) {
+          score = part.part_type === 'assembly' ? 1 : usage.length > 0 ? 2 : 3;
+        } else if (partNumber.startsWith(normalizedPartSearch)) {
+          score = 0;
+        } else if (name.startsWith(normalizedPartSearch)) {
+          score = 1;
+        } else if (usageText.toLowerCase().includes(normalizedPartSearch)) {
+          score = 2;
+        }
+
+        return { part, usage, score };
+      })
+      .filter((option): option is { part: Part; usage: ComponentUsage[]; score: number } => Boolean(option))
+      .sort((a, b) => {
+        if (a.score !== b.score) return a.score - b.score;
+        const aComponent = a.usage.length > 0 ? 0 : 1;
+        const bComponent = b.usage.length > 0 ? 0 : 1;
+        if (aComponent !== bComponent) return aComponent - bComponent;
+        return a.part.part_number.localeCompare(b.part.part_number);
+      });
+
+    return scored.slice(0, 12);
+  }, [parts, componentUsageByPartId, normalizedPartSearch]);
+
+  const selectedPartUsage = selectedPart ? componentUsageByPartId.get(selectedPart.id) || [] : [];
+
+  const formatPartType = (partType: string) => (
+    partType
+      .split('_')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ')
+  );
+
+  const formatQuantity = (quantity: number) => Number.isInteger(quantity) ? quantity.toString() : quantity.toFixed(2);
+
+  const partDisplayName = (part: Part) => `${part.part_number} - ${part.name}`;
+
+  const selectPart = (part: Part) => {
+    setPartSearch(partDisplayName(part));
+    setShowPartDropdown(false);
+    setHighlightedPartIndex(-1);
+    handlePartChange(part.id);
+  };
+
+  const clearPartSelection = () => {
+    setPartSearch('');
+    setShowPartDropdown(false);
+    setHighlightedPartIndex(-1);
+    handlePartChange(0);
+  };
+
+  const handlePartKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!showPartDropdown) {
+        setShowPartDropdown(true);
+        return;
+      }
+      if (workOrderPartOptions.length === 0) return;
+      setHighlightedPartIndex((prev) => {
+        const next = prev + 1;
+        return next >= workOrderPartOptions.length ? 0 : next;
+      });
+      return;
+    }
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!showPartDropdown) {
+        setShowPartDropdown(true);
+        return;
+      }
+      if (workOrderPartOptions.length === 0) return;
+      setHighlightedPartIndex((prev) => {
+        const next = prev - 1;
+        return next < 0 ? workOrderPartOptions.length - 1 : next;
+      });
+      return;
+    }
+
+    if (e.key === 'Enter' && showPartDropdown && highlightedPartIndex >= 0) {
+      e.preventDefault();
+      const option = workOrderPartOptions[highlightedPartIndex];
+      if (option) selectPart(option.part);
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      setShowPartDropdown(false);
+      setHighlightedPartIndex(-1);
+    }
+  };
+
+  useEffect(() => {
+    setHighlightedPartIndex(-1);
+  }, [partSearch, showPartDropdown]);
 
   const normalizedCustomerSearch = customerSearch.trim().toLowerCase();
   const matchingCustomers = useMemo(() => {
@@ -196,11 +401,11 @@ export default function WorkOrderNew() {
   const handlePartChange = async (partId: number) => {
     const selectedPart = parts.find(p => p.id === partId);
     const partCustomerName = selectedPart?.customer_name || '';
-    setForm({
-      ...form,
+    setForm((prev) => ({
+      ...prev,
       part_id: partId,
-      customer_name: partCustomerName || form.customer_name
-    });
+      customer_name: partCustomerName || prev.customer_name
+    }));
     if (partCustomerName) {
       setCustomerSearch(partCustomerName);
     }
@@ -455,21 +660,138 @@ export default function WorkOrderNew() {
           <div className="space-y-4">
             <div>
               <label className="label">Part *</label>
-              <select
-                value={form.part_id}
-                onChange={(e) => handlePartChange(parseInt(e.target.value))}
-                className="input"
-                required
-              >
-                <option value={0}>Select a part...</option>
-                {parts
-                  .filter(p => ['assembly', 'manufactured'].includes(p.part_type))
-                  .map(part => (
-                    <option key={part.id} value={part.id}>
-                      {part.part_number} - {part.name}
-                    </option>
-                  ))}
-              </select>
+              <div className="relative">
+                <div className="relative">
+                  <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={partSearch}
+                    onChange={(e) => {
+                      setPartSearch(e.target.value);
+                      setShowPartDropdown(true);
+                      if (form.part_id) {
+                        setForm((prev) => ({ ...prev, part_id: 0 }));
+                        setRouting(null);
+                        setOperations([]);
+                        setShowManualEntry(false);
+                        setPartReadiness(null);
+                      }
+                    }}
+                    onFocus={() => setShowPartDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowPartDropdown(false), 200)}
+                    onKeyDown={handlePartKeyDown}
+                    className="input pl-10 pr-20"
+                    placeholder="Search parts, assemblies, or BOM components"
+                    role="combobox"
+                    aria-expanded={showPartDropdown}
+                    aria-controls="work-order-part-results"
+                    aria-autocomplete="list"
+                  />
+                  {form.part_id > 0 && (
+                    <button
+                      type="button"
+                      onClick={clearPartSelection}
+                      className="absolute right-10 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-500 hover:text-slate-200 hover:bg-slate-800"
+                      aria-label="Clear selected part"
+                    >
+                      <XMarkIcon className="h-4 w-4" />
+                    </button>
+                  )}
+                  <ChevronDownIcon
+                    className="h-5 w-5 absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 cursor-pointer"
+                    onClick={() => setShowPartDropdown(!showPartDropdown)}
+                  />
+                </div>
+
+                {showPartDropdown && (
+                  <div
+                    id="work-order-part-results"
+                    className="absolute z-20 w-full mt-1 bg-[#151b28] border border-slate-700 rounded-xl shadow-xl max-h-96 overflow-y-auto"
+                    role="listbox"
+                  >
+                    {workOrderPartOptions.length > 0 ? (
+                      <>
+                        {workOrderPartOptions.map(({ part, usage }, index) => (
+                          <button
+                            key={part.id}
+                            type="button"
+                            className={`w-full text-left px-4 py-3 border-b border-slate-700/40 last:border-b-0 ${
+                              highlightedPartIndex === index ? 'bg-cyan-500/10' : 'hover:bg-slate-800/80'
+                            }`}
+                            onMouseEnter={() => setHighlightedPartIndex(index)}
+                            onMouseDown={(event) => {
+                              event.preventDefault();
+                              selectPart(part);
+                            }}
+                            role="option"
+                            aria-selected={form.part_id === part.id}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="font-semibold text-slate-100 truncate">
+                                  {part.part_number} <span className="text-slate-400 font-normal">- {part.name}</span>
+                                </div>
+                                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                                  <span className="rounded-md border border-slate-700 px-2 py-0.5 text-slate-300">
+                                    {formatPartType(part.part_type)}
+                                  </span>
+                                  {part.revision && <span>Rev {part.revision}</span>}
+                                  {part.customer_part_number && <span>Customer PN {part.customer_part_number}</span>}
+                                  {usage.length > 0 && (
+                                    <span className="text-cyan-300">
+                                      Component in {usage.slice(0, 2).map((item) => item.assemblyPartNumber).join(', ')}
+                                      {usage.length > 2 ? ` +${usage.length - 2}` : ''}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              {part.part_type === 'assembly' && (
+                                <span className="shrink-0 rounded-md bg-blue-500/10 px-2 py-1 text-xs font-medium text-blue-200 border border-blue-500/20">
+                                  Assembly
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                        {parts.filter((part) => ['assembly', 'manufactured'].includes(part.part_type)).length > workOrderPartOptions.length && (
+                          <div className="px-4 py-2 text-xs text-slate-400 border-t border-slate-700/40">
+                            Showing {workOrderPartOptions.length} matches
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="px-4 py-3 text-sm text-slate-400">No matching work-order parts found</div>
+                    )}
+                  </div>
+                )}
+
+                {selectedPart && (
+                  <div className="mt-3 rounded-xl border border-slate-700 bg-slate-900/40 p-3">
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      <span className="font-semibold text-white">{selectedPart.part_number}</span>
+                      <span className="text-slate-300">{selectedPart.name}</span>
+                      <span className="rounded-md border border-slate-700 px-2 py-0.5 text-xs text-slate-300">
+                        {formatPartType(selectedPart.part_type)}
+                      </span>
+                    </div>
+                    {selectedPartUsage.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-400">
+                        {selectedPartUsage.slice(0, 3).map((usage, index) => (
+                          <span
+                            key={`${usage.assemblyPartNumber}-${usage.quantity}-${index}`}
+                            className="rounded-md bg-cyan-500/10 border border-cyan-500/20 px-2 py-1 text-cyan-200"
+                          >
+                            {formatQuantity(usage.quantity)} per {usage.assemblyPartNumber}
+                          </span>
+                        ))}
+                        {selectedPartUsage.length > 3 && (
+                          <span className="px-2 py-1 text-slate-500">+{selectedPartUsage.length - 3} more assemblies</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
