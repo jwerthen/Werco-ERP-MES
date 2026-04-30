@@ -21,6 +21,19 @@ import {
   MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline';
 
+type BatchPartRow = {
+  id: string;
+  item_number: number;
+  part_number: string;
+  revision: string;
+  name: string;
+  description: string;
+  part_type: PartType;
+  line_type: LineType;
+  quantity: number;
+  notes: string;
+};
+
 interface Props {
   part: Part;
   bom: BOM | null;
@@ -39,6 +52,9 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
   // Add item state
   const [showAddItem, setShowAddItem] = useState(false);
   const [showNewPart, setShowNewPart] = useState(false);
+  const [showBatchAdd, setShowBatchAdd] = useState(false);
+  const [batchRows, setBatchRows] = useState<BatchPartRow[]>([]);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [allParts, setAllParts] = useState<Part[]>([]);
   const [partSearch, setPartSearch] = useState('');
   const [newItem, setNewItem] = useState({
@@ -105,6 +121,53 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       .slice(0, 50);
   }, [allParts, part.id, partSearch]);
 
+  const nextItemNumber = () => {
+    if (!bom) return 10;
+    return bom.items.reduce((max, i) => Math.max(max, i.item_number), 0) + 10;
+  };
+
+  const createBatchRow = (itemNumber: number): BatchPartRow => ({
+    id: `${Date.now()}-${itemNumber}-${Math.random().toString(36).slice(2)}`,
+    item_number: itemNumber,
+    part_number: '',
+    revision: 'A',
+    name: '',
+    description: '',
+    part_type: 'manufactured',
+    line_type: 'component',
+    quantity: 1,
+    notes: '',
+  });
+
+  const openBatchAdd = () => {
+    const firstItemNumber = nextItemNumber();
+    setBatchRows([
+      createBatchRow(firstItemNumber),
+      createBatchRow(firstItemNumber + 10),
+      createBatchRow(firstItemNumber + 20),
+    ]);
+    setShowBatchAdd(true);
+  };
+
+  const addBatchRow = () => {
+    setBatchRows(prev => {
+      const nextNumber = prev.length > 0
+        ? Math.max(...prev.map(row => row.item_number)) + 10
+        : nextItemNumber();
+      return [...prev, createBatchRow(nextNumber)];
+    });
+  };
+
+  const removeBatchRow = (rowId: string) => {
+    setBatchRows(prev => prev.filter(row => row.id !== rowId));
+  };
+
+  const updateBatchRow = <K extends keyof BatchPartRow>(rowId: string, field: K, value: BatchPartRow[K]) => {
+    setBatchRows(prev => prev.map(row => (
+      row.id === rowId ? { ...row, [field]: value } : row
+    )));
+  };
+
   // ── Actions ────────────────────────────────────────────────────────────
 
   const handleCreateBOM = async () => {
@@ -164,6 +227,77 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       showToast('success', `Part ${createdPart.part_number} created`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create part');
+    }
+  };
+
+  const handleCreateBatchParts = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!bom) return;
+
+    const rowsToCreate = batchRows
+      .map(row => ({
+        ...row,
+        part_number: row.part_number.trim().toUpperCase(),
+        revision: row.revision.trim().toUpperCase() || 'A',
+        name: row.name.trim(),
+        description: row.description.trim(),
+        notes: row.notes.trim(),
+      }))
+      .filter(row => row.part_number || row.name);
+
+    if (rowsToCreate.length === 0) {
+      showToast('error', 'Add at least one part row');
+      return;
+    }
+
+    const incompleteRow = rowsToCreate.find(row => !row.part_number || !row.name || row.quantity <= 0 || row.item_number <= 0);
+    if (incompleteRow) {
+      showToast('error', 'Each part row needs a part number, name, item number, and quantity');
+      return;
+    }
+
+    const duplicatePartNumber = rowsToCreate.find((row, index) =>
+      rowsToCreate.findIndex(other => other.part_number === row.part_number) !== index
+    );
+    if (duplicatePartNumber) {
+      showToast('error', `Duplicate part number: ${duplicatePartNumber.part_number}`);
+      return;
+    }
+
+    setBatchSubmitting(true);
+    try {
+      const createdParts: Part[] = [];
+      for (const row of rowsToCreate) {
+        const createdPart = await api.createPart({
+          part_number: row.part_number,
+          revision: row.revision,
+          name: row.name,
+          description: row.description || undefined,
+          part_type: row.part_type,
+          unit_of_measure: 'each',
+        });
+
+        createdParts.push(createdPart);
+
+        await api.addBOMItem(bom.id, {
+          component_part_id: createdPart.id,
+          item_number: row.item_number,
+          quantity: row.quantity,
+          item_type: row.part_type === 'purchased' || row.part_type === 'hardware' || row.part_type === 'consumable' ? 'buy' : 'make',
+          line_type: row.line_type,
+          notes: row.notes || undefined,
+        });
+      }
+
+      setAllParts(prev => [...prev, ...createdParts]);
+      await onBOMChanged();
+      setShowBatchAdd(false);
+      setBatchRows([]);
+      showToast('success', `${createdParts.length} part${createdParts.length !== 1 ? 's' : ''} created and added`);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to create and add parts');
+    } finally {
+      setBatchSubmitting(false);
     }
   };
 
@@ -297,6 +431,10 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
               <button onClick={() => setShowAddItem(true)} className="btn-secondary flex items-center gap-1 text-sm">
                 <PlusIcon className="h-4 w-4" />
                 Add Item
+              </button>
+              <button onClick={openBatchAdd} className="btn-secondary flex items-center gap-1 text-sm">
+                <PlusIcon className="h-4 w-4" />
+                Batch Add Parts
               </button>
               <button onClick={() => setShowImport(true)} className="btn-secondary flex items-center gap-1 text-sm">
                 <ArrowUpTrayIcon className="h-4 w-4" />
@@ -521,6 +659,173 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                 </button>
                 <button type="submit" className="btn-primary" disabled={newItem.component_part_id <= 0}>
                   Add Item
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Add Parts Modal */}
+      {showBatchAdd && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowBatchAdd(false)}>
+          <div className="bg-[#151b28] rounded-xl p-6 max-w-6xl w-full mx-4 shadow-xl animate-scale-in max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <h3 className="text-lg font-semibold text-white">Create Parts and Add to BOM</h3>
+                <p className="text-sm text-slate-400 mt-1">
+                  Enter new component parts below. Each completed row will be created as a part and added to this assembly BOM.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={addBatchRow}
+                className="btn-secondary btn-sm flex items-center gap-1 shrink-0"
+              >
+                <PlusIcon className="h-4 w-4" />
+                Add Row
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateBatchParts} className="space-y-4">
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-700">
+                  <thead className="bg-slate-800">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase w-24">Item #</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-44">Part Number</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase w-24">Rev</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-56">Name</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-48">Description</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-40">Type</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-36">Line</th>
+                      <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase w-28">Qty</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-44">Notes</th>
+                      <th className="px-3 py-2 w-12" />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-700">
+                    {batchRows.map((row, index) => (
+                      <tr key={row.id}>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            type="number"
+                            value={row.item_number}
+                            onChange={e => updateBatchRow(row.id, 'item_number', parseInt(e.target.value) || 0)}
+                            className="input py-1.5 px-2 text-sm"
+                            step={10}
+                            min={10}
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            type="text"
+                            value={row.part_number}
+                            onChange={e => updateBatchRow(row.id, 'part_number', e.target.value.toUpperCase())}
+                            className="input py-1.5 px-2 text-sm"
+                            placeholder="Part number"
+                            autoFocus={index === 0}
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            type="text"
+                            value={row.revision}
+                            onChange={e => updateBatchRow(row.id, 'revision', e.target.value.toUpperCase())}
+                            className="input py-1.5 px-2 text-sm"
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            type="text"
+                            value={row.name}
+                            onChange={e => updateBatchRow(row.id, 'name', e.target.value)}
+                            className="input py-1.5 px-2 text-sm"
+                            placeholder="Part name"
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            type="text"
+                            value={row.description}
+                            onChange={e => updateBatchRow(row.id, 'description', e.target.value)}
+                            className="input py-1.5 px-2 text-sm"
+                            placeholder="Optional"
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <select
+                            value={row.part_type}
+                            onChange={e => updateBatchRow(row.id, 'part_type', e.target.value as PartType)}
+                            className="input py-1.5 px-2 text-sm"
+                          >
+                            <option value="manufactured">Manufactured</option>
+                            <option value="purchased">Purchased</option>
+                            <option value="assembly">Assembly</option>
+                            <option value="raw_material">Raw Material</option>
+                            <option value="hardware">Hardware</option>
+                            <option value="consumable">Consumable</option>
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <select
+                            value={row.line_type}
+                            onChange={e => updateBatchRow(row.id, 'line_type', e.target.value as LineType)}
+                            className="input py-1.5 px-2 text-sm"
+                          >
+                            <option value="component">Component</option>
+                            <option value="hardware">Hardware</option>
+                            <option value="consumable">Consumable</option>
+                            <option value="reference">Reference</option>
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            type="number"
+                            value={row.quantity}
+                            onChange={e => updateBatchRow(row.id, 'quantity', parseFloat(e.target.value) || 0)}
+                            className="input py-1.5 px-2 text-sm text-right"
+                            step="0.001"
+                            min="0"
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <input
+                            type="text"
+                            value={row.notes}
+                            onChange={e => updateBatchRow(row.id, 'notes', e.target.value)}
+                            className="input py-1.5 px-2 text-sm"
+                            placeholder="Optional"
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-top text-right">
+                          <button
+                            type="button"
+                            onClick={() => removeBatchRow(row.id)}
+                            className="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10"
+                            disabled={batchRows.length === 1}
+                            title="Remove row"
+                          >
+                            <TrashIcon className="h-4 w-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowBatchAdd(false)}
+                  className="btn-secondary"
+                  disabled={batchSubmitting}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary" disabled={batchSubmitting}>
+                  {batchSubmitting ? 'Creating...' : 'Create Parts & Add to BOM'}
                 </button>
               </div>
             </form>
