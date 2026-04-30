@@ -263,6 +263,9 @@ export default function WorkOrderNew() {
 
   const formatQuantity = (quantity: number) => Number.isInteger(quantity) ? quantity.toString() : quantity.toFixed(2);
 
+  const hoursToMinutes = (hours: number) => Math.round(Number(hours || 0) * 60 * 100) / 100;
+  const minutesToHours = (minutes: number) => Math.round(Number(minutes || 0) / 60 * 10000) / 10000;
+
   const partDisplayName = (part: Part) => `${part.part_number} - ${part.name}`;
 
   const selectPart = (part: Part) => {
@@ -1017,8 +1020,8 @@ export default function WorkOrderNew() {
                       <th className="w-20">Seq</th>
                       <th>Operation</th>
                       <th>Work Center</th>
-                      <th className="w-28">Setup (hr)</th>
-                      <th className="w-28">Run (hr)</th>
+                      <th className="w-28">Setup (min)</th>
+                      <th className="w-28">Run (min)</th>
                       <th className="w-16"></th>
                     </tr>
                   </thead>
@@ -1056,18 +1059,20 @@ export default function WorkOrderNew() {
                         <td>
                           <input
                             type="number"
-                            step="0.01"
-                            value={op.setup_time_hours}
-                            onChange={(e) => updateOperation(index, 'setup_time_hours', parseFloat(e.target.value) || 0)}
+                            step="0.1"
+                            min={0}
+                            value={hoursToMinutes(op.setup_time_hours)}
+                            onChange={(e) => updateOperation(index, 'setup_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
                             className="input input-sm text-right"
                           />
                         </td>
                         <td>
                           <input
                             type="number"
-                            step="0.01"
-                            value={op.run_time_hours.toFixed(2)}
-                            onChange={(e) => updateOperation(index, 'run_time_hours', parseFloat(e.target.value) || 0)}
+                            step="0.1"
+                            min={0}
+                            value={hoursToMinutes(op.run_time_hours)}
+                            onChange={(e) => updateOperation(index, 'run_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
                             className="input input-sm text-right"
                           />
                         </td>
@@ -1120,8 +1125,8 @@ export default function WorkOrderNew() {
                         <th className="w-20">Seq</th>
                         <th>Operation</th>
                         <th>Work Center</th>
-                        <th className="w-28">Setup (hr)</th>
-                        <th className="w-28">Run (hr)</th>
+                        <th className="w-28">Setup (min)</th>
+                        <th className="w-28">Run (min)</th>
                         <th className="w-16"></th>
                       </tr>
                     </thead>
@@ -1160,18 +1165,20 @@ export default function WorkOrderNew() {
                           <td>
                             <input
                               type="number"
-                              step="0.01"
-                              value={op.setup_time_hours}
-                              onChange={(e) => updateOperation(index, 'setup_time_hours', parseFloat(e.target.value) || 0)}
+                              step="0.1"
+                              min={0}
+                              value={hoursToMinutes(op.setup_time_hours)}
+                              onChange={(e) => updateOperation(index, 'setup_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
                               className="input input-sm text-right"
                             />
                           </td>
                           <td>
                             <input
                               type="number"
-                              step="0.01"
-                              value={op.run_time_hours}
-                              onChange={(e) => updateOperation(index, 'run_time_hours', parseFloat(e.target.value) || 0)}
+                              step="0.1"
+                              min={0}
+                              value={hoursToMinutes(op.run_time_hours)}
+                              onChange={(e) => updateOperation(index, 'run_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
                               className="input input-sm text-right"
                             />
                           </td>
