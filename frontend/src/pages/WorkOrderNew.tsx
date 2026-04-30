@@ -11,6 +11,7 @@ import {
   MagnifyingGlassIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
+import { SelectField, SelectOption } from '../components/ui';
 
 interface Part {
   id: number;
@@ -253,6 +254,21 @@ export default function WorkOrderNew() {
   }, [parts, componentUsageByPartId, normalizedPartSearch]);
 
   const selectedPartUsage = selectedPart ? componentUsageByPartId.get(selectedPart.id) || [] : [];
+  const priorityOptions: SelectOption<number>[] = [
+    { value: 1, label: '1 - Critical' },
+    { value: 2, label: '2 - Urgent' },
+    { value: 3, label: '3 - High' },
+    { value: 5, label: '5 - Normal' },
+    { value: 7, label: '7 - Low' },
+    { value: 10, label: '10 - Lowest' },
+  ];
+  const workCenterOptions = useMemo<SelectOption<number>[]>(() => (
+    workCenters.map((workCenter) => ({
+      value: workCenter.id,
+      label: workCenter.name,
+      description: workCenter.code,
+    }))
+  ), [workCenters]);
 
   const formatPartType = (partType: string) => (
     partType
@@ -829,18 +845,12 @@ export default function WorkOrderNew() {
               </div>
               <div>
                 <label className="label">Priority</label>
-                <select
+                <SelectField
                   value={form.priority}
-                  onChange={(e) => setForm({ ...form, priority: parseInt(e.target.value) })}
-                  className="input"
-                >
-                  <option value={1}>1 - Critical</option>
-                  <option value={2}>2 - Urgent</option>
-                  <option value={3}>3 - High</option>
-                  <option value={5}>5 - Normal</option>
-                  <option value={7}>7 - Low</option>
-                  <option value={10}>10 - Lowest</option>
-                </select>
+                  onChange={(priority) => setForm({ ...form, priority })}
+                  options={priorityOptions}
+                  ariaLabel="Priority"
+                />
               </div>
             </div>
 
@@ -1064,15 +1074,16 @@ export default function WorkOrderNew() {
                           />
                         </td>
                         <td>
-                          <select
+                          <SelectField
                             value={op.work_center_id}
-                            onChange={(e) => updateOperation(index, 'work_center_id', parseInt(e.target.value))}
-                            className="input input-sm"
-                          >
-                            {workCenters.map(wc => (
-                              <option key={wc.id} value={wc.id}>{wc.name}</option>
-                            ))}
-                          </select>
+                            onChange={(workCenterId) => updateOperation(index, 'work_center_id', workCenterId)}
+                            options={workCenterOptions}
+                            searchable
+                            placeholder="Select work center"
+                            buttonClassName="input-sm"
+                            menuClassName="min-w-72"
+                            ariaLabel="Work center"
+                          />
                         </td>
                         <td>
                           <input
@@ -1170,15 +1181,16 @@ export default function WorkOrderNew() {
                             />
                           </td>
                           <td>
-                            <select
+                            <SelectField
                               value={op.work_center_id}
-                              onChange={(e) => updateOperation(index, 'work_center_id', parseInt(e.target.value))}
-                              className="input input-sm"
-                            >
-                              {workCenters.map(wc => (
-                                <option key={wc.id} value={wc.id}>{wc.name}</option>
-                              ))}
-                            </select>
+                              onChange={(workCenterId) => updateOperation(index, 'work_center_id', workCenterId)}
+                              options={workCenterOptions}
+                              searchable
+                              placeholder="Select work center"
+                              buttonClassName="input-sm"
+                              menuClassName="min-w-72"
+                              ariaLabel="Work center"
+                            />
                           </td>
                           <td>
                             <input
