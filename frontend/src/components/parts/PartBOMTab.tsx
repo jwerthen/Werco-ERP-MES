@@ -30,7 +30,7 @@ type BatchPartRow = {
   description: string;
   part_type: PartType;
   line_type: LineType;
-  quantity: number;
+  quantity: string;
   notes: string;
 };
 
@@ -135,7 +135,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
     description: '',
     part_type: 'manufactured',
     line_type: 'component',
-    quantity: 1,
+    quantity: '1',
     notes: '',
   });
 
@@ -241,6 +241,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
         revision: row.revision.trim().toUpperCase() || 'A',
         name: row.name.trim(),
         description: row.description.trim(),
+        quantity: Number(row.quantity),
         notes: row.notes.trim(),
       }))
       .filter(row => row.part_number || row.name);
@@ -250,7 +251,13 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       return;
     }
 
-    const incompleteRow = rowsToCreate.find(row => !row.part_number || !row.name || row.quantity <= 0 || row.item_number <= 0);
+    const incompleteRow = rowsToCreate.find(row =>
+      !row.part_number ||
+      !row.name ||
+      !Number.isFinite(row.quantity) ||
+      row.quantity <= 0 ||
+      row.item_number <= 0
+    );
     if (incompleteRow) {
       showToast('error', 'Each part row needs a part number, name, item number, and quantity');
       return;
@@ -699,7 +706,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                       <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-48">Description</th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-40">Type</th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-36">Line</th>
-                      <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase w-28">Qty</th>
+                      <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase min-w-36">Qty</th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase min-w-44">Notes</th>
                       <th className="px-3 py-2 w-12" />
                     </tr>
@@ -783,8 +790,8 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                           <input
                             type="number"
                             value={row.quantity}
-                            onChange={e => updateBatchRow(row.id, 'quantity', parseFloat(e.target.value) || 0)}
-                            className="input py-1.5 px-2 text-sm text-right"
+                            onChange={e => updateBatchRow(row.id, 'quantity', e.target.value)}
+                            className="input w-32 py-1.5 px-3 text-sm text-right"
                             step="0.001"
                             min="0"
                           />

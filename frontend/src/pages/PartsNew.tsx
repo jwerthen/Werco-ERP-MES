@@ -325,6 +325,58 @@ export default function PartsPage() {
     }
   };
 
+  const removeDeletedParts = (partIds: number[]) => {
+    const deletedIds = new Set(partIds);
+    setParts(prev => prev.filter(part => !deletedIds.has(part.id)));
+    setSelectedPartIds(prev => {
+      const next = new Set(prev);
+      partIds.forEach(id => next.delete(id));
+      return next;
+    });
+    setExpandedParts(prev => {
+      const next = new Set(prev);
+      partIds.forEach(id => next.delete(id));
+      return next;
+    });
+    setBomData(prev => {
+      const next = { ...prev };
+      partIds.forEach(id => delete next[id]);
+      return next;
+    });
+  };
+
+  const handleDeletePart = async (part: Part, event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (!window.confirm(`Delete part ${part.part_number}? This will remove it from the active parts list.`)) return;
+
+    try {
+      await api.deletePart(part.id);
+      removeDeletedParts([part.id]);
+      showToast('success', `Deleted ${part.part_number}`);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to delete part');
+    }
+  };
+
+  const handleDeleteSelectedParts = async () => {
+    if (selectedParts.length === 0) return;
+    if (!window.confirm(`Delete ${selectedParts.length} selected part${selectedParts.length !== 1 ? 's' : ''}? This will remove them from the active parts list.`)) return;
+
+    const results = await Promise.allSettled(selectedParts.map(part => api.deletePart(part.id)));
+    const deletedIds = selectedParts
+      .filter((_, index) => results[index].status === 'fulfilled')
+      .map(part => part.id);
+    if (deletedIds.length > 0) removeDeletedParts(deletedIds);
+
+    const failed = results.length - deletedIds.length;
+    if (failed > 0) {
+      const firstFailure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      showToast('error', firstFailure?.reason?.response?.data?.detail || `Failed to delete ${failed} part${failed !== 1 ? 's' : ''}`);
+    } else {
+      showToast('success', `Deleted ${deletedIds.length} part${deletedIds.length !== 1 ? 's' : ''}`);
+    }
+  };
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -486,6 +538,10 @@ export default function PartsPage() {
               <ArrowDownTrayIcon className="h-4 w-4" />
               Export CSV
             </button>
+            <button type="button" onClick={handleDeleteSelectedParts} className="btn-danger flex items-center gap-2 text-sm">
+              <TrashIcon className="h-4 w-4" />
+              Delete Selected
+            </button>
             <button type="button" onClick={() => setSelectedPartIds(new Set())} className="btn-secondary flex items-center gap-2 text-sm">
               <XMarkIcon className="h-4 w-4" />
               Clear Selection
@@ -584,7 +640,18 @@ export default function PartsPage() {
                           </div>
                         </td>
                         <td className="px-4 py-3 text-right">
-                          <ChevronRightIcon className="h-4 w-4 text-slate-500" />
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={event => handleDeletePart(part, event)}
+                              className="rounded-lg p-1.5 text-slate-500 hover:bg-red-500/10 hover:text-red-400"
+                              title={`Delete ${part.part_number}`}
+                              aria-label={`Delete ${part.part_number}`}
+                            >
+                              <TrashIcon className="h-4 w-4" />
+                            </button>
+                            <ChevronRightIcon className="h-4 w-4 text-slate-500" />
+                          </div>
                         </td>
                       </tr>
                       {isExpanded && bomItems.map(item => {
@@ -664,7 +731,18 @@ export default function PartsPage() {
                   />
                   <span className="font-semibold text-werco-navy-600 text-sm">{part.part_number}</span>
                 </div>
-                <StatusBadge status={part.status} />
+                <div className="flex items-center gap-2">
+                  <StatusBadge status={part.status} />
+                  <button
+                    type="button"
+                    onClick={event => handleDeletePart(part, event)}
+                    className="rounded-lg p-1.5 text-slate-500 hover:bg-red-500/10 hover:text-red-400"
+                    title={`Delete ${part.part_number}`}
+                    aria-label={`Delete ${part.part_number}`}
+                  >
+                    <TrashIcon className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
               <h3 className="text-sm font-medium text-white mb-1 line-clamp-2">{part.name}</h3>
               {part.customer_name && (
