@@ -265,6 +265,7 @@ export default function WorkOrderNew() {
 
   const hoursToMinutes = (hours: number) => Math.round(Number(hours || 0) * 60 * 100) / 100;
   const minutesToHours = (minutes: number) => Math.round(Number(minutes || 0) / 60 * 10000) / 10000;
+  const isMissingRoutingBlocker = (message: string) => message.toLowerCase().includes('no active routing');
 
   const partDisplayName = (part: Part) => `${part.part_number} - ${part.name}`;
 
@@ -584,14 +585,32 @@ export default function WorkOrderNew() {
     setOperations(ops => ops.filter((_, i) => i !== index));
   };
 
+  const hasManualOperations = operations.length > 0 && (showManualEntry || operations.some(op => !op.fromRouting));
+  const manualOperationsAreValid = hasManualOperations
+    && operations.every(op => op.name.trim().length > 0 && op.work_center_id > 0);
+  const readinessBlockers = partReadiness?.blockers || [];
+  const blockingReadinessMessages = readinessBlockers.filter((message) => (
+    !(isMissingRoutingBlocker(message) && manualOperationsAreValid)
+  ));
+  const routingWillBeSavedToWorkOrder = manualOperationsAreValid && readinessBlockers.some(isMissingRoutingBlocker);
+  const informationalReadinessMessages = [
+    ...(manualOperationsAreValid ? readinessBlockers.filter(isMissingRoutingBlocker) : []),
+    ...(routingWillBeSavedToWorkOrder ? ['Manual operations will be saved directly to this work order.'] : []),
+    ...(partReadiness?.warnings || []),
+  ];
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.part_id) {
       alert('Please select a part');
       return;
     }
-    if (partReadiness?.blockers.length) {
-      alert(`This part is not ready for a work order:\n\n${partReadiness.blockers.join('\n')}`);
+    if (blockingReadinessMessages.length) {
+      alert(`This part is not ready for a work order:\n\n${blockingReadinessMessages.join('\n')}`);
+      return;
+    }
+    if (hasManualOperations && !manualOperationsAreValid) {
+      alert('Please complete every manual operation with an operation name and work center.');
       return;
     }
 
@@ -619,8 +638,7 @@ export default function WorkOrderNew() {
       };
 
       // If operations were modified or manually entered, include them
-      const hasModifiedOps = operations.some(op => !op.fromRouting);
-      if (hasModifiedOps || showManualEntry) {
+      if (hasManualOperations) {
         payload.operations = operations.map(op => ({
           sequence: op.sequence,
           operation_number: op.operation_number,
@@ -948,14 +966,14 @@ export default function WorkOrderNew() {
           </div>
         </div>
 
-        {partReadiness && (partReadiness.blockers.length > 0 || partReadiness.warnings.length > 0) && (
+        {partReadiness && (blockingReadinessMessages.length > 0 || informationalReadinessMessages.length > 0) && (
           <div className="bg-[#151b28] border border-amber-500/30 rounded-lg p-4">
             <div className="flex items-start gap-3">
               <ExclamationTriangleIcon className="h-5 w-5 text-amber-300 mt-0.5" />
               <div>
                 <div className="font-semibold text-white">Work order readiness</div>
                 <div className="mt-2 space-y-1 text-sm text-slate-300">
-                  {[...partReadiness.blockers, ...partReadiness.warnings].map((message) => (
+                  {[...blockingReadinessMessages, ...informationalReadinessMessages].map((message) => (
                     <div key={message}>{message}</div>
                   ))}
                 </div>
@@ -964,7 +982,7 @@ export default function WorkOrderNew() {
           </div>
         )}
 
-        {partReadiness?.ready && partReadiness.warnings.length === 0 && (
+        {partReadiness && blockingReadinessMessages.length === 0 && informationalReadinessMessages.length === 0 && (
           <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-center gap-2 text-sm text-emerald-200">
             <CheckCircleIcon className="h-5 w-5" />
             Selected part is ready for a work order.
