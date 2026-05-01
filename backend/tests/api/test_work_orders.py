@@ -142,13 +142,32 @@ class TestWorkOrdersAPI:
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
     def test_delete_work_order(
-        self, client: TestClient, admin_headers: dict, test_work_order: WorkOrder
+        self, client: TestClient, admin_headers: dict, test_work_order: WorkOrder, db_session
     ):
         """Test deleting a work order (admin only)."""
         response = client.delete(
             f"/api/v1/work-orders/{test_work_order.id}", headers=admin_headers
         )
         assert response.status_code == status.HTTP_204_NO_CONTENT
+        db_session.refresh(test_work_order)
+        assert test_work_order.is_deleted is True
+
+    def test_delete_released_work_order_soft_deletes(
+        self, client: TestClient, admin_headers: dict, test_work_order: WorkOrder, db_session
+    ):
+        """Current work orders should be removable through soft delete."""
+        test_work_order.status = WorkOrderStatus.RELEASED
+        db_session.commit()
+
+        response = client.delete(
+            f"/api/v1/work-orders/{test_work_order.id}", headers=admin_headers
+        )
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+        db_session.refresh(test_work_order)
+        assert test_work_order.status == WorkOrderStatus.RELEASED
+        assert test_work_order.is_deleted is True
+        assert test_work_order.deleted_at is not None
 
     def test_delete_work_order_forbidden(
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder

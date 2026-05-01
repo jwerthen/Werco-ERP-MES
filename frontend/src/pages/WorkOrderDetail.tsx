@@ -12,7 +12,10 @@ import {
   CheckCircleIcon,
   PrinterIcon,
   CubeIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
+
+const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 
 const statusColors: Record<string, string> = {
   draft: 'bg-slate-800 text-slate-100',
@@ -75,6 +78,7 @@ export default function WorkOrderDetail() {
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [deleting, setDeleting] = useState(false);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
   const [userNameById, setUserNameById] = useState<Record<number, string>>({});
   const [activeUsersOnWorkOrder, setActiveUsersOnWorkOrder] = useState<ActiveShopUser[]>([]);
@@ -220,6 +224,24 @@ export default function WorkOrderDetail() {
     }
   };
 
+  const handleDelete = async () => {
+    if (!workOrder) return;
+    const isCurrent = CURRENT_WORK_ORDER_STATUSES.includes(workOrder.status);
+    const message = isCurrent
+      ? `Delete current work order ${workOrder.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
+      : `Delete work order ${workOrder.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`;
+    if (!window.confirm(message)) return;
+
+    setDeleting(true);
+    try {
+      await api.deleteWorkOrder(workOrder.id);
+      navigate('/work-orders');
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to delete work order');
+      setDeleting(false);
+    }
+  };
+
   /**
    * Parse a string from prompt() as a non-negative quantity. Returns null
    * (with a user-facing alert) if the input isn't a finite number or
@@ -337,6 +359,16 @@ export default function WorkOrderDetail() {
             <PrinterIcon className="h-5 w-5 mr-2" />
             Print Traveler
           </button>
+          {isAdminView && (
+            <button
+              onClick={handleDelete}
+              disabled={deleting}
+              className="btn-secondary flex items-center text-red-300 hover:text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <TrashIcon className="h-5 w-5 mr-2" />
+              {deleting ? 'Deleting...' : 'Delete'}
+            </button>
+          )}
         </div>
       </div>
 

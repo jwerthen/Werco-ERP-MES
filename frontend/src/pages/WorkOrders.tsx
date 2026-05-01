@@ -4,6 +4,7 @@ import api from '../services/api';
 import { WorkOrderSummary, WorkOrderStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
+import { useAuth } from '../context/AuthContext';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../utils/centralTime';
 import { 
   PlusIcon, 
@@ -37,6 +38,7 @@ const priorityConfig: Record<number, { bg: string; text: string; label: string }
 };
 
 const EXCLUDED_PART_TYPES = ['purchased', 'hardware', 'raw_material'];
+const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 
 type GroupBy = 'none' | 'customer' | 'part' | 'status';
 
@@ -60,6 +62,8 @@ const groupOptions: { value: GroupBy; label: string }[] = [
 const formatStatusLabel = (status: string) => status.replace('_', ' ');
 
 export default function WorkOrders() {
+  const { user } = useAuth();
+  const canDeleteWorkOrders = user?.role === 'admin' || !!user?.is_superuser;
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -120,12 +124,11 @@ export default function WorkOrders() {
   }, []);
 
   const handleDelete = async (wo: WorkOrderSummary) => {
-    const canDelete = wo.status === 'draft' || wo.status === 'cancelled';
-    if (!canDelete) {
-      alert('Only draft or cancelled work orders can be deleted.');
-      return;
-    }
-    if (!window.confirm(`Delete work order ${wo.work_order_number}?`)) return;
+    const isCurrent = CURRENT_WORK_ORDER_STATUSES.includes(wo.status);
+    const message = isCurrent
+      ? `Delete current work order ${wo.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
+      : `Delete work order ${wo.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`;
+    if (!window.confirm(message)) return;
     try {
       await api.deleteWorkOrder(wo.id);
       loadWorkOrders();
@@ -382,14 +385,14 @@ export default function WorkOrders() {
                 <WorkOrderTable
                   workOrders={orders}
                   hideColumn={groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined}
-                  onDelete={handleDelete}
+                  onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                   onRelease={handleRelease}
                   releasingIds={releasingIds}
                 />
               </div>
               <WorkOrderMobileList
                 workOrders={orders}
-                onDelete={handleDelete}
+                onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onRelease={handleRelease}
                 releasingIds={releasingIds}
                 className="lg:hidden p-3"
@@ -404,7 +407,7 @@ export default function WorkOrders() {
           <div className="hidden lg:block card card-flush overflow-hidden">
             <WorkOrderTable
               workOrders={filteredWorkOrders}
-              onDelete={handleDelete}
+              onDelete={canDeleteWorkOrders ? handleDelete : undefined}
               onRelease={handleRelease}
               releasingIds={releasingIds}
             />
@@ -412,7 +415,7 @@ export default function WorkOrders() {
 
           <WorkOrderMobileList
             workOrders={filteredWorkOrders}
-            onDelete={handleDelete}
+            onDelete={canDeleteWorkOrders ? handleDelete : undefined}
             onRelease={handleRelease}
             releasingIds={releasingIds}
             className="lg:hidden"
@@ -513,7 +516,7 @@ function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }
   const priority = priorityConfig[wo.priority] || priorityConfig[4];
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
-  const canDelete = onDelete && (wo.status === 'draft' || wo.status === 'cancelled');
+  const canDelete = Boolean(onDelete);
   const progress = wo.quantity_ordered > 0
     ? Math.min(100, (wo.quantity_complete / wo.quantity_ordered) * 100)
     : 0;
@@ -709,7 +712,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
                         <CheckCircleIcon className="h-4 w-4" />
                       </button>
                     )}
-                    {onDelete && (wo.status === 'draft' || wo.status === 'cancelled') && (
+                    {onDelete && (
                       <button 
                         onClick={() => onDelete(wo)}
                         className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors"
