@@ -88,8 +88,10 @@ export default function ShopFloorSimple() {
 
   // Filters
   const [workCenterId, _setWorkCenterId] = useState<number | ''>('');
+  const workCenterIdRef = useRef<number | ''>('');
   const setWorkCenterId = useCallback((id: number | '') => {
     _setWorkCenterId(id);
+    workCenterIdRef.current = id;
     if (id) {
       localStorage.setItem(WORK_CENTER_STORAGE_KEY, String(id));
     }
@@ -130,6 +132,10 @@ export default function ShopFloorSimple() {
     const timer = setTimeout(() => setDebouncedSearch(search), 300);
     return () => clearTimeout(timer);
   }, [search]);
+
+  useEffect(() => {
+    workCenterIdRef.current = workCenterId;
+  }, [workCenterId]);
 
   // Load data
   const loadOperations = useCallback(async () => {
@@ -208,7 +214,7 @@ export default function ShopFloorSimple() {
     try {
       const response = await api.getWorkCenters();
       setWorkCenters(response || []);
-      if (response && response.length > 0 && !workCenterId) {
+      if (response && response.length > 0 && !workCenterIdRef.current) {
         const deptMatch = kioskParams.dept?.toLowerCase() || null;
         const matched = response.find((wc: WorkCenter) => {
           if (kioskParams.workCenterId && wc.id === kioskParams.workCenterId) return true;
@@ -237,21 +243,32 @@ export default function ShopFloorSimple() {
     } catch (err) {
       console.error('Failed to load work centers:', err);
     }
-  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, workCenterId, setWorkCenterId]);
+  }, [kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, setWorkCenterId]);
 
   useEffect(() => {
+    let cancelled = false;
+
     const init = async () => {
       setLoading(true);
-      await loadWorkCenters();
-      await Promise.all([
-        loadOperations(),
-        loadDashboardCounts(),
-        loadActiveJobs(),
-      ]);
-      setLoading(false);
+      try {
+        await Promise.all([
+          loadWorkCenters(),
+          loadDashboardCounts(),
+          loadActiveJobs(),
+        ]);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     };
+
     init();
-  }, [loadActiveJobs, loadDashboardCounts, loadOperations, loadWorkCenters]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadActiveJobs, loadDashboardCounts, loadWorkCenters]);
 
   useEffect(() => {
     if (!loading) {
