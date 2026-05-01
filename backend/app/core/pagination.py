@@ -4,7 +4,7 @@ Pagination utilities for API endpoints.
 Provides reusable pagination logic with consistent response format.
 """
 from math import ceil
-from typing import List, Any
+from typing import Any, List, TypeVar
 from pydantic import BaseModel
 from sqlalchemy.orm import Query
 
@@ -74,5 +74,4 @@ def paginate_query(
     )
     
     return paginated_query, meta
-
 

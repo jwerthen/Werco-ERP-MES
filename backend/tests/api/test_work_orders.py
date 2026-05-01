@@ -7,7 +7,7 @@ from app.models.part import Part
 from app.models.routing import Routing, RoutingOperation
 from app.models.work_center import WorkCenter
 from app.models.audit_log import AuditLog
-from app.models.work_order import WorkOrder
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 
 
 @pytest.mark.api
@@ -658,6 +658,83 @@ class TestWorkOrdersAPI:
         assert operation["name"] == f"{component.part_number} - Machine BOM Component"
         assert operation["component_part_id"] == component.id
         assert operation["component_quantity"] == 6
+
+    def test_shop_floor_work_center_counts_match_operation_list(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        part = Part(
+            part_number="SHOP-COUNT-001",
+            name="Shop Count Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-SHOP-COUNT",
+            name="Shop Count Work Center",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-SHOP-COUNT-001",
+            part_id=part.id,
+            quantity_ordered=1,
+            status=WorkOrderStatus.RELEASED,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+        db_session.add_all([
+            WorkOrderOperation(
+                work_order_id=work_order.id,
+                work_center_id=work_center.id,
+                sequence=10,
+                operation_number="Op 10",
+                name="Ready Shop Operation",
+                status=OperationStatus.READY,
+                company_id=1,
+            ),
+            WorkOrderOperation(
+                work_order_id=work_order.id,
+                work_center_id=work_center.id,
+                sequence=20,
+                operation_number="Op 20",
+                name="Active Shop Operation",
+                status=OperationStatus.IN_PROGRESS,
+                company_id=1,
+            ),
+        ])
+        db_session.commit()
+
+        dashboard_response = client.get("/api/v1/shop-floor/dashboard", headers=auth_headers)
+        operations_response = client.get(
+            "/api/v1/shop-floor/operations",
+            headers=auth_headers,
+            params={"work_center_id": work_center.id},
+        )
+        queue_response = client.get(
+            f"/api/v1/shop-floor/work-center-queue/{work_center.id}",
+            headers=auth_headers,
+        )
+
+        assert dashboard_response.status_code == status.HTTP_200_OK
+        assert operations_response.status_code == status.HTTP_200_OK
+        assert queue_response.status_code == status.HTTP_200_OK
+
+        center = next(
+            item for item in dashboard_response.json()["work_centers"]
+            if item["id"] == work_center.id
+        )
+        assert center["queued_operations"] == 1
+        assert center["active_operations"] == 1
+        assert operations_response.json()["total"] == 2
+        assert len(queue_response.json()["queue"]) == 2
 
     def test_assembly_work_order_blocks_out_of_sequence_start(
         self, client: TestClient, auth_headers: dict, db_session

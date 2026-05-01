@@ -141,17 +141,47 @@ export default function ShopFloorSimple() {
       if (debouncedSearch) params.search = debouncedSearch;
       
       const response = await api.getShopFloorOperations(params);
-      setOperations(response.operations || []);
+      let nextOperations = response.operations || [];
+
+      if (workCenterId && !statusFilter && !dueTodayOnly && !debouncedSearch && nextOperations.length === 0) {
+        const queueResponse = await api.getWorkCenterQueue(workCenterId);
+        nextOperations = (queueResponse.queue || []).map((item: any) => ({
+          id: item.operation_id,
+          work_order_id: item.work_order_id,
+          work_order_number: item.work_order_number,
+          part_number: item.part_number,
+          part_name: item.part_name,
+          operation_number: item.operation_number,
+          operation_name: item.operation_name,
+          description: null,
+          work_center_id: workCenterId,
+          work_center_name: workCenters.find((wc) => wc.id === workCenterId)?.name || null,
+          status: item.status,
+          quantity_ordered: item.quantity_ordered,
+          quantity_complete: item.quantity_complete,
+          quantity_scrapped: 0,
+          priority: item.priority,
+          due_date: item.due_date,
+          customer_name: null,
+          customer_po: null,
+          actual_start: null,
+          setup_instructions: null,
+          run_instructions: null,
+          requires_inspection: false,
+        }));
+      }
+
+      setOperations(nextOperations);
     } catch (err) {
       console.error('Failed to load operations:', err);
       showToast('error', 'Failed to load operations');
     }
-  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly]);
+  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly, workCenters]);
 
   const loadDashboardCounts = useCallback(async () => {
     try {
-      const response = await api.getDashboardWithCache();
-      const centers = response.data?.work_centers || [];
+      const response = await api.getDashboard();
+      const centers = response.work_centers || [];
       const nextCounts: Record<number, { active: number; queued: number }> = {};
       centers.forEach((wc: any) => {
         nextCounts[wc.id] = {

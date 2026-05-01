@@ -391,6 +391,7 @@ def get_work_center_queue(
     ).join(WorkOrder).filter(
         and_(
             WorkOrder.company_id == company_id,
+            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
             WorkOrderOperation.work_center_id == work_center_id,
             WorkOrderOperation.status.in_([OperationStatus.READY, OperationStatus.IN_PROGRESS])
         )
@@ -407,6 +408,7 @@ def get_work_center_queue(
             "part_name": wo.part.name if wo.part else None,
             "operation_number": op.operation_number,
             "operation_name": op.name,
+            "work_center_id": op.work_center_id,
             "status": op.status,
             "quantity_ordered": wo.quantity_ordered,
             "quantity_complete": op.quantity_complete,
