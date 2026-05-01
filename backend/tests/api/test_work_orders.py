@@ -1041,6 +1041,81 @@ class TestWorkOrdersAPI:
         assert start_response.status_code == status.HTTP_400_BAD_REQUEST
         assert "Previous operations must be completed first" in start_response.json()["detail"]
 
+    def test_shop_floor_allows_out_of_sequence_start_within_same_work_center(
+        self, client: TestClient, operator_headers: dict, db_session
+    ):
+        """Operators may choose any operation when prior steps are in the same work center."""
+        part = Part(
+            part_number="SHOP-SAME-WC-001",
+            name="Same WC Sequence",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-SAME-SEQ",
+            name="Same Sequence Work Center",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-SAME-WC-001",
+            part_id=part.id,
+            quantity_ordered=1,
+            status=WorkOrderStatus.RELEASED,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+
+        first_op = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=work_center.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="First Same WC Operation",
+            status=OperationStatus.READY,
+            company_id=1,
+        )
+        second_op = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=work_center.id,
+            sequence=20,
+            operation_number="Op 20",
+            name="Second Same WC Operation",
+            status=OperationStatus.PENDING,
+            company_id=1,
+        )
+        db_session.add_all([first_op, second_op])
+        db_session.commit()
+
+        operations_response = client.get(
+            "/api/v1/shop-floor/operations",
+            headers=operator_headers,
+            params={"work_center_id": work_center.id},
+        )
+        assert operations_response.status_code == status.HTTP_200_OK
+        second_shop_op = next(
+            op for op in operations_response.json()["operations"] if op["id"] == second_op.id
+        )
+        assert second_shop_op["can_check_in"] is True
+        assert second_shop_op["blocked_by_previous_operations"] is False
+
+        start_response = client.put(
+            f"/api/v1/shop-floor/operations/{second_op.id}/start",
+            headers=operator_headers,
+        )
+
+        assert start_response.status_code == status.HTTP_200_OK
+        db_session.expire_all()
+        assert db_session.get(WorkOrderOperation, second_op.id).status == OperationStatus.IN_PROGRESS
+
 
 @pytest.mark.api
 @pytest.mark.requires_db

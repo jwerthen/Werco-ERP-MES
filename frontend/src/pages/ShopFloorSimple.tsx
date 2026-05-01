@@ -54,6 +54,8 @@ interface Operation {
   setup_instructions: string | null;
   run_instructions: string | null;
   requires_inspection: boolean;
+  can_check_in?: boolean;
+  blocked_by_previous_operations?: boolean;
 }
 
 interface WorkCenter {
@@ -178,6 +180,8 @@ export default function ShopFloorSimple() {
           setup_instructions: null,
           run_instructions: null,
           requires_inspection: false,
+          can_check_in: item.can_check_in,
+          blocked_by_previous_operations: item.blocked_by_previous_operations,
         }));
       }
 
@@ -470,6 +474,11 @@ export default function ShopFloorSimple() {
 
   // Action handlers
   const handleCheckIn = async (operation: Operation) => {
+    if (operation.can_check_in === false) {
+      showToast('info', 'Previous work-center operations must be completed first');
+      return;
+    }
+
     setActionLoading(operation.id);
     try {
       if (operation.status === 'in_progress' || operation.status === 'on_hold') {
@@ -531,6 +540,8 @@ export default function ShopFloorSimple() {
       setup_instructions: null,
       run_instructions: null,
       requires_inspection: false,
+      can_check_in: true,
+      blocked_by_previous_operations: false,
     };
   };
 
@@ -1243,6 +1254,8 @@ export default function ShopFloorSimple() {
               : 0;
             const overdue = isOverdue(op.due_date);
             const activeJob = getActiveJobForOperation(op);
+            const canCheckIn = op.can_check_in !== false;
+            const showCheckIn = op.status === 'pending' || op.status === 'ready' || (op.status === 'in_progress' && !activeJob);
             
             return (
               <div 
@@ -1337,14 +1350,20 @@ export default function ShopFloorSimple() {
                 {/* Action Buttons */}
                 <div className="flex flex-col sm:flex-row gap-2" data-tour="sf-complete">
                   {/* Check In Button */}
-                  {(op.status === 'pending' || op.status === 'ready' || (op.status === 'in_progress' && !activeJob)) && (
+                  {showCheckIn && (
                     <button
                       onClick={() => handleCheckIn(op)}
-                      disabled={actionLoading === op.id}
-                      className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full"
+                      disabled={actionLoading === op.id || !canCheckIn}
+                      className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                      title={canCheckIn ? 'Check in' : 'Waiting on a previous work center'}
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
+                      ) : !canCheckIn ? (
+                        <>
+                          <ClockIcon className="h-4 w-4 mr-1.5" />
+                          <span>Waiting</span>
+                        </>
                       ) : (
                         <>
                           <PlayIcon className="h-4 w-4 mr-1.5" />

@@ -51,7 +51,9 @@ def _has_incomplete_predecessors(
     db: Session,
     work_order_id: int,
     sequence: int,
-    current_operation_id: Optional[int] = None
+    current_operation_id: Optional[int] = None,
+    current_work_center_id: Optional[int] = None,
+    allow_same_work_center: bool = False,
 ) -> bool:
     query = db.query(WorkOrderOperation).filter(
         and_(
@@ -62,6 +64,8 @@ def _has_incomplete_predecessors(
     )
     if current_operation_id is not None:
         query = query.filter(WorkOrderOperation.id != current_operation_id)
+    if allow_same_work_center and current_work_center_id is not None:
+        query = query.filter(WorkOrderOperation.work_center_id != current_work_center_id)
     return query.count() > 0
 
 
@@ -84,6 +88,30 @@ def _sync_work_order_quantity_complete(work_order: WorkOrder, operation: WorkOrd
             float(operation.quantity_complete or 0),
             float(work_order.quantity_ordered or 0),
         )
+
+
+def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dict:
+    blocked = _has_incomplete_predecessors(
+        db,
+        operation.work_order_id,
+        operation.sequence,
+        operation.id,
+        operation.work_center_id,
+        allow_same_work_center=True,
+    )
+    can_check_in = (
+        operation.status in [
+            OperationStatus.PENDING,
+            OperationStatus.READY,
+            OperationStatus.IN_PROGRESS,
+            OperationStatus.ON_HOLD,
+        ]
+        and not blocked
+    )
+    return {
+        "can_check_in": can_check_in,
+        "blocked_by_previous_operations": blocked,
+    }
 
 @router.get("/my-active-job")
 def get_my_active_job(
@@ -180,21 +208,28 @@ def clock_in(
     if operation.work_center_id != clock_in_data.work_center_id:
         raise HTTPException(status_code=400, detail="Operation does not belong to this work center")
 
-    if operation.status not in [OperationStatus.READY, OperationStatus.IN_PROGRESS]:
+    if operation.status not in [OperationStatus.PENDING, OperationStatus.READY, OperationStatus.IN_PROGRESS]:
         raise HTTPException(status_code=400, detail="Operation is not ready to start")
 
     # Prevent out-of-sequence starts
     work_order = operation.work_order
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
-    if _has_incomplete_predecessors(db, operation.work_order_id, operation.sequence, operation.id):
+    if _has_incomplete_predecessors(
+        db,
+        operation.work_order_id,
+        operation.sequence,
+        operation.id,
+        operation.work_center_id,
+        allow_same_work_center=True,
+    ):
         raise HTTPException(
             status_code=400,
             detail="Previous operations must be completed first"
         )
     
     # Update operation status
-    if operation.status == OperationStatus.READY:
+    if operation.status in [OperationStatus.PENDING, OperationStatus.READY]:
         operation.status = OperationStatus.IN_PROGRESS
         if not operation.actual_start:
             operation.actual_start = datetime.utcnow()
@@ -213,7 +248,8 @@ def clock_in(
         work_center_id=clock_in_data.work_center_id,
         entry_type=clock_in_data.entry_type,
         clock_in=datetime.utcnow(),
-        notes=clock_in_data.notes
+        notes=clock_in_data.notes,
+        company_id=company_id,
     )
     
     db.add(time_entry)
@@ -806,6 +842,7 @@ def get_all_operations(
         wo = op.work_order
         wc = op.work_center
         target_qty = _operation_target_quantity(op, wo)
+        check_in_state = _operation_check_in_state(db, op)
         result.append({
             "id": op.id,
             "work_order_id": wo.id,
@@ -831,6 +868,7 @@ def get_all_operations(
             "setup_instructions": op.setup_instructions,
             "run_instructions": op.run_instructions,
             "requires_inspection": op.requires_inspection,
+            **check_in_state,
         })
     
     return {
@@ -879,7 +917,14 @@ def start_operation(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    if _has_incomplete_predecessors(db, operation.work_order_id, operation.sequence, operation.id):
+    if _has_incomplete_predecessors(
+        db,
+        operation.work_order_id,
+        operation.sequence,
+        operation.id,
+        operation.work_center_id,
+        allow_same_work_center=True,
+    ):
         raise HTTPException(
             status_code=400,
             detail="Previous operations must be completed first"
@@ -915,6 +960,7 @@ def start_operation(
             work_center_id=operation.work_center_id,
             entry_type=TimeEntryType.RUN,
             clock_in=datetime.utcnow(),
+            company_id=company_id,
         )
         db.add(time_entry)
 
@@ -1020,7 +1066,14 @@ def complete_operation(
             detail=f"Quantity ({completion_data.quantity_complete}) cannot exceed quantity ordered ({ordered_qty})"
         )
 
-    if _has_incomplete_predecessors(db, operation.work_order_id, operation.sequence, operation.id):
+    if _has_incomplete_predecessors(
+        db,
+        operation.work_order_id,
+        operation.sequence,
+        operation.id,
+        operation.work_center_id,
+        allow_same_work_center=True,
+    ):
         raise HTTPException(
             status_code=400,
             detail="Previous operations must be completed first"
@@ -1218,6 +1271,7 @@ def get_operation_details(
             "requires_inspection": operation.requires_inspection,
             "inspection_type": operation.inspection_type,
             "inspection_complete": operation.inspection_complete,
+            **_operation_check_in_state(db, operation),
         },
         "work_order": {
             "id": wo.id,
@@ -1252,7 +1306,8 @@ def get_operation_details(
                 "work_order_quantity_ordered": wo.quantity_ordered,
                 "component_quantity": op.component_quantity,
                 "quantity_complete": op.quantity_complete,
-                "is_current": op.id == operation_id
+                "is_current": op.id == operation_id,
+                **_operation_check_in_state(db, op),
             }
             for op in all_ops
         ],
