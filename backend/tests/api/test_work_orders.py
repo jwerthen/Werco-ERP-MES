@@ -214,10 +214,10 @@ class TestWorkOrdersAPI:
         assert operation["started_by"] is not None
         assert operation["completed_by"] is not None
 
-    def test_assembly_work_order_uses_released_routing_only(
+    def test_assembly_work_order_uses_bom_component_and_assembly_routings(
         self, client: TestClient, auth_headers: dict, db_session
     ):
-        """Assembly auto-routing should use only the released assembly routing."""
+        """Assembly auto-routing should include released BOM component routings."""
         assembly = Part(
             part_number="ASM-ORDER-001",
             name="Assembly Ordered",
@@ -371,6 +371,21 @@ class TestWorkOrdersAPI:
         )
         db_session.commit()
 
+        preview_response = client.get(
+            f"/api/v1/work-orders/preview-operations/{assembly.id}",
+            headers=auth_headers,
+            params={"quantity": 1},
+        )
+        assert preview_response.status_code == status.HTTP_200_OK
+        preview_names = [op["name"] for op in preview_response.json()["operations_preview"]]
+        assert preview_names == [
+            f"{component_one.part_number} - Bend One",
+            f"{component_one.part_number} - Weld One",
+            f"{component_two.part_number} - Laser Two",
+            "Assemble Frame",
+            "Final Inspection",
+        ]
+
         response = client.post(
             "/api/v1/work-orders/",
             headers=auth_headers,
@@ -381,12 +396,19 @@ class TestWorkOrdersAPI:
 
         operation_names = [op["name"] for op in data["operations"]]
         assert operation_names == [
+            f"{component_one.part_number} - Bend One",
+            f"{component_one.part_number} - Weld One",
+            f"{component_two.part_number} - Laser Two",
             "Assemble Frame",
             "Final Inspection",
         ]
-        assert "Bend One" not in operation_names
-        assert "Weld One" not in operation_names
-        assert "Laser Two" not in operation_names
+        component_operations = data["operations"][:3]
+        assert [op["component_part_id"] for op in component_operations] == [
+            component_one.id,
+            component_one.id,
+            component_two.id,
+        ]
+        assert [op["component_quantity"] for op in component_operations] == [1, 1, 1]
 
     def test_assembly_work_order_places_final_inspection_last(
         self, client: TestClient, auth_headers: dict, db_session
@@ -510,11 +532,12 @@ class TestWorkOrdersAPI:
 
         operation_names = [op["name"] for op in data["operations"]]
         assert operation_names == [
+            f"{component.part_number} - Machine Component",
             "Build Final Assembly",
             "Final Inspection",
         ]
         operation_groups = [op["operation_group"] for op in data["operations"]]
-        assert operation_groups == ["ASSEMBLY", "INSPECT"]
+        assert operation_groups == ["MACHINE", "ASSEMBLY", "INSPECT"]
 
     def test_assembly_work_order_blocks_out_of_sequence_start(
         self, client: TestClient, auth_headers: dict, db_session
