@@ -108,8 +108,10 @@ export default function ShopFloorSimple() {
   
   // Modal states
   const [checkOutModal, setCheckOutModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
+  const [productionModal, setProductionModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
   const [detailsModal, setDetailsModal] = useState<any | null>(null);
   const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
+  const [productionData, setProductionData] = useState({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, notes: '' });
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
   const [priorityReason, setPriorityReason] = useState('');
@@ -511,6 +513,11 @@ export default function ShopFloorSimple() {
     setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   };
 
+  const handleOpenProductionModal = (operation: Operation, job: ActiveJob) => {
+    setProductionModal({ operation, job });
+    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, notes: '' });
+  };
+
   const getOperationForActiveJob = (job: ActiveJob): Operation => {
     const matchingOperation = operations.find((op) => getActiveJobForOperation(op)?.time_entry_id === job.time_entry_id);
     if (matchingOperation) return matchingOperation;
@@ -554,11 +561,76 @@ export default function ShopFloorSimple() {
     setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
   };
 
+  const closeProductionModal = () => {
+    setProductionModal(null);
+    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, notes: '' });
+  };
+
   const adjustGoodQuantity = (delta: number) => {
     setCheckOutData((prev) => ({
       ...prev,
       quantity_produced: Math.max(0, Number(prev.quantity_produced || 0) + delta),
     }));
+  };
+
+  const adjustProductionQuantity = (delta: number) => {
+    setProductionData((prev) => ({
+      ...prev,
+      quantity_complete_delta: Math.max(0, Number(prev.quantity_complete_delta || 0) + delta),
+    }));
+  };
+
+  const reportProduction = async (
+    operation: Operation,
+    quantityCompleteDelta: number,
+    quantityScrappedDelta = 0,
+    notes?: string,
+    closeModal = false
+  ) => {
+    setActionLoading(operation.id);
+    try {
+      await api.reportOperationProduction(operation.id, {
+        quantity_complete_delta: quantityCompleteDelta,
+        quantity_scrapped_delta: quantityScrappedDelta,
+        notes: notes || undefined,
+      });
+      const label = quantityCompleteDelta > 0
+        ? `Added ${quantityCompleteDelta} complete part${quantityCompleteDelta === 1 ? '' : 's'}`
+        : `Added ${quantityScrappedDelta} scrap`;
+      showToast('success', label);
+      if (closeModal) closeProductionModal();
+      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to add completed quantity');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleSaveProduction = async () => {
+    if (!productionModal) return;
+    await reportProduction(
+      productionModal.operation,
+      Number(productionData.quantity_complete_delta || 0),
+      Number(productionData.quantity_scrapped_delta || 0),
+      productionData.notes,
+      true
+    );
+  };
+
+  const handleCompleteOperation = async (operation: Operation) => {
+    setActionLoading(operation.id);
+    try {
+      await api.completeOperation(operation.id, {
+        quantity_complete: Number(operation.quantity_ordered || 0),
+      });
+      showToast('success', `Completed ${operation.work_order_number}`);
+      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to complete operation');
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   const handleClockOut = async () => {
@@ -1256,6 +1328,8 @@ export default function ShopFloorSimple() {
             const activeJob = getActiveJobForOperation(op);
             const canCheckIn = op.can_check_in !== false;
             const showCheckIn = op.status === 'pending' || op.status === 'ready' || (op.status === 'in_progress' && !activeJob);
+            const remainingQuantity = getRemainingQuantity(op);
+            const targetReached = Boolean(activeJob && op.status === 'in_progress' && remainingQuantity <= 0);
             
             return (
               <div 
@@ -1314,6 +1388,33 @@ export default function ShopFloorSimple() {
                     {Math.round(progress)}% complete
                   </div>
                 </div>
+
+                {targetReached && (
+                  <div className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-emerald-300">Target quantity reached</p>
+                        <p className="text-xs text-emerald-200/80">Stay clocked in, complete the operation, or check out.</p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleCompleteOperation(op)}
+                          disabled={actionLoading === op.id}
+                          className="btn-success btn-sm"
+                        >
+                          Complete Operation
+                        </button>
+                        <button
+                          onClick={() => handleOpenCheckOut(op, activeJob!)}
+                          disabled={actionLoading === op.id}
+                          className="btn-secondary btn-sm"
+                        >
+                          Check Out
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 
                 {/* Meta Info */}
                 <div className="flex items-center justify-between text-sm text-slate-400 mb-4">
@@ -1349,6 +1450,33 @@ export default function ShopFloorSimple() {
                 
                 {/* Action Buttons */}
                 <div className="flex flex-col sm:flex-row gap-2" data-tour="sf-complete">
+                  {op.status === 'in_progress' && activeJob && !targetReached && (
+                    <>
+                      <button
+                        onClick={() => reportProduction(op, 1)}
+                        disabled={actionLoading === op.id || remainingQuantity <= 0}
+                        className="flex-1 btn-success text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={remainingQuantity <= 0 ? 'Target quantity reached' : 'Add one completed part'}
+                      >
+                        {actionLoading === op.id ? (
+                          <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
+                        ) : (
+                          <>
+                            <CheckCircleIcon className="h-4 w-4 mr-1.5" />
+                            <span>+1 Complete</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        onClick={() => handleOpenProductionModal(op, activeJob)}
+                        disabled={actionLoading === op.id}
+                        className="btn-secondary text-sm py-2.5 px-3 w-full sm:w-auto"
+                      >
+                        More
+                      </button>
+                    </>
+                  )}
+
                   {/* Check In Button */}
                   {showCheckIn && (
                     <button
@@ -1374,11 +1502,11 @@ export default function ShopFloorSimple() {
                   )}
                   
                   {/* Check Out Button */}
-                  {op.status === 'in_progress' && activeJob && (
+                  {op.status === 'in_progress' && activeJob && !targetReached && (
                     <button
                       onClick={() => handleOpenCheckOut(op, activeJob)}
                       disabled={actionLoading === op.id}
-                      className="flex-1 btn-success text-base sm:text-sm py-3 sm:py-2.5 w-full"
+                      className="btn-secondary text-sm py-2.5 px-3 w-full sm:w-auto"
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
@@ -1438,6 +1566,120 @@ export default function ShopFloorSimple() {
         </div>
       )}
 
+      {/* Add Production Modal */}
+      {productionModal && createPortal((
+        <div className="modal-overlay" onClick={closeProductionModal}>
+          <div className="modal max-w-md" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="text-lg font-semibold">Add Completed Quantity</h3>
+              <button onClick={closeProductionModal} className="p-2 rounded-lg hover:bg-slate-800">
+                <XMarkIcon className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="modal-body space-y-4">
+              <div className="bg-slate-800/50 rounded-lg p-4">
+                <p className="text-sm text-slate-400">Operation</p>
+                <p className="font-semibold text-white">
+                  {productionModal.operation.operation_number} - {productionModal.operation.operation_name}
+                </p>
+                <p className="text-sm text-slate-400 mt-1">
+                  {productionModal.operation.work_order_number} &middot; {productionModal.operation.part_number}
+                </p>
+                <p className="mt-2 text-xs text-slate-400">
+                  Completed {productionModal.operation.quantity_complete} / {productionModal.operation.quantity_ordered}
+                </p>
+              </div>
+
+              <div>
+                <label className="label">Good parts to add</label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  value={productionData.quantity_complete_delta}
+                  onChange={(e) => setProductionData({ ...productionData, quantity_complete_delta: Number(e.target.value) || 0 })}
+                  className="input h-14 text-center text-2xl font-bold"
+                  autoFocus
+                />
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  {[1, 5, 10].map((amount) => (
+                    <button
+                      key={amount}
+                      type="button"
+                      onClick={() => adjustProductionQuantity(amount)}
+                      className="btn-secondary min-h-11 px-2 text-sm"
+                    >
+                      +{amount}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setProductionData({
+                      ...productionData,
+                      quantity_complete_delta: getRemainingQuantity(productionModal.operation),
+                    })}
+                    className="btn-secondary col-span-3 min-h-11 px-2 text-sm"
+                  >
+                    Remaining
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-slate-400">
+                  Remaining: {getRemainingQuantity(productionModal.operation)}
+                </p>
+              </div>
+
+              <div>
+                <label className="label">Scrap to add</label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  value={productionData.quantity_scrapped_delta}
+                  onChange={(e) => setProductionData({ ...productionData, quantity_scrapped_delta: Number(e.target.value) || 0 })}
+                  className="input h-12 text-center text-lg font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="label">Notes (optional)</label>
+                <textarea
+                  value={productionData.notes}
+                  onChange={(e) => setProductionData({ ...productionData, notes: e.target.value })}
+                  className="input"
+                  rows={3}
+                  placeholder="Production notes, scrap details, or inspection notes..."
+                />
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button onClick={closeProductionModal} className="btn-secondary">
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveProduction}
+                disabled={
+                  actionLoading === productionModal.operation.id ||
+                  (Number(productionData.quantity_complete_delta || 0) <= 0 &&
+                    Number(productionData.quantity_scrapped_delta || 0) <= 0)
+                }
+                className="btn-success disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {actionLoading === productionModal.operation.id ? (
+                  <ArrowPathIcon className="h-5 w-5 animate-spin" />
+                ) : (
+                  <>
+                    <CheckCircleIcon className="h-5 w-5 mr-2" />
+                    Add to Completed
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      ), document.body)}
+
       {/* Check Out Modal */}
       {checkOutModal && createPortal((
         <div className="modal-overlay" onClick={closeCheckOutModal}>
@@ -1464,7 +1706,7 @@ export default function ShopFloorSimple() {
               </div>
               
               <div>
-                <label className="label">Good parts this session</label>
+                <label className="label">Additional good parts at checkout</label>
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -1499,7 +1741,7 @@ export default function ShopFloorSimple() {
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-slate-400">
-                  Remaining: {getRemainingQuantity(checkOutModal.operation)}
+                  Use this only for parts not already added with +1 Complete. Remaining: {getRemainingQuantity(checkOutModal.operation)}
                 </p>
               </div>
 

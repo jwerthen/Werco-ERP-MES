@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime
 from fastapi import status
 from fastapi.testclient import TestClient
 
@@ -7,6 +8,8 @@ from app.models.part import Part
 from app.models.routing import Routing, RoutingOperation
 from app.models.work_center import WorkCenter
 from app.models.audit_log import AuditLog
+from app.models.time_entry import TimeEntry, TimeEntryType
+from app.models.user import User
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 
 
@@ -1115,6 +1118,85 @@ class TestWorkOrdersAPI:
         assert start_response.status_code == status.HTTP_200_OK
         db_session.expire_all()
         assert db_session.get(WorkOrderOperation, second_op.id).status == OperationStatus.IN_PROGRESS
+
+    def test_shop_floor_reports_production_without_clocking_operator_out(
+        self, client: TestClient, operator_headers: dict, operator_user: User, db_session
+    ):
+        part = Part(
+            part_number="SHOP-PROD-001",
+            name="Shop Production Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-PROD-001",
+            name="Production Tracking Work Center",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-PROD-001",
+            part_id=part.id,
+            quantity_ordered=5,
+            status=WorkOrderStatus.IN_PROGRESS,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+
+        operation = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=work_center.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="Track Production",
+            status=OperationStatus.IN_PROGRESS,
+            company_id=1,
+        )
+        db_session.add(operation)
+        db_session.flush()
+
+        time_entry = TimeEntry(
+            user_id=operator_user.id,
+            work_order_id=work_order.id,
+            operation_id=operation.id,
+            work_center_id=work_center.id,
+            entry_type=TimeEntryType.RUN,
+            clock_in=datetime.utcnow(),
+            company_id=1,
+        )
+        db_session.add(time_entry)
+        db_session.commit()
+
+        response = client.post(
+            f"/api/v1/shop-floor/operations/{operation.id}/production",
+            headers=operator_headers,
+            json={"quantity_complete_delta": 2, "quantity_scrapped_delta": 1},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["operation"]["quantity_complete"] == 2
+        assert data["active_time_entry"]["quantity_produced"] == 2
+        assert data["active_time_entry"]["quantity_scrapped"] == 1
+        assert data["active_time_entry"]["clock_out"] is None
+
+        db_session.expire_all()
+        refreshed_operation = db_session.get(WorkOrderOperation, operation.id)
+        refreshed_entry = db_session.get(TimeEntry, time_entry.id)
+        assert refreshed_operation.quantity_complete == 2
+        assert refreshed_operation.quantity_scrapped == 1
+        assert refreshed_operation.status == OperationStatus.IN_PROGRESS
+        assert refreshed_entry.quantity_produced == 2
+        assert refreshed_entry.quantity_scrapped == 1
+        assert refreshed_entry.clock_out is None
 
 
 @pytest.mark.api

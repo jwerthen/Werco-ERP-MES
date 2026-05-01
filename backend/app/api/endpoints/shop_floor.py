@@ -32,6 +32,12 @@ class OperationCompleteRequest(BaseModel):
     quantity_complete: float
     notes: Optional[str] = None
 
+
+class ProductionReportRequest(BaseModel):
+    quantity_complete_delta: float = 0.0
+    quantity_scrapped_delta: float = 0.0
+    notes: Optional[str] = None
+
 router = APIRouter()
 
 
@@ -1009,6 +1015,146 @@ def start_operation(
             "id": operation.id,
             "status": operation.status.value,
             "actual_start": operation.actual_start.isoformat() if operation.actual_start else None
+        }
+    }
+
+
+@router.post("/operations/{operation_id}/production")
+def report_operation_production(
+    operation_id: int,
+    production_data: ProductionReportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
+):
+    """
+    Add produced/scrapped quantity while keeping the operator clocked in.
+
+    This is intentionally separate from checkout: it updates progress and the
+    active time entry production counters, but does not close time or complete
+    the operation automatically when the target quantity is reached.
+    """
+    operation = db.query(WorkOrderOperation).options(
+        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
+    ).filter(
+        WorkOrderOperation.id == operation_id,
+        WorkOrderOperation.company_id == company_id,
+    ).first()
+
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+
+    work_order = operation.work_order
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found for this operation")
+
+    if operation.status != OperationStatus.IN_PROGRESS:
+        raise HTTPException(status_code=400, detail="Operation must be in progress to add completed quantity")
+
+    active_entry = db.query(TimeEntry).filter(
+        and_(
+            TimeEntry.user_id == current_user.id,
+            TimeEntry.operation_id == operation_id,
+            TimeEntry.clock_out.is_(None),
+            TimeEntry.company_id == company_id,
+        )
+    ).first()
+    if not active_entry:
+        raise HTTPException(status_code=400, detail="You must be clocked in to add completed quantity")
+
+    good_delta = production_data.quantity_complete_delta
+    scrap_delta = production_data.quantity_scrapped_delta
+    if math.isnan(good_delta) or math.isinf(good_delta) or math.isnan(scrap_delta) or math.isinf(scrap_delta):
+        raise HTTPException(status_code=400, detail="Quantity must be a valid number")
+    if good_delta < 0 or scrap_delta < 0:
+        raise HTTPException(status_code=400, detail="Quantity cannot be negative")
+    if good_delta == 0 and scrap_delta == 0:
+        raise HTTPException(status_code=400, detail="Enter a completed or scrap quantity")
+
+    target_qty = _operation_target_quantity(operation, work_order)
+    next_complete_qty = float(operation.quantity_complete or 0) + good_delta
+    if target_qty > 0 and next_complete_qty > target_qty:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Quantity ({next_complete_qty}) cannot exceed quantity ordered ({target_qty})"
+        )
+
+    operation.quantity_complete = next_complete_qty
+    operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + scrap_delta
+    operation.updated_at = datetime.utcnow()
+
+    active_entry.quantity_produced = float(active_entry.quantity_produced or 0) + good_delta
+    active_entry.quantity_scrapped = float(active_entry.quantity_scrapped or 0) + scrap_delta
+    if production_data.notes:
+        active_entry.notes = (
+            f"{active_entry.notes}\n{production_data.notes}"
+            if active_entry.notes
+            else production_data.notes
+        )
+    active_entry.updated_at = datetime.utcnow()
+
+    _sync_work_order_quantity_complete(work_order, operation, all_operations_complete=False)
+    work_order.updated_at = datetime.utcnow()
+
+    AuditService(db, current_user).log(
+        action="REPORT_OPERATION_PRODUCTION",
+        resource_type="work_order_operation",
+        resource_id=operation_id,
+        description=(
+            f"Reported production on operation {operation.operation_number} for WO {work_order.work_order_number}. "
+            f"Added good: {good_delta}, scrap: {scrap_delta}. "
+            f"Qty: {operation.quantity_complete}/{target_qty}"
+            + (f". Notes: {production_data.notes}" if production_data.notes else "")
+        )
+    )
+
+    db.commit()
+    db.refresh(operation)
+    db.refresh(active_entry)
+
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_production_reported",
+                "work_order_id": work_order.id,
+                "operation_id": operation.id,
+                "quantity_complete": operation.quantity_complete,
+                "quantity_scrapped": operation.quantity_scrapped,
+            }
+        )
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {
+            "event": "operation_production_reported",
+            "operation_id": operation.id,
+        }
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "operation_production_reported",
+            "work_order_id": work_order.id,
+            "operation_id": operation.id,
+        }
+    )
+
+    return {
+        "message": "Production quantity added",
+        "operation": {
+            "id": operation.id,
+            "status": operation.status.value,
+            "quantity_complete": operation.quantity_complete,
+            "quantity_scrapped": operation.quantity_scrapped,
+            "quantity_ordered": target_qty,
+        },
+        "active_time_entry": {
+            "id": active_entry.id,
+            "quantity_produced": active_entry.quantity_produced,
+            "quantity_scrapped": active_entry.quantity_scrapped,
+            "clock_out": active_entry.clock_out.isoformat() if active_entry.clock_out else None,
         }
     }
 

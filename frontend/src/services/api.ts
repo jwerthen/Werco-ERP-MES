@@ -645,6 +645,11 @@ class ApiService {
     return response.data;
   }
 
+  async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string }) {
+    const response = await this.api.post(`/shop-floor/operations/${operationId}/production`, data);
+    return response.data;
+  }
+
   async getOperationDetails(operationId: number) {
     const response = await this.api.get(`/shop-floor/operations/${operationId}`);
     return response.data;
