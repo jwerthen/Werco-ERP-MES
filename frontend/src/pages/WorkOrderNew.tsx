@@ -98,6 +98,10 @@ interface OperationPreview {
   work_center_name: string;
   setup_time_hours: number;
   run_time_hours: number;
+  run_time_per_unit?: number;
+  component_part_id?: number;
+  component_quantity?: number;
+  quantity_per_assembly?: number;
   fromRouting: boolean;
 }
 
@@ -200,8 +204,10 @@ export default function WorkOrderNew() {
   );
 
   const normalizedPartSearch = partSearch.trim().toLowerCase();
+  const normalizePartType = (partType?: string) => (partType || '').trim().toLowerCase();
+
   const workOrderPartOptions = useMemo(() => {
-    const eligibleParts = parts.filter((part) => ['assembly', 'manufactured'].includes(part.part_type));
+    const eligibleParts = parts.filter((part) => ['assembly', 'manufactured'].includes(normalizePartType(part.part_type)));
 
     const scored = eligibleParts
       .map((part) => {
@@ -230,7 +236,7 @@ export default function WorkOrderNew() {
         const name = part.name.toLowerCase();
         let score = 4;
         if (!normalizedPartSearch) {
-          score = part.part_type === 'assembly' ? 1 : usage.length > 0 ? 2 : 3;
+          score = normalizePartType(part.part_type) === 'assembly' ? 1 : usage.length > 0 ? 2 : 3;
         } else if (partNumber.startsWith(normalizedPartSearch)) {
           score = 0;
         } else if (name.startsWith(normalizedPartSearch)) {
@@ -271,7 +277,7 @@ export default function WorkOrderNew() {
   ), [workCenters]);
 
   const formatPartType = (partType: string) => (
-    partType
+    normalizePartType(partType)
       .split('_')
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(' ')
@@ -437,7 +443,7 @@ export default function WorkOrderNew() {
     if (!partId) return;
 
     // Find the selected part to check if it's an assembly
-    const isAssembly = selectedPart?.part_type === 'assembly';
+    const isAssembly = normalizePartType(selectedPart?.part_type) === 'assembly';
 
     setLoadingRouting(true);
     try {
@@ -455,6 +461,7 @@ export default function WorkOrderNew() {
           // Create a fake routing object to indicate we have operations
           setRouting({ id: 0, part_id: partId, revision: 'BOM', status: 'released', operations: [] } as any);
           const ops: OperationPreview[] = previewRes.operations_preview.map((op: any, index: number) => ({
+            quantity_per_assembly: (op.component_quantity || form.quantity_ordered) / form.quantity_ordered,
             sequence: (index + 1) * 10,
             operation_number: `Op ${(index + 1) * 10}`,
             name: op.name,
@@ -462,6 +469,7 @@ export default function WorkOrderNew() {
             work_center_name: op.work_center_name || '',
             setup_time_hours: op.setup_hours || 0,
             run_time_hours: (op.run_hours_per_unit || 0) * (op.component_quantity || form.quantity_ordered),
+            run_time_per_unit: op.run_hours_per_unit || 0,
             fromRouting: true,
             component_part_id: op.component_part_id,
             component_quantity: op.component_quantity
@@ -489,6 +497,7 @@ export default function WorkOrderNew() {
               work_center_name: op.work_center?.name || '',
               setup_time_hours: op.setup_hours,
               run_time_hours: op.run_hours_per_unit * form.quantity_ordered,
+              run_time_per_unit: op.run_hours_per_unit,
               fromRouting: true
             }));
           setOperations(ops);
@@ -562,8 +571,12 @@ export default function WorkOrderNew() {
     if (routing) {
       setOperations(ops => ops.map(op => ({
         ...op,
-        run_time_hours: op.fromRouting 
-          ? (routing.operations.find(r => r.sequence === op.sequence)?.run_hours_per_unit || 0) * qty
+        component_quantity: op.fromRouting && op.quantity_per_assembly
+          ? op.quantity_per_assembly * qty
+          : op.component_quantity,
+        run_time_hours: op.fromRouting
+          ? (op.run_time_per_unit || routing.operations.find(r => r.sequence === op.sequence)?.run_hours_per_unit || 0)
+            * (op.quantity_per_assembly ? op.quantity_per_assembly * qty : qty)
           : op.run_time_hours
       })));
     }
@@ -782,7 +795,7 @@ export default function WorkOrderNew() {
                                   )}
                                 </div>
                               </div>
-                              {part.part_type === 'assembly' && (
+                              {normalizePartType(part.part_type) === 'assembly' && (
                                 <span className="shrink-0 rounded-md bg-blue-500/10 px-2 py-1 text-xs font-medium text-blue-200 border border-blue-500/20">
                                   Assembly
                                 </span>
@@ -790,7 +803,7 @@ export default function WorkOrderNew() {
                             </div>
                           </button>
                         ))}
-                        {parts.filter((part) => ['assembly', 'manufactured'].includes(part.part_type)).length > workOrderPartOptions.length && (
+                        {parts.filter((part) => ['assembly', 'manufactured'].includes(normalizePartType(part.part_type))).length > workOrderPartOptions.length && (
                           <div className="px-4 py-2 text-xs text-slate-400 border-t border-slate-700/40">
                             Showing {workOrderPartOptions.length} matches
                           </div>

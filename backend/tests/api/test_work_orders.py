@@ -237,12 +237,20 @@ class TestWorkOrdersAPI:
         component_two = Part(
             part_number="CMP-ORDER-002",
             name="Component Two",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        nested_component = Part(
+            part_number="CMP-ORDER-003",
+            name="Nested Component",
             part_type="manufactured",
             unit_of_measure="each",
             is_active=True,
             company_id=1,
         )
-        db_session.add_all([assembly, component_one, component_two])
+        db_session.add_all([assembly, component_one, component_two, nested_component])
         db_session.flush()
 
         laser_wc = WorkCenter(
@@ -272,6 +280,9 @@ class TestWorkOrdersAPI:
         bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add(bom)
         db_session.flush()
+        nested_bom = BOM(part_id=component_two.id, revision="A", status="released", is_active=True, company_id=1)
+        db_session.add(nested_bom)
+        db_session.flush()
         db_session.add_all(
             [
                 BOMItem(
@@ -294,6 +305,16 @@ class TestWorkOrdersAPI:
                     unit_of_measure="each",
                     company_id=1,
                 ),
+                BOMItem(
+                    bom_id=nested_bom.id,
+                    component_part_id=nested_component.id,
+                    item_number=10,
+                    quantity=2,
+                    item_type="make",
+                    line_type="component",
+                    unit_of_measure="each",
+                    company_id=1,
+                ),
             ]
         )
 
@@ -303,10 +324,13 @@ class TestWorkOrdersAPI:
         routing_two = Routing(
             part_id=component_two.id, revision="A", status="released", is_active=True, company_id=1
         )
+        routing_nested = Routing(
+            part_id=nested_component.id, revision="A", status="released", is_active=True, company_id=1
+        )
         assembly_routing = Routing(
             part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1
         )
-        db_session.add_all([routing_one, routing_two, assembly_routing])
+        db_session.add_all([routing_one, routing_two, routing_nested, assembly_routing])
         db_session.flush()
 
         db_session.add_all(
@@ -339,6 +363,17 @@ class TestWorkOrdersAPI:
                     operation_number="Op 10",
                     name="Laser Two",
                     work_center_id=laser_wc.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.1,
+                    is_active=True,
+                    company_id=1,
+                ),
+                RoutingOperation(
+                    routing_id=routing_nested.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Bend Nested",
+                    work_center_id=bend_wc.id,
                     setup_hours=0,
                     run_hours_per_unit=0.1,
                     is_active=True,
@@ -382,6 +417,7 @@ class TestWorkOrdersAPI:
             f"{component_one.part_number} - Bend One",
             f"{component_one.part_number} - Weld One",
             f"{component_two.part_number} - Laser Two",
+            f"{nested_component.part_number} - Bend Nested",
             "Assemble Frame",
             "Final Inspection",
         ]
@@ -399,16 +435,18 @@ class TestWorkOrdersAPI:
             f"{component_one.part_number} - Bend One",
             f"{component_one.part_number} - Weld One",
             f"{component_two.part_number} - Laser Two",
+            f"{nested_component.part_number} - Bend Nested",
             "Assemble Frame",
             "Final Inspection",
         ]
-        component_operations = data["operations"][:3]
+        component_operations = data["operations"][:4]
         assert [op["component_part_id"] for op in component_operations] == [
             component_one.id,
             component_one.id,
             component_two.id,
+            nested_component.id,
         ]
-        assert [op["component_quantity"] for op in component_operations] == [1, 1, 1]
+        assert [op["component_quantity"] for op in component_operations] == [1, 1, 1, 2]
 
     def test_assembly_work_order_places_final_inspection_last(
         self, client: TestClient, auth_headers: dict, db_session

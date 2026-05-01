@@ -34,6 +34,67 @@ class WorkOrderPriorityUpdate(BaseModel):
     reason: Optional[str] = Field(None, max_length=500, description="Optional reason for priority change")
 
 
+def _get_active_bom(db: Session, part_id: int, company_id: int) -> Optional[BOM]:
+    return db.query(BOM).filter(
+        BOM.part_id == part_id,
+        BOM.company_id == company_id,
+        BOM.is_active == True,
+    ).first()
+
+
+def _collect_bom_components(
+    db: Session,
+    bom: BOM,
+    company_id: int,
+    parent_qty: float = 1.0,
+    visited_part_ids: Optional[set[int]] = None,
+) -> List[tuple[BOMItem, Part, float]]:
+    """Return BOM components in multi-level order with quantity per parent assembly."""
+    if visited_part_ids is None:
+        visited_part_ids = {bom.part_id}
+
+    items = db.query(BOMItem).options(
+        joinedload(BOMItem.component_part)
+    ).filter(
+        BOMItem.bom_id == bom.id,
+        BOMItem.company_id == company_id,
+    ).order_by(
+        BOMItem.item_number.asc(),
+        BOMItem.id.asc(),
+    ).all()
+
+    components: List[tuple[BOMItem, Part, float]] = []
+    for item in items:
+        component = item.component_part
+        if not component or component.id in visited_part_ids:
+            continue
+
+        qty = float(item.quantity or 1)
+        scrap = float(item.scrap_factor or 0)
+        extended_qty = qty * parent_qty * (1 + scrap)
+        components.append((item, component, extended_qty))
+
+        item_type = (item.item_type or "").lower()
+        if item_type == "buy":
+            continue
+
+        child_bom = _get_active_bom(db, component.id, company_id)
+        if child_bom:
+            next_visited = set(visited_part_ids)
+            next_visited.add(component.id)
+            components.extend(
+                _collect_bom_components(
+                    db,
+                    child_bom,
+                    company_id,
+                    parent_qty=extended_qty,
+                    visited_part_ids=next_visited,
+                )
+            )
+
+    return components
+
+
 def _has_incomplete_predecessors(
     operations: List[WorkOrderOperation],
     sequence: int,
@@ -187,46 +248,29 @@ def preview_work_order_operations(
     
     if part.part_type == PartType.ASSEMBLY:
         # Check for BOM
-        bom = db.query(BOM).filter(
-            BOM.company_id == company_id,
-            BOM.part_id == part_id,
-            BOM.is_active == True
-        ).first()
+        bom = _get_active_bom(db, part_id, company_id)
         
         if bom:
             result["bom_found"] = True
             result["bom_status"] = bom.status
             
-            # Get BOM items with component parts preloaded
-            items = db.query(BOMItem).options(
-                joinedload(BOMItem.component_part)
-            ).filter(
-                BOMItem.bom_id == bom.id,
-                BOMItem.company_id == company_id,
-            ).order_by(
-                BOMItem.item_number.asc(),
-                BOMItem.id.asc()
-            ).all()
-            result["bom_items_count"] = len(items)
+            component_items = _collect_bom_components(db, bom, company_id)
+            result["bom_items_count"] = len(component_items)
 
-            component_ids = [item.component_part_id for item in items if item.component_part_id]
+            component_ids = [component.id for _, component, _ in component_items]
             routings_by_part_id = {}
             if component_ids:
                 routings = db.query(Routing).options(
                     selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
                 ).filter(
                     Routing.company_id == company_id,
-                    Routing.part_id.in_(component_ids),
+                    Routing.part_id.in_(set(component_ids)),
                     Routing.is_active == True,
                     Routing.status == "released"
                 ).all()
                 routings_by_part_id = {r.part_id: r for r in routings}
 
-            for item in items:
-                component = item.component_part
-                if not component:
-                    continue
-                    
+            for item, component, component_qty_per_assembly in component_items:
                 # Check for routing
                 routing = routings_by_part_id.get(component.id)
                 
@@ -234,7 +278,7 @@ def preview_work_order_operations(
                     "part_id": component.id,
                     "part_number": component.part_number,
                     "quantity_per": float(item.quantity),
-                    "total_qty": float(item.quantity) * quantity,
+                    "total_qty": component_qty_per_assembly * quantity,
                     "has_routing": routing is not None,
                     "routing_status": routing.status if routing else None,
                     "routing_operations": []
@@ -257,7 +301,7 @@ def preview_work_order_operations(
                                 "run_hours_per_unit": op.run_hours_per_unit,
                                 "component_part_id": component.id,
                                 "component_part_number": component.part_number,
-                                "component_quantity": float(item.quantity) * quantity,
+                                "component_quantity": component_qty_per_assembly * quantity,
                                 "operation_group": get_work_center_group(work_center) if work_center else None
                             })
                 
@@ -463,46 +507,31 @@ def _create_assembly_routing_operations(
     """Create assembly operations from BOM component routings, then assembly routing."""
 
     sequence = 10
-    bom = db.query(BOM).filter(
-        BOM.part_id == work_order.part_id,
-        BOM.company_id == (company_id or work_order.company_id),
-        BOM.is_active == True,
-    ).first()
+    company_id = company_id or work_order.company_id
+    bom = _get_active_bom(db, work_order.part_id, company_id)
 
     if bom:
-        bom_items = db.query(BOMItem).options(
-            joinedload(BOMItem.component_part)
-        ).filter(
-            BOMItem.bom_id == bom.id,
-            BOMItem.company_id == (company_id or work_order.company_id),
-        ).order_by(
-            BOMItem.item_number.asc(),
-            BOMItem.id.asc(),
-        ).all()
-        component_ids = [item.component_part_id for item in bom_items if item.component_part_id]
+        component_items = _collect_bom_components(db, bom, company_id)
+        component_ids = [component.id for _, component, _ in component_items]
 
         routings_by_part_id = {}
         if component_ids:
             routings = db.query(Routing).options(
                 selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
             ).filter(
-                Routing.company_id == (company_id or work_order.company_id),
-                Routing.part_id.in_(component_ids),
+                Routing.company_id == company_id,
+                Routing.part_id.in_(set(component_ids)),
                 Routing.is_active == True,
                 Routing.status == "released",
             ).all()
             routings_by_part_id = {routing.part_id: routing for routing in routings}
 
-        for item in bom_items:
-            component = item.component_part
-            if not component:
-                continue
-
+        for _, component, component_qty_per_assembly in component_items:
             routing = routings_by_part_id.get(component.id)
             if not routing:
                 continue
 
-            component_qty = float(item.quantity) * wo_quantity
+            component_qty = component_qty_per_assembly * wo_quantity
             for rop in sorted(routing.operations, key=lambda operation: operation.sequence):
                 if not rop.is_active:
                     continue
@@ -527,7 +556,7 @@ def _create_assembly_routing_operations(
                     component_part_id=component.id,
                     component_quantity=component_qty,
                     operation_group=get_work_center_group(work_center) if work_center else None,
-                    company_id=company_id or work_order.company_id,
+                    company_id=company_id,
                 )
                 db.add(wo_op)
                 sequence += 10
@@ -535,7 +564,7 @@ def _create_assembly_routing_operations(
     assembly_routing = db.query(Routing).options(
         selectinload(Routing.operations).selectinload(RoutingOperation.work_center)
     ).filter(
-        Routing.company_id == (company_id or work_order.company_id),
+        Routing.company_id == company_id,
         Routing.part_id == work_order.part_id,
         Routing.is_active == True,
         Routing.status == "released"
@@ -563,7 +592,7 @@ def _create_assembly_routing_operations(
             run_time_hours=float(rop.run_hours_per_unit or 0) * wo_quantity,
             status=OperationStatus.PENDING,
             operation_group=get_work_center_group(work_center) if work_center else None,
-            company_id=company_id or work_order.company_id,
+            company_id=company_id,
         )
         db.add(wo_op)
         sequence += 10

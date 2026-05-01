@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -18,6 +18,54 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderStatus
 
 router = APIRouter()
+
+
+def _active_bom_for_part(db: Session, part_id: int, company_id: int) -> Optional[BOM]:
+    return db.query(BOM).filter(
+        BOM.part_id == part_id,
+        BOM.company_id == company_id,
+        BOM.is_active == True,
+    ).first()
+
+
+def _bom_has_released_component_routing(
+    db: Session,
+    bom: BOM,
+    company_id: int,
+    visited_part_ids: Optional[Set[int]] = None,
+) -> bool:
+    if visited_part_ids is None:
+        visited_part_ids = {bom.part_id}
+
+    items = db.query(BOMItem).filter(
+        BOMItem.bom_id == bom.id,
+        BOMItem.company_id == company_id,
+    ).all()
+
+    for item in items:
+        if not item.component_part_id or item.component_part_id in visited_part_ids:
+            continue
+
+        routing_exists = db.query(Routing.id).filter(
+            Routing.part_id == item.component_part_id,
+            Routing.company_id == company_id,
+            Routing.is_active == True,
+            Routing.status == "released",
+        ).first()
+        if routing_exists:
+            return True
+
+        if (item.item_type or "").lower() == "buy":
+            continue
+
+        child_bom = _active_bom_for_part(db, item.component_part_id, company_id)
+        if child_bom:
+            next_visited = set(visited_part_ids)
+            next_visited.add(item.component_part_id)
+            if _bom_has_released_component_routing(db, child_bom, company_id, next_visited):
+                return True
+
+    return False
 
 
 class SetupStep(BaseModel):
@@ -267,12 +315,27 @@ def get_part_readiness(
     checks: Dict[str, str] = {}
 
     routing = db.query(Routing).filter(Routing.part_id == part_id, Routing.company_id == company_id, Routing.is_active == True).first()
-    bom = db.query(BOM).filter(BOM.part_id == part_id, BOM.company_id == company_id, BOM.is_active == True).first()
+    bom = _active_bom_for_part(db, part_id, company_id)
 
-    if part.part_type in (PartType.MANUFACTURED, PartType.ASSEMBLY):
+    if part.part_type == PartType.MANUFACTURED:
         if not routing:
             blockers.append("No active routing exists for this make part.")
             checks["routing"] = "missing"
+        elif routing.status != "released":
+            warnings.append(f"Routing exists but is {routing.status}.")
+            checks["routing"] = "draft"
+        else:
+            checks["routing"] = "ready"
+
+    if part.part_type == PartType.ASSEMBLY:
+        has_component_routing = bool(bom and _bom_has_released_component_routing(db, bom, company_id))
+        if not routing:
+            if has_component_routing:
+                warnings.append("No assembly routing exists; work order will use released BOM component routings.")
+                checks["routing"] = "component_routings_ready"
+            else:
+                blockers.append("No active routing exists for this make part.")
+                checks["routing"] = "missing"
         elif routing.status != "released":
             warnings.append(f"Routing exists but is {routing.status}.")
             checks["routing"] = "draft"

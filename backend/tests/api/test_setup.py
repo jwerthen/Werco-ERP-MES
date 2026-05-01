@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.bom import BOM, BOMItem
 from app.models.part import Part
-from app.models.routing import Routing
+from app.models.routing import Routing, RoutingOperation
 from app.models.work_center import WorkCenter
 
 
@@ -158,3 +158,82 @@ class TestSetupHealth:
         assert data["checks"]["bom"] == "draft"
         assert "Routing exists but is draft." in data["warnings"]
         assert "BOM exists but is draft." in data["warnings"]
+
+    def test_part_readiness_allows_assembly_with_component_routing(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        db_session: Session,
+    ):
+        assembly = Part(
+            part_number="ASM-READY-COMP-001",
+            name="Readiness Component Routed Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        component = Part(
+            part_number="CMP-READY-COMP-001",
+            name="Readiness Routed Component",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-READY-COMP",
+            name="Ready Component Work Center",
+            work_center_type="machining",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([assembly, component, work_center])
+        db_session.flush()
+
+        bom = BOM(
+            part_id=assembly.id,
+            revision="A",
+            status="released",
+            is_active=True,
+            company_id=1,
+        )
+        routing = Routing(
+            part_id=component.id,
+            revision="A",
+            status="released",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([bom, routing])
+        db_session.flush()
+        db_session.add_all([
+            BOMItem(
+                bom_id=bom.id,
+                component_part_id=component.id,
+                item_number=10,
+                quantity=1,
+                item_type="make",
+                line_type="component",
+                company_id=1,
+            ),
+            RoutingOperation(
+                routing_id=routing.id,
+                sequence=10,
+                operation_number="Op 10",
+                name="Machine Component",
+                work_center_id=work_center.id,
+                is_active=True,
+                company_id=1,
+            ),
+        ])
+        db_session.commit()
+
+        response = client.get(f"/api/v1/setup/readiness/part/{assembly.id}", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["ready"] is True
+        assert data["checks"]["routing"] == "component_routings_ready"
+        assert data["checks"]["bom"] == "ready"
+        assert data["blockers"] == []
