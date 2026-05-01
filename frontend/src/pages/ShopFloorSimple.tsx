@@ -1567,12 +1567,12 @@ export default function ShopFloorSimple() {
             
             <div className="modal-body space-y-6 max-h-[70vh] overflow-y-auto">
               {/* Work Order Info */}
-              <div className="bg-werco-50 rounded-lg p-4">
+              <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-4">
                 <div className="flex justify-between items-start">
                   <div>
-                    <p className="text-sm text-werco-600 font-medium">Work Order</p>
+                    <p className="text-sm text-blue-300 font-medium">Work Order</p>
                     <p className="text-xl font-bold text-white">{detailsModal.work_order.work_order_number}</p>
-                    <p className="text-slate-400">{detailsModal.work_order.part?.part_number} - {detailsModal.work_order.part?.name}</p>
+                    <p className="text-slate-300">{detailsModal.work_order.part?.part_number} - {detailsModal.work_order.part?.name}</p>
                   </div>
                   <button
                     onClick={() => {
@@ -1637,17 +1637,23 @@ export default function ShopFloorSimple() {
                     return (
                       <div 
                         key={op.id} 
-                        className={`flex items-center justify-between p-3 rounded-lg ${op.is_current ? 'bg-werco-100 border border-werco-300' : 'bg-slate-800/50'}`}
+                        className={`flex items-center justify-between gap-3 p-3 rounded-lg border transition-colors ${
+                          op.is_current
+                            ? 'border-blue-400/60 bg-blue-500/10 shadow-[inset_3px_0_0_rgba(96,165,250,0.9)]'
+                            : 'border-transparent bg-slate-800/50'
+                        }`}
                       >
-                        <div className="flex items-center gap-3">
-                          <span className="text-sm font-medium text-slate-400 w-12">{op.operation_number}</span>
-                          <span className="font-medium">{op.name}</span>
-                          <span className="text-xs text-slate-400 tabular-nums">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <span className={`text-sm font-medium w-12 flex-shrink-0 ${op.is_current ? 'text-blue-200' : 'text-slate-400'}`}>
+                            {op.operation_number}
+                          </span>
+                          <span className="font-medium text-slate-100 truncate">{op.name}</span>
+                          <span className="text-xs text-slate-400 tabular-nums flex-shrink-0">
                             {op.quantity_complete} / {op.quantity_ordered}
                           </span>
-                          {op.is_current && <span className="text-xs bg-werco-600 text-white px-2 py-0.5 rounded">Current</span>}
+                          {op.is_current && <span className="text-xs bg-blue-500/20 text-blue-200 border border-blue-400/30 px-2 py-0.5 rounded-full flex-shrink-0">Current</span>}
                         </div>
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${opColors.bg} ${opColors.text}`}>
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${opColors.bg} ${opColors.text}`}>
                           {op.status.replace('_', ' ')}
                         </span>
                       </div>
