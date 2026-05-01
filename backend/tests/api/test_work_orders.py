@@ -289,7 +289,7 @@ class TestWorkOrdersAPI:
                     bom_id=bom.id,
                     component_part_id=component_one.id,
                     item_number=10,
-                    quantity=1,
+                    quantity=3,
                     item_type="make",
                     line_type="component",
                     unit_of_measure="each",
@@ -421,6 +421,12 @@ class TestWorkOrdersAPI:
             "Assemble Frame",
             "Final Inspection",
         ]
+        preview_component_quantities = [
+            op["component_quantity"]
+            for op in preview_response.json()["operations_preview"]
+            if op["component_part_id"]
+        ]
+        assert preview_component_quantities == [3, 3, 1, 2]
 
         response = client.post(
             "/api/v1/work-orders/",
@@ -446,7 +452,7 @@ class TestWorkOrdersAPI:
             component_two.id,
             nested_component.id,
         ]
-        assert [op["component_quantity"] for op in component_operations] == [1, 1, 1, 2]
+        assert [op["component_quantity"] for op in component_operations] == [3, 3, 1, 2]
 
     def test_work_order_manual_preview_operations_preserve_component_quantities(
         self, client: TestClient, auth_headers: dict, db_session
@@ -508,6 +514,83 @@ class TestWorkOrdersAPI:
         assert operation["component_part_number"] == component.part_number
         assert operation["component_quantity"] == 6
         assert operation["operation_group"] == "LASER"
+
+    def test_work_order_detail_reconciles_router_quantities_from_bom(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        """Existing router rows with part-number-prefixed names should display BOM required qty."""
+        assembly = Part(
+            part_number="ASM-RECON-QTY",
+            name="Reconcile Qty Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        component = Part(
+            part_number="CMP-RECON-QTY",
+            name="Reconcile Qty Component",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-RECON-QTY",
+            name="Reconcile Qty WC",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([assembly, component, work_center])
+        db_session.flush()
+
+        bom = BOM(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
+        db_session.add(bom)
+        db_session.flush()
+        db_session.add(
+            BOMItem(
+                bom_id=bom.id,
+                component_part_id=component.id,
+                item_number=10,
+                quantity=4,
+                item_type="make",
+                line_type="component",
+                unit_of_measure="each",
+                company_id=1,
+            )
+        )
+        work_order = WorkOrder(
+            work_order_number="WO-RECON-QTY",
+            part_id=assembly.id,
+            quantity_ordered=2,
+            status=WorkOrderStatus.RELEASED,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+        db_session.add(
+            WorkOrderOperation(
+                work_order_id=work_order.id,
+                work_center_id=work_center.id,
+                sequence=10,
+                operation_number="Op 10",
+                name=f"{component.part_number} - Cut",
+                status=OperationStatus.PENDING,
+                component_quantity=1,
+                company_id=1,
+            )
+        )
+        db_session.commit()
+
+        response = client.get(f"/api/v1/work-orders/{work_order.id}", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        operation = response.json()["operations"][0]
+        assert operation["component_part_id"] == component.id
+        assert operation["component_part_number"] == component.part_number
+        assert operation["component_quantity"] == 8
 
     def test_assembly_work_order_places_final_inspection_last(
         self, client: TestClient, auth_headers: dict, db_session

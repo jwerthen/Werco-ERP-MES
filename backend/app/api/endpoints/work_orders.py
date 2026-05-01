@@ -95,6 +95,69 @@ def _collect_bom_components(
     return components
 
 
+def _bom_required_quantities_by_component(
+    db: Session,
+    work_order: WorkOrder,
+    company_id: int,
+) -> tuple[dict[int, float], dict[str, int], dict[int, Part]]:
+    bom = _get_active_bom(db, work_order.part_id, company_id)
+    if not bom:
+        return {}, {}, {}
+
+    component_items = _collect_bom_components(db, bom, company_id)
+    quantity_by_part_id: dict[int, float] = {}
+    part_by_id: dict[int, Part] = {}
+    part_id_by_number: dict[str, int] = {}
+    work_order_qty = float(work_order.quantity_ordered or 0)
+
+    for _, component, qty_per_assembly in component_items:
+        required_qty = float(qty_per_assembly or 0) * work_order_qty
+        quantity_by_part_id[component.id] = quantity_by_part_id.get(component.id, 0.0) + required_qty
+        part_by_id[component.id] = component
+        part_id_by_number[component.part_number.upper()] = component.id
+
+    return quantity_by_part_id, part_id_by_number, part_by_id
+
+
+def _reconcile_operation_component_quantities(
+    db: Session,
+    work_order: WorkOrder,
+    company_id: int,
+) -> bool:
+    quantity_by_part_id, part_id_by_number, part_by_id = _bom_required_quantities_by_component(
+        db,
+        work_order,
+        company_id,
+    )
+    if not quantity_by_part_id:
+        return False
+
+    changed = False
+    for op in work_order.operations:
+        component_part_id = op.component_part_id
+        if not component_part_id and op.name and " - " in op.name:
+            part_number_prefix = op.name.split(" - ", 1)[0].strip().upper()
+            component_part_id = part_id_by_number.get(part_number_prefix)
+            if component_part_id:
+                op.component_part_id = component_part_id
+                changed = True
+
+        if not component_part_id or component_part_id not in quantity_by_part_id:
+            continue
+
+        required_qty = quantity_by_part_id[component_part_id]
+        if float(op.component_quantity or 0) != required_qty:
+            op.component_quantity = required_qty
+            changed = True
+
+        component = part_by_id.get(component_part_id)
+        if component:
+            op.component_part_number = component.part_number
+            op.component_part_name = component.name
+
+    return changed
+
+
 def _has_incomplete_predecessors(
     operations: List[WorkOrderOperation],
     sequence: int,
@@ -291,21 +354,34 @@ def preview_work_order_operations(
                 ).all()
                 routings_by_part_id = {r.part_id: r for r in routings}
 
+            quantity_by_component_id: dict[int, float] = {}
+            for _, component, component_qty_per_assembly in component_items:
+                quantity_by_component_id[component.id] = (
+                    quantity_by_component_id.get(component.id, 0.0)
+                    + (float(component_qty_per_assembly or 0) * float(quantity or 0))
+                )
+
+            previewed_component_part_ids = set()
             for item, component, component_qty_per_assembly in component_items:
                 # Check for routing
                 routing = routings_by_part_id.get(component.id)
+                total_component_qty = quantity_by_component_id.get(
+                    component.id,
+                    float(component_qty_per_assembly or 0) * float(quantity or 0),
+                )
                 
                 comp_info = {
                     "part_id": component.id,
                     "part_number": component.part_number,
                     "quantity_per": float(item.quantity),
-                    "total_qty": component_qty_per_assembly * quantity,
+                    "total_qty": total_component_qty,
                     "has_routing": routing is not None,
                     "routing_status": routing.status if routing else None,
                     "routing_operations": []
                 }
                 
-                if routing:
+                if routing and component.id not in previewed_component_part_ids:
+                    previewed_component_part_ids.add(component.id)
                     for op in sorted(routing.operations, key=lambda operation: operation.sequence):
                         if op.is_active:
                             work_center = op.work_center
@@ -322,7 +398,7 @@ def preview_work_order_operations(
                                 "run_hours_per_unit": op.run_hours_per_unit,
                                 "component_part_id": component.id,
                                 "component_part_number": component.part_number,
-                                "component_quantity": component_qty_per_assembly * quantity,
+                                "component_quantity": total_component_qty,
                                 "operation_group": get_work_center_group(work_center) if work_center else None
                             })
                 
@@ -499,6 +575,8 @@ def create_work_order(
         selectinload(WorkOrder.operations)
             .selectinload(WorkOrderOperation.work_center),
     ).filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id).first()
+    if _reconcile_operation_component_quantities(db, work_order, company_id):
+        db.commit()
     _enrich_work_order_operations(work_order)
     
     # Audit log for work order creation
@@ -555,12 +633,26 @@ def _create_assembly_routing_operations(
             ).all()
             routings_by_part_id = {routing.part_id: routing for routing in routings}
 
+        quantity_by_component_id: dict[int, float] = {}
+        for _, component_for_qty, qty_per_assembly in component_items:
+            quantity_by_component_id[component_for_qty.id] = (
+                quantity_by_component_id.get(component_for_qty.id, 0.0)
+                + (float(qty_per_assembly or 0) * float(wo_quantity or 0))
+            )
+
+        created_component_part_ids = set()
         for _, component, component_qty_per_assembly in component_items:
+            if component.id in created_component_part_ids:
+                continue
+            created_component_part_ids.add(component.id)
             routing = routings_by_part_id.get(component.id)
             if not routing:
                 continue
 
-            component_qty = component_qty_per_assembly * wo_quantity
+            component_qty = quantity_by_component_id.get(
+                component.id,
+                float(component_qty_per_assembly or 0) * float(wo_quantity or 0),
+            )
             for rop in sorted(routing.operations, key=lambda operation: operation.sequence):
                 if not rop.is_active:
                     continue
@@ -654,6 +746,8 @@ def get_work_order(
     work_order.estimated_cost = work_order.estimated_cost or 0
     work_order.actual_cost = work_order.actual_cost or 0
 
+    if _reconcile_operation_component_quantities(db, work_order, company_id):
+        db.commit()
     _enrich_work_order_operations(work_order)
     
     return work_order
