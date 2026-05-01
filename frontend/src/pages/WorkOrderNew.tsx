@@ -102,6 +102,7 @@ interface OperationPreview {
   component_part_id?: number;
   component_quantity?: number;
   quantity_per_assembly?: number;
+  operation_group?: string;
   fromRouting: boolean;
 }
 
@@ -679,6 +680,10 @@ export default function WorkOrderNew() {
           work_center_id: op.work_center_id,
           setup_time_hours: op.setup_time_hours,
           run_time_hours: op.run_time_hours,
+          run_time_per_piece: op.run_time_per_unit || 0,
+          component_part_id: op.component_part_id,
+          component_quantity: op.component_quantity,
+          operation_group: op.operation_group,
           status: 'pending'
         }));
       } else {

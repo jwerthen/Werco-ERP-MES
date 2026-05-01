@@ -134,6 +134,27 @@ def _release_next_group(work_order: WorkOrder, completed_op: WorkOrderOperation)
     if next_op:
         next_op.status = OperationStatus.READY
 
+
+def _enrich_work_order_operations(work_order: WorkOrder) -> None:
+    for op in work_order.operations:
+        op.setup_time_hours = op.setup_time_hours or 0
+        op.run_time_hours = op.run_time_hours or 0
+        op.run_time_per_piece = op.run_time_per_piece or 0
+        op.actual_setup_hours = op.actual_setup_hours or 0
+        op.actual_run_hours = op.actual_run_hours or 0
+        op.quantity_complete = op.quantity_complete or 0
+        op.quantity_scrapped = op.quantity_scrapped or 0
+        op.estimated_hours = float(op.setup_time_hours) + float(op.run_time_hours)
+        op.actual_hours = float(op.actual_setup_hours) + float(op.actual_run_hours)
+        op.work_center_name = op.work_center.name if op.work_center else None
+
+        if op.component_part_id:
+            component = op.component_part
+            if component:
+                op.component_part_number = component.part_number
+                op.component_part_name = component.name
+
+
 def generate_work_order_number(db: Session, company_id: int = None) -> str:
     """Generate next work order number (WO-YYYYMMDD-XXX)
 
@@ -471,7 +492,14 @@ def create_work_order(
             db.add(operation)
     
     db.commit()
-    db.refresh(work_order)
+    work_order = db.query(WorkOrder).options(
+        joinedload(WorkOrder.part),
+        selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.component_part),
+        selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.work_center),
+    ).filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id).first()
+    _enrich_work_order_operations(work_order)
     
     # Audit log for work order creation
     audit.log_create(
@@ -626,24 +654,7 @@ def get_work_order(
     work_order.estimated_cost = work_order.estimated_cost or 0
     work_order.actual_cost = work_order.actual_cost or 0
 
-    # Enrich operations with component part info and normalize nullables
-    for op in work_order.operations:
-        op.setup_time_hours = op.setup_time_hours or 0
-        op.run_time_hours = op.run_time_hours or 0
-        op.run_time_per_piece = op.run_time_per_piece or 0
-        op.actual_setup_hours = op.actual_setup_hours or 0
-        op.actual_run_hours = op.actual_run_hours or 0
-        op.quantity_complete = op.quantity_complete or 0
-        op.quantity_scrapped = op.quantity_scrapped or 0
-        op.estimated_hours = float(op.setup_time_hours) + float(op.run_time_hours)
-        op.actual_hours = float(op.actual_setup_hours) + float(op.actual_run_hours)
-        op.work_center_name = op.work_center.name if op.work_center else None
-
-        if op.component_part_id:
-            component = op.component_part
-            if component:
-                op.component_part_number = component.part_number
-                op.component_part_name = component.name
+    _enrich_work_order_operations(work_order)
     
     return work_order
 

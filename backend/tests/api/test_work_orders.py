@@ -448,6 +448,67 @@ class TestWorkOrdersAPI:
         ]
         assert [op["component_quantity"] for op in component_operations] == [1, 1, 1, 2]
 
+    def test_work_order_manual_preview_operations_preserve_component_quantities(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        """Previewed component rows submitted as explicit ops should keep BOM qty metadata."""
+        assembly = Part(
+            part_number="ASM-MANUAL-QTY",
+            name="Manual Qty Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        component = Part(
+            part_number="CMP-MANUAL-QTY",
+            name="Manual Qty Component",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-MANUAL-QTY",
+            name="Manual Qty WC",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([assembly, component, work_center])
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/work-orders/",
+            headers=auth_headers,
+            json={
+                "part_id": assembly.id,
+                "quantity_ordered": 2,
+                "priority": 5,
+                "operations": [
+                    {
+                        "sequence": 10,
+                        "operation_number": "Op 10",
+                        "name": f"{component.part_number} - Cut",
+                        "work_center_id": work_center.id,
+                        "setup_time_hours": 0.1,
+                        "run_time_hours": 1.2,
+                        "run_time_per_piece": 0.2,
+                        "component_part_id": component.id,
+                        "component_quantity": 6,
+                        "operation_group": "LASER",
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        operation = response.json()["operations"][0]
+        assert operation["component_part_id"] == component.id
+        assert operation["component_part_number"] == component.part_number
+        assert operation["component_quantity"] == 6
+        assert operation["operation_group"] == "LASER"
+
     def test_assembly_work_order_places_final_inspection_last(
         self, client: TestClient, auth_headers: dict, db_session
     ):

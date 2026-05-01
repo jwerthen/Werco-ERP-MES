@@ -31,6 +31,9 @@ class WorkOrderOperationBase(BaseModel):
     run_time_per_piece: MoneySmall = Field(default=Decimal("0.0"), ge=Decimal("0"))
     requires_inspection: bool = False
     inspection_type: Optional[str] = Field(None, max_length=100)
+    component_part_id: Optional[int] = Field(None, gt=0)
+    component_quantity: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    operation_group: Optional[str] = Field(None, max_length=50)
 
 
 class WorkOrderOperationCreate(WorkOrderOperationBase):
