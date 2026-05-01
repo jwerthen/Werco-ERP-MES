@@ -822,6 +822,37 @@ class TestWorkOrdersAPI:
         assert operation["component_part_id"] == component.id
         assert operation["component_quantity"] == 6
 
+        release_response = client.post(
+            f"/api/v1/work-orders/{response.json()['id']}/release", headers=auth_headers
+        )
+        assert release_response.status_code == status.HTTP_200_OK
+
+        shop_floor_response = client.get(
+            "/api/v1/shop-floor/operations",
+            headers=auth_headers,
+            params={"work_center_id": work_center.id},
+        )
+        assert shop_floor_response.status_code == status.HTTP_200_OK
+        shop_floor_operation = shop_floor_response.json()["operations"][0]
+        assert shop_floor_operation["id"] == operation["id"]
+        assert shop_floor_operation["quantity_ordered"] == 6
+        assert shop_floor_operation["work_order_quantity_ordered"] == 3
+        assert shop_floor_operation["component_quantity"] == 6
+
+        partial_response = client.post(
+            f"/api/v1/shop-floor/operations/{operation['id']}/complete",
+            headers=auth_headers,
+            json={"quantity_complete": 4},
+        )
+        assert partial_response.status_code == status.HTTP_200_OK
+
+        db_session.expire_all()
+        refreshed_operation = db_session.get(WorkOrderOperation, operation["id"])
+        refreshed_work_order = db_session.get(WorkOrder, response.json()["id"])
+        assert refreshed_operation.quantity_complete == 4
+        assert refreshed_operation.status == OperationStatus.IN_PROGRESS
+        assert refreshed_work_order.quantity_complete == 0
+
     def test_shop_floor_work_center_counts_match_operation_list(
         self, client: TestClient, auth_headers: dict, db_session
     ):

@@ -64,6 +64,27 @@ def _has_incomplete_predecessors(
         query = query.filter(WorkOrderOperation.id != current_operation_id)
     return query.count() > 0
 
+
+def _operation_target_quantity(operation: Optional[WorkOrderOperation], work_order: Optional[WorkOrder] = None) -> float:
+    """Quantity an operator must complete for this operation."""
+    if operation and operation.component_quantity and float(operation.component_quantity) > 0:
+        return float(operation.component_quantity)
+    if work_order and work_order.quantity_ordered:
+        return float(work_order.quantity_ordered)
+    if operation and operation.work_order and operation.work_order.quantity_ordered:
+        return float(operation.work_order.quantity_ordered)
+    return 0.0
+
+
+def _sync_work_order_quantity_complete(work_order: WorkOrder, operation: WorkOrderOperation, all_operations_complete: bool) -> None:
+    if all_operations_complete:
+        work_order.quantity_complete = float(work_order.quantity_ordered or 0)
+    elif not operation.component_part_id:
+        work_order.quantity_complete = min(
+            float(operation.quantity_complete or 0),
+            float(work_order.quantity_ordered or 0),
+        )
+
 @router.get("/my-active-job")
 def get_my_active_job(
     db: Session = Depends(get_db),
@@ -110,7 +131,9 @@ def get_my_active_job(
             "operation_name": operation.name if operation else None,
             "operation_number": operation.operation_number if operation else None,
             "work_center_name": entry.work_center.name if entry.work_center else None,
-            "quantity_ordered": float(work_order.quantity_ordered) if work_order and work_order.quantity_ordered else 0,
+            "quantity_ordered": _operation_target_quantity(operation, work_order),
+            "work_order_quantity_ordered": float(work_order.quantity_ordered) if work_order and work_order.quantity_ordered else 0,
+            "component_quantity": float(operation.component_quantity) if operation and operation.component_quantity else None,
             "quantity_complete": float(operation.quantity_complete) if operation and operation.quantity_complete else 0,
         })
 
@@ -280,7 +303,8 @@ def clock_out(
                 status_code=404,
                 detail="Operation for this time entry no longer exists",
             )
-        if (operation.quantity_complete + clock_out_data.quantity_produced) > work_order.quantity_ordered:
+        target_qty = _operation_target_quantity(operation, work_order)
+        if (operation.quantity_complete + clock_out_data.quantity_produced) > target_qty:
             raise HTTPException(status_code=400, detail="Quantity produced exceeds quantity ordered")
 
     # Update time entry
@@ -304,7 +328,8 @@ def clock_out(
 
     # Update statuses if operation complete
     if operation:
-        is_fully_complete = operation.quantity_complete >= work_order.quantity_ordered
+        target_qty = _operation_target_quantity(operation, work_order)
+        is_fully_complete = operation.quantity_complete >= target_qty
 
         if is_fully_complete:
             operation.status = OperationStatus.COMPLETE
@@ -322,7 +347,7 @@ def clock_out(
             if remaining_ops == 0:
                 work_order.status = WorkOrderStatus.COMPLETE
                 work_order.actual_end = datetime.utcnow()
-                work_order.quantity_complete = operation.quantity_complete
+                _sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
                 SchedulingService(db).update_availability_rates(
                     work_center_ids=[operation.work_center_id],
                     horizon_days=90
@@ -340,7 +365,11 @@ def clock_out(
                     horizon_days=90
                 )
 
-        work_order.quantity_complete = operation.quantity_complete
+        _sync_work_order_quantity_complete(
+            work_order,
+            operation,
+            all_operations_complete=work_order.status == WorkOrderStatus.COMPLETE,
+        )
         work_order.updated_at = datetime.utcnow()
     
     db.commit()
@@ -400,6 +429,7 @@ def get_work_center_queue(
     queue = []
     for op in operations:
         wo = op.work_order
+        target_qty = _operation_target_quantity(op, wo)
         queue.append({
             "operation_id": op.id,
             "work_order_id": wo.id,
@@ -410,7 +440,9 @@ def get_work_center_queue(
             "operation_name": op.name,
             "work_center_id": op.work_center_id,
             "status": op.status,
-            "quantity_ordered": wo.quantity_ordered,
+            "quantity_ordered": target_qty,
+            "work_order_quantity_ordered": wo.quantity_ordered,
+            "component_quantity": op.component_quantity,
             "quantity_complete": op.quantity_complete,
             "priority": wo.priority,
             "due_date": wo.due_date,
@@ -773,6 +805,7 @@ def get_all_operations(
     for op in operations:
         wo = op.work_order
         wc = op.work_center
+        target_qty = _operation_target_quantity(op, wo)
         result.append({
             "id": op.id,
             "work_order_id": wo.id,
@@ -785,7 +818,9 @@ def get_all_operations(
             "work_center_id": wc.id if wc else None,
             "work_center_name": wc.name if wc else None,
             "status": op.status.value,
-            "quantity_ordered": wo.quantity_ordered,
+            "quantity_ordered": target_qty,
+            "work_order_quantity_ordered": wo.quantity_ordered,
+            "component_quantity": op.component_quantity,
             "quantity_complete": op.quantity_complete,
             "quantity_scrapped": op.quantity_scrapped,
             "priority": wo.priority,
@@ -975,9 +1010,9 @@ def complete_operation(
     if completion_data.quantity_complete < 0:
         raise HTTPException(status_code=400, detail="Quantity cannot be negative")
     
-    ordered_qty = float(work_order.quantity_ordered or 0)
+    ordered_qty = _operation_target_quantity(operation, work_order)
     if ordered_qty <= 0:
-        raise HTTPException(status_code=400, detail="Work order quantity ordered is missing or invalid")
+        raise HTTPException(status_code=400, detail="Operation quantity ordered is missing or invalid")
 
     if completion_data.quantity_complete > ordered_qty:
         raise HTTPException(
@@ -1023,7 +1058,7 @@ def complete_operation(
             # All operations complete - mark work order complete
             work_order.status = WorkOrderStatus.COMPLETE
             work_order.actual_end = datetime.utcnow()
-            work_order.quantity_complete = completion_data.quantity_complete
+            _sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
             if operation.work_center_id:
                 SchedulingService(db).update_availability_rates(
                     work_center_ids=[operation.work_center_id],
@@ -1043,7 +1078,11 @@ def complete_operation(
             )
     
     # Update work order quantity tracking
-    work_order.quantity_complete = completion_data.quantity_complete
+    _sync_work_order_quantity_complete(
+        work_order,
+        operation,
+        all_operations_complete=work_order.status == WorkOrderStatus.COMPLETE,
+    )
     work_order.updated_at = datetime.utcnow()
 
     # Close any open time entries for this operation when fully complete
@@ -1163,6 +1202,9 @@ def get_operation_details(
             "name": operation.name,
             "description": operation.description,
             "status": operation.status.value,
+            "quantity_ordered": _operation_target_quantity(operation, wo),
+            "work_order_quantity_ordered": wo.quantity_ordered,
+            "component_quantity": operation.component_quantity,
             "quantity_complete": operation.quantity_complete,
             "quantity_scrapped": operation.quantity_scrapped,
             "setup_instructions": operation.setup_instructions,
@@ -1206,6 +1248,9 @@ def get_operation_details(
                 "operation_number": op.operation_number,
                 "name": op.name,
                 "status": op.status.value,
+                "quantity_ordered": _operation_target_quantity(op, wo),
+                "work_order_quantity_ordered": wo.quantity_ordered,
+                "component_quantity": op.component_quantity,
                 "quantity_complete": op.quantity_complete,
                 "is_current": op.id == operation_id
             }

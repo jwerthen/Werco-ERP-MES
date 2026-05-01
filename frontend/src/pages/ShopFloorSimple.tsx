@@ -42,6 +42,8 @@ interface Operation {
   work_center_name: string | null;
   status: string;
   quantity_ordered: number;
+  work_order_quantity_ordered?: number;
+  component_quantity?: number | null;
   quantity_complete: number;
   quantity_scrapped: number;
   priority: number;
@@ -164,6 +166,8 @@ export default function ShopFloorSimple() {
           work_center_name: workCenters.find((wc) => wc.id === workCenterId)?.name || null,
           status: item.status,
           quantity_ordered: item.quantity_ordered,
+          work_order_quantity_ordered: item.work_order_quantity_ordered,
+          component_quantity: item.component_quantity,
           quantity_complete: item.quantity_complete,
           quantity_scrapped: 0,
           priority: item.priority,
@@ -515,6 +519,8 @@ export default function ShopFloorSimple() {
       work_center_name: job.work_center_name || null,
       status: 'in_progress',
       quantity_ordered: job.quantity_ordered || 0,
+      work_order_quantity_ordered: job.work_order_quantity_ordered,
+      component_quantity: job.component_quantity,
       quantity_complete: job.quantity_complete || 0,
       quantity_scrapped: 0,
       priority: 5,
@@ -1575,7 +1581,7 @@ export default function ShopFloorSimple() {
                   </div>
                   <div>
                     <p className="text-sm text-slate-400">Quantity</p>
-                    <p className="font-medium">{detailsModal.operation.quantity_complete} / {detailsModal.work_order.quantity_ordered}</p>
+                    <p className="font-medium">{detailsModal.operation.quantity_complete} / {detailsModal.operation.quantity_ordered}</p>
                   </div>
                   <div>
                     <p className="text-sm text-slate-400">Status</p>
@@ -1617,6 +1623,9 @@ export default function ShopFloorSimple() {
                         <div className="flex items-center gap-3">
                           <span className="text-sm font-medium text-slate-400 w-12">{op.operation_number}</span>
                           <span className="font-medium">{op.name}</span>
+                          <span className="text-xs text-slate-400 tabular-nums">
+                            {op.quantity_complete} / {op.quantity_ordered}
+                          </span>
                           {op.is_current && <span className="text-xs bg-werco-600 text-white px-2 py-0.5 rounded">Current</span>}
                         </div>
                         <span className={`px-2 py-0.5 rounded text-xs font-medium ${opColors.bg} ${opColors.text}`}>

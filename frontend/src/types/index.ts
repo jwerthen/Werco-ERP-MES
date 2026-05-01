@@ -289,5 +289,7 @@ export interface ActiveJob {
   operation_number?: string;
   work_center_name?: string;
   quantity_ordered?: number;
+  work_order_quantity_ordered?: number;
+  component_quantity?: number | null;
   quantity_complete?: number;
 }
