@@ -1013,14 +1013,14 @@ class ApiService {
     return response.data;
   }
 
-  async scheduleWorkOrder(workOrderId: number, data: { scheduled_start: string; work_center_id?: number }) {
+  async scheduleWorkOrder(workOrderId: number, data: { scheduled_start: string; work_center_id?: number; forward_schedule?: boolean }) {
     const response = await this.api.put(`/scheduling/work-orders/${workOrderId}/schedule`, data);
     return response.data;
   }
 
   async scheduleWorkOrderEarliest(
     workOrderId: number,
-    data?: { work_center_id?: number; start_date?: string; horizon_days?: number }
+    data?: { work_center_id?: number; start_date?: string; horizon_days?: number; forward_schedule?: boolean }
   ) {
     const response = await this.api.post(`/scheduling/work-orders/${workOrderId}/schedule-earliest`, data || {});
     return response.data;
@@ -1058,10 +1058,12 @@ class ApiService {
     return response.data;
   }
 
-  async getCapacityForDate(workCenterId: number, targetDate: string) {
+  async getCapacityForDate(workCenterId: number, targetDate: string, options?: { work_order_id?: number; forward_schedule?: boolean }) {
     const response = await this.api.post('/scheduling/capacity-for-date', {
       work_center_id: workCenterId,
       target_date: targetDate,
+      work_order_id: options?.work_order_id,
+      forward_schedule: options?.forward_schedule || false,
     });
     return response.data;
   }

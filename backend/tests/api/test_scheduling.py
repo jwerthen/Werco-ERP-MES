@@ -289,3 +289,217 @@ class TestSchedulingAPI:
         assert day["date"] == start.isoformat()
         assert day["overloaded"] is True
         assert day["utilization_pct"] == 200.0
+
+    def test_capacity_preview_includes_projected_work_order_routing(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        target_date = date.today() + timedelta(days=2)
+
+        part = Part(
+            part_number="SCHED-PART-PREVIEW",
+            name="Preview Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        wc_laser = WorkCenter(
+            code="SCHED-WC-LAS",
+            name="Preview Laser",
+            work_center_type="laser",
+            capacity_hours_per_day=8.0,
+            is_active=True,
+            company_id=1,
+        )
+        wc_weld = WorkCenter(
+            code="SCHED-WC-WELD",
+            name="Preview Weld",
+            work_center_type="welding",
+            capacity_hours_per_day=8.0,
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, wc_laser, wc_weld])
+        db_session.flush()
+
+        existing_work_order = WorkOrder(
+            work_order_number="WO-SCHED-PREVIEW-BUSY",
+            part_id=part.id,
+            quantity_ordered=1,
+            status="released",
+            priority=5,
+            company_id=1,
+        )
+        target_work_order = WorkOrder(
+            work_order_number="WO-SCHED-PREVIEW",
+            part_id=part.id,
+            quantity_ordered=1,
+            status="released",
+            priority=3,
+            company_id=1,
+        )
+        db_session.add_all([existing_work_order, target_work_order])
+        db_session.flush()
+
+        existing_op = WorkOrderOperation(
+            work_order_id=existing_work_order.id,
+            work_center_id=wc_laser.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="Existing Cut",
+            status=OperationStatus.READY,
+            scheduled_start=datetime.combine(target_date, datetime.min.time()),
+            scheduled_end=datetime.combine(target_date, datetime.min.time()),
+            setup_time_hours=1,
+            run_time_hours=1,
+            company_id=1,
+        )
+        current_op = WorkOrderOperation(
+            work_order_id=target_work_order.id,
+            work_center_id=wc_laser.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="Projected Cut",
+            status=OperationStatus.PENDING,
+            setup_time_hours=1,
+            run_time_hours=2,
+            company_id=1,
+        )
+        next_op = WorkOrderOperation(
+            work_order_id=target_work_order.id,
+            work_center_id=wc_weld.id,
+            sequence=20,
+            operation_number="Op 20",
+            name="Projected Weld",
+            status=OperationStatus.PENDING,
+            setup_time_hours=2,
+            run_time_hours=3,
+            company_id=1,
+        )
+        db_session.add_all([existing_op, current_op, next_op])
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/scheduling/capacity-for-date",
+            headers=auth_headers,
+            json={
+                "work_center_id": wc_laser.id,
+                "target_date": target_date.isoformat(),
+                "work_order_id": target_work_order.id,
+                "forward_schedule": True,
+            },
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        payload = response.json()
+
+        assert payload["existing_hours"] == 2.0
+        assert payload["projected_hours"] == 3.0
+        assert payload["projected_total_hours"] == 8.0
+        assert payload["used_hours"] == 5.0
+        assert any(job["projected"] for job in payload["jobs_on_date"])
+
+    def test_schedule_earliest_forward_schedule_checks_downstream_capacity(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        today = date.today()
+
+        part = Part(
+            part_number="SCHED-PART-DOWNSTREAM",
+            name="Downstream Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        wc_cut = WorkCenter(
+            code="SCHED-WC-CUT",
+            name="Cut WC",
+            work_center_type="laser",
+            capacity_hours_per_day=8.0,
+            is_active=True,
+            company_id=1,
+        )
+        wc_weld = WorkCenter(
+            code="SCHED-WC-DOWN",
+            name="Downstream WC",
+            work_center_type="welding",
+            capacity_hours_per_day=8.0,
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, wc_cut, wc_weld])
+        db_session.flush()
+
+        busy_work_order = WorkOrder(
+            work_order_number="WO-SCHED-DOWN-BUSY",
+            part_id=part.id,
+            quantity_ordered=1,
+            status="released",
+            priority=5,
+            company_id=1,
+        )
+        target_work_order = WorkOrder(
+            work_order_number="WO-SCHED-DOWN-TARGET",
+            part_id=part.id,
+            quantity_ordered=1,
+            status="released",
+            priority=2,
+            company_id=1,
+        )
+        db_session.add_all([busy_work_order, target_work_order])
+        db_session.flush()
+
+        busy_op = WorkOrderOperation(
+            work_order_id=busy_work_order.id,
+            work_center_id=wc_weld.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="Busy Weld",
+            status=OperationStatus.READY,
+            scheduled_start=datetime.combine(today + timedelta(days=1), datetime.min.time()),
+            scheduled_end=datetime.combine(today + timedelta(days=1), datetime.min.time()),
+            setup_time_hours=0,
+            run_time_hours=8,
+            company_id=1,
+        )
+        cut_op = WorkOrderOperation(
+            work_order_id=target_work_order.id,
+            work_center_id=wc_cut.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="Target Cut",
+            status=OperationStatus.PENDING,
+            setup_time_hours=0,
+            run_time_hours=1,
+            company_id=1,
+        )
+        weld_op = WorkOrderOperation(
+            work_order_id=target_work_order.id,
+            work_center_id=wc_weld.id,
+            sequence=20,
+            operation_number="Op 20",
+            name="Target Weld",
+            status=OperationStatus.PENDING,
+            setup_time_hours=0,
+            run_time_hours=8,
+            company_id=1,
+        )
+        db_session.add_all([busy_op, cut_op, weld_op])
+        db_session.commit()
+
+        response = client.post(
+            f"/api/v1/scheduling/work-orders/{target_work_order.id}/schedule-earliest",
+            headers=auth_headers,
+            json={"forward_schedule": True},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        payload = response.json()
+
+        assert payload["scheduled_start"] == (today + timedelta(days=1)).isoformat()
+
+        db_session.refresh(cut_op)
+        db_session.refresh(weld_op)
+        assert cut_op.scheduled_start.date() == today + timedelta(days=1)
+        assert weld_op.scheduled_start.date() == today + timedelta(days=2)

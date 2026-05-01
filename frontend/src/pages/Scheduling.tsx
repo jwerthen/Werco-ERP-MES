@@ -74,11 +74,14 @@ interface CapacityForDate {
   work_center_code: string;
   date: string;
   capacity_hours: number;
+  existing_hours?: number;
+  projected_hours?: number;
+  projected_total_hours?: number;
   used_hours: number;
   available_hours: number;
   utilization_pct: number;
   overloaded: boolean;
-  jobs_on_date: { work_order_id: number; work_order_number: string; operation_name: string; hours: number }[];
+  jobs_on_date: { work_order_id: number; work_order_number: string; operation_name: string; hours: number; projected?: boolean }[];
 }
 
 interface DispatchQueueJob extends ScheduledJob {
@@ -483,7 +486,7 @@ export default function Scheduling() {
         scheduled_start: scheduleForm.scheduled_start,
         work_center_id: scheduleForm.work_center_id || selectedJob.work_center_id,
         forward_schedule: forwardSchedule,
-      } as any);
+      });
       setShowScheduleModal(false);
       setCapacityPreview(null);
       await loadData();
@@ -503,14 +506,17 @@ export default function Scheduling() {
     }
   };
 
-  const loadCapacityPreview = useCallback(async (workCenterId: number, dateStr: string) => {
+  const loadCapacityPreview = useCallback(async (workCenterId: number, dateStr: string, job: ScheduledJob | null, shouldForwardSchedule: boolean) => {
     if (!workCenterId || !dateStr) {
       setCapacityPreview(null);
       return;
     }
     setLoadingCapacity(true);
     try {
-      const data = await api.getCapacityForDate(workCenterId, dateStr);
+      const data = await api.getCapacityForDate(workCenterId, dateStr, {
+        work_order_id: job?.work_order_id,
+        forward_schedule: shouldForwardSchedule,
+      });
       setCapacityPreview(data);
     } catch {
       setCapacityPreview(null);
@@ -522,11 +528,11 @@ export default function Scheduling() {
   // Load capacity when schedule form changes
   useEffect(() => {
     if (showScheduleModal && scheduleForm.scheduled_start && scheduleForm.work_center_id) {
-      loadCapacityPreview(scheduleForm.work_center_id, scheduleForm.scheduled_start);
+      loadCapacityPreview(scheduleForm.work_center_id, scheduleForm.scheduled_start, selectedJob, forwardSchedule);
     } else {
       setCapacityPreview(null);
     }
-  }, [showScheduleModal, scheduleForm.scheduled_start, scheduleForm.work_center_id, loadCapacityPreview]);
+  }, [showScheduleModal, scheduleForm.scheduled_start, scheduleForm.work_center_id, selectedJob, forwardSchedule, loadCapacityPreview]);
 
   const handleInlineDateSave = async (job: ScheduledJob) => {
     if (!inlineEditDate) {
@@ -573,6 +579,7 @@ export default function Scheduling() {
     try {
       await api.scheduleWorkOrderEarliest(job.work_order_id, {
         work_center_id: job.work_center_id,
+        forward_schedule: forwardSchedule,
       });
       await loadData();
     } catch (err: any) {
@@ -1406,6 +1413,15 @@ export default function Scheduling() {
                         <span>{capacityPreview.available_hours.toFixed(1)}h available</span>
                         <span>{capacityPreview.used_hours.toFixed(1)}h / {capacityPreview.capacity_hours}h</span>
                       </div>
+                      {capacityPreview.projected_total_hours !== undefined && capacityPreview.projected_total_hours > 0 && (
+                        <div className="mt-2 text-xs text-slate-300">
+                          This work order adds {Number(capacityPreview.projected_hours || 0).toFixed(1)}h here
+                          {forwardSchedule && capacityPreview.projected_total_hours > capacityPreview.projected_hours
+                            ? `; total remaining routing is ${capacityPreview.projected_total_hours.toFixed(1)}h`
+                            : ''}
+                          .
+                        </div>
+                      )}
                       {capacityPreview.overloaded && (
                         <p className="text-xs text-red-600 mt-1 flex items-center gap-1">
                           <ExclamationTriangleIcon className="h-3.5 w-3.5" />
@@ -1417,7 +1433,7 @@ export default function Scheduling() {
                           <span className="text-xs text-slate-400">{capacityPreview.jobs_on_date.length} jobs on this date:</span>
                           {capacityPreview.jobs_on_date.slice(0, 3).map((j, idx) => (
                             <div key={idx} className="text-xs text-slate-400">
-                              {j.work_order_number} - {j.operation_name} ({j.hours.toFixed(1)}h)
+                              {j.work_order_number} - {j.operation_name} ({j.hours.toFixed(1)}h){j.projected ? ' pending schedule' : ''}
                             </div>
                           ))}
                           {capacityPreview.jobs_on_date.length > 3 && (
