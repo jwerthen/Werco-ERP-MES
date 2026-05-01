@@ -1,8 +1,9 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 from typing import Optional, List
 from datetime import datetime, date
 from decimal import Decimal
 from app.models.work_order import WorkOrderStatus, OperationStatus
+from app.core.time_utils import to_central_iso
 from app.core.validation import (
     PositiveInteger,
     NonNegativeInteger,
@@ -86,6 +87,18 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     started_by: Optional[int] = None
     completed_by: Optional[int] = None
 
+    @field_serializer(
+        "scheduled_start",
+        "scheduled_end",
+        "actual_start",
+        "actual_end",
+        "created_at",
+        "updated_at",
+        when_used="json",
+    )
+    def serialize_central_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        return to_central_iso(value)
+
     class Config:
         from_attributes = True
 
@@ -153,6 +166,18 @@ class WorkOrderResponse(WorkOrderBase):
     created_at: datetime
     updated_at: datetime
     operations: List[WorkOrderOperationResponse] = Field(default_factory=list)
+
+    @field_serializer(
+        "scheduled_start",
+        "scheduled_end",
+        "actual_start",
+        "actual_end",
+        "created_at",
+        "updated_at",
+        when_used="json",
+    )
+    def serialize_central_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        return to_central_iso(value)
 
     class Config:
         from_attributes = True

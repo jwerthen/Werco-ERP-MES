@@ -70,6 +70,24 @@ class TestWorkOrdersAPI:
         assert data["id"] == test_work_order.id
         assert data["work_order_number"] == test_work_order.work_order_number
 
+    def test_get_work_order_serializes_datetimes_in_tulsa_time(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder, db_session
+    ):
+        """Work order detail timestamps should render in America/Chicago time."""
+        operation = test_work_order.operations[0]
+        test_work_order.actual_start = datetime(2026, 5, 1, 18, 17, 0)
+        operation.actual_start = datetime(2026, 5, 1, 18, 17, 0)
+        db_session.commit()
+
+        response = client.get(
+            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["actual_start"] == "2026-05-01T13:17:00-05:00"
+        assert data["operations"][0]["actual_start"] == "2026-05-01T13:17:00-05:00"
+
     def test_get_work_order_not_found(self, client: TestClient, auth_headers: dict):
         """Test retrieving a non-existent work order."""
         response = client.get("/api/v1/work-orders/99999", headers=auth_headers)

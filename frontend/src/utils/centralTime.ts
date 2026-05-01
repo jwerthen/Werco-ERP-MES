@@ -3,6 +3,8 @@ const CENTRAL_TIME_ZONE = 'America/Chicago';
 type DateInput = string | number | Date | null | undefined;
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_TIME_WITHOUT_ZONE_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?$/;
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
 
 const getFormatter = (options: Intl.DateTimeFormatOptions) => {
@@ -31,6 +33,10 @@ const toDate = (value: DateInput): Date | null => {
 
   if (typeof value === 'string' && DATE_ONLY_REGEX.test(value)) {
     return new Date(`${value}T12:00:00Z`);
+  }
+
+  if (typeof value === 'string' && DATE_TIME_WITHOUT_ZONE_REGEX.test(value)) {
+    return new Date(`${value}Z`);
   }
 
   const parsed = new Date(value);

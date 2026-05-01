@@ -1,5 +1,9 @@
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+
+CENTRAL_TIME_ZONE = ZoneInfo("America/Chicago")
 
 
 def ensure_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -15,3 +19,10 @@ def to_utc_iso(value: Optional[datetime]) -> Optional[str]:
     if dt is None:
         return None
     return dt.isoformat().replace("+00:00", "Z")
+
+
+def to_central_iso(value: Optional[datetime]) -> Optional[str]:
+    dt = ensure_utc(value)
+    if dt is None:
+        return None
+    return dt.astimezone(CENTRAL_TIME_ZONE).isoformat()
