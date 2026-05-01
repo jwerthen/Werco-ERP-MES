@@ -1367,13 +1367,17 @@ def complete_operation(
 def get_operation_details(
     operation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id)
 ):
     """Get detailed information about a specific operation"""
     operation = db.query(WorkOrderOperation).options(
         joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
         joinedload(WorkOrderOperation.work_center)
-    ).filter(WorkOrderOperation.id == operation_id).first()
+    ).filter(
+        WorkOrderOperation.id == operation_id,
+        WorkOrderOperation.company_id == company_id,
+    ).first()
     
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
@@ -1383,7 +1387,8 @@ def get_operation_details(
     
     # Get all operations for this work order
     all_ops = db.query(WorkOrderOperation).filter(
-        WorkOrderOperation.work_order_id == wo.id
+        WorkOrderOperation.work_order_id == wo.id,
+        WorkOrderOperation.company_id == company_id,
     ).order_by(WorkOrderOperation.sequence).all()
     
     # Get recent history (audit logs)
@@ -1452,6 +1457,13 @@ def get_operation_details(
                 "work_order_quantity_ordered": wo.quantity_ordered,
                 "component_quantity": op.component_quantity,
                 "quantity_complete": op.quantity_complete,
+                "quantity_scrapped": op.quantity_scrapped,
+                "actual_setup_hours": op.actual_setup_hours,
+                "actual_run_hours": op.actual_run_hours,
+                "actual_start": op.actual_start.isoformat() if op.actual_start else None,
+                "actual_end": op.actual_end.isoformat() if op.actual_end else None,
+                "started_by": op.started_by,
+                "completed_by": op.completed_by,
                 "is_current": op.id == operation_id,
                 **_operation_check_in_state(db, op),
             }

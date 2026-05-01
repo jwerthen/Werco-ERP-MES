@@ -70,6 +70,41 @@ interface ActiveShopUser {
 const formatDateTimeCT = (value?: string) =>
   formatCentralDateTime(value, { timeZoneName: 'short' });
 
+const hydrateOperationsFromShopFloor = async (workOrder: WorkOrder): Promise<WorkOrder> => {
+  const firstOperationId = workOrder.operations?.[0]?.id;
+  if (!firstOperationId) return workOrder;
+
+  try {
+    const details = await api.getOperationDetails(firstOperationId);
+    const liveOperations = Array.isArray(details?.all_operations) ? details.all_operations : [];
+    if (liveOperations.length === 0) return workOrder;
+
+    const liveById = new Map(liveOperations.map((op: any) => [op.id, op]));
+    return {
+      ...workOrder,
+      operations: workOrder.operations.map((op) => {
+        const liveOp = liveById.get(op.id);
+        if (!liveOp) return op;
+
+        return {
+          ...op,
+          status: liveOp.status ?? op.status,
+          quantity_complete: liveOp.quantity_complete ?? op.quantity_complete,
+          quantity_scrapped: liveOp.quantity_scrapped ?? op.quantity_scrapped,
+          actual_setup_hours: liveOp.actual_setup_hours ?? op.actual_setup_hours,
+          actual_run_hours: liveOp.actual_run_hours ?? op.actual_run_hours,
+          actual_start: liveOp.actual_start ?? op.actual_start,
+          actual_end: liveOp.actual_end ?? op.actual_end,
+          started_by: liveOp.started_by ?? op.started_by,
+          completed_by: liveOp.completed_by ?? op.completed_by,
+        };
+      }),
+    };
+  } catch {
+    return workOrder;
+  }
+};
+
 export default function WorkOrderDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -102,19 +137,21 @@ export default function WorkOrderDetail() {
       setError('');
       const response = await api.getWorkOrder(currentWorkOrderId);
       if (requestId !== loadRequestRef.current) return;
-      setWorkOrder(response);
+      const hydratedWorkOrder = await hydrateOperationsFromShopFloor(response);
+      if (requestId !== loadRequestRef.current) return;
+      setWorkOrder(hydratedWorkOrder);
       
       // Load material requirements
       try {
         const matReqs = await api.getMaterialRequirements(currentWorkOrderId);
         if (requestId !== loadRequestRef.current) return;
         setMaterialReqs(matReqs);
-      } catch (e) {
+      } catch {
         if (requestId !== loadRequestRef.current) return;
         // Material requirements may not exist for all parts
         setMaterialReqs(null);
       }
-    } catch (err) {
+    } catch {
       if (requestId !== loadRequestRef.current) return;
       setError('Failed to load work order');
     } finally {
@@ -207,7 +244,7 @@ export default function WorkOrderDetail() {
           lookup[item.id] = fullName || item.email || `User #${item.id}`;
         });
         setUserNameById(lookup);
-      } catch (err) {
+      } catch {
         if (!cancelled) {
           setUserNameById({});
         }
@@ -238,7 +275,7 @@ export default function WorkOrderDetail() {
         setActiveUsersOnWorkOrder(
           activeUsers.filter((entry) => entry.work_order_number === workOrder.work_order_number)
         );
-      } catch (err) {
+      } catch {
         if (!cancelled) {
           setActiveUsersOnWorkOrder([]);
         }
