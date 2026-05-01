@@ -317,7 +317,9 @@ def get_part_readiness(
     routing = db.query(Routing).filter(Routing.part_id == part_id, Routing.company_id == company_id, Routing.is_active == True).first()
     bom = _active_bom_for_part(db, part_id, company_id)
 
-    if part.part_type == PartType.MANUFACTURED:
+    is_bom_routed_part = part.part_type == PartType.ASSEMBLY or bom is not None
+
+    if part.part_type == PartType.MANUFACTURED and not is_bom_routed_part:
         if not routing:
             blockers.append("No active routing exists for this make part.")
             checks["routing"] = "missing"
@@ -327,11 +329,11 @@ def get_part_readiness(
         else:
             checks["routing"] = "ready"
 
-    if part.part_type == PartType.ASSEMBLY:
+    if is_bom_routed_part:
         has_component_routing = bool(bom and _bom_has_released_component_routing(db, bom, company_id))
         if not routing:
             if has_component_routing:
-                warnings.append("No assembly routing exists; work order will use released BOM component routings.")
+                warnings.append("No part routing exists; work order will use released BOM component routings.")
                 checks["routing"] = "component_routings_ready"
             else:
                 blockers.append("No active routing exists for this make part.")
@@ -342,7 +344,7 @@ def get_part_readiness(
         else:
             checks["routing"] = "ready"
 
-    if part.part_type == PartType.ASSEMBLY:
+    if is_bom_routed_part:
         if not bom:
             blockers.append("No active BOM exists for this assembly.")
             checks["bom"] = "missing"

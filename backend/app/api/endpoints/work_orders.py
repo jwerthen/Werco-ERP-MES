@@ -232,12 +232,14 @@ def preview_work_order_operations(
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
+    bom = _get_active_bom(db, part_id, company_id)
+    has_bom = bom is not None
     
     result = {
         "part_id": part_id,
         "part_number": part.part_number,
         "part_type": part.part_type.value,
-        "is_assembly": part.part_type == PartType.ASSEMBLY,
+        "is_assembly": part.part_type == PartType.ASSEMBLY or has_bom,
         "quantity": quantity,
         "bom_found": False,
         "bom_status": None,
@@ -246,10 +248,8 @@ def preview_work_order_operations(
         "operations_preview": []
     }
     
-    if part.part_type == PartType.ASSEMBLY:
+    if has_bom:
         # Check for BOM
-        bom = _get_active_bom(db, part_id, company_id)
-        
         if bom:
             result["bom_found"] = True
             result["bom_status"] = bom.status
@@ -407,6 +407,7 @@ def create_work_order(
     part = db.query(Part).filter(Part.id == work_order_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
+    has_bom = _get_active_bom(db, part.id, company_id) is not None
 
     # Generate work order number
     wo_number = generate_work_order_number(db, company_id)
@@ -425,7 +426,7 @@ def create_work_order(
     # Auto-generate operations from routing if enabled and no operations provided
     
     if auto_routing and not work_order_in.operations:
-        if part.part_type == PartType.ASSEMBLY:
+        if part.part_type == PartType.ASSEMBLY or has_bom:
             _create_assembly_routing_operations(
                 db, work_order, float(work_order_in.quantity_ordered),
                 company_id=company_id,

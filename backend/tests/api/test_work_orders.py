@@ -577,6 +577,88 @@ class TestWorkOrdersAPI:
         operation_groups = [op["operation_group"] for op in data["operations"]]
         assert operation_groups == ["MACHINE", "ASSEMBLY", "INSPECT"]
 
+    def test_work_order_uses_bom_component_routings_for_manufactured_part_with_bom(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        """Parts typed manufactured should still expand BOM component routings when a BOM exists."""
+        parent = Part(
+            part_number="MFG-BOM-001",
+            name="Manufactured Part With BOM",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        component = Part(
+            part_number="CMP-MFG-BOM-001",
+            name="Manufactured BOM Component",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-MFG-BOM",
+            name="Manufactured BOM Work Center",
+            work_center_type="machine",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([parent, component, work_center])
+        db_session.flush()
+
+        bom = BOM(part_id=parent.id, revision="A", status="released", is_active=True, company_id=1)
+        routing = Routing(part_id=component.id, revision="A", status="released", is_active=True, company_id=1)
+        db_session.add_all([bom, routing])
+        db_session.flush()
+        db_session.add_all([
+            BOMItem(
+                bom_id=bom.id,
+                component_part_id=component.id,
+                item_number=10,
+                quantity=2,
+                item_type="make",
+                line_type="component",
+                unit_of_measure="each",
+                company_id=1,
+            ),
+            RoutingOperation(
+                routing_id=routing.id,
+                sequence=10,
+                operation_number="Op 10",
+                name="Machine BOM Component",
+                work_center_id=work_center.id,
+                setup_hours=0,
+                run_hours_per_unit=0.1,
+                is_active=True,
+                company_id=1,
+            ),
+        ])
+        db_session.commit()
+
+        preview_response = client.get(
+            f"/api/v1/work-orders/preview-operations/{parent.id}",
+            headers=auth_headers,
+            params={"quantity": 3},
+        )
+        assert preview_response.status_code == status.HTTP_200_OK
+        preview = preview_response.json()
+        assert preview["bom_found"] is True
+        assert preview["operations_preview"][0]["name"] == f"{component.part_number} - Machine BOM Component"
+        assert preview["operations_preview"][0]["component_quantity"] == 6
+
+        response = client.post(
+            "/api/v1/work-orders/",
+            headers=auth_headers,
+            json={"part_id": parent.id, "quantity_ordered": 3, "priority": 5},
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        operation = response.json()["operations"][0]
+        assert operation["name"] == f"{component.part_number} - Machine BOM Component"
+        assert operation["component_part_id"] == component.id
+        assert operation["component_quantity"] == 6
+
     def test_assembly_work_order_blocks_out_of_sequence_start(
         self, client: TestClient, auth_headers: dict, db_session
     ):

@@ -237,3 +237,70 @@ class TestSetupHealth:
         assert data["checks"]["routing"] == "component_routings_ready"
         assert data["checks"]["bom"] == "ready"
         assert data["blockers"] == []
+
+    def test_part_readiness_allows_manufactured_part_with_bom_component_routing(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        db_session: Session,
+    ):
+        parent = Part(
+            part_number="MFG-READY-BOM-001",
+            name="Readiness Manufactured BOM Parent",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        component = Part(
+            part_number="CMP-READY-BOM-001",
+            name="Readiness Manufactured BOM Component",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-READY-BOM",
+            name="Ready BOM Work Center",
+            work_center_type="machining",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([parent, component, work_center])
+        db_session.flush()
+
+        bom = BOM(part_id=parent.id, revision="A", status="released", is_active=True, company_id=1)
+        routing = Routing(part_id=component.id, revision="A", status="released", is_active=True, company_id=1)
+        db_session.add_all([bom, routing])
+        db_session.flush()
+        db_session.add_all([
+            BOMItem(
+                bom_id=bom.id,
+                component_part_id=component.id,
+                item_number=10,
+                quantity=1,
+                item_type="make",
+                line_type="component",
+                company_id=1,
+            ),
+            RoutingOperation(
+                routing_id=routing.id,
+                sequence=10,
+                operation_number="Op 10",
+                name="Machine Component",
+                work_center_id=work_center.id,
+                is_active=True,
+                company_id=1,
+            ),
+        ])
+        db_session.commit()
+
+        response = client.get(f"/api/v1/setup/readiness/part/{parent.id}", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["ready"] is True
+        assert data["checks"]["routing"] == "component_routings_ready"
+        assert data["checks"]["bom"] == "ready"
+        assert data["blockers"] == []

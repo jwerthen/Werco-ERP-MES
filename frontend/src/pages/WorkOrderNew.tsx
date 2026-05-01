@@ -202,6 +202,10 @@ export default function WorkOrderNew() {
     () => parts.find((part) => part.id === form.part_id) || null,
     [parts, form.part_id]
   );
+  const bomPartIds = useMemo(
+    () => new Set(activeBOMs.map((bom) => bom.part_id)),
+    [activeBOMs]
+  );
 
   const normalizedPartSearch = partSearch.trim().toLowerCase();
   const normalizePartType = (partType?: string) => (partType || '').trim().toLowerCase();
@@ -443,7 +447,7 @@ export default function WorkOrderNew() {
     if (!partId) return;
 
     // Find the selected part to check if it's an assembly
-    const isAssembly = normalizePartType(selectedPart?.part_type) === 'assembly';
+    const isAssembly = normalizePartType(selectedPart?.part_type) === 'assembly' || bomPartIds.has(partId);
 
     setLoadingRouting(true);
     try {
