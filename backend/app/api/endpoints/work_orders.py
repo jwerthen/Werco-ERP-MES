@@ -248,6 +248,7 @@ def generate_work_order_number(db: Session, company_id: int = None) -> str:
 
 @router.get("/", response_model=List[WorkOrderSummary])
 def list_work_orders(
+    response: Response,
     skip: int = 0,
     limit: int = 100,
     status: Optional[WorkOrderStatus] = None,
@@ -258,6 +259,8 @@ def list_work_orders(
     company_id: int = Depends(get_current_company_id)
 ):
     """List work orders with summary info"""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(joinedload(WorkOrder.part))
     
     # Filter out soft-deleted unless explicitly requested by admin
@@ -722,11 +725,14 @@ def _create_assembly_routing_operations(
 @router.get("/{work_order_id}", response_model=WorkOrderResponse)
 def get_work_order(
     work_order_id: int,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id)
 ):
     """Get a specific work order with all operations"""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     work_order = db.query(WorkOrder).options(
         joinedload(WorkOrder.part),
         selectinload(WorkOrder.operations)
@@ -756,11 +762,14 @@ def get_work_order(
 @router.get("/by-number/{wo_number}", response_model=WorkOrderResponse)
 def get_work_order_by_number(
     wo_number: str,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id)
 ):
     """Get a work order by work order number"""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     work_order = db.query(WorkOrder).options(
         joinedload(WorkOrder.operations)
     ).filter(WorkOrder.work_order_number == wo_number, WorkOrder.company_id == company_id).first()

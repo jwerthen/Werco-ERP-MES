@@ -73,20 +73,27 @@ export default function WorkOrders() {
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
   const [releasingIds, setReleasingIds] = useState<Set<number>>(new Set());
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  const loadRequestRef = useRef(0);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
     return buildWsUrl('/ws/updates', token ? { token } : undefined);
   }, []);
 
   const loadWorkOrders = useCallback(async () => {
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
+
     try {
       const params: any = {};
       if (statusFilter) params.status = statusFilter;
       const response = await api.getWorkOrders(params);
+      if (requestId !== loadRequestRef.current) return;
       setWorkOrders(response);
     } catch (err) {
+      if (requestId !== loadRequestRef.current) return;
       console.error('Failed to load work orders:', err);
     } finally {
+      if (requestId !== loadRequestRef.current) return;
       setLoading(false);
     }
   }, [statusFilter]);
@@ -122,6 +129,31 @@ export default function WorkOrders() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      loadWorkOrders();
+    }, 30000);
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        loadWorkOrders();
+      }
+    };
+
+    const refreshOnFocus = () => {
+      loadWorkOrders();
+    };
+
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    window.addEventListener('focus', refreshOnFocus);
+
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      window.removeEventListener('focus', refreshOnFocus);
+    };
+  }, [loadWorkOrders]);
 
   const handleDelete = async (wo: WorkOrderSummary) => {
     const isCurrent = CURRENT_WORK_ORDER_STATUSES.includes(wo.status);

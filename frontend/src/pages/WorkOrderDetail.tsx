@@ -83,6 +83,7 @@ export default function WorkOrderDetail() {
   const [userNameById, setUserNameById] = useState<Record<number, string>>({});
   const [activeUsersOnWorkOrder, setActiveUsersOnWorkOrder] = useState<ActiveShopUser[]>([]);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  const loadRequestRef = useRef(0);
   const workOrderId = useMemo(() => (id ? parseInt(id, 10) : null), [id]);
   const realtimeUrl = useMemo(() => {
     if (!id) return null;
@@ -92,20 +93,32 @@ export default function WorkOrderDetail() {
   }, [id]);
 
   const loadWorkOrder = useCallback(async () => {
+    if (!id) return;
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
+    const currentWorkOrderId = parseInt(id, 10);
+
     try {
-      const response = await api.getWorkOrder(parseInt(id!));
+      setError('');
+      const response = await api.getWorkOrder(currentWorkOrderId);
+      if (requestId !== loadRequestRef.current) return;
       setWorkOrder(response);
       
       // Load material requirements
       try {
-        const matReqs = await api.getMaterialRequirements(parseInt(id!));
+        const matReqs = await api.getMaterialRequirements(currentWorkOrderId);
+        if (requestId !== loadRequestRef.current) return;
         setMaterialReqs(matReqs);
       } catch (e) {
+        if (requestId !== loadRequestRef.current) return;
         // Material requirements may not exist for all parts
+        setMaterialReqs(null);
       }
     } catch (err) {
+      if (requestId !== loadRequestRef.current) return;
       setError('Failed to load work order');
     } finally {
+      if (requestId !== loadRequestRef.current) return;
       setLoading(false);
     }
   }, [id]);
@@ -123,12 +136,20 @@ export default function WorkOrderDetail() {
     enabled: Boolean(realtimeUrl),
     onMessage: (message) => {
       if (message.type === 'connected' || message.type === 'ping') return;
-      if (message.type !== 'work_order_update') return;
+      if (!['work_order_update', 'shop_floor_update', 'dashboard_update'].includes(message.type)) return;
       const messageWorkOrderId = message.data?.work_order_id;
       if (workOrderId && messageWorkOrderId && messageWorkOrderId !== workOrderId) return;
+      if (workOrderId && !messageWorkOrderId) return;
       scheduleRealtimeRefresh();
     }
   });
+
+  useEffect(() => {
+    setLoading(true);
+    setError('');
+    setWorkOrder(null);
+    setMaterialReqs(null);
+  }, [workOrderId]);
 
   useEffect(() => {
     loadWorkOrder();
@@ -142,6 +163,31 @@ export default function WorkOrderDetail() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      loadWorkOrder();
+    }, 30000);
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        loadWorkOrder();
+      }
+    };
+
+    const refreshOnFocus = () => {
+      loadWorkOrder();
+    };
+
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    window.addEventListener('focus', refreshOnFocus);
+
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      window.removeEventListener('focus', refreshOnFocus);
+    };
+  }, [loadWorkOrder]);
 
   useEffect(() => {
     if (!isAdminView) {

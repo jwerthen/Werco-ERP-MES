@@ -501,12 +501,16 @@ class ApiService {
 
   // Work Orders
   async getWorkOrders(params?: { status?: string; search?: string }) {
-    const response = await this.api.get('/work-orders/', { params });
+    const response = await this.api.get('/work-orders/', {
+      params: { ...params, _ts: Date.now() },
+    });
     return response.data;
   }
 
   async getWorkOrder(id: number) {
-    const response = await this.api.get(`/work-orders/${id}`);
+    const response = await this.api.get(`/work-orders/${id}`, {
+      params: { _ts: Date.now() },
+    });
     return response.data;
   }
 
