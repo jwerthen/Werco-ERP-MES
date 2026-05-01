@@ -113,6 +113,14 @@ interface CapacityHeatmapResponse {
   work_centers: CapacityHeatmapRow[];
 }
 
+interface MachineCapacityOverview extends CapacityHeatmapRow {
+  scheduled_hours: number;
+  capacity_hours: number;
+  utilization_pct: number;
+  available_hours: number;
+  overloaded_days: number;
+}
+
 const statusColors: Record<string, string> = {
   pending: 'bg-slate-500',
   ready: 'bg-blue-500/100',
@@ -263,6 +271,25 @@ export default function Scheduling() {
     const totalHoursRemaining = openJobs.reduce((sum, j) => sum + j.remaining_hours, 0);
     return { unscheduledCount, scheduledCount, overdueCount, overloadedWcCount, totalHoursRemaining };
   }, [openJobs, todayStamp, capacityHeatmap]);
+
+  const machineCapacityOverview = useMemo<MachineCapacityOverview[]>(() => {
+    return (capacityHeatmap?.work_centers || [])
+      .map((row) => {
+        const scheduledHours = row.days.reduce((sum, day) => sum + day.scheduled_hours, 0);
+        const capacityHours = row.days.reduce((sum, day) => sum + day.capacity_hours, 0);
+        const overloadedDays = row.days.filter((day) => day.overloaded).length;
+        const utilizationPct = capacityHours > 0 ? (scheduledHours / capacityHours) * 100 : 0;
+        return {
+          ...row,
+          scheduled_hours: scheduledHours,
+          capacity_hours: capacityHours,
+          utilization_pct: utilizationPct,
+          available_hours: Math.max(0, capacityHours - scheduledHours),
+          overloaded_days: overloadedDays,
+        };
+      })
+      .sort((a, b) => b.utilization_pct - a.utilization_pct);
+  }, [capacityHeatmap]);
 
   const loadData = useCallback(async () => {
     try {
@@ -818,6 +845,68 @@ export default function Scheduling() {
         <div className="stat-card !py-2 !px-3">
           <div className="stat-label">Hours Remaining</div>
           <div className="stat-value text-lg">{stats.totalHoursRemaining.toFixed(0)}h</div>
+        </div>
+      </div>
+
+      {/* Machine Capacity Overview */}
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h2 className="card-title">Machine Capacity</h2>
+            <p className="card-subtitle">Scheduled load across all work centers for the visible week</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {machineCapacityOverview.map((machine) => {
+            const utilization = machine.utilization_pct;
+            const barClass =
+              utilization > 100 ? 'bg-red-500/100' :
+              utilization >= 90 ? 'bg-amber-500/100' :
+              utilization >= 70 ? 'bg-yellow-400' : 'bg-emerald-500/100';
+
+            return (
+              <div key={machine.work_center_id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-white">{machine.work_center_code}</p>
+                    <p className="truncate text-xs text-slate-400">{machine.work_center_name}</p>
+                  </div>
+                  <span className={`text-sm font-bold ${utilization > 100 ? 'text-red-500' : utilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                    {Math.round(utilization)}%
+                  </span>
+                </div>
+                <div className="mt-3 h-2 rounded-full bg-slate-800">
+                  <div className={`h-2 rounded-full ${barClass}`} style={{ width: `${Math.min(100, utilization)}%` }} />
+                </div>
+                <div className="mt-2 flex justify-between text-xs text-slate-400">
+                  <span>{machine.scheduled_hours.toFixed(1)}h scheduled</span>
+                  <span>{machine.capacity_hours.toFixed(1)}h cap</span>
+                </div>
+                <div className="mt-3 grid grid-cols-6 gap-1">
+                  {machine.days.map((day) => {
+                    const dayClass =
+                      day.utilization_pct > 100 ? 'bg-red-500/100' :
+                      day.utilization_pct >= 90 ? 'bg-amber-500/100' :
+                      day.utilization_pct >= 70 ? 'bg-yellow-400' :
+                      day.scheduled_hours > 0 ? 'bg-emerald-500/100' : 'bg-slate-700';
+                    return (
+                      <div
+                        key={`${machine.work_center_id}-${day.date}`}
+                        className={`h-7 rounded ${dayClass}`}
+                        title={`${formatCentralDate(day.date, { year: undefined })}: ${day.scheduled_hours.toFixed(1)}h / ${day.capacity_hours.toFixed(1)}h`}
+                      />
+                    );
+                  })}
+                </div>
+                {machine.overloaded_days > 0 && (
+                  <p className="mt-2 flex items-center gap-1 text-xs font-medium text-red-500">
+                    <ExclamationTriangleIcon className="h-3.5 w-3.5" />
+                    {machine.overloaded_days} overloaded day{machine.overloaded_days === 1 ? '' : 's'}
+                  </p>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 

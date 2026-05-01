@@ -781,38 +781,60 @@ def get_capacity_summary(
     company_id: int = Depends(get_current_company_id)
 ):
     """Get capacity utilization by work center"""
-    # Get all work centers
-    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True, WorkCenter.company_id == company_id).all()
-    
-    # Calculate scheduled hours per work center
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if end < start:
+        raise HTTPException(status_code=400, detail="end_date must be on or after start_date")
+
+    work_centers = db.query(WorkCenter).filter(
+        WorkCenter.is_active == True,
+        WorkCenter.company_id == company_id,
+    ).order_by(WorkCenter.code).all()
+
+    wc_ids = [wc.id for wc in work_centers]
+    operations = []
+    if wc_ids:
+        operations = db.query(WorkOrderOperation).join(WorkOrder).filter(
+            WorkOrder.company_id == company_id,
+            WorkOrderOperation.work_center_id.in_(wc_ids),
+            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.scheduled_start.isnot(None),
+        ).all()
+
+    operations_by_wc: Dict[int, List[WorkOrderOperation]] = {wc.id: [] for wc in work_centers}
+    for op in operations:
+        op_start = op.scheduled_start.date() if isinstance(op.scheduled_start, datetime) else op.scheduled_start
+        op_end = op_start
+        if op.scheduled_end:
+            op_end = op.scheduled_end.date() if isinstance(op.scheduled_end, datetime) else op.scheduled_end
+        if op_end < op_start:
+            op_end = op_start
+        if op_end < start or op_start > end:
+            continue
+        if op.work_center_id in operations_by_wc:
+            operations_by_wc[op.work_center_id].append(op)
     
     result = []
     for wc in work_centers:
-        # Get operations scheduled in date range
-        ops = db.query(WorkOrderOperation).filter(
-            WorkOrderOperation.work_center_id == wc.id,
-            WorkOrderOperation.scheduled_start != None,
-            WorkOrderOperation.scheduled_start >= start,
-            WorkOrderOperation.scheduled_start <= end,
-            WorkOrderOperation.status != OperationStatus.COMPLETE
-        ).all()
-        
-        total_hours = sum((op.setup_time_hours or 0) + (op.run_time_hours or 0) for op in ops)
-        
-        # Assume 8 hours/day capacity
+        load_map = _build_daily_load_for_work_center(operations_by_wc.get(wc.id, []))
+        total_hours = sum(
+            hours for load_date, hours in load_map.items()
+            if start <= load_date <= end
+        )
         days = (end - start).days + 1
-        available_hours = days * 8
+        daily_capacity = max(0.1, float(wc.capacity_hours_per_day or 8.0))
+        available_hours = days * daily_capacity
         
         result.append({
             "work_center_id": wc.id,
             "work_center_code": wc.code,
             "work_center_name": wc.name,
-            "scheduled_hours": total_hours,
-            "available_hours": available_hours,
-            "utilization_pct": (total_hours / available_hours * 100) if available_hours > 0 else 0,
-            "operation_count": len(ops)
+            "scheduled_hours": round(total_hours, 2),
+            "available_hours": round(available_hours, 2),
+            "capacity_hours_per_day": round(daily_capacity, 2),
+            "utilization_pct": round((total_hours / available_hours * 100), 1) if available_hours > 0 else 0,
+            "operation_count": len(operations_by_wc.get(wc.id, [])),
+            "overloaded": total_hours > available_hours,
         })
     
     return result

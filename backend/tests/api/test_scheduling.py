@@ -290,6 +290,72 @@ class TestSchedulingAPI:
         assert day["overloaded"] is True
         assert day["utilization_pct"] == 200.0
 
+    def test_capacity_summary_counts_spanning_operations_and_machine_capacity(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        start = date.today() + timedelta(days=1)
+        end = start + timedelta(days=1)
+
+        part = Part(
+            part_number="SCHED-PART-SUMMARY",
+            name="Summary Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        wc = WorkCenter(
+            code="SCHED-WC-SUM",
+            name="Summary WC",
+            work_center_type="laser",
+            capacity_hours_per_day=10.0,
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, wc])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-SCHED-SUM",
+            part_id=part.id,
+            quantity_ordered=1,
+            status="released",
+            priority=3,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+
+        op = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=wc.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="Spanning Op",
+            status=OperationStatus.READY,
+            scheduled_start=datetime.combine(start - timedelta(days=1), datetime.min.time()),
+            scheduled_end=datetime.combine(end, datetime.min.time()),
+            setup_time_hours=0,
+            run_time_hours=12,
+            company_id=1,
+        )
+        db_session.add(op)
+        db_session.commit()
+
+        response = client.get(
+            "/api/v1/scheduling/capacity",
+            headers=auth_headers,
+            params={"start_date": start.isoformat(), "end_date": end.isoformat()},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["work_center_id"] == wc.id)
+
+        assert row["scheduled_hours"] == 8.0
+        assert row["available_hours"] == 20.0
+        assert row["capacity_hours_per_day"] == 10.0
+        assert row["utilization_pct"] == 40.0
+
     def test_capacity_preview_includes_projected_work_order_routing(
         self, client: TestClient, auth_headers: dict, db_session
     ):

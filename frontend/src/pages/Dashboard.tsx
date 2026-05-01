@@ -1,11 +1,18 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
+import { addDays } from 'date-fns';
 import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { ActiveAssignment, DashboardData, SignedInUserStatus, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
-import { formatCentralDate, formatCentralTime, isDateBeforeTodayInCentral } from '../utils/centralTime';
+import {
+  formatCentralDate,
+  formatCentralTime,
+  getCentralDateStamp,
+  getCentralTodayDate,
+  isDateBeforeTodayInCentral,
+} from '../utils/centralTime';
 import {
   ClipboardDocumentListIcon,
   ExclamationTriangleIcon,
@@ -63,6 +70,38 @@ interface Alert {
   icon?: React.ElementType;
 }
 
+interface CapacityHeatmapDay {
+  date: string;
+  scheduled_hours: number;
+  capacity_hours: number;
+  utilization_pct: number;
+  job_count: number;
+  overloaded: boolean;
+}
+
+interface CapacityHeatmapRow {
+  work_center_id: number;
+  work_center_code: string;
+  work_center_name: string;
+  capacity_hours_per_day: number;
+  days: CapacityHeatmapDay[];
+}
+
+interface CapacityHeatmapResponse {
+  start_date: string;
+  end_date: string;
+  overload_cells: number;
+  overloaded_work_centers: number[];
+  work_centers: CapacityHeatmapRow[];
+}
+
+interface MachineCapacityOverview extends CapacityHeatmapRow {
+  scheduled_hours: number;
+  capacity_hours: number;
+  utilization_pct: number;
+  overloaded_days: number;
+}
+
 const formatElapsed = (clockIn: string, nowMs: number) => {
   const startMs = new Date(clockIn).getTime();
   if (Number.isNaN(startMs)) return '--';
@@ -96,6 +135,7 @@ export default function Dashboard() {
   const [openNCRs, setOpenNCRs] = useState(0);
   const [lowInventory, setLowInventory] = useState(0);
   const [equipmentDue, setEquipmentDue] = useState(0);
+  const [capacityHeatmap, setCapacityHeatmap] = useState<CapacityHeatmapResponse | null>(null);
   
   // Conditional request state
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -137,11 +177,15 @@ export default function Dashboard() {
         console.error(`Dashboard widget "${widget}" failed to load:`, err);
         return fallback;
       };
-      const [dashboardResult, qualitySummary, equipmentDueData, lowStockData] = await Promise.all([
+      const today = getCentralTodayDate();
+      const capacityStart = getCentralDateStamp(today);
+      const capacityEnd = getCentralDateStamp(addDays(today, 6));
+      const [dashboardResult, qualitySummary, equipmentDueData, lowStockData, capacityData] = await Promise.all([
         api.getDashboardWithCache(),
         api.getQualitySummary().catch(logAndFallback('quality summary', { open_ncrs: 0 })),
         api.getEquipmentDueSoon(30).catch(logAndFallback('equipment due soon', [])),
-        api.getLowStockAlerts().catch(logAndFallback('low stock alerts', []))
+        api.getLowStockAlerts().catch(logAndFallback('low stock alerts', [])),
+        api.getCapacityHeatmap(capacityStart, capacityEnd).catch(logAndFallback('capacity heatmap', null))
       ]);
       
       // Only update state if data actually changed (prevents unnecessary re-renders)
@@ -153,6 +197,7 @@ export default function Dashboard() {
       setOpenNCRs(qualitySummary.open_ncrs || 0);
       setEquipmentDue(equipmentDueData.length || 0);
       setLowInventory(lowStockData.length || 0);
+      setCapacityHeatmap(capacityData);
       
       // Update last refreshed timestamp
       if (!dashboardResult.fromCache) {
@@ -272,6 +317,25 @@ export default function Dashboard() {
 
   const signedInUsers = data?.signed_in_users || [];
   const idleSignedInUsers = signedInUsers.filter((user) => !user.has_active_job);
+  const machineCapacityOverview = useMemo<MachineCapacityOverview[]>(() => {
+    return (capacityHeatmap?.work_centers || [])
+      .map((row) => {
+        const scheduledHours = row.days.reduce((sum, day) => sum + day.scheduled_hours, 0);
+        const capacityHours = row.days.reduce((sum, day) => sum + day.capacity_hours, 0);
+        const utilizationPct = capacityHours > 0 ? (scheduledHours / capacityHours) * 100 : 0;
+        return {
+          ...row,
+          scheduled_hours: scheduledHours,
+          capacity_hours: capacityHours,
+          utilization_pct: utilizationPct,
+          overloaded_days: row.days.filter((day) => day.overloaded).length,
+        };
+      })
+      .sort((a, b) => b.utilization_pct - a.utilization_pct);
+  }, [capacityHeatmap]);
+  const totalCapacityHours = machineCapacityOverview.reduce((sum, machine) => sum + machine.capacity_hours, 0);
+  const totalScheduledHours = machineCapacityOverview.reduce((sum, machine) => sum + machine.scheduled_hours, 0);
+  const totalCapacityUtilization = totalCapacityHours > 0 ? (totalScheduledHours / totalCapacityHours) * 100 : 0;
 
   if (loading) {
     return <SkeletonDashboard />;
@@ -457,6 +521,90 @@ export default function Dashboard() {
           valueColor={openNCRs > 0 ? "text-orange-600" : undefined}
           href="/quality"
         />
+      </div>
+
+      {/* Capacity Overview */}
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h2 className="card-title">Capacity Overview</h2>
+            <p className="card-subtitle">All machine load for the next 7 days</p>
+          </div>
+          <Link to="/scheduling" className="btn-ghost btn-sm">
+            Open Schedule
+          </Link>
+        </div>
+        <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Scheduled</p>
+            <p className="mt-1 text-2xl font-bold text-white">{totalScheduledHours.toFixed(1)}h</p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Capacity</p>
+            <p className="mt-1 text-2xl font-bold text-white">{totalCapacityHours.toFixed(1)}h</p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Utilization</p>
+            <p className={`mt-1 text-2xl font-bold ${totalCapacityUtilization > 100 ? 'text-red-500' : totalCapacityUtilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
+              {Math.round(totalCapacityUtilization)}%
+            </p>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
+          {machineCapacityOverview.map((machine) => {
+            const utilization = machine.utilization_pct;
+            const barClass =
+              utilization > 100 ? 'bg-red-500/100' :
+              utilization >= 90 ? 'bg-amber-500/100' :
+              utilization >= 70 ? 'bg-yellow-400' : 'bg-emerald-500/100';
+
+            return (
+              <div key={machine.work_center_id} className="rounded-xl border border-slate-700 bg-[#151b28] p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold text-white">{machine.work_center_code}</p>
+                    <p className="truncate text-sm text-slate-400">{machine.work_center_name}</p>
+                  </div>
+                  <span className={`text-sm font-bold ${utilization > 100 ? 'text-red-500' : utilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                    {Math.round(utilization)}%
+                  </span>
+                </div>
+                <div className="mt-3 h-2 rounded-full bg-slate-800">
+                  <div className={`h-2 rounded-full ${barClass}`} style={{ width: `${Math.min(100, utilization)}%` }} />
+                </div>
+                <div className="mt-2 flex justify-between text-xs text-slate-400">
+                  <span>{machine.scheduled_hours.toFixed(1)}h scheduled</span>
+                  <span>{machine.capacity_hours.toFixed(1)}h cap</span>
+                </div>
+                <div className="mt-3 grid grid-cols-7 gap-1">
+                  {machine.days.map((day) => {
+                    const dayClass =
+                      day.utilization_pct > 100 ? 'bg-red-500/100' :
+                      day.utilization_pct >= 90 ? 'bg-amber-500/100' :
+                      day.utilization_pct >= 70 ? 'bg-yellow-400' :
+                      day.scheduled_hours > 0 ? 'bg-emerald-500/100' : 'bg-slate-700';
+                    return (
+                      <div
+                        key={`${machine.work_center_id}-${day.date}`}
+                        className={`h-7 rounded ${dayClass}`}
+                        title={`${formatCentralDate(day.date, { year: undefined })}: ${day.scheduled_hours.toFixed(1)}h / ${day.capacity_hours.toFixed(1)}h`}
+                      />
+                    );
+                  })}
+                </div>
+                {machine.overloaded_days > 0 && (
+                  <p className="mt-2 flex items-center gap-1 text-xs font-medium text-red-500">
+                    <ExclamationTriangleIcon className="h-3.5 w-3.5" />
+                    {machine.overloaded_days} overloaded day{machine.overloaded_days === 1 ? '' : 's'}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+          {machineCapacityOverview.length === 0 && (
+            <p className="text-sm text-slate-400">No machine capacity data available.</p>
+          )}
+        </div>
       </div>
 
       {/* Live Shop Activity */}
