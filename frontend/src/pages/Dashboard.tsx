@@ -777,7 +777,7 @@ export default function Dashboard() {
         <div className="card-header">
           <div>
             <h2 className="card-title">Recent Completions</h2>
-            <p className="card-subtitle">Latest work order completions</p>
+            <p className="card-subtitle">Latest completed operations</p>
           </div>
           <Link to="/work-orders" className="btn-ghost btn-sm">
             View All
@@ -796,8 +796,11 @@ export default function Dashboard() {
                     <CheckCircleSolid className="h-5 w-5 text-emerald-600" />
                   </div>
                   <div>
-                    <p className="font-semibold text-white">{completion.work_order_number}</p>
-                    <p className="text-sm text-slate-400">Completed</p>
+                    <p className="font-semibold text-white">{completion.work_order_number || '-'}</p>
+                    <p className="text-sm text-slate-400">
+                      {completion.operation_name || 'Operation completed'}
+                      {completion.operator_name ? ` by ${completion.operator_name}` : ''}
+                    </p>
                   </div>
                 </div>
                 <div className="text-right">

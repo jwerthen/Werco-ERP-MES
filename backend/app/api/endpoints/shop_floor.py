@@ -648,11 +648,26 @@ def shop_floor_dashboard(
         ]
         signed_in_users.sort(key=lambda user: (not user["has_active_job"], user["name"] or ""))
     
-    # Recent completions
-    recent = db.query(WorkOrder).filter(
-        WorkOrder.company_id == company_id,
-        WorkOrder.status == WorkOrderStatus.COMPLETE
-    ).order_by(WorkOrder.actual_end.desc()).limit(5).all()
+    # Recent operation completions. Work orders can remain open while operators
+    # finish individual ops, so use operation completions for the live feed.
+    recent_operations = db.query(WorkOrderOperation).options(
+        joinedload(WorkOrderOperation.work_order),
+        joinedload(WorkOrderOperation.work_center),
+    ).filter(
+        WorkOrderOperation.company_id == company_id,
+        WorkOrderOperation.status == OperationStatus.COMPLETE,
+        WorkOrderOperation.actual_end.isnot(None),
+    ).order_by(WorkOrderOperation.actual_end.desc()).limit(10).all()
+    completed_user_ids = {op.completed_by for op in recent_operations if op.completed_by}
+    completed_users_by_id = {}
+    if completed_user_ids:
+        completed_users_by_id = {
+            user.id: user
+            for user in db.query(User).filter(
+                User.company_id == company_id,
+                User.id.in_(completed_user_ids),
+            ).all()
+        }
 
     checked_in_user_ids = {entry.user_id for entry in active_entries if entry.user_id}
     
@@ -670,10 +685,15 @@ def shop_floor_dashboard(
         "active_assignments": active_assignments,
         "recent_completions": [
             {
-                "work_order_number": wo.work_order_number,
-                "completed_at": wo.actual_end.isoformat() if wo.actual_end else None,
-                "quantity_complete": wo.quantity_complete
-            } for wo in recent
+                "work_order_number": op.work_order.work_order_number if op.work_order else None,
+                "operation_name": op.name,
+                "work_center_name": op.work_center.name if op.work_center else None,
+                "operator_name": completed_users_by_id[op.completed_by].full_name
+                if op.completed_by in completed_users_by_id
+                else None,
+                "completed_at": op.actual_end.isoformat() if op.actual_end else None,
+                "quantity_complete": op.quantity_complete
+            } for op in recent_operations
         ]
     }
     

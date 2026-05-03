@@ -1,8 +1,8 @@
 from typing import Optional
 from datetime import datetime, timedelta, date
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import and_, func, or_
 from app.db.database import get_db
 from app.api.deps import get_current_user, get_current_company_id
 from app.models.user import User
@@ -24,7 +24,7 @@ def get_production_summary(
 ):
     """Get production metrics for dashboard"""
     cutoff = datetime.utcnow() - timedelta(days=days)
-    
+
     # Work order counts by status
     wo_stats = db.query(
         WorkOrder.status,
@@ -402,9 +402,21 @@ def get_employee_time_report(
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
     
-    query = db.query(TimeEntry).filter(
-        TimeEntry.clock_in >= start_dt,
-        TimeEntry.clock_in <= end_dt
+    query = db.query(TimeEntry).options(
+        joinedload(TimeEntry.user),
+        joinedload(TimeEntry.work_order),
+        joinedload(TimeEntry.operation),
+        joinedload(TimeEntry.work_center),
+    ).filter(
+        TimeEntry.company_id == company_id,
+        or_(
+            and_(TimeEntry.clock_in >= start_dt, TimeEntry.clock_in <= end_dt),
+            and_(
+                TimeEntry.clock_out.isnot(None),
+                TimeEntry.clock_out >= start_dt,
+                TimeEntry.clock_out <= end_dt,
+            ),
+        ),
     )
     
     if user_id:
@@ -414,19 +426,36 @@ def get_employee_time_report(
     
     # Group by employee
     by_employee = {}
+    seen_operation_completions = set()
     for entry in entries:
         uid = entry.user_id
         if uid not in by_employee:
-            user = db.query(User).filter(User.id == uid).first()
+            user = entry.user or db.query(User).filter(User.id == uid).first()
             by_employee[uid] = {
                 "user_id": uid,
                 "employee_name": user.full_name if user else f"User {uid}",
                 "total_hours": 0,
+                "completed_operations": 0,
+                "quantity_produced": 0,
+                "quantity_scrapped": 0,
                 "entries": []
             }
         
         hours = entry.duration_hours or 0
+        quantity_produced = float(entry.quantity_produced or 0)
+        quantity_scrapped = float(entry.quantity_scrapped or 0)
+        operation_completed_by_user = (
+            entry.operation
+            and entry.operation.completed_by == uid
+            and entry.operation.actual_end
+            and start_dt <= entry.operation.actual_end <= end_dt
+        )
         by_employee[uid]["total_hours"] += hours
+        by_employee[uid]["quantity_produced"] += quantity_produced
+        by_employee[uid]["quantity_scrapped"] += quantity_scrapped
+        if operation_completed_by_user:
+            by_employee[uid]["completed_operations"] += 1
+            seen_operation_completions.add((uid, entry.operation_id))
         by_employee[uid]["entries"].append({
             "date": entry.clock_in.date().isoformat() if entry.clock_in else None,
             "clock_in": entry.clock_in.isoformat() if entry.clock_in else None,
@@ -434,11 +463,83 @@ def get_employee_time_report(
             "hours": hours,
             "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
             "operation": entry.operation.name if entry.operation else None,
-            "work_center": entry.work_center.name if entry.work_center else None
+            "work_center": entry.work_center.name if entry.work_center else None,
+            "quantity_produced": quantity_produced,
+            "quantity_scrapped": quantity_scrapped,
+            "completed_at": entry.operation.actual_end.isoformat() if operation_completed_by_user else None,
+            "source": "time_entry",
+        })
+
+    completed_ops_query = db.query(WorkOrderOperation).options(
+        joinedload(WorkOrderOperation.work_order),
+        joinedload(WorkOrderOperation.work_center),
+    ).filter(
+        WorkOrderOperation.company_id == company_id,
+        WorkOrderOperation.completed_by.isnot(None),
+        WorkOrderOperation.actual_end.isnot(None),
+        WorkOrderOperation.actual_end >= start_dt,
+        WorkOrderOperation.actual_end <= end_dt,
+    )
+    if user_id:
+        completed_ops_query = completed_ops_query.filter(WorkOrderOperation.completed_by == user_id)
+
+    completed_ops = completed_ops_query.order_by(WorkOrderOperation.actual_end.desc()).all()
+    completed_user_ids = {op.completed_by for op in completed_ops if op.completed_by}
+    users_by_id = {}
+    if completed_user_ids:
+        users_by_id = {
+            user.id: user
+            for user in db.query(User).filter(
+                User.company_id == company_id,
+                User.id.in_(completed_user_ids),
+            ).all()
+        }
+
+    for op in completed_ops:
+        uid = op.completed_by
+        if not uid or (uid, op.id) in seen_operation_completions:
+            continue
+        if uid not in by_employee:
+            user = users_by_id.get(uid)
+            by_employee[uid] = {
+                "user_id": uid,
+                "employee_name": user.full_name if user else f"User {uid}",
+                "total_hours": 0,
+                "completed_operations": 0,
+                "quantity_produced": 0,
+                "quantity_scrapped": 0,
+                "entries": []
+            }
+
+        by_employee[uid]["completed_operations"] += 1
+        by_employee[uid]["quantity_produced"] += float(op.quantity_complete or 0)
+        by_employee[uid]["quantity_scrapped"] += float(op.quantity_scrapped or 0)
+        by_employee[uid]["entries"].append({
+            "date": op.actual_end.date().isoformat() if op.actual_end else None,
+            "clock_in": None,
+            "clock_out": op.actual_end.isoformat() if op.actual_end else None,
+            "hours": 0,
+            "work_order_number": op.work_order.work_order_number if op.work_order else None,
+            "operation": op.name,
+            "work_center": op.work_center.name if op.work_center else None,
+            "quantity_produced": float(op.quantity_complete or 0),
+            "quantity_scrapped": float(op.quantity_scrapped or 0),
+            "completed_at": op.actual_end.isoformat() if op.actual_end else None,
+            "source": "operation_completion",
         })
     
     result = list(by_employee.values())
     for emp in result:
         emp["total_hours"] = round(emp["total_hours"], 2)
-    
-    return sorted(result, key=lambda x: x["total_hours"], reverse=True)
+        emp["quantity_produced"] = round(emp["quantity_produced"], 3)
+        emp["quantity_scrapped"] = round(emp["quantity_scrapped"], 3)
+        emp["entries"].sort(
+            key=lambda item: item["completed_at"] or item["clock_out"] or item["clock_in"] or "",
+            reverse=True,
+        )
+
+    return sorted(
+        result,
+        key=lambda x: (x["completed_operations"], x["total_hours"], x["quantity_produced"]),
+        reverse=True,
+    )

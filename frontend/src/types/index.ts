@@ -179,8 +179,11 @@ export interface DashboardData {
   signed_in_users: SignedInUserStatus[];
   active_assignments: ActiveAssignment[];
   recent_completions: {
-    work_order_number: string;
-    completed_at: string;
+    work_order_number?: string;
+    operation_name?: string;
+    work_center_name?: string;
+    operator_name?: string;
+    completed_at?: string;
     quantity_complete: number;
   }[];
 }

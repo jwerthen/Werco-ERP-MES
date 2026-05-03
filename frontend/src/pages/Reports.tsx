@@ -83,12 +83,21 @@ interface EmployeeTime {
   user_id: number;
   employee_name: string;
   total_hours: number;
+  completed_operations?: number;
+  quantity_produced?: number;
+  quantity_scrapped?: number;
   entries: Array<{
     date?: string;
+    clock_in?: string;
+    clock_out?: string;
     hours: number;
     work_order_number?: string;
     operation?: string;
     work_center?: string;
+    quantity_produced?: number;
+    quantity_scrapped?: number;
+    completed_at?: string;
+    source?: string;
   }>;
 }
 
@@ -493,7 +502,11 @@ export default function Reports() {
               <div key={emp.user_id} className="mb-6 last:mb-0">
                 <div className="flex justify-between items-center bg-slate-800/50 px-4 py-2 rounded-t-lg">
                   <span className="font-semibold">{emp.employee_name}</span>
-                  <span className="text-werco-primary font-bold">{emp.total_hours} hrs</span>
+                  <div className="flex flex-wrap items-center justify-end gap-3 text-sm">
+                    <span className="text-emerald-400 font-bold">{emp.completed_operations || 0} ops</span>
+                    <span className="text-slate-300 font-semibold">{emp.quantity_produced || 0} qty</span>
+                    <span className="text-werco-primary font-bold">{emp.total_hours} hrs</span>
+                  </div>
                 </div>
                 <div className="border border-t-0 rounded-b-lg overflow-hidden">
                   <table className="min-w-full text-sm">
@@ -503,6 +516,8 @@ export default function Reports() {
                         <th className="text-left py-2 px-4">Work Order</th>
                         <th className="text-left py-2 px-4">Operation</th>
                         <th className="text-left py-2 px-4">Work Center</th>
+                        <th className="text-right py-2 px-4">Qty</th>
+                        <th className="text-left py-2 px-4">Completed</th>
                         <th className="text-right py-2 px-4">Hours</th>
                       </tr>
                     </thead>
@@ -513,6 +528,10 @@ export default function Reports() {
                           <td className="py-2 px-4 font-mono">{entry.work_order_number || '-'}</td>
                           <td className="py-2 px-4">{entry.operation || '-'}</td>
                           <td className="py-2 px-4">{entry.work_center || '-'}</td>
+                          <td className="py-2 px-4 text-right tabular-nums">{entry.quantity_produced || 0}</td>
+                          <td className="py-2 px-4">
+                            {entry.completed_at ? formatCentralDate(entry.completed_at, { month: 'short', day: 'numeric' }) : '-'}
+                          </td>
                           <td className="py-2 px-4 text-right">{entry.hours.toFixed(2)}</td>
                         </tr>
                       ))}
