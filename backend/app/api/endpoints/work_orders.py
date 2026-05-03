@@ -23,6 +23,7 @@ from app.services.work_order_state_service import (
     release_next_ready_operation,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
+    work_order_operation_progress,
 )
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
@@ -186,6 +187,11 @@ def _enrich_work_order_operations(work_order: WorkOrder) -> None:
                 op.component_part_number = component.part_number
                 op.component_part_name = component.name
 
+    metrics = work_order_operation_progress(work_order)
+    work_order.operation_count = metrics["operation_count"]
+    work_order.operations_complete = metrics["operations_complete"]
+    work_order.operation_progress_percent = metrics["operation_progress_percent"]
+
 
 def generate_work_order_number(db: Session, company_id: int = None) -> str:
     """Generate next work order number (WO-YYYYMMDD-XXX)
@@ -230,7 +236,10 @@ def list_work_orders(
     """List work orders with summary info"""
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
-    query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(joinedload(WorkOrder.part))
+    query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(
+        joinedload(WorkOrder.part),
+        selectinload(WorkOrder.operations),
+    )
     
     # Filter out soft-deleted unless explicitly requested by admin
     if not include_deleted or current_user.role != UserRole.ADMIN:
@@ -260,6 +269,7 @@ def list_work_orders(
     
     result = []
     for wo in work_orders:
+        metrics = work_order_operation_progress(wo)
         summary = WorkOrderSummary(
             id=wo.id,
             work_order_number=wo.work_order_number,
@@ -271,6 +281,9 @@ def list_work_orders(
             priority=wo.priority,
             quantity_ordered=wo.quantity_ordered,
             quantity_complete=wo.quantity_complete,
+            operation_count=metrics["operation_count"],
+            operations_complete=metrics["operations_complete"],
+            operation_progress_percent=metrics["operation_progress_percent"],
             due_date=wo.due_date,
             customer_name=wo.customer_name,
         )

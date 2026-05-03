@@ -70,6 +70,36 @@ interface ActiveShopUser {
 const formatDateTimeCT = (value?: string) =>
   formatCentralDateTime(value, { timeZoneName: 'short' });
 
+const getDetailWorkOrderProgress = (workOrder: WorkOrder) => {
+  const operations = workOrder.operations || [];
+  if (operations.length === 0) {
+    const ordered = Number(workOrder.quantity_ordered || 0);
+    const complete = Number(workOrder.quantity_complete || 0);
+    return {
+      percent: ordered > 0 ? Math.min(100, Math.max(0, (complete / ordered) * 100)) : 0,
+      label: `${complete}/${ordered}`,
+    };
+  }
+
+  let completeCount = 0;
+  const progressTotal = operations.reduce((sum, op) => {
+    const target = Number(op.component_quantity || workOrder.quantity_ordered || 0);
+    const complete = Number(op.quantity_complete || 0);
+    const ratio = op.status === 'complete'
+      ? 1
+      : target > 0
+        ? Math.min(1, Math.max(0, complete / target))
+        : 0;
+    if (ratio >= 1) completeCount += 1;
+    return sum + ratio;
+  }, 0);
+
+  return {
+    percent: Math.round((progressTotal / operations.length) * 1000) / 10,
+    label: `${completeCount}/${operations.length} ops`,
+  };
+};
+
 const hydrateOperationsFromShopFloor = async (workOrder: WorkOrder): Promise<WorkOrder> => {
   const firstOperationId = workOrder.operations?.[0]?.id;
   if (!firstOperationId) return workOrder;
@@ -405,6 +435,8 @@ export default function WorkOrderDetail() {
     );
   }
 
+  const operationProgress = getDetailWorkOrderProgress(workOrder);
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -473,6 +505,10 @@ export default function WorkOrderDetail() {
             <div>
               <dt className="text-sm text-slate-400">Quantity Complete</dt>
               <dd className="text-lg font-medium text-green-600">{workOrder.quantity_complete}</dd>
+            </div>
+            <div>
+              <dt className="text-sm text-slate-400">Operation Progress</dt>
+              <dd className="text-lg font-medium text-werco-400">{operationProgress.label} ({operationProgress.percent}%)</dd>
             </div>
             <div>
               <dt className="text-sm text-slate-400">Due Date</dt>

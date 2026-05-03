@@ -111,6 +111,56 @@ def sync_work_order_quantity_complete(
         )
 
 
+def work_order_operation_progress(work_order: WorkOrder) -> dict:
+    """Return route-progress metrics without changing finished WO quantity.
+
+    Component operations can complete before the parent assembly is finished.
+    Those completions should move the progress bar, but they should not be
+    counted as finished work-order quantity for shipping or closeout.
+    """
+    operations = list(work_order.operations or [])
+    total_operations = len(operations)
+    if total_operations == 0:
+        quantity_ordered = float(work_order.quantity_ordered or 0)
+        quantity_complete = float(work_order.quantity_complete or 0)
+        progress_percent = (
+            min(100.0, max(0.0, (quantity_complete / quantity_ordered) * 100.0))
+            if quantity_ordered > 0
+            else 0.0
+        )
+        return {
+            "operation_count": 0,
+            "operations_complete": 0,
+            "operation_progress_percent": round(progress_percent, 1),
+        }
+
+    progress_total = 0.0
+    operations_complete = 0
+    for operation in operations:
+        target_qty = operation_target_quantity(operation, work_order)
+        complete_qty = float(operation.quantity_complete or 0)
+
+        if operation.status == OperationStatus.COMPLETE:
+            ratio = 1.0
+        elif target_qty > 0:
+            ratio = min(1.0, max(0.0, complete_qty / target_qty))
+        else:
+            ratio = 0.0
+
+        if ratio >= 1.0:
+            operations_complete += 1
+        progress_total += ratio
+
+    return {
+        "operation_count": total_operations,
+        "operations_complete": operations_complete,
+        "operation_progress_percent": round(
+            (progress_total / total_operations) * 100.0,
+            1,
+        ),
+    }
+
+
 def validate_operation_quantity(quantity_complete: float, target_qty: float) -> None:
     if math.isnan(quantity_complete) or math.isinf(quantity_complete):
         raise WorkOrderStateError("Quantity must be a valid number")

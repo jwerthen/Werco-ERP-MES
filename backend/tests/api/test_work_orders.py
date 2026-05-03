@@ -35,6 +35,80 @@ class TestWorkOrdersAPI:
         assert len(data) == 1
         assert data[0]["work_order_number"] == test_work_order.work_order_number
 
+    def test_work_order_list_reports_operation_progress_for_component_ops(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        part = Part(
+            part_number="WO-PROG-ASM",
+            name="Progress Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-PROG",
+            name="Progress Work Center",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-PROG-001",
+            part_id=part.id,
+            quantity_ordered=1,
+            quantity_complete=0,
+            status=WorkOrderStatus.IN_PROGRESS,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+
+        db_session.add_all([
+            WorkOrderOperation(
+                work_order_id=work_order.id,
+                work_center_id=work_center.id,
+                component_part_id=part.id,
+                component_quantity=2,
+                sequence=10,
+                operation_number="Op 10",
+                name="Completed Component Cut",
+                status=OperationStatus.COMPLETE,
+                quantity_complete=2,
+                actual_end=datetime.utcnow(),
+                company_id=1,
+            ),
+            WorkOrderOperation(
+                work_order_id=work_order.id,
+                work_center_id=work_center.id,
+                component_part_id=part.id,
+                component_quantity=1,
+                sequence=20,
+                operation_number="Op 20",
+                name="Pending Component Cut",
+                status=OperationStatus.PENDING,
+                quantity_complete=0,
+                company_id=1,
+            ),
+        ])
+        db_session.commit()
+
+        response = client.get("/api/v1/work-orders/", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        item = next(
+            row for row in response.json()
+            if row["work_order_number"] == "WO-PROG-001"
+        )
+        assert item["quantity_complete"] == 0
+        assert item["operation_count"] == 2
+        assert item["operations_complete"] == 1
+        assert item["operation_progress_percent"] == 50.0
+
     def test_create_work_order(
         self, client: TestClient, auth_headers: dict, sample_work_order_data: dict
     ):

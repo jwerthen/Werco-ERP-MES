@@ -61,6 +61,25 @@ const groupOptions: { value: GroupBy; label: string }[] = [
 
 const formatStatusLabel = (status: string) => status.replace('_', ' ');
 
+const getWorkOrderProgress = (wo: WorkOrderSummary) => {
+  const operationCount = Number(wo.operation_count || 0);
+  if (operationCount > 0 && wo.operation_progress_percent !== undefined) {
+    return {
+      percent: Math.min(100, Math.max(0, Number(wo.operation_progress_percent || 0))),
+      label: `${Number(wo.operations_complete || 0)}/${operationCount} ops`,
+      title: 'Progress',
+    };
+  }
+
+  const ordered = Number(wo.quantity_ordered || 0);
+  const complete = Number(wo.quantity_complete || 0);
+  return {
+    percent: ordered > 0 ? Math.min(100, Math.max(0, (complete / ordered) * 100)) : 0,
+    label: `${complete}/${ordered}`,
+    title: 'Quantity',
+  };
+};
+
 export default function WorkOrders() {
   const { user } = useAuth();
   const canDeleteWorkOrders = user?.role === 'admin' || !!user?.is_superuser;
@@ -547,9 +566,7 @@ function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
   const canDelete = Boolean(onDelete);
-  const progress = wo.quantity_ordered > 0
-    ? Math.min(100, (wo.quantity_complete / wo.quantity_ordered) * 100)
-    : 0;
+  const progress = getWorkOrderProgress(wo);
 
   return (
     <article className={`mobile-card ${overdue ? 'border-red-500/50 bg-red-500/5' : ''}`}>
@@ -590,15 +607,15 @@ function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }
 
         <div>
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs uppercase tracking-wide text-surface-500">Quantity</p>
+            <p className="text-xs uppercase tracking-wide text-surface-500">{progress.title}</p>
             <p className="text-sm font-semibold text-surface-800 tabular-nums">
-              {wo.quantity_complete}/{wo.quantity_ordered}
+              {progress.label}
             </p>
           </div>
           <div className="mt-2 h-2 bg-surface-200 rounded-full overflow-hidden">
             <div
               className="h-full bg-werco-500 rounded-full transition-all"
-              style={{ width: `${progress}%` }}
+              style={{ width: `${progress.percent}%` }}
             />
           </div>
         </div>
@@ -663,7 +680,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
             <th>Work Order</th>
             {hideColumn !== 'part' && <th>Part</th>}
             {hideColumn !== 'customer' && <th>Customer</th>}
-            <th>Quantity</th>
+            <th>Progress</th>
             <th>Due Date</th>
             <th>Priority</th>
             <th>Status</th>
@@ -676,6 +693,7 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
             const priority = priorityConfig[wo.priority] || priorityConfig[4];
             const overdue = isOverdue(wo);
             const isReleasing = releasingIds?.has(wo.id);
+            const progress = getWorkOrderProgress(wo);
             
             return (
               <tr key={wo.id} className={overdue ? 'bg-red-500/10' : ''}>
@@ -703,11 +721,11 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
                     <div className="flex-1 h-2 bg-surface-200 rounded-full overflow-hidden w-20">
                       <div 
                         className="h-full bg-werco-500 rounded-full transition-all"
-                        style={{ width: `${Math.min(100, (wo.quantity_complete / wo.quantity_ordered) * 100)}%` }}
+                        style={{ width: `${progress.percent}%` }}
                       />
                     </div>
                     <span className="text-sm font-medium text-surface-700 tabular-nums">
-                      {wo.quantity_complete}/{wo.quantity_ordered}
+                      {progress.label}
                     </span>
                   </div>
                 </td>

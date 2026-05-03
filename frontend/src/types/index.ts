@@ -99,6 +99,9 @@ export interface WorkOrder {
   special_instructions?: string;
   estimated_hours: number;
   actual_hours: number;
+  operation_count?: number;
+  operations_complete?: number;
+  operation_progress_percent?: number;
   created_at: string;
   updated_at: string;
   operations: WorkOrderOperation[];
@@ -159,6 +162,9 @@ export interface WorkOrderSummary {
   priority: number;
   quantity_ordered: number;
   quantity_complete: number;
+  operation_count?: number;
+  operations_complete?: number;
+  operation_progress_percent?: number;
   due_date?: string;
   customer_name?: string;
   current_operation?: string;

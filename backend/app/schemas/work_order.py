@@ -163,6 +163,9 @@ class WorkOrderResponse(WorkOrderBase):
     actual_hours: Money
     estimated_cost: Money
     actual_cost: Money
+    operation_count: int = 0
+    operations_complete: int = 0
+    operation_progress_percent: float = 0.0
     created_at: datetime
     updated_at: datetime
     operations: List[WorkOrderOperationResponse] = Field(default_factory=list)
@@ -196,6 +199,9 @@ class WorkOrderSummary(BaseModel):
     priority: int
     quantity_ordered: MoneySmall
     quantity_complete: MoneySmall
+    operation_count: int = 0
+    operations_complete: int = 0
+    operation_progress_percent: float = 0.0
     due_date: Optional[date]
     customer_name: Optional[str]
     current_operation: Optional[str] = None
