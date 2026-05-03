@@ -65,6 +65,7 @@ export default function PartsPage() {
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [viewMode, setViewMode] = useState<ViewMode>('table');
@@ -97,6 +98,7 @@ export default function PartsPage() {
       setLoading(true);
       const params: any = { include_bom_components: showBOMComponents };
       if (typeFilter) params.part_type = typeFilter;
+      if (debouncedSearch) params.search = debouncedSearch;
       const [partsResult, bomsResult] = await Promise.allSettled([
         api.getParts(params),
         api.getBOMs({ active_only: true, limit: 5000 }),
@@ -127,7 +129,12 @@ export default function PartsPage() {
     } finally {
       setLoading(false);
     }
-  }, [typeFilter, showBOMComponents, showToast]);
+  }, [typeFilter, showBOMComponents, debouncedSearch, showToast]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
 
   useEffect(() => {
     loadParts();

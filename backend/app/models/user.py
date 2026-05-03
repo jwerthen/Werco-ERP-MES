@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEn
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
+from typing import Optional
 from app.db.database import Base
 
 
@@ -53,3 +54,7 @@ class User(Base):
     @property
     def full_name(self) -> str:
         return f"{self.first_name} {self.last_name}"
+
+    @property
+    def company_name(self) -> Optional[str]:
+        return self.company.name if self.company else None

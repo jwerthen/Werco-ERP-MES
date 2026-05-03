@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
+import { useSearchParams } from 'react-router-dom';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   PlusIcon,
@@ -114,6 +115,7 @@ const statusColors: Record<string, string> = {
 };
 
 export default function Purchasing() {
+  const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
@@ -215,6 +217,27 @@ export default function Purchasing() {
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    const vendorId = Number(searchParams.get('vendor') || 0);
+    const poId = Number(searchParams.get('po') || 0);
+
+    if (vendorId && vendors.length > 0 && selectedVendor?.id !== vendorId) {
+      const vendor = vendors.find(v => v.id === vendorId);
+      if (vendor) {
+        setActiveTab('vendors');
+        openEditVendorModal(vendor);
+      }
+    }
+
+    if (poId && purchaseOrders.length > 0) {
+      const po = purchaseOrders.find(order => order.id === poId);
+      if (po) {
+        setActiveTab('orders');
+        setPoSearch(po.po_number);
+      }
+    }
+  }, [searchParams, vendors, purchaseOrders, selectedVendor?.id]);
 
   const loadData = async () => {
     try {

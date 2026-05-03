@@ -275,12 +275,15 @@ def list_work_orders(
     
     if search:
         search_filter = f"%{search}%"
+        query = query.outerjoin(Part, WorkOrder.part_id == Part.id)
         query = query.filter(
             or_(
                 WorkOrder.work_order_number.ilike(search_filter),
                 WorkOrder.customer_name.ilike(search_filter),
                 WorkOrder.customer_po.ilike(search_filter),
-                WorkOrder.lot_number.ilike(search_filter)
+                WorkOrder.lot_number.ilike(search_filter),
+                Part.part_number.ilike(search_filter),
+                Part.name.ilike(search_filter),
             )
         )
     

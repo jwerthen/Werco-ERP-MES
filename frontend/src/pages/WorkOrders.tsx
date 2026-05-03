@@ -67,6 +67,7 @@ export default function WorkOrders() {
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [customerFilter, setCustomerFilter] = useState<string>('');
   const [hideCOTS, setHideCOTS] = useState(true);
@@ -77,7 +78,12 @@ export default function WorkOrders() {
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
     return buildWsUrl('/ws/updates', token ? { token } : undefined);
-  }, []);
+  }, [user?.id]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
 
   const loadWorkOrders = useCallback(async () => {
     const requestId = loadRequestRef.current + 1;
@@ -86,6 +92,7 @@ export default function WorkOrders() {
     try {
       const params: any = {};
       if (statusFilter) params.status = statusFilter;
+      if (debouncedSearch) params.search = debouncedSearch;
       const response = await api.getWorkOrders(params);
       if (requestId !== loadRequestRef.current) return;
       setWorkOrders(response);
@@ -96,7 +103,7 @@ export default function WorkOrders() {
       if (requestId !== loadRequestRef.current) return;
       setLoading(false);
     }
-  }, [statusFilter]);
+  }, [statusFilter, debouncedSearch]);
 
   const scheduleRealtimeRefresh = useCallback(() => {
     if (realtimeRefreshRef.current) return;
@@ -199,18 +206,9 @@ export default function WorkOrders() {
       if (customerFilter && wo.customer_name !== customerFilter) {
         return false;
       }
-      if (search) {
-        const searchLower = search.toLowerCase();
-        return (
-          wo.work_order_number.toLowerCase().includes(searchLower) ||
-          wo.part_number?.toLowerCase().includes(searchLower) ||
-          wo.part_name?.toLowerCase().includes(searchLower) ||
-          wo.customer_name?.toLowerCase().includes(searchLower)
-        );
-      }
       return true;
     });
-  }, [workOrders, search, customerFilter, hideCOTS]);
+  }, [workOrders, customerFilter, hideCOTS]);
 
   const groupedWorkOrders = useMemo(() => {
     if (groupBy === 'none') return null;

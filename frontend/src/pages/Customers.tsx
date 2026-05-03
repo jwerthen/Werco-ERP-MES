@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 
 interface Customer {
   id: number;
@@ -84,6 +84,7 @@ const statusColors: Record<string, string> = {
 
 export default function Customers() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -132,6 +133,15 @@ export default function Customers() {
     loadCustomers();
   }, [loadCustomers]);
 
+  useEffect(() => {
+    const requestedId = Number(searchParams.get('id') || 0);
+    if (!requestedId || customers.length === 0) return;
+    const customer = customers.find(c => c.id === requestedId);
+    if (customer && selectedCustomer?.id !== requestedId) {
+      viewCustomerDetails(customer);
+    }
+  }, [customers, searchParams, selectedCustomer?.id]);
+
   const filteredCustomers = customers.filter(c => {
     if (!search) return true;
     const searchLower = search.toLowerCase();
@@ -160,6 +170,9 @@ export default function Customers() {
   const closeDetails = () => {
     setSelectedCustomer(null);
     setCustomerStats(null);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('id');
+    setSearchParams(nextParams, { replace: true });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {

@@ -1505,7 +1505,7 @@ export default function Scheduling() {
                       {capacityPreview.projected_total_hours !== undefined && capacityPreview.projected_total_hours > 0 && (
                         <div className="mt-2 text-xs text-slate-300">
                           This work order adds {Number(capacityPreview.projected_hours || 0).toFixed(1)}h here
-                          {forwardSchedule && capacityPreview.projected_total_hours > capacityPreview.projected_hours
+                          {forwardSchedule && capacityPreview.projected_total_hours > Number(capacityPreview.projected_hours || 0)
                             ? `; total remaining routing is ${capacityPreview.projected_total_hours.toFixed(1)}h`
                             : ''}
                           .

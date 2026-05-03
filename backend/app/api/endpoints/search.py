@@ -107,7 +107,7 @@ def global_search(
                 type="part",
                 title=part.part_number,
                 subtitle=part.name,
-                url=f"/parts?id={part.id}",
+                url=f"/parts/{part.id}",
                 icon="cube"
             ))
         categories["part"] = len(parts)
@@ -160,10 +160,12 @@ def global_search(
     
     # Search BOMs
     if should_search("bom"):
-        boms = db.query(BOM).filter(
+        boms = db.query(BOM).join(Part, BOM.part_id == Part.id).filter(
+            BOM.company_id == company_id,
             BOM.is_active == True,
             or_(
-                func.lower(BOM.name).like(search_term),
+                func.lower(Part.part_number).like(search_term),
+                func.lower(Part.name).like(search_term),
                 func.lower(BOM.description).like(search_term),
             )
         ).limit(limit).all()
@@ -172,8 +174,8 @@ def global_search(
             results.append(SearchResult(
                 id=bom.id,
                 type="bom",
-                title=bom.name,
-                subtitle=f"Rev {bom.revision}" if bom.revision else None,
+                title=bom.part.part_number if bom.part else f"BOM #{bom.id}",
+                subtitle=f"{bom.part.name if bom.part else 'BOM'} - Rev {bom.revision}".strip(" -"),
                 url=f"/bom?id={bom.id}",
                 icon="document"
             ))
@@ -181,10 +183,12 @@ def global_search(
     
     # Search Routings
     if should_search("routing"):
-        routings = db.query(Routing).filter(
+        routings = db.query(Routing).join(Part, Routing.part_id == Part.id).filter(
+            Routing.company_id == company_id,
             Routing.is_active == True,
             or_(
-                func.lower(Routing.name).like(search_term),
+                func.lower(Part.part_number).like(search_term),
+                func.lower(Part.name).like(search_term),
                 func.lower(Routing.description).like(search_term),
             )
         ).limit(limit).all()
@@ -193,8 +197,8 @@ def global_search(
             results.append(SearchResult(
                 id=routing.id,
                 type="routing",
-                title=routing.name,
-                subtitle=f"Rev {routing.revision}" if routing.revision else None,
+                title=routing.part.part_number if routing.part else f"Routing #{routing.id}",
+                subtitle=f"{routing.part.name if routing.part else 'Routing'} - Rev {routing.revision}".strip(" -"),
                 url=f"/routing?id={routing.id}",
                 icon="list"
             ))
@@ -203,6 +207,7 @@ def global_search(
     # Search Users (admin/manager only can see all users)
     if should_search("user") and current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
         users = db.query(User).filter(
+            User.company_id == company_id,
             User.is_active == True,
             or_(
                 func.lower(User.first_name).like(search_term),
@@ -226,6 +231,7 @@ def global_search(
     # Search Vendors
     if should_search("vendor"):
         vendors = db.query(Vendor).filter(
+            Vendor.company_id == company_id,
             Vendor.is_active == True,
             or_(
                 func.lower(Vendor.name).like(search_term),
@@ -348,7 +354,7 @@ def get_recent_items(
             type="part",
             title=part.part_number,
             subtitle=part.name,
-            url=f"/parts?id={part.id}",
+            url=f"/parts/{part.id}",
             icon="cube"
         ))
     

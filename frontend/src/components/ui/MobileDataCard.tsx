@@ -36,7 +36,7 @@ export function MobileDataCard({
       className={`
         bg-[#151b28] rounded-xl border border-slate-700 overflow-hidden
         ${highlight ? 'ring-2 ring-werco-navy-600 ring-offset-2 ring-offset-[#0d1117]' : ''}
-        ${isClickable ? 'cursor-pointer active:bg-slate-800 touch:active:scale-[0.99]' : ''}
+        ${isClickable ? 'cursor-pointer active:bg-slate-800 active:scale-[0.99]' : ''}
         transition-all duration-200
         ${className}
       `}

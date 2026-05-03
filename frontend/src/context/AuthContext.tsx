@@ -41,6 +41,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const persistUser = useCallback((nextUser: User) => {
+    setUser(nextUser);
+    sessionStorage.setItem('user', JSON.stringify(nextUser));
+  }, []);
+
   const handleLogoutDueToIdle = useCallback(() => {
     clearTimers();
     api.logout();
@@ -103,12 +108,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const token = sessionStorage.getItem('token');
     const savedUser = sessionStorage.getItem('user');
 
-    if (token && savedUser) {
+    const restoreSession = async () => {
+      if (!token || !savedUser) {
+        setIsLoading(false);
+        return;
+      }
+
       try {
         const parsed = JSON.parse(savedUser);
-        // Validate minimum shape — JSON.parse succeeding is not enough, we
-        // also need id/email/role to avoid booting the app with a partial
-        // or corrupted user object that would blow up downstream.
+        // Validate minimum shape. Older sessions stored only a partial user,
+        // so refresh the full profile before trusting it for kiosk/logout UI.
         if (
           parsed &&
           typeof parsed === 'object' &&
@@ -116,17 +125,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           typeof parsed.email === 'string' &&
           typeof parsed.role === 'string'
         ) {
-          setUser(parsed);
+          const hasFullUserShape =
+            typeof parsed.employee_id === 'string' &&
+            typeof parsed.first_name === 'string' &&
+            typeof parsed.last_name === 'string' &&
+            typeof parsed.is_active === 'boolean';
+
+          if (hasFullUserShape) {
+            setUser(parsed);
+          }
+
+          try {
+            const currentUser = await api.getCurrentUser();
+            persistUser({ ...parsed, ...currentUser });
+          } catch {
+            if (hasFullUserShape) {
+              setUser(parsed);
+            } else {
+              throw new Error('Stored user is incomplete and could not be refreshed');
+            }
+          }
         } else {
           throw new Error('Stored user is missing required fields');
         }
       } catch {
         sessionStorage.removeItem('user');
         sessionStorage.removeItem('token');
+        sessionStorage.removeItem('refreshToken');
+        sessionStorage.removeItem('tokenExpiresAt');
       }
-    }
-    setIsLoading(false);
-  }, []);
+      setIsLoading(false);
+    };
+
+    restoreSession();
+  }, [persistUser]);
 
   const login = async (email: string, password: string) => {
     const response = await api.login(email, password);
@@ -136,11 +168,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } else {
       api.setToken(response.access_token);
     }
-    setUser(response.user);
-    sessionStorage.setItem('user', JSON.stringify({
-      id: response.user.id, role: response.user.role, email: response.user.email,
-      company_id: response.user.company_id, company_name: response.user.company_name,
-    }));
+    persistUser(response.user);
 
     // Load custom role permissions from backend (non-blocking)
     try {
@@ -161,11 +189,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } else {
       api.setToken(response.access_token);
     }
-    setUser(response.user);
-    sessionStorage.setItem('user', JSON.stringify({
-      id: response.user.id, role: response.user.role, email: response.user.email,
-      company_id: response.user.company_id, company_name: response.user.company_name,
-    }));
+    persistUser(response.user);
 
     try {
       const permData = await api.getRolePermissions();
@@ -189,9 +213,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    const activeEmployeeId = user.employee_id || '';
+    if (!activeEmployeeId) {
+      throw new Error('Active user is missing an employee ID. Refresh and try again.');
+    }
+
     const enteredId = employeeId.trim();
-    const exactMatch = user.employee_id.toLowerCase() === enteredId.toLowerCase();
-    const userDigits = user.employee_id.replace(/\D/g, '');
+    const exactMatch = activeEmployeeId.toLowerCase() === enteredId.toLowerCase();
+    const userDigits = activeEmployeeId.replace(/\D/g, '');
     const userBadgeId = userDigits ? userDigits.slice(-4).padStart(4, '0') : null;
     const enteredDigits = enteredId.replace(/\D/g, '');
     const enteredBadgeId = enteredDigits ? enteredDigits.slice(-4).padStart(4, '0') : null;

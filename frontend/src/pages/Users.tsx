@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { UserRole } from '../types';
+import { useSearchParams } from 'react-router-dom';
 import { PlusIcon, PencilIcon, KeyIcon, UserMinusIcon, UserPlusIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline';
 
 interface UserData {
@@ -55,6 +56,7 @@ const roleLabels: Record<UserRole, string> = {
 };
 
 export default function Users() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [users, setUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
   const [showInactive, setShowInactive] = useState(false);
@@ -156,6 +158,13 @@ export default function Users() {
     setShowModal(true);
   };
 
+  useEffect(() => {
+    const requestedId = Number(searchParams.get('id') || 0);
+    if (!requestedId || users.length === 0 || editingUser?.id === requestedId) return;
+    const requestedUser = users.find(user => user.id === requestedId);
+    if (requestedUser) handleEdit(requestedUser);
+  }, [users, searchParams, editingUser?.id]);
+
   const openPasswordReset = (userId: number) => {
     setSelectedUserId(userId);
     setNewPassword('');
@@ -188,6 +197,9 @@ export default function Users() {
 
   const resetForm = () => {
     setEditingUser(null);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('id');
+    setSearchParams(nextParams, { replace: true });
     setFormData({
       email: '',
       employee_id: '',

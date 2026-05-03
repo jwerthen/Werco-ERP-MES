@@ -248,6 +248,7 @@ class ApiService {
     this.token = token;
     sessionStorage.setItem('token', token);
     this.api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    window.dispatchEvent(new Event('werco:auth-token-changed'));
   }
 
   setTokens(accessToken: string, refreshToken: string, expiresIn: number) {
@@ -260,6 +261,7 @@ class ApiService {
     sessionStorage.setItem('tokenExpiresAt', this.tokenExpiresAt.toString());
 
     this.api.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
+    window.dispatchEvent(new Event('werco:auth-token-changed'));
   }
 
   logout() {
@@ -273,6 +275,7 @@ class ApiService {
 
     delete this.api.defaults.headers.common['Authorization'];
     this.clearCache();
+    window.dispatchEvent(new Event('werco:auth-token-changed'));
   }
 
   // Auth
@@ -318,6 +321,11 @@ class ApiService {
 
   async getSetupStatus(): Promise<{ has_users: boolean; is_setup_required: boolean }> {
     const response = await this.api.get<{ has_users: boolean; is_setup_required: boolean }>('/auth/setup-status');
+    return response.data;
+  }
+
+  async getCurrentUser(): Promise<User> {
+    const response = await this.api.get<User>('/users/me');
     return response.data;
   }
 
@@ -369,8 +377,25 @@ class ApiService {
 
   // Parts
   async getParts(params?: PartListParams): Promise<Part[]> {
-    const response = await this.api.get<Part[]>('/parts/', { params: { limit: 500, ...params } });
-    return response.data;
+    if (params?.limit) {
+      const response = await this.api.get<Part[]>('/parts/', { params });
+      return response.data;
+    }
+
+    const pageSize = 500;
+    const allParts: Part[] = [];
+    let skip = params?.skip ?? params?.offset ?? 0;
+
+    while (true) {
+      const response = await this.api.get<Part[]>('/parts/', {
+        params: { ...params, skip, limit: pageSize },
+      });
+      allParts.push(...response.data);
+      if (response.data.length < pageSize) break;
+      skip += pageSize;
+    }
+
+    return allParts;
   }
 
   async getPart(id: number): Promise<Part> {
@@ -500,11 +525,28 @@ class ApiService {
   }
 
   // Work Orders
-  async getWorkOrders(params?: { status?: string; search?: string }) {
-    const response = await this.api.get('/work-orders/', {
-      params: { ...params, _ts: Date.now() },
-    });
-    return response.data;
+  async getWorkOrders(params?: { status?: string; search?: string; limit?: number; skip?: number }) {
+    if (params?.limit) {
+      const response = await this.api.get('/work-orders/', {
+        params: { ...params, _ts: Date.now() },
+      });
+      return response.data;
+    }
+
+    const pageSize = 500;
+    const allWorkOrders: any[] = [];
+    let skip = params?.skip ?? 0;
+
+    while (true) {
+      const response = await this.api.get('/work-orders/', {
+        params: { ...params, skip, limit: pageSize, _ts: Date.now() },
+      });
+      allWorkOrders.push(...response.data);
+      if (response.data.length < pageSize) break;
+      skip += pageSize;
+    }
+
+    return allWorkOrders;
   }
 
   async getWorkOrder(id: number) {
@@ -1879,7 +1921,7 @@ class ApiService {
 
   // Search
   async search(query: string, type?: string) {
-    const response = await this.api.get('/search/', { params: { q: query, type } });
+    const response = await this.api.get('/search/', { params: { q: query, types: type } });
     return response.data;
   }
 

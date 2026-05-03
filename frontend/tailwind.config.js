@@ -10,13 +10,6 @@ module.exports = {
       lg: '1024px', // Small laptops
       xl: '1280px', // Desktops
       '2xl': '1536px', // Large desktops
-      // Touch-specific breakpoints
-      touch: { raw: '(hover: none) and (pointer: coarse)' },
-      stylus: { raw: '(hover: none) and (pointer: fine)' },
-      mouse: { raw: '(hover: hover) and (pointer: fine)' },
-      // Orientation
-      portrait: { raw: '(orientation: portrait)' },
-      landscape: { raw: '(orientation: landscape)' },
     },
     extend: {
       colors: {

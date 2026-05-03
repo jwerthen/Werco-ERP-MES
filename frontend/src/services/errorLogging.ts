@@ -156,7 +156,7 @@ class ErrorLoggingService {
       const authData = sessionStorage.getItem('user');
       if (authData) {
         const parsed = JSON.parse(authData);
-        return parsed?.user?.id?.toString();
+        return (parsed?.id ?? parsed?.user?.id)?.toString();
       }
     } catch {
       // Ignore parse errors
@@ -198,4 +198,3 @@ export const logError = (payload: ErrorLogPayload): void => {
 if (typeof window !== 'undefined') {
   errorLoggingService.initialize();
 }
-

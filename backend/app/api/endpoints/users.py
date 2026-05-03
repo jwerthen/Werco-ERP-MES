@@ -47,6 +47,7 @@ class PasswordChange(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
+    version: Optional[int] = 0
     email: str
     employee_id: str
     first_name: str
@@ -55,7 +56,11 @@ class UserResponse(BaseModel):
     department: Optional[str] = None
     phone: Optional[str] = None
     is_active: bool
+    is_superuser: bool = False
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
     
     class Config:

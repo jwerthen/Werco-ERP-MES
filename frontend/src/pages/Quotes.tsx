@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
@@ -57,11 +57,12 @@ const statusColors: Record<string, string> = {
 
 export default function Quotes() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [_selectedQuote, _setSelectedQuote] = useState<Quote | null>(null); // eslint-disable-line @typescript-eslint/no-unused-vars
+  const [selectedQuote, setSelectedQuote] = useState<Quote | null>(null);
 
   const [newQuote, setNewQuote] = useState({
     customer_name: '',
@@ -78,6 +79,16 @@ export default function Quotes() {
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    const requestedId = Number(searchParams.get('id') || 0);
+    if (!requestedId) {
+      setSelectedQuote(null);
+      return;
+    }
+    const quote = quotes.find(q => q.id === requestedId);
+    if (quote) setSelectedQuote(quote);
+  }, [quotes, searchParams]);
 
   const loadData = async () => {
     try {
@@ -131,6 +142,13 @@ export default function Quotes() {
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to convert quote');
     }
+  };
+
+  const clearSelectedQuote = () => {
+    setSelectedQuote(null);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('id');
+    setSearchParams(nextParams, { replace: true });
   };
 
   const addLine = () => {
@@ -190,6 +208,27 @@ export default function Quotes() {
 
       {/* Quotes Table */}
       <div className="card">
+        {selectedQuote && (
+          <div className="mb-4 rounded-xl border border-werco-500/30 bg-werco-500/10 p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-sm text-slate-400">Selected quote</p>
+                <h2 className="text-lg font-semibold text-slate-100">
+                  {selectedQuote.quote_number} Rev {selectedQuote.revision}
+                </h2>
+                <p className="text-sm text-slate-300">{selectedQuote.customer_name}</p>
+              </div>
+              <div className="text-left sm:text-right">
+                <p className="text-xl font-bold text-slate-100">
+                  ${selectedQuote.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                </p>
+                <button onClick={clearSelectedQuote} className="mt-2 text-sm text-werco-300 hover:text-werco-200">
+                  Clear selection
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-700">
             <thead className="bg-slate-800/50">
@@ -206,7 +245,7 @@ export default function Quotes() {
             </thead>
             <tbody className="divide-y divide-slate-700">
               {quotes.map((q) => (
-                <tr key={q.id} className="hover:bg-slate-800/50">
+                <tr key={q.id} className={`${selectedQuote?.id === q.id ? 'bg-werco-500/10' : ''} hover:bg-slate-800/50`}>
                   <td className="px-4 py-3">
                     <span className="font-medium text-werco-primary">{q.quote_number}</span>
                     <span className="text-slate-400 text-sm ml-1">Rev {q.revision}</span>

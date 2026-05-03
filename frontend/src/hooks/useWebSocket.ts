@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { getAccessToken } from '../services/realtime';
 
 interface RealtimeMessage {
   type: string;
@@ -21,12 +22,166 @@ interface WebSocketOptions {
   onError?: (event: Event) => void;
 }
 
+interface Subscriber {
+  setStatus: (status: WebSocketStatus) => void;
+  callbacksRef: MutableRefObject<Pick<WebSocketOptions, 'onMessage' | 'onOpen' | 'onClose' | 'onError'>>;
+}
+
+interface SharedConnection {
+  key: string;
+  url: string;
+  socket: WebSocket | null;
+  status: WebSocketStatus;
+  subscribers: Set<Subscriber>;
+  reconnect: boolean;
+  reconnectMinDelayMs: number;
+  reconnectMaxDelayMs: number;
+  heartbeatIntervalMs: number;
+  reconnectAttempt: number;
+  reconnectTimer: number | null;
+  heartbeatTimer: number | null;
+  manualClose: boolean;
+}
+
+const connections = new Map<string, SharedConnection>();
+
+interface ConnectionOptions {
+  url: string;
+  reconnect: boolean;
+  reconnectMinDelayMs: number;
+  reconnectMaxDelayMs: number;
+  heartbeatIntervalMs: number;
+}
+
 const parseMessage = (event: MessageEvent): RealtimeMessage => {
   try {
     return JSON.parse(event.data);
-  } catch (error) {
+  } catch {
     return { type: 'message', data: event.data };
   }
+};
+
+const connectionKey = (url: string): string => {
+  const parsed = new URL(url);
+  parsed.searchParams.delete('token');
+  return parsed.toString();
+};
+
+const withFreshToken = (url: string): string => {
+  const parsed = new URL(url);
+  if (parsed.searchParams.has('token')) {
+    const token = getAccessToken();
+    if (token) {
+      parsed.searchParams.set('token', token);
+    }
+  }
+  return parsed.toString();
+};
+
+const broadcastStatus = (connection: SharedConnection, status: WebSocketStatus) => {
+  connection.status = status;
+  connection.subscribers.forEach(subscriber => subscriber.setStatus(status));
+};
+
+const clearTimers = (connection: SharedConnection) => {
+  if (connection.reconnectTimer) {
+    window.clearTimeout(connection.reconnectTimer);
+    connection.reconnectTimer = null;
+  }
+  if (connection.heartbeatTimer) {
+    window.clearInterval(connection.heartbeatTimer);
+    connection.heartbeatTimer = null;
+  }
+};
+
+const startHeartbeat = (connection: SharedConnection) => {
+  if (connection.heartbeatIntervalMs <= 0) return;
+  connection.heartbeatTimer = window.setInterval(() => {
+    if (connection.socket?.readyState === WebSocket.OPEN) {
+      connection.socket.send(JSON.stringify({ type: 'ping', timestamp: new Date().toISOString() }));
+    }
+  }, connection.heartbeatIntervalMs);
+};
+
+const connect = (connection: SharedConnection) => {
+  if (connection.subscribers.size === 0) return;
+  if (
+    connection.socket &&
+    (connection.socket.readyState === WebSocket.CONNECTING || connection.socket.readyState === WebSocket.OPEN)
+  ) {
+    return;
+  }
+
+  connection.manualClose = false;
+  broadcastStatus(connection, 'connecting');
+
+  const socket = new WebSocket(withFreshToken(connection.url));
+  connection.socket = socket;
+
+  socket.onopen = (event) => {
+    connection.reconnectAttempt = 0;
+    clearTimers(connection);
+    broadcastStatus(connection, 'open');
+    startHeartbeat(connection);
+    connection.subscribers.forEach(subscriber => subscriber.callbacksRef.current.onOpen?.(event));
+  };
+
+  socket.onmessage = (event) => {
+    const message = parseMessage(event);
+    connection.subscribers.forEach(subscriber => subscriber.callbacksRef.current.onMessage?.(message, event));
+  };
+
+  socket.onerror = (event) => {
+    broadcastStatus(connection, 'error');
+    connection.subscribers.forEach(subscriber => subscriber.callbacksRef.current.onError?.(event));
+  };
+
+  socket.onclose = (event) => {
+    clearTimers(connection);
+    connection.socket = null;
+    broadcastStatus(connection, 'closed');
+    connection.subscribers.forEach(subscriber => subscriber.callbacksRef.current.onClose?.(event));
+
+    if (!connection.reconnect || connection.manualClose || connection.subscribers.size === 0) return;
+    const delay = Math.min(
+      connection.reconnectMaxDelayMs,
+      connection.reconnectMinDelayMs * Math.pow(2, connection.reconnectAttempt)
+    );
+    const jitter = Math.floor(delay * 0.2 * Math.random());
+    connection.reconnectAttempt += 1;
+    connection.reconnectTimer = window.setTimeout(() => connect(connection), delay + jitter);
+  };
+};
+
+const getConnection = (options: ConnectionOptions) => {
+  const key = connectionKey(options.url);
+  const existing = connections.get(key);
+  if (existing) {
+    existing.url = options.url;
+    existing.reconnect = options.reconnect;
+    existing.reconnectMinDelayMs = options.reconnectMinDelayMs;
+    existing.reconnectMaxDelayMs = options.reconnectMaxDelayMs;
+    existing.heartbeatIntervalMs = options.heartbeatIntervalMs;
+    return existing;
+  }
+
+  const connection: SharedConnection = {
+    key,
+    url: options.url,
+    socket: null,
+    status: 'idle',
+    subscribers: new Set(),
+    reconnect: options.reconnect,
+    reconnectMinDelayMs: options.reconnectMinDelayMs,
+    reconnectMaxDelayMs: options.reconnectMaxDelayMs,
+    heartbeatIntervalMs: options.heartbeatIntervalMs,
+    reconnectAttempt: 0,
+    reconnectTimer: null,
+    heartbeatTimer: null,
+    manualClose: false,
+  };
+  connections.set(key, connection);
+  return connection;
 };
 
 export const useWebSocket = ({
@@ -42,112 +197,68 @@ export const useWebSocket = ({
   onError,
 }: WebSocketOptions) => {
   const [status, setStatus] = useState<WebSocketStatus>('idle');
-  const socketRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<number | null>(null);
-  const heartbeatTimerRef = useRef<number | null>(null);
-  const reconnectAttemptRef = useRef(0);
-  const manualCloseRef = useRef(false);
-  const connectRef = useRef<() => void>(() => {});
   const callbacksRef = useRef({ onMessage, onOpen, onClose, onError });
-
   callbacksRef.current = { onMessage, onOpen, onClose, onError };
-
-  const clearTimers = useCallback(() => {
-    if (reconnectTimerRef.current) {
-      window.clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-    if (heartbeatTimerRef.current) {
-      window.clearInterval(heartbeatTimerRef.current);
-      heartbeatTimerRef.current = null;
-    }
-  }, []);
-
-  const scheduleReconnect = useCallback(() => {
-    if (!reconnect || manualCloseRef.current) return;
-
-    const attempt = reconnectAttemptRef.current;
-    const delay = Math.min(reconnectMaxDelayMs, reconnectMinDelayMs * Math.pow(2, attempt));
-    const jitter = Math.floor(delay * 0.2 * Math.random());
-    const nextDelay = delay + jitter;
-
-    reconnectAttemptRef.current += 1;
-    reconnectTimerRef.current = window.setTimeout(() => {
-      connectRef.current();
-    }, nextDelay);
-  }, [reconnect, reconnectMaxDelayMs, reconnectMinDelayMs]);
-
-  const startHeartbeat = useCallback(() => {
-    if (heartbeatIntervalMs <= 0) return;
-    heartbeatTimerRef.current = window.setInterval(() => {
-      if (socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current.send(JSON.stringify({ type: 'ping', timestamp: new Date().toISOString() }));
-      }
-    }, heartbeatIntervalMs);
-  }, [heartbeatIntervalMs]);
-
-  const connect = useCallback(() => {
-    if (!url || !enabled) {
-      setStatus('idle');
-      return;
-    }
-
-    manualCloseRef.current = false;
-    setStatus('connecting');
-    const socket = new WebSocket(url);
-    socketRef.current = socket;
-
-    socket.onopen = (event) => {
-      reconnectAttemptRef.current = 0;
-      setStatus('open');
-      clearTimers();
-      startHeartbeat();
-      callbacksRef.current.onOpen?.(event);
-    };
-
-    socket.onmessage = (event) => {
-      const message = parseMessage(event);
-      callbacksRef.current.onMessage?.(message, event);
-    };
-
-    socket.onerror = (event) => {
-      setStatus('error');
-      callbacksRef.current.onError?.(event);
-    };
-
-    socket.onclose = (event) => {
-      setStatus('closed');
-      clearTimers();
-      callbacksRef.current.onClose?.(event);
-      scheduleReconnect();
-    };
-  }, [clearTimers, enabled, scheduleReconnect, startHeartbeat, url]);
-
-  connectRef.current = connect;
+  const connectionRef = useRef<SharedConnection | null>(null);
 
   useEffect(() => {
     if (!enabled || !url) {
-      manualCloseRef.current = true;
-      clearTimers();
-      socketRef.current?.close();
-      socketRef.current = null;
       setStatus('idle');
       return;
     }
 
-    connect();
+    const connection = getConnection({
+      url,
+      reconnect,
+      reconnectMinDelayMs,
+      reconnectMaxDelayMs,
+      heartbeatIntervalMs,
+    });
+    connectionRef.current = connection;
+
+    const subscriber: Subscriber = { setStatus, callbacksRef };
+    connection.subscribers.add(subscriber);
+    setStatus(connection.status);
+    connect(connection);
 
     return () => {
-      manualCloseRef.current = true;
-      clearTimers();
-      socketRef.current?.close();
-      socketRef.current = null;
+      connection.subscribers.delete(subscriber);
+      if (connection.subscribers.size === 0) {
+        connection.manualClose = true;
+        clearTimers(connection);
+        connection.socket?.close();
+        connection.socket = null;
+        connections.delete(connection.key);
+      }
+      connectionRef.current = null;
     };
-  }, [clearTimers, connect, enabled, url]);
+  }, [enabled, heartbeatIntervalMs, reconnect, reconnectMaxDelayMs, reconnectMinDelayMs, url]);
+
+  useEffect(() => {
+    const reconnectWithLatestToken = () => {
+      connections.forEach(connection => {
+        if (!connection.url.includes('token=')) return;
+        connection.manualClose = true;
+        clearTimers(connection);
+        const socket = connection.socket;
+        connection.socket = null;
+        if (socket) {
+          socket.onclose = null;
+          socket.close();
+        }
+        connection.manualClose = false;
+        connect(connection);
+      });
+    };
+
+    window.addEventListener('werco:auth-token-changed', reconnectWithLatestToken);
+    return () => window.removeEventListener('werco:auth-token-changed', reconnectWithLatestToken);
+  }, []);
 
   const sendJson = useCallback((payload: Record<string, unknown>) => {
-    if (socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify(payload));
+    const socket = connectionRef.current?.socket;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(payload));
     }
   }, []);
 

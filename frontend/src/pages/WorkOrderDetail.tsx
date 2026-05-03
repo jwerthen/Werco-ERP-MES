@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { User, WorkOrder } from '../types';
+import { User, WorkOrder, WorkOrderOperation } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
@@ -79,7 +79,9 @@ const hydrateOperationsFromShopFloor = async (workOrder: WorkOrder): Promise<Wor
     const liveOperations = Array.isArray(details?.all_operations) ? details.all_operations : [];
     if (liveOperations.length === 0) return workOrder;
 
-    const liveById = new Map(liveOperations.map((op: any) => [op.id, op]));
+    const liveById = new Map<number, Partial<WorkOrderOperation>>(
+      liveOperations.map((op: Partial<WorkOrderOperation> & { id: number }) => [op.id, op])
+    );
     return {
       ...workOrder,
       operations: workOrder.operations.map((op) => {

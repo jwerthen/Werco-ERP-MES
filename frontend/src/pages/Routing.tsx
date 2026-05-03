@@ -236,6 +236,14 @@ export default function RoutingPage() {
     return null;
   };
 
+  useEffect(() => {
+    const routingIdParam = searchParams.get('id');
+    if (!routingIdParam) return;
+    const routingId = parseInt(routingIdParam, 10);
+    if (Number.isNaN(routingId) || selectedRouting?.id === routingId) return;
+    loadRouting(routingId);
+  }, [searchParams, selectedRouting?.id]);
+
   const handleCreateRouting = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRouting.part_id) {

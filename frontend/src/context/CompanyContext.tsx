@@ -15,12 +15,17 @@ interface CompanyContextType {
 }
 
 const CompanyContext = createContext<CompanyContextType | undefined>(undefined);
+const VIEWING_COMPANY_KEY = 'werco.platform.viewingCompanyId';
 
 export function CompanyProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const [currentCompany, setCurrentCompany] = useState<Company | null>(null);
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [viewingCompanyId, setViewingCompanyId] = useState<number | null>(null);
+  const [viewingCompanyId, setViewingCompanyId] = useState<number | null>(() => {
+    const stored = sessionStorage.getItem(VIEWING_COMPANY_KEY);
+    const parsed = stored ? Number(stored) : null;
+    return Number.isFinite(parsed) ? parsed : null;
+  });
 
   const isPlatformAdmin = user?.role === 'platform_admin' || user?.is_superuser === true;
 
@@ -39,6 +44,8 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     if (!user) {
       setCurrentCompany(null);
       setCompanies([]);
+      setViewingCompanyId(null);
+      sessionStorage.removeItem(VIEWING_COMPANY_KEY);
       return;
     }
 
@@ -71,6 +78,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
 
       // Track that we're viewing another company
       setViewingCompanyId(companyId);
+      sessionStorage.setItem(VIEWING_COMPANY_KEY, String(companyId));
 
       // Reload company info
       const company = await api.getCurrentCompany();
@@ -85,6 +93,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     if (!user?.company_id) return;
     await switchCompany(user.company_id);
     setViewingCompanyId(null);
+    sessionStorage.removeItem(VIEWING_COMPANY_KEY);
   }, [user, switchCompany]);
 
   const isViewingOtherCompany = viewingCompanyId !== null && viewingCompanyId !== user?.company_id;
