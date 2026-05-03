@@ -242,7 +242,10 @@ class TestWorkOrdersAPI:
         complete_response = client.post(
             f"/api/v1/work-orders/operations/{operation_id}/complete",
             headers=auth_headers,
-            params={"quantity_complete": 1, "quantity_scrapped": 0},
+            params={
+                "quantity_complete": test_work_order.quantity_ordered,
+                "quantity_scrapped": 0,
+            },
         )
         assert complete_response.status_code == status.HTTP_200_OK
 
@@ -253,6 +256,81 @@ class TestWorkOrdersAPI:
         operation = refreshed_work_order.json()["operations"][0]
         assert operation["started_by"] is not None
         assert operation["completed_by"] is not None
+
+    def test_work_order_operation_completion_uses_component_target(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        part = Part(
+            part_number="WO-COMPLETE-COMPONENT",
+            name="Component Target Parent",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-COMPLETE-COMPONENT",
+            name="Component Target Work Center",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-COMPLETE-COMPONENT",
+            part_id=part.id,
+            quantity_ordered=3,
+            status=WorkOrderStatus.RELEASED,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+
+        operation = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=work_center.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="Make Component",
+            component_part_id=part.id,
+            component_quantity=6,
+            status=OperationStatus.READY,
+            company_id=1,
+        )
+        db_session.add(operation)
+        db_session.commit()
+
+        partial_response = client.post(
+            f"/api/v1/work-orders/operations/{operation.id}/complete",
+            headers=auth_headers,
+            params={"quantity_complete": 3, "quantity_scrapped": 0},
+        )
+        assert partial_response.status_code == status.HTTP_200_OK
+        assert partial_response.json()["message"] == "Progress updated"
+
+        db_session.expire_all()
+        refreshed_operation = db_session.get(WorkOrderOperation, operation.id)
+        refreshed_work_order = db_session.get(WorkOrder, work_order.id)
+        assert refreshed_operation.status == OperationStatus.IN_PROGRESS
+        assert refreshed_work_order.status == WorkOrderStatus.IN_PROGRESS
+        assert refreshed_work_order.quantity_complete == 0
+
+        complete_response = client.post(
+            f"/api/v1/work-orders/operations/{operation.id}/complete",
+            headers=auth_headers,
+            params={"quantity_complete": 6, "quantity_scrapped": 0},
+        )
+        assert complete_response.status_code == status.HTTP_200_OK
+
+        db_session.expire_all()
+        refreshed_operation = db_session.get(WorkOrderOperation, operation.id)
+        refreshed_work_order = db_session.get(WorkOrder, work_order.id)
+        assert refreshed_operation.status == OperationStatus.COMPLETE
+        assert refreshed_work_order.status == WorkOrderStatus.COMPLETE
+        assert refreshed_work_order.quantity_complete == 3
 
     def test_assembly_work_order_uses_bom_component_and_assembly_routings(
         self, client: TestClient, auth_headers: dict, db_session
@@ -1215,6 +1293,21 @@ class TestWorkOrdersAPI:
         assert refreshed_entry.quantity_produced == 2
         assert refreshed_entry.quantity_scrapped == 1
         assert refreshed_entry.clock_out is None
+
+        clock_out_response = client.post(
+            f"/api/v1/shop-floor/clock-out/{time_entry.id}",
+            headers=operator_headers,
+            json={"quantity_produced": 0, "quantity_scrapped": 0},
+        )
+        assert clock_out_response.status_code == status.HTTP_200_OK
+
+        db_session.expire_all()
+        refreshed_operation = db_session.get(WorkOrderOperation, operation.id)
+        refreshed_entry = db_session.get(TimeEntry, time_entry.id)
+        assert refreshed_operation.quantity_complete == 2
+        assert refreshed_entry.quantity_produced == 2
+        assert refreshed_entry.quantity_scrapped == 1
+        assert refreshed_entry.clock_out is not None
 
 
 @pytest.mark.api

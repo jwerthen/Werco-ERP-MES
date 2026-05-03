@@ -368,10 +368,13 @@ export default function WorkOrderDetail() {
     }
   };
 
-  const handleCompleteOperation = async (operationId: number, opName: string) => {
-    const ordered = workOrder!.quantity_ordered;
-    const qtyCompleteRaw = prompt(`Complete operation "${opName}"\nEnter quantity completed:`, ordered.toString());
-    const qtyComplete = parseQty(qtyCompleteRaw, 'Quantity completed', ordered);
+  const handleCompleteOperation = async (operation: WorkOrderOperation) => {
+    const targetQty = Number(operation.component_quantity || workOrder!.quantity_ordered || 0);
+    const qtyCompleteRaw = prompt(
+      `Complete operation "${operation.name}"\nEnter quantity completed (target: ${targetQty}):`,
+      targetQty.toString()
+    );
+    const qtyComplete = parseQty(qtyCompleteRaw, 'Quantity completed', targetQty);
     if (qtyComplete === null) return;
 
     const qtyScrappedRaw = prompt('Enter quantity scrapped (if any):', '0');
@@ -379,7 +382,7 @@ export default function WorkOrderDetail() {
     if (qtyScrapped === null) return;
 
     try {
-      await api.completeWOOperation(operationId, qtyComplete, qtyScrapped);
+      await api.completeWOOperation(operation.id, qtyComplete, qtyScrapped);
       loadWorkOrder();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to complete operation');
@@ -590,6 +593,7 @@ export default function WorkOrderDetail() {
                   return workOrder.operations.map((op) => {
                     const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
                     if (op.operation_group) lastGroup = op.operation_group;
+                    const operationTarget = Number(op.component_quantity || workOrder.quantity_ordered || 0);
                     
                     const groupColors: Record<string, string> = {
                       'LASER': 'bg-red-500/20 text-red-300',
@@ -635,14 +639,10 @@ export default function WorkOrderDetail() {
                           )}
                         </td>
                         <td className="px-4 py-3">
-                          {op.component_quantity ? (
-                            <span className="font-medium text-sm">{op.component_quantity}</span>
-                          ) : (
-                            <div>
-                              <span className="font-medium text-sm">{op.quantity_complete}</span>
-                              <span className="text-slate-400 text-sm">/{workOrder.quantity_ordered}</span>
-                            </div>
-                          )}
+                          <div>
+                            <span className="font-medium text-sm">{op.quantity_complete}</span>
+                            <span className="text-slate-400 text-sm">/{operationTarget}</span>
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-sm">
                           {(Number(op.setup_time_hours || 0) + Number(op.run_time_hours || 0)).toFixed(2)}
@@ -671,7 +671,7 @@ export default function WorkOrderDetail() {
                         <td className="px-4 py-3 text-center">
                           {op.status !== 'complete' && workOrder.status !== 'draft' && (
                             <button
-                              onClick={() => handleCompleteOperation(op.id, op.name)}
+                              onClick={() => handleCompleteOperation(op)}
                               className="text-green-600 hover:text-green-300 text-sm font-medium"
                               title="Complete Operation"
                             >

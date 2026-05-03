@@ -15,6 +15,15 @@ from app.models.routing import Routing, RoutingOperation
 from app.models.bom import BOM, BOMItem
 from app.models.work_center import WorkCenter
 from app.services.scheduling_service import SchedulingService
+from app.services.work_order_state_service import (
+    WorkOrderStateError,
+    has_incomplete_predecessors,
+    operation_target_quantity,
+    release_first_ready_operation,
+    release_next_ready_operation,
+    sync_work_order_quantity_complete,
+    validate_operation_quantity,
+)
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
     broadcast_dashboard_update,
@@ -156,46 +165,6 @@ def _reconcile_operation_component_quantities(
             op.component_part_name = component.name
 
     return changed
-
-
-def _has_incomplete_predecessors(
-    operations: List[WorkOrderOperation],
-    sequence: int,
-    current_operation_id: Optional[int] = None,
-) -> bool:
-    return any(
-        op.sequence < sequence
-        and op.status != OperationStatus.COMPLETE
-        and (current_operation_id is None or op.id != current_operation_id)
-        for op in operations
-    )
-
-
-def _release_first_group(work_order: WorkOrder) -> None:
-    if not work_order.operations:
-        return
-
-    first_pending = min(
-        (op for op in work_order.operations if op.status == OperationStatus.PENDING),
-        key=lambda op: op.sequence,
-        default=None,
-    )
-    if first_pending:
-        first_pending.status = OperationStatus.READY
-
-
-def _release_next_group(work_order: WorkOrder, completed_op: WorkOrderOperation) -> None:
-    next_op = min(
-        (
-            op
-            for op in work_order.operations
-            if op.sequence > completed_op.sequence and op.status == OperationStatus.PENDING
-        ),
-        key=lambda x: x.sequence,
-        default=None,
-    )
-    if next_op:
-        next_op.status = OperationStatus.READY
 
 
 def _enrich_work_order_operations(work_order: WorkOrder) -> None:
@@ -1057,8 +1026,7 @@ def release_work_order(
     work_order.released_by = current_user.id
     work_order.released_at = datetime.utcnow()
     
-    # Set first group to ready for assembly work orders
-    _release_first_group(work_order)
+    release_first_ready_operation(work_order)
     
     db.commit()
 
@@ -1321,7 +1289,14 @@ def start_operation(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    if _has_incomplete_predecessors(work_order.operations, operation.sequence, operation.id):
+    if has_incomplete_predecessors(
+        db,
+        operation.work_order_id,
+        operation.sequence,
+        operation.id,
+        operation.work_center_id,
+        allow_same_work_center=False,
+    ):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
     
     operation.status = OperationStatus.IN_PROGRESS
@@ -1380,26 +1355,80 @@ def complete_operation(
         raise HTTPException(status_code=404, detail="Operation not found")
 
     work_order = operation.work_order
-    if work_order and _has_incomplete_predecessors(work_order.operations, operation.sequence, operation.id):
+    if work_order and has_incomplete_predecessors(
+        db,
+        operation.work_order_id,
+        operation.sequence,
+        operation.id,
+        operation.work_center_id,
+        allow_same_work_center=False,
+    ):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
-    
-    operation.status = OperationStatus.COMPLETE
+
+    target_qty = operation_target_quantity(operation, work_order)
+    try:
+        validate_operation_quantity(quantity_complete, target_qty)
+    except WorkOrderStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if operation.status == OperationStatus.COMPLETE:
+        raise HTTPException(status_code=400, detail="Operation is already complete")
+
+    if operation.status != OperationStatus.IN_PROGRESS:
+        operation.status = OperationStatus.IN_PROGRESS
+        if not operation.actual_start:
+            operation.actual_start = datetime.utcnow()
+            operation.started_by = current_user.id
+    if work_order and work_order.status == WorkOrderStatus.RELEASED:
+        work_order.status = WorkOrderStatus.IN_PROGRESS
+        if not work_order.actual_start:
+            work_order.actual_start = datetime.utcnow()
+
     operation.quantity_complete = quantity_complete
     operation.quantity_scrapped = quantity_scrapped
-    operation.actual_end = datetime.utcnow()
-    operation.completed_by = current_user.id
-    
-    # Check if next operation/group should be set to ready
+    operation.updated_at = datetime.utcnow()
+
+    is_fully_complete = quantity_complete >= target_qty
+    if is_fully_complete:
+        operation.status = OperationStatus.COMPLETE
+        operation.actual_end = datetime.utcnow()
+        operation.completed_by = current_user.id
+
     work_order = operation.work_order
     affected_work_centers = {operation.work_center_id}
-    if work_order:
-        _release_next_group(work_order, operation)
-        newly_ready_wcs = {op.work_center_id for op in work_order.operations if op.status == OperationStatus.READY}
-        affected_work_centers |= {wc_id for wc_id in newly_ready_wcs if wc_id}
+    if work_order and is_fully_complete:
+        remaining_ops = db.query(WorkOrderOperation).filter(
+            WorkOrderOperation.work_order_id == work_order.id,
+            WorkOrderOperation.id != operation.id,
+            WorkOrderOperation.status != OperationStatus.COMPLETE,
+        ).count()
 
+        if remaining_ops == 0:
+            work_order.status = WorkOrderStatus.COMPLETE
+            work_order.actual_end = datetime.utcnow()
+            sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
+        else:
+            release_next_ready_operation(db, work_order, operation)
+
+        newly_ready_wcs = {
+            op.work_center_id
+            for op in work_order.operations
+            if op.status == OperationStatus.READY and op.work_center_id
+        }
+        affected_work_centers |= newly_ready_wcs
+
+    if work_order:
+        sync_work_order_quantity_complete(
+            work_order,
+            operation,
+            all_operations_complete=work_order.status == WorkOrderStatus.COMPLETE,
+        )
+        work_order.updated_at = datetime.utcnow()
+
+    if is_fully_complete:
         scheduling_service = SchedulingService(db)
         scheduling_service.update_availability_rates(
-            work_center_ids=list(affected_work_centers),
+            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id],
             horizon_days=90
         )
     
@@ -1411,6 +1440,7 @@ def complete_operation(
             "event": "operation_completed",
             "operation_id": operation.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+            "is_fully_complete": is_fully_complete,
         }
     )
     safe_broadcast(
@@ -1419,6 +1449,7 @@ def complete_operation(
             "event": "operation_completed",
             "work_order_id": work_order.id,
             "operation_id": operation.id,
+            "is_fully_complete": is_fully_complete,
         }
     )
     if operation.work_center_id:
@@ -1429,6 +1460,7 @@ def complete_operation(
                 "event": "operation_completed",
                 "work_order_id": work_order.id,
                 "operation_id": operation.id,
+                "is_fully_complete": is_fully_complete,
             }
         )
-    return {"message": "Operation completed"}
+    return {"message": "Operation completed" if is_fully_complete else "Progress updated"}
