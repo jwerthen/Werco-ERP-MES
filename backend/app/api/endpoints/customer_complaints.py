@@ -1,25 +1,28 @@
+from datetime import date, datetime, timedelta
 from typing import List, Optional
-from datetime import datetime, date, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import extract, func
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, extract
+
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role, get_current_company_id
-from app.models.user import User, UserRole
 from app.models.customer_complaint import (
-    CustomerComplaint, ReturnMaterialAuthorization,
-    ComplaintStatus, ComplaintSeverity, RMAStatus
+    ComplaintSeverity,
+    ComplaintStatus,
+    CustomerComplaint,
+    ReturnMaterialAuthorization,
+    RMAStatus,
 )
-from app.models.quality import (
-    NonConformanceReport, NCRStatus, NCRSource,
-    CorrectiveActionRequest, CARStatus
-)
+from app.models.quality import CorrectiveActionRequest, NCRSource, NonConformanceReport
+from app.models.user import User, UserRole
 
 router = APIRouter()
 
 
 # ============== Pydantic Schemas ==============
+
 
 class PartSummary(BaseModel):
     id: int
@@ -231,12 +234,16 @@ class EightDReport(BaseModel):
 
 # ============== Number Generators ==============
 
+
 def generate_complaint_number(db: Session) -> str:
     year = datetime.now().strftime("%Y")
     prefix = f"CC-{year}-"
-    last = db.query(CustomerComplaint).filter(
-        CustomerComplaint.complaint_number.like(f"{prefix}%")
-    ).order_by(CustomerComplaint.complaint_number.desc()).first()
+    last = (
+        db.query(CustomerComplaint)
+        .filter(CustomerComplaint.complaint_number.like(f"{prefix}%"))
+        .order_by(CustomerComplaint.complaint_number.desc())
+        .first()
+    )
 
     if last:
         num = int(last.complaint_number.split("-")[-1]) + 1
@@ -248,9 +255,12 @@ def generate_complaint_number(db: Session) -> str:
 def generate_rma_number(db: Session) -> str:
     year = datetime.now().strftime("%Y")
     prefix = f"RMA-{year}-"
-    last = db.query(ReturnMaterialAuthorization).filter(
-        ReturnMaterialAuthorization.rma_number.like(f"{prefix}%")
-    ).order_by(ReturnMaterialAuthorization.rma_number.desc()).first()
+    last = (
+        db.query(ReturnMaterialAuthorization)
+        .filter(ReturnMaterialAuthorization.rma_number.like(f"{prefix}%"))
+        .order_by(ReturnMaterialAuthorization.rma_number.desc())
+        .first()
+    )
 
     if last:
         num = int(last.rma_number.split("-")[-1]) + 1
@@ -261,22 +271,21 @@ def generate_rma_number(db: Session) -> str:
 
 # ============== Complaint Endpoints ==============
 
+
 @router.get("/complaints/dashboard", response_model=DashboardResponse)
-def get_dashboard(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get complaint dashboard statistics"""
     open_statuses = [ComplaintStatus.RECEIVED, ComplaintStatus.UNDER_INVESTIGATION, ComplaintStatus.PENDING_RESOLUTION]
-    open_complaints = db.query(func.count(CustomerComplaint.id)).filter(
-        CustomerComplaint.status.in_(open_statuses)
-    ).scalar() or 0
+    open_complaints = (
+        db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.status.in_(open_statuses)).scalar() or 0
+    )
 
     # Average resolution time
-    resolved = db.query(CustomerComplaint).filter(
-        CustomerComplaint.resolved_date.isnot(None),
-        CustomerComplaint.date_received.isnot(None)
-    ).all()
+    resolved = (
+        db.query(CustomerComplaint)
+        .filter(CustomerComplaint.resolved_date.isnot(None), CustomerComplaint.date_received.isnot(None))
+        .all()
+    )
     avg_days = None
     if resolved:
         total_days = sum(
@@ -285,46 +294,63 @@ def get_dashboard(
         avg_days = round(total_days / len(resolved), 1) if resolved else None
 
     # By severity
-    severity_counts = db.query(
-        CustomerComplaint.severity, func.count(CustomerComplaint.id)
-    ).filter(
-        CustomerComplaint.status.in_(open_statuses)
-    ).group_by(CustomerComplaint.severity).all()
+    severity_counts = (
+        db.query(CustomerComplaint.severity, func.count(CustomerComplaint.id))
+        .filter(CustomerComplaint.status.in_(open_statuses))
+        .group_by(CustomerComplaint.severity)
+        .all()
+    )
     by_severity = {s.value: c for s, c in severity_counts}
 
     # By customer (top 10)
-    by_customer_rows = db.query(
-        CustomerComplaint.customer_name, func.count(CustomerComplaint.id).label("count")
-    ).group_by(CustomerComplaint.customer_name).order_by(
-        func.count(CustomerComplaint.id).desc()
-    ).limit(10).all()
+    by_customer_rows = (
+        db.query(CustomerComplaint.customer_name, func.count(CustomerComplaint.id).label("count"))
+        .group_by(CustomerComplaint.customer_name)
+        .order_by(func.count(CustomerComplaint.id).desc())
+        .limit(10)
+        .all()
+    )
     by_customer = [{"customer": name, "count": count} for name, count in by_customer_rows]
 
     # Satisfaction rate
-    satisfied_total = db.query(func.count(CustomerComplaint.id)).filter(
-        CustomerComplaint.customer_satisfied.isnot(None)
-    ).scalar() or 0
-    satisfied_yes = db.query(func.count(CustomerComplaint.id)).filter(
-        CustomerComplaint.customer_satisfied == True
-    ).scalar() or 0
+    satisfied_total = (
+        db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.customer_satisfied.isnot(None)).scalar()
+        or 0
+    )
+    satisfied_yes = (
+        db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.customer_satisfied == True).scalar() or 0
+    )
     satisfaction_rate = round((satisfied_yes / satisfied_total) * 100, 1) if satisfied_total > 0 else None
 
     # Monthly trend (last 12 months)
     twelve_months_ago = date.today() - timedelta(days=365)
-    trend_rows = db.query(
-        extract('year', CustomerComplaint.date_received).label('year'),
-        extract('month', CustomerComplaint.date_received).label('month'),
-        func.count(CustomerComplaint.id).label('count')
-    ).filter(
-        CustomerComplaint.date_received >= twelve_months_ago
-    ).group_by('year', 'month').order_by('year', 'month').all()
+    trend_rows = (
+        db.query(
+            extract('year', CustomerComplaint.date_received).label('year'),
+            extract('month', CustomerComplaint.date_received).label('month'),
+            func.count(CustomerComplaint.id).label('count'),
+        )
+        .filter(CustomerComplaint.date_received >= twelve_months_ago)
+        .group_by('year', 'month')
+        .order_by('year', 'month')
+        .all()
+    )
     trend = [{"year": int(r.year), "month": int(r.month), "count": r.count} for r in trend_rows]
 
     # Open RMAs
-    open_rma_statuses = [RMAStatus.REQUESTED, RMAStatus.APPROVED, RMAStatus.MATERIAL_RECEIVED, RMAStatus.UNDER_INSPECTION, RMAStatus.DISPOSITION_DECIDED]
-    open_rmas = db.query(func.count(ReturnMaterialAuthorization.id)).filter(
-        ReturnMaterialAuthorization.status.in_(open_rma_statuses)
-    ).scalar() or 0
+    open_rma_statuses = [
+        RMAStatus.REQUESTED,
+        RMAStatus.APPROVED,
+        RMAStatus.MATERIAL_RECEIVED,
+        RMAStatus.UNDER_INSPECTION,
+        RMAStatus.DISPOSITION_DECIDED,
+    ]
+    open_rmas = (
+        db.query(func.count(ReturnMaterialAuthorization.id))
+        .filter(ReturnMaterialAuthorization.status.in_(open_rma_statuses))
+        .scalar()
+        or 0
+    )
 
     return DashboardResponse(
         open_complaints=open_complaints,
@@ -333,22 +359,23 @@ def get_dashboard(
         by_customer=by_customer,
         satisfaction_rate=satisfaction_rate,
         trend=trend,
-        open_rmas=open_rmas
+        open_rmas=open_rmas,
     )
 
 
 @router.get("/complaints/8d-report/{complaint_id}", response_model=EightDReport)
-def get_8d_report(
-    complaint_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_8d_report(complaint_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Generate 8D report data for a complaint"""
-    complaint = db.query(CustomerComplaint).options(
-        joinedload(CustomerComplaint.part),
-        joinedload(CustomerComplaint.customer),
-        joinedload(CustomerComplaint.rmas),
-    ).filter(CustomerComplaint.id == complaint_id).first()
+    complaint = (
+        db.query(CustomerComplaint)
+        .options(
+            joinedload(CustomerComplaint.part),
+            joinedload(CustomerComplaint.customer),
+            joinedload(CustomerComplaint.rmas),
+        )
+        .filter(CustomerComplaint.id == complaint_id)
+        .first()
+    )
 
     if not complaint:
         raise HTTPException(status_code=404, detail="Complaint not found")
@@ -368,7 +395,7 @@ def get_8d_report(
         d5_corrective_action=complaint.corrective_action,
         d6_verification=complaint.resolution_description,
         d7_preventive_action=complaint.preventive_action,
-        d8_customer_satisfaction=satisfaction_text
+        d8_customer_satisfaction=satisfaction_text,
     )
 
 
@@ -383,13 +410,17 @@ def list_complaints(
     date_to: Optional[date] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all complaints with filters"""
-    query = db.query(CustomerComplaint).filter(CustomerComplaint.company_id == company_id).options(
-        joinedload(CustomerComplaint.part),
-        joinedload(CustomerComplaint.customer),
-        joinedload(CustomerComplaint.rmas),
+    query = (
+        db.query(CustomerComplaint)
+        .filter(CustomerComplaint.company_id == company_id)
+        .options(
+            joinedload(CustomerComplaint.part),
+            joinedload(CustomerComplaint.customer),
+            joinedload(CustomerComplaint.rmas),
+        )
     )
 
     if status:
@@ -407,17 +438,18 @@ def list_complaints(
 
 
 @router.get("/complaints/{complaint_id}", response_model=ComplaintResponse)
-def get_complaint(
-    complaint_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_complaint(complaint_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get complaint details"""
-    complaint = db.query(CustomerComplaint).options(
-        joinedload(CustomerComplaint.part),
-        joinedload(CustomerComplaint.customer),
-        joinedload(CustomerComplaint.rmas),
-    ).filter(CustomerComplaint.id == complaint_id).first()
+    complaint = (
+        db.query(CustomerComplaint)
+        .options(
+            joinedload(CustomerComplaint.part),
+            joinedload(CustomerComplaint.customer),
+            joinedload(CustomerComplaint.rmas),
+        )
+        .filter(CustomerComplaint.id == complaint_id)
+        .first()
+    )
 
     if not complaint:
         raise HTTPException(status_code=404, detail="Complaint not found")
@@ -429,14 +461,14 @@ def create_complaint(
     data: ComplaintCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new customer complaint"""
     complaint = CustomerComplaint(
         complaint_number=generate_complaint_number(db),
         **data.model_dump(),
         received_by=current_user.id,
-        date_received=data.date_received or date.today()
+        date_received=data.date_received or date.today(),
     )
     complaint.company_id = company_id
     db.add(complaint)
@@ -451,10 +483,14 @@ def update_complaint(
     data: ComplaintUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a complaint"""
-    complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id, CustomerComplaint.company_id == company_id).first()
+    complaint = (
+        db.query(CustomerComplaint)
+        .filter(CustomerComplaint.id == complaint_id, CustomerComplaint.company_id == company_id)
+        .first()
+    )
     if not complaint:
         raise HTTPException(status_code=404, detail="Complaint not found")
 
@@ -472,7 +508,7 @@ def investigate_complaint(
     complaint_id: int,
     data: InvestigateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Update complaint to under investigation with findings"""
     complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
@@ -496,7 +532,7 @@ def resolve_complaint(
     complaint_id: int,
     data: ResolveRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Resolve a complaint"""
     complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
@@ -520,10 +556,7 @@ def resolve_complaint(
 
 @router.post("/complaints/{complaint_id}/close", response_model=ComplaintResponse)
 def close_complaint(
-    complaint_id: int,
-    data: CloseRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    complaint_id: int, data: CloseRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Close a complaint with optional satisfaction feedback"""
     complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
@@ -546,7 +579,7 @@ def close_complaint(
 def create_ncr_from_complaint(
     complaint_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Create a linked NCR from a complaint"""
     complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
@@ -558,9 +591,12 @@ def create_ncr_from_complaint(
     # Generate NCR number
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"NCR-{today}-"
-    last = db.query(NonConformanceReport).filter(
-        NonConformanceReport.ncr_number.like(f"{prefix}%")
-    ).order_by(NonConformanceReport.ncr_number.desc()).first()
+    last = (
+        db.query(NonConformanceReport)
+        .filter(NonConformanceReport.ncr_number.like(f"{prefix}%"))
+        .order_by(NonConformanceReport.ncr_number.desc())
+        .first()
+    )
     num = int(last.ncr_number.split("-")[-1]) + 1 if last else 1
     ncr_number = f"{prefix}{num:03d}"
 
@@ -575,7 +611,7 @@ def create_ncr_from_complaint(
         serial_number=complaint.serial_number,
         quantity_affected=complaint.quantity_affected,
         detected_by=current_user.id,
-        detected_date=date.today()
+        detected_date=date.today(),
     )
     db.add(ncr)
     db.flush()
@@ -590,7 +626,7 @@ def create_ncr_from_complaint(
 def create_car_from_complaint(
     complaint_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Create a linked CAR from a complaint"""
     complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
@@ -602,9 +638,12 @@ def create_car_from_complaint(
     # Generate CAR number
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"CAR-{today}-"
-    last = db.query(CorrectiveActionRequest).filter(
-        CorrectiveActionRequest.car_number.like(f"{prefix}%")
-    ).order_by(CorrectiveActionRequest.car_number.desc()).first()
+    last = (
+        db.query(CorrectiveActionRequest)
+        .filter(CorrectiveActionRequest.car_number.like(f"{prefix}%"))
+        .order_by(CorrectiveActionRequest.car_number.desc())
+        .first()
+    )
     num = int(last.car_number.split("-")[-1]) + 1 if last else 1
     car_number = f"{prefix}{num:03d}"
 
@@ -612,7 +651,7 @@ def create_car_from_complaint(
         car_number=car_number,
         title=f"CAR from {complaint.complaint_number}: {complaint.title}",
         problem_description=complaint.description,
-        initiated_by=current_user.id
+        initiated_by=current_user.id,
     )
     db.add(car)
     db.flush()
@@ -625,6 +664,7 @@ def create_car_from_complaint(
 
 # ============== RMA Endpoints ==============
 
+
 @router.get("/rma/", response_model=List[RMAResponse])
 def list_rmas(
     skip: int = 0,
@@ -634,12 +674,16 @@ def list_rmas(
     complaint_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all RMAs with filters"""
-    query = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.company_id == company_id).options(
-        joinedload(ReturnMaterialAuthorization.part),
-        joinedload(ReturnMaterialAuthorization.customer),
+    query = (
+        db.query(ReturnMaterialAuthorization)
+        .filter(ReturnMaterialAuthorization.company_id == company_id)
+        .options(
+            joinedload(ReturnMaterialAuthorization.part),
+            joinedload(ReturnMaterialAuthorization.customer),
+        )
     )
 
     if status:
@@ -653,16 +697,17 @@ def list_rmas(
 
 
 @router.get("/rma/{rma_id}", response_model=RMAResponse)
-def get_rma(
-    rma_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_rma(rma_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get RMA details"""
-    rma = db.query(ReturnMaterialAuthorization).options(
-        joinedload(ReturnMaterialAuthorization.part),
-        joinedload(ReturnMaterialAuthorization.customer),
-    ).filter(ReturnMaterialAuthorization.id == rma_id).first()
+    rma = (
+        db.query(ReturnMaterialAuthorization)
+        .options(
+            joinedload(ReturnMaterialAuthorization.part),
+            joinedload(ReturnMaterialAuthorization.customer),
+        )
+        .filter(ReturnMaterialAuthorization.id == rma_id)
+        .first()
+    )
 
     if not rma:
         raise HTTPException(status_code=404, detail="RMA not found")
@@ -674,13 +719,10 @@ def create_rma(
     data: RMACreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new RMA"""
-    rma = ReturnMaterialAuthorization(
-        rma_number=generate_rma_number(db),
-        **data.model_dump()
-    )
+    rma = ReturnMaterialAuthorization(rma_number=generate_rma_number(db), **data.model_dump())
     rma.company_id = company_id
     db.add(rma)
     db.commit()
@@ -694,10 +736,14 @@ def update_rma(
     data: RMAUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an RMA"""
-    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id, ReturnMaterialAuthorization.company_id == company_id).first()
+    rma = (
+        db.query(ReturnMaterialAuthorization)
+        .filter(ReturnMaterialAuthorization.id == rma_id, ReturnMaterialAuthorization.company_id == company_id)
+        .first()
+    )
     if not rma:
         raise HTTPException(status_code=404, detail="RMA not found")
 
@@ -714,7 +760,7 @@ def update_rma(
 def approve_rma(
     rma_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Approve an RMA"""
     rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
@@ -736,7 +782,7 @@ def approve_rma(
 def deny_rma(
     rma_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Deny an RMA"""
     rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
@@ -763,7 +809,7 @@ def receive_rma(
     rma_id: int,
     data: ReceiveRequest = ReceiveRequest(),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Mark RMA material as received"""
     rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
@@ -788,10 +834,7 @@ class InspectRequest(BaseModel):
 
 @router.post("/rma/{rma_id}/inspect", response_model=RMAResponse)
 def inspect_rma(
-    rma_id: int,
-    data: InspectRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    rma_id: int, data: InspectRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Record RMA inspection findings"""
     rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
@@ -821,7 +864,7 @@ def dispose_rma(
     rma_id: int,
     data: DisposeRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Set RMA disposition"""
     rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
@@ -852,7 +895,7 @@ def dispose_rma(
 def complete_rma(
     rma_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
 ):
     """Complete an RMA"""
     rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()

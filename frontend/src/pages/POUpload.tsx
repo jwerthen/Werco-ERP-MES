@@ -83,7 +83,7 @@ export default function POUpload() {
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState('');
   const [extractionResult, setExtractionResult] = useState<ExtractionResult | null>(null);
-  
+
   // Form state for review
   const [formData, setFormData] = useState({
     po_number: '',
@@ -133,7 +133,7 @@ export default function POUpload() {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    
+
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const droppedFile = e.dataTransfer.files[0];
       if (isValidFile(droppedFile)) {
@@ -143,7 +143,7 @@ export default function POUpload() {
         setError('Only PDF and Word documents (.pdf, .doc, .docx) are supported');
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -160,16 +160,16 @@ export default function POUpload() {
 
   const handleUpload = async () => {
     if (!file) return;
-    
+
     setStep('processing');
     setError('');
-    
+
     try {
       const result = documentType === 'quote'
         ? await api.uploadQuotePdf(file)
         : await api.uploadPOPdf(file);
       setExtractionResult(result);
-      
+
       // Initialize form data from extraction
       setFormData({
         po_number: result.po_number || '',
@@ -185,7 +185,7 @@ export default function POUpload() {
         ship_to: result.ship_to || '',
         notes: result.notes || '',
       });
-      
+
       // Initialize line items with match info
       setLineItems(result.line_items.map((item: any) => {
         const desc = (item.description || '').trim().toLowerCase();
@@ -202,7 +202,7 @@ export default function POUpload() {
           new_part_type: (item.suggested_part_type || 'purchased') as LineItem['new_part_type'],
         };
       }));
-      
+
       setStep('review');
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to process PDF');
@@ -230,7 +230,7 @@ export default function POUpload() {
   // Search parts for a specific line
   const searchParts = async (lineIndex: number, query: string) => {
     setPartSearches(prev => ({ ...prev, [lineIndex]: query }));
-    
+
     if (query.length >= 2) {
       try {
         const results = await api.searchPartsForPO(query);
@@ -244,8 +244,8 @@ export default function POUpload() {
   };
 
   const selectPartForLine = (lineIndex: number, partId: number, partNumber: string) => {
-    setLineItems(prev => prev.map((item, idx) => 
-      idx === lineIndex 
+    setLineItems(prev => prev.map((item, idx) =>
+      idx === lineIndex
         ? { ...item, selected_part_id: partId, part_number: partNumber, create_new_part: false }
         : item
     ));
@@ -254,9 +254,9 @@ export default function POUpload() {
   };
 
   const toggleCreatePart = (lineIndex: number) => {
-    setLineItems(prev => prev.map((item, idx) => 
-      idx === lineIndex 
-        ? { 
+    setLineItems(prev => prev.map((item, idx) =>
+      idx === lineIndex
+        ? {
             ...item,
             create_new_part: !item.create_new_part,
             selected_part_id: null,
@@ -268,8 +268,8 @@ export default function POUpload() {
   };
 
   const setPartType = (lineIndex: number, partType: LineItem['new_part_type']) => {
-    setLineItems(prev => prev.map((item, idx) => 
-      idx === lineIndex 
+    setLineItems(prev => prev.map((item, idx) =>
+      idx === lineIndex
         ? { ...item, new_part_type: partType }
         : item
     ));
@@ -277,18 +277,18 @@ export default function POUpload() {
 
   const handleCreatePO = async () => {
     setError('');
-    
+
     // Validate
     if (!formData.po_number) {
       setError('PO number is required');
       return;
     }
-    
+
     if (!formData.vendor_id && !formData.create_vendor) {
       setError('Please select a vendor or create a new one');
       return;
     }
-    
+
     // Check all line items have parts
     const unmatchedLines = lineItems.filter(item => !item.selected_part_id && !item.create_new_part);
     if (unmatchedLines.length > 0) {
@@ -303,7 +303,7 @@ export default function POUpload() {
       setError('All new parts must have a part number or a suggested Werco number.');
       return;
     }
-    
+
     try {
       const partsToCreate = lineItems
         .filter(item => item.create_new_part)
@@ -315,7 +315,7 @@ export default function POUpload() {
         .filter((item): item is { part_number: string; description: string; part_type: LineItem['new_part_type'] } =>
           Boolean(item.part_number)
         );
-      
+
       const result = await api.createPOFromUpload({
         po_number: formData.po_number,
         vendor_id: formData.vendor_id || 0,
@@ -340,7 +340,7 @@ export default function POUpload() {
         create_parts: partsToCreate,
         pdf_path: extractionResult?.pdf_path || '',
       });
-      
+
       if (result.success) {
         setCreatedPO({ id: result.po_id, number: result.po_number });
         setStep('success');
@@ -400,10 +400,10 @@ export default function POUpload() {
           </div>
           <div
             className={`border-2 border-dashed rounded-xl p-12 text-center transition-colors ${
-              dragActive 
-                ? 'border-werco-primary bg-werco-500/10' 
-                : file 
-                  ? 'border-green-500/50 bg-green-500/10' 
+              dragActive
+                ? 'border-werco-primary bg-werco-500/10'
+                : file
+                  ? 'border-green-500/50 bg-green-500/10'
                   : 'border-slate-600 hover:border-gray-400'
             }`}
             onDragEnter={handleDrag}
@@ -630,7 +630,7 @@ export default function POUpload() {
           {/* Vendor Section */}
           <div className="card">
             <h3 className="font-semibold mb-4">Vendor</h3>
-            
+
             {extractionResult?.vendor_match?.matched && !formData.create_vendor ? (
               <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4 mb-4">
                 <div className="flex justify-between items-center">
@@ -655,7 +655,7 @@ export default function POUpload() {
                 <p className="text-sm text-amber-600">
                   Extracted vendor: "{extractionResult?.vendor?.name}" - No exact match found
                 </p>
-                
+
                 {/* Suggestions */}
                 {extractionResult?.vendor_match?.suggestions && extractionResult.vendor_match.suggestions.length > 0 && (
                   <div className="space-y-2">
@@ -673,7 +673,7 @@ export default function POUpload() {
                     ))}
                   </div>
                 )}
-                
+
                 {/* Search */}
                 <div className="relative">
                   <input
@@ -701,7 +701,7 @@ export default function POUpload() {
                     </div>
                   )}
                 </div>
-                
+
                 <button
                   onClick={() => setFormData({ ...formData, create_vendor: true })}
                   className="text-sm text-werco-primary hover:underline"
@@ -752,7 +752,7 @@ export default function POUpload() {
                 </div>
               </div>
             )}
-            
+
             {formData.vendor_id && !formData.create_vendor && (
               <div className="mt-3 text-sm text-green-600">
                 Vendor selected (ID: {formData.vendor_id})
@@ -765,8 +765,8 @@ export default function POUpload() {
             <h3 className="font-semibold mb-4">Line Items ({lineItems.length})</h3>
             <div className="space-y-4">
               {lineItems.map((item, idx) => (
-                <div 
-                  key={idx} 
+                <div
+                  key={idx}
                   className={`border rounded-xl p-4 ${
                     item.confidence === 'low' ? 'border-amber-500/40 bg-amber-500/10' : 'border-slate-700'
                   }`}
@@ -785,14 +785,14 @@ export default function POUpload() {
                       </p>
                     </div>
                   </div>
-                  
+
                   <div className="grid grid-cols-3 gap-4 mb-3">
                     <div>
                       <label className="block text-xs text-slate-400 mb-1">Part Number</label>
                       <input
                         type="text"
                         value={item.part_number}
-                        onChange={(e) => setLineItems(prev => prev.map((it, i) => 
+                        onChange={(e) => setLineItems(prev => prev.map((it, i) =>
                           i === idx ? { ...it, part_number: e.target.value } : it
                         ))}
                         className="input w-full text-sm"
@@ -803,7 +803,7 @@ export default function POUpload() {
                       <input
                         type="number"
                         value={item.qty_ordered}
-                        onChange={(e) => setLineItems(prev => prev.map((it, i) => 
+                        onChange={(e) => setLineItems(prev => prev.map((it, i) =>
                           i === idx ? { ...it, qty_ordered: parseFloat(e.target.value) || 0 } : it
                         ))}
                         className="input w-full text-sm"
@@ -815,20 +815,20 @@ export default function POUpload() {
                         type="number"
                         step="0.01"
                         value={item.unit_price}
-                        onChange={(e) => setLineItems(prev => prev.map((it, i) => 
+                        onChange={(e) => setLineItems(prev => prev.map((it, i) =>
                           i === idx ? { ...it, unit_price: parseFloat(e.target.value) || 0 } : it
                         ))}
                         className="input w-full text-sm"
                       />
                     </div>
                   </div>
-                  
+
                   <div className="mb-3">
                     <label className="block text-xs text-slate-400 mb-1">Description</label>
                     <input
                       type="text"
                       value={item.description}
-                      onChange={(e) => setLineItems(prev => prev.map((it, i) => 
+                      onChange={(e) => setLineItems(prev => prev.map((it, i) =>
                         i === idx ? { ...it, description: e.target.value } : it
                       ))}
                       className="input w-full text-sm"
@@ -843,7 +843,7 @@ export default function POUpload() {
                           Matched to part ID: {item.selected_part_id}
                         </span>
                         <button
-                          onClick={() => setLineItems(prev => prev.map((it, i) => 
+                          onClick={() => setLineItems(prev => prev.map((it, i) =>
                             i === idx ? { ...it, selected_part_id: null } : it
                           ))}
                           className="text-xs text-slate-400 hover:underline"
@@ -869,7 +869,7 @@ export default function POUpload() {
                             <span>Suggested Werco #:</span>
                             <button
                               type="button"
-                              onClick={() => setLineItems(prev => prev.map((it, i) => 
+                              onClick={() => setLineItems(prev => prev.map((it, i) =>
                                 i === idx ? { ...it, part_number: item.suggested_part_number || it.part_number } : it
                               ))}
                               className="text-werco-primary hover:underline"
@@ -928,7 +928,7 @@ export default function POUpload() {
                           <ExclamationTriangleIcon className="h-4 w-4 text-amber-500" />
                           <span className="text-sm text-amber-600">Part not matched</span>
                         </div>
-                        
+
                         {/* Suggestions */}
                         {item.part_match?.suggestions && item.part_match.suggestions.length > 0 && (
                           <div className="flex flex-wrap gap-2">
@@ -943,7 +943,7 @@ export default function POUpload() {
                             ))}
                           </div>
                         )}
-                        
+
                         {/* Search */}
                         <div className="relative">
                           <input
@@ -967,7 +967,7 @@ export default function POUpload() {
                             </div>
                           )}
                         </div>
-                        
+
                         <button
                           onClick={() => toggleCreatePart(idx)}
                           className="text-xs text-werco-primary hover:underline"
@@ -980,7 +980,7 @@ export default function POUpload() {
                 </div>
               ))}
             </div>
-            
+
             {/* Totals */}
             <div className="mt-6 pt-4 border-t">
               <div className="flex justify-end">

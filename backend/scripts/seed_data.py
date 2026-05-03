@@ -2,29 +2,37 @@
 Seed script to populate initial data for Werco ERP
 Run with: python -m scripts.seed_data
 """
-import sys
+
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.db.database import SessionLocal, engine, Base
-from app.models import *
+from datetime import date, timedelta
+
 from app.core.security import get_password_hash
-from datetime import datetime, date, timedelta
+from app.db.database import Base, SessionLocal, engine
+from app.models.inventory import InventoryLocation
+from app.models.part import Part, PartType
+from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter, WorkCenterType
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+
 
 def seed_database():
     # Create tables
     Base.metadata.create_all(bind=engine)
-    
+
     db = SessionLocal()
-    
+
     try:
         # Check if already seeded
         if db.query(User).first():
             print("Database already seeded. Skipping...")
             return
-        
+
         print("Seeding database...")
-        
+
         # Create admin user
         admin = User(
             employee_id="EMP001",
@@ -34,10 +42,10 @@ def seed_database():
             last_name="Administrator",
             role=UserRole.ADMIN,
             department="IT",
-            is_superuser=True
+            is_superuser=True,
         )
         db.add(admin)
-        
+
         # Create sample users
         users_data = [
             ("EMP002", "jsmith@werco.com", "John", "Smith", UserRole.MANAGER, "Production"),
@@ -46,7 +54,7 @@ def seed_database():
             ("EMP005", "sjones@werco.com", "Sarah", "Jones", UserRole.QUALITY, "Quality"),
             ("EMP006", "dwilson@werco.com", "David", "Wilson", UserRole.OPERATOR, "Assembly"),
         ]
-        
+
         for emp_id, email, first, last, role, dept in users_data:
             user = User(
                 employee_id=emp_id,
@@ -55,13 +63,13 @@ def seed_database():
                 first_name=first,
                 last_name=last,
                 role=role,
-                department=dept
+                department=dept,
             )
             db.add(user)
-        
+
         db.flush()
         print("Created users")
-        
+
         # Create work centers
         work_centers_data = [
             ("FAB-01", "Fabrication Bay 1", WorkCenterType.FABRICATION, 75.00, "Main", "Bay 1"),
@@ -78,23 +86,18 @@ def seed_database():
             ("INS-01", "Inspection Station", WorkCenterType.INSPECTION, 60.00, "Quality", "QC"),
             ("SHP-01", "Shipping", WorkCenterType.SHIPPING, 45.00, "Warehouse", "Shipping"),
         ]
-        
+
         work_centers = {}
         for code, name, wc_type, rate, building, area in work_centers_data:
             wc = WorkCenter(
-                code=code,
-                name=name,
-                work_center_type=wc_type,
-                hourly_rate=rate,
-                building=building,
-                area=area
+                code=code, name=name, work_center_type=wc_type, hourly_rate=rate, building=building, area=area
             )
             db.add(wc)
             work_centers[code] = wc
-        
+
         db.flush()
         print("Created work centers")
-        
+
         # Create sample parts
         parts_data = [
             ("WERCO-001", "Mounting Bracket Assembly", PartType.ASSEMBLY, "A", True),
@@ -108,7 +111,7 @@ def seed_database():
             ("WERCO-002-01", "Enclosure Body", PartType.MANUFACTURED, "C", True),
             ("WERCO-002-02", "Door Panel", PartType.MANUFACTURED, "B", False),
         ]
-        
+
         parts = {}
         for pn, name, ptype, rev, critical in parts_data:
             part = Part(
@@ -118,22 +121,49 @@ def seed_database():
                 revision=rev,
                 is_critical=critical,
                 requires_inspection=True,
-                standard_cost=100.00 if ptype == PartType.ASSEMBLY else 25.00
+                standard_cost=100.00 if ptype == PartType.ASSEMBLY else 25.00,
             )
             db.add(part)
             parts[pn] = part
-        
+
         db.flush()
         print("Created parts")
-        
+
         # Create sample work orders
         work_orders_data = [
-            ("WO-20260102-001", "WERCO-001", 10, "in_progress", 2, "ACME Corp", "PO-12345", date.today() + timedelta(days=5)),
-            ("WO-20260102-002", "WERCO-001-01", 25, "released", 3, "ACME Corp", "PO-12345", date.today() + timedelta(days=3)),
+            (
+                "WO-20260102-001",
+                "WERCO-001",
+                10,
+                "in_progress",
+                2,
+                "ACME Corp",
+                "PO-12345",
+                date.today() + timedelta(days=5),
+            ),
+            (
+                "WO-20260102-002",
+                "WERCO-001-01",
+                25,
+                "released",
+                3,
+                "ACME Corp",
+                "PO-12345",
+                date.today() + timedelta(days=3),
+            ),
             ("WO-20260102-003", "WERCO-002", 5, "draft", 5, "TechCo", "PO-67890", date.today() + timedelta(days=14)),
-            ("WO-20260102-004", "WERCO-002-01", 15, "in_progress", 1, "TechCo", "PO-67890", date.today() + timedelta(days=7)),
+            (
+                "WO-20260102-004",
+                "WERCO-002-01",
+                15,
+                "in_progress",
+                1,
+                "TechCo",
+                "PO-67890",
+                date.today() + timedelta(days=7),
+            ),
         ]
-        
+
         for wo_num, part_num, qty, status, priority, customer, po, due in work_orders_data:
             wo = WorkOrder(
                 work_order_number=wo_num,
@@ -145,11 +175,11 @@ def seed_database():
                 customer_po=po,
                 due_date=due,
                 lot_number=f"LOT-{wo_num[-3:]}",
-                created_by=admin.id
+                created_by=admin.id,
             )
             db.add(wo)
             db.flush()
-            
+
             # Add operations for this work order
             if part_num == "WERCO-001":
                 ops = [
@@ -176,7 +206,7 @@ def seed_database():
                     (10, "ASM-01", "Assembly", OperationStatus.PENDING, 0.5, 2.0),
                     (20, "INS-01", "Inspection", OperationStatus.PENDING, 0.1, 0.5),
                 ]
-            
+
             for seq, wc_code, name, op_status, setup, run in ops:
                 op = WorkOrderOperation(
                     work_order_id=wo.id,
@@ -186,15 +216,13 @@ def seed_database():
                     name=name,
                     status=op_status,
                     setup_time_hours=setup,
-                    run_time_hours=run
+                    run_time_hours=run,
                 )
                 db.add(op)
-        
+
         db.commit()
         print("Created work orders with operations")
-        
-        # Create inventory locations
-        from app.models.inventory import InventoryLocation
+
         locations_data = [
             ("RECV-01", "Receiving Dock 1", "MAIN", "receiving"),
             ("WH1-A-01", "Warehouse 1 Aisle A Bin 1", "MAIN", "bin"),
@@ -212,28 +240,31 @@ def seed_database():
             db.add(loc)
         db.commit()
         print("Created inventory locations")
-        
+
         # Create sample vendors
         from app.models.purchasing import Vendor
+
         vendors_data = [
             ("VND-001", "Acme Steel Supply", "John Smith", "john@acmesteel.com", True),
             ("VND-002", "FastBolt Hardware", "Jane Doe", "jane@fastbolt.com", True),
             ("VND-003", "Premier Coatings", "Bob Wilson", "bob@premiercoat.com", True),
         ]
         for code, name, contact, email, approved in vendors_data:
-            vendor = Vendor(code=code, name=name, contact_name=contact, email=email, is_approved=approved, is_active=True)
+            vendor = Vendor(
+                code=code, name=name, contact_name=contact, email=email, is_approved=approved, is_active=True
+            )
             db.add(vendor)
         db.commit()
         print("Created vendors")
-        
-        print("\n" + "="*50)
+
+        print("\n" + "=" * 50)
         print("Database seeded successfully!")
-        print("="*50)
+        print("=" * 50)
         print("\nDefault login credentials:")
         print("  Admin: admin@werco.com / admin123")
         print("  Users: <email> / password123")
         print("\n")
-        
+
     except Exception as e:
         db.rollback()
         print(f"Error seeding database: {e}")

@@ -1,8 +1,10 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional, List
-from datetime import datetime, date
+from datetime import date, datetime
 from decimal import Decimal
-from app.core.validation import MoneySmall, Money, DescriptionLong
+from typing import List, Optional
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.core.validation import Money, MoneySmall
 
 
 # Vendor schemas

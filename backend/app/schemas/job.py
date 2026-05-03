@@ -1,7 +1,9 @@
-from pydantic import BaseModel
-from typing import Optional, Dict, Any
 from datetime import datetime
-from app.models.job import JobStatus, JobPriority
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel
+
+from app.models.job import JobPriority, JobStatus
 
 
 class JobBase(BaseModel):

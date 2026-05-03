@@ -1,6 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional, List
 from datetime import date
+from typing import List, Optional
+
+from pydantic import BaseModel
 
 
 class SchedulingRunRequest(BaseModel):

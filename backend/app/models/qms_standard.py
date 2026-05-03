@@ -1,6 +1,8 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, JSON
-from sqlalchemy.orm import relationship
 from datetime import datetime
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 
 
@@ -9,6 +11,7 @@ class QMSStandard(Base):
     QMS Standard document (e.g., AS9100D, ISO 9001:2015, internal Quality Manual).
     Stores the top-level standard with its clauses for audit readiness mapping.
     """
+
     __tablename__ = "qms_standards"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -29,8 +32,9 @@ class QMSStandard(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    clauses = relationship("QMSClause", back_populates="standard", cascade="all, delete-orphan",
-                           order_by="QMSClause.sort_order")
+    clauses = relationship(
+        "QMSClause", back_populates="standard", cascade="all, delete-orphan", order_by="QMSClause.sort_order"
+    )
     document = relationship("Document")
 
 
@@ -39,6 +43,7 @@ class QMSClause(Base):
     Individual clause/requirement within a QMS standard.
     Hierarchical structure supports sub-clauses (e.g., 8.5, 8.5.1, 8.5.2).
     """
+
     __tablename__ = "qms_clauses"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -66,8 +71,7 @@ class QMSClause(Base):
     # Relationships
     standard = relationship("QMSStandard", back_populates="clauses")
     parent_clause = relationship("QMSClause", remote_side=[id], backref="sub_clauses")
-    evidence_links = relationship("QMSClauseEvidence", back_populates="clause",
-                                  cascade="all, delete-orphan")
+    evidence_links = relationship("QMSClauseEvidence", back_populates="clause", cascade="all, delete-orphan")
 
 
 class QMSClauseEvidence(Base):
@@ -76,6 +80,7 @@ class QMSClauseEvidence(Base):
     This is the key table that makes audit preparation seamless — it maps each
     standard requirement to concrete evidence in the ERP/MES system.
     """
+
     __tablename__ = "qms_clause_evidence"
 
     id = Column(Integer, primary_key=True, index=True)

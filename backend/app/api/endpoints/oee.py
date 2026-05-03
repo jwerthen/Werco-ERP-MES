@@ -1,19 +1,22 @@
+from datetime import date, datetime, timedelta
 from typing import List, Optional
-from datetime import datetime, date, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
+from pydantic import BaseModel
 from sqlalchemy import func
-from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
-from app.models.user import User
 from app.models.oee import OEERecord, OEETarget
+from app.models.user import User
 from app.models.work_center import WorkCenter
 
 router = APIRouter()
 
 
 # ============== Pydantic Schemas ==============
+
 
 class OEERecordCreate(BaseModel):
     work_center_id: int
@@ -124,6 +127,7 @@ class OEETargetResponse(BaseModel):
 
 # ============== Helper Functions ==============
 
+
 def calculate_oee(
     planned_production_time_minutes: float,
     actual_run_time_minutes: float,
@@ -222,6 +226,7 @@ def _parse_period(period: str) -> date:
 
 # ============== OEE Record Endpoints ==============
 
+
 @router.get("/records", response_model=List[OEERecordResponse])
 def list_oee_records(
     work_center_id: Optional[int] = None,
@@ -258,9 +263,12 @@ def get_oee_record(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get a single OEE record."""
-    record = db.query(OEERecord).options(
-        joinedload(OEERecord.work_center)
-    ).filter(OEERecord.id == record_id, OEERecord.company_id == company_id).first()
+    record = (
+        db.query(OEERecord)
+        .options(joinedload(OEERecord.work_center))
+        .filter(OEERecord.id == record_id, OEERecord.company_id == company_id)
+        .first()
+    )
 
     if not record:
         raise HTTPException(status_code=404, detail="OEE record not found")
@@ -302,9 +310,7 @@ def create_oee_record(
     db.refresh(record)
 
     # Reload with relationship
-    record = db.query(OEERecord).options(
-        joinedload(OEERecord.work_center)
-    ).filter(OEERecord.id == record.id).first()
+    record = db.query(OEERecord).options(joinedload(OEERecord.work_center)).filter(OEERecord.id == record.id).first()
 
     return _record_to_response(record)
 
@@ -318,9 +324,12 @@ def update_oee_record(
     company_id: int = Depends(get_current_company_id),
 ):
     """Update an OEE record and recalculate OEE metrics."""
-    record = db.query(OEERecord).options(
-        joinedload(OEERecord.work_center)
-    ).filter(OEERecord.id == record_id, OEERecord.company_id == company_id).first()
+    record = (
+        db.query(OEERecord)
+        .options(joinedload(OEERecord.work_center))
+        .filter(OEERecord.id == record_id, OEERecord.company_id == company_id)
+        .first()
+    )
 
     if not record:
         raise HTTPException(status_code=404, detail="OEE record not found")
@@ -366,6 +375,7 @@ def delete_oee_record(
 
 # ============== Auto-Calculate Endpoint ==============
 
+
 @router.post("/calculate/{work_center_id}")
 def auto_calculate_oee(
     work_center_id: int,
@@ -391,10 +401,15 @@ def auto_calculate_oee(
 
     # Try to gather data from time entries for this date
     from app.models.time_entry import TimeEntry
-    time_entries = db.query(TimeEntry).filter(
-        TimeEntry.work_center_id == work_center_id,
-        func.date(TimeEntry.start_time) == record_date,
-    ).all()
+
+    time_entries = (
+        db.query(TimeEntry)
+        .filter(
+            TimeEntry.work_center_id == work_center_id,
+            func.date(TimeEntry.start_time) == record_date,
+        )
+        .all()
+    )
 
     actual_run_minutes = 0.0
     total_parts = 0
@@ -427,11 +442,15 @@ def auto_calculate_oee(
     )
 
     # Check for existing record
-    existing = db.query(OEERecord).filter(
-        OEERecord.work_center_id == work_center_id,
-        OEERecord.record_date == record_date,
-        OEERecord.shift == shift,
-    ).first()
+    existing = (
+        db.query(OEERecord)
+        .filter(
+            OEERecord.work_center_id == work_center_id,
+            OEERecord.record_date == record_date,
+            OEERecord.shift == shift,
+        )
+        .first()
+    )
 
     if existing:
         existing.planned_production_time_minutes = planned_time
@@ -472,14 +491,13 @@ def auto_calculate_oee(
         db.refresh(record)
 
     # Reload with relationship
-    record = db.query(OEERecord).options(
-        joinedload(OEERecord.work_center)
-    ).filter(OEERecord.id == record.id).first()
+    record = db.query(OEERecord).options(joinedload(OEERecord.work_center)).filter(OEERecord.id == record.id).first()
 
     return _record_to_response(record)
 
 
 # ============== Dashboard Endpoint ==============
+
 
 @router.get("/dashboard")
 def get_oee_dashboard(
@@ -498,15 +516,18 @@ def get_oee_dashboard(
     all_oee_values = []
 
     for wc in work_centers:
-        latest = db.query(OEERecord).filter(
-            OEERecord.work_center_id == wc.id,
-            OEERecord.record_date >= start_date,
-        ).order_by(OEERecord.record_date.desc()).first()
+        latest = (
+            db.query(OEERecord)
+            .filter(
+                OEERecord.work_center_id == wc.id,
+                OEERecord.record_date >= start_date,
+            )
+            .order_by(OEERecord.record_date.desc())
+            .first()
+        )
 
         # Get target for this work center
-        target = db.query(OEETarget).filter(
-            OEETarget.work_center_id == wc.id
-        ).first()
+        target = db.query(OEETarget).filter(OEETarget.work_center_id == wc.id).first()
 
         oee_data = {
             "work_center_id": wc.id,
@@ -532,21 +553,25 @@ def get_oee_dashboard(
     # Get average OEE per work center over the period for comparison chart
     comparison = []
     for wc in work_centers:
-        avg = db.query(func.avg(OEERecord.oee_pct)).filter(
-            OEERecord.work_center_id == wc.id,
-            OEERecord.record_date >= start_date,
-        ).scalar()
+        avg = (
+            db.query(func.avg(OEERecord.oee_pct))
+            .filter(
+                OEERecord.work_center_id == wc.id,
+                OEERecord.record_date >= start_date,
+            )
+            .scalar()
+        )
 
-        target = db.query(OEETarget).filter(
-            OEETarget.work_center_id == wc.id
-        ).first()
+        target = db.query(OEETarget).filter(OEETarget.work_center_id == wc.id).first()
 
-        comparison.append({
-            "work_center_id": wc.id,
-            "work_center_name": wc.name,
-            "avg_oee_pct": round(float(avg), 2) if avg else 0.0,
-            "target_oee_pct": target.target_oee_pct if target else 85.0,
-        })
+        comparison.append(
+            {
+                "work_center_id": wc.id,
+                "work_center_name": wc.name,
+                "avg_oee_pct": round(float(avg), 2) if avg else 0.0,
+                "target_oee_pct": target.target_oee_pct if target else 85.0,
+            }
+        )
 
     return {
         "plant_oee_pct": plant_oee,
@@ -558,6 +583,7 @@ def get_oee_dashboard(
 
 # ============== Trends Endpoint ==============
 
+
 @router.get("/trends")
 def get_oee_trends(
     work_center_id: Optional[int] = None,
@@ -568,9 +594,7 @@ def get_oee_trends(
     """Get OEE trend data over time for charts."""
     start_date = _parse_period(period)
 
-    query = db.query(OEERecord).options(
-        joinedload(OEERecord.work_center)
-    ).filter(OEERecord.record_date >= start_date)
+    query = db.query(OEERecord).options(joinedload(OEERecord.work_center)).filter(OEERecord.record_date >= start_date)
 
     if work_center_id:
         query = query.filter(OEERecord.work_center_id == work_center_id)
@@ -580,24 +604,24 @@ def get_oee_trends(
     # Get target
     target = None
     if work_center_id:
-        target = db.query(OEETarget).filter(
-            OEETarget.work_center_id == work_center_id
-        ).first()
+        target = db.query(OEETarget).filter(OEETarget.work_center_id == work_center_id).first()
 
     time_series = []
     for r in records:
-        time_series.append({
-            "date": r.record_date.isoformat(),
-            "work_center_id": r.work_center_id,
-            "work_center_name": r.work_center.name if r.work_center else None,
-            "oee_pct": r.oee_pct,
-            "availability_pct": r.availability_pct,
-            "performance_pct": r.performance_pct,
-            "quality_pct": r.quality_pct,
-            "total_parts": r.total_parts,
-            "good_parts": r.good_parts,
-            "defect_parts": r.defect_parts,
-        })
+        time_series.append(
+            {
+                "date": r.record_date.isoformat(),
+                "work_center_id": r.work_center_id,
+                "work_center_name": r.work_center.name if r.work_center else None,
+                "oee_pct": r.oee_pct,
+                "availability_pct": r.availability_pct,
+                "performance_pct": r.performance_pct,
+                "quality_pct": r.quality_pct,
+                "total_parts": r.total_parts,
+                "good_parts": r.good_parts,
+                "defect_parts": r.defect_parts,
+            }
+        )
 
     return {
         "time_series": time_series,
@@ -610,6 +634,7 @@ def get_oee_trends(
 
 
 # ============== Six Big Losses Endpoint ==============
+
 
 @router.get("/six-big-losses/{work_center_id}")
 def get_six_big_losses(
@@ -625,10 +650,14 @@ def get_six_big_losses(
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
-    records = db.query(OEERecord).filter(
-        OEERecord.work_center_id == work_center_id,
-        OEERecord.record_date >= start_date,
-    ).all()
+    records = (
+        db.query(OEERecord)
+        .filter(
+            OEERecord.work_center_id == work_center_id,
+            OEERecord.record_date >= start_date,
+        )
+        .all()
+    )
 
     # Aggregate six big losses
     unplanned_stops = sum(r.unplanned_stop_minutes or 0 for r in records)
@@ -696,6 +725,7 @@ def get_six_big_losses(
 
 # ============== Target Endpoints ==============
 
+
 @router.get("/targets", response_model=List[OEETargetResponse])
 def list_oee_targets(
     db: Session = Depends(get_db),
@@ -703,23 +733,25 @@ def list_oee_targets(
     company_id: int = Depends(get_current_company_id),
 ):
     """List all OEE targets."""
-    targets = db.query(OEETarget).filter(OEETarget.company_id == company_id).options(
-        joinedload(OEETarget.work_center)
-    ).all()
+    targets = (
+        db.query(OEETarget).filter(OEETarget.company_id == company_id).options(joinedload(OEETarget.work_center)).all()
+    )
 
     result = []
     for t in targets:
-        result.append({
-            "id": t.id,
-            "work_center_id": t.work_center_id,
-            "work_center_name": t.work_center.name if t.work_center else None,
-            "target_oee_pct": t.target_oee_pct,
-            "target_availability_pct": t.target_availability_pct,
-            "target_performance_pct": t.target_performance_pct,
-            "target_quality_pct": t.target_quality_pct,
-            "created_at": t.created_at,
-            "updated_at": t.updated_at,
-        })
+        result.append(
+            {
+                "id": t.id,
+                "work_center_id": t.work_center_id,
+                "work_center_name": t.work_center.name if t.work_center else None,
+                "target_oee_pct": t.target_oee_pct,
+                "target_availability_pct": t.target_availability_pct,
+                "target_performance_pct": t.target_performance_pct,
+                "target_quality_pct": t.target_quality_pct,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+            }
+        )
     return result
 
 
@@ -736,9 +768,7 @@ def create_oee_target(
         raise HTTPException(status_code=404, detail="Work center not found")
 
     # Check if target already exists for this work center
-    existing = db.query(OEETarget).filter(
-        OEETarget.work_center_id == target_in.work_center_id
-    ).first()
+    existing = db.query(OEETarget).filter(OEETarget.work_center_id == target_in.work_center_id).first()
 
     if existing:
         # Update existing
@@ -756,9 +786,7 @@ def create_oee_target(
         db.refresh(target)
 
     # Reload with relationship
-    target = db.query(OEETarget).options(
-        joinedload(OEETarget.work_center)
-    ).filter(OEETarget.id == target.id).first()
+    target = db.query(OEETarget).options(joinedload(OEETarget.work_center)).filter(OEETarget.id == target.id).first()
 
     return {
         "id": target.id,
@@ -793,9 +821,7 @@ def update_oee_target(
     db.refresh(target)
 
     # Reload with relationship
-    target = db.query(OEETarget).options(
-        joinedload(OEETarget.work_center)
-    ).filter(OEETarget.id == target.id).first()
+    target = db.query(OEETarget).options(joinedload(OEETarget.work_center)).filter(OEETarget.id == target.id).first()
 
     return {
         "id": target.id,

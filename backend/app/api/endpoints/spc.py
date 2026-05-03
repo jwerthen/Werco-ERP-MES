@@ -1,21 +1,22 @@
-from typing import List, Optional
-from datetime import datetime, date, timedelta
+from datetime import datetime
 from math import sqrt
+from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, and_
-from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
-from app.models.user import User
-from app.models.spc import (
-    SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability, ChartType
-)
 from pydantic import BaseModel
+from sqlalchemy import and_, func
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_company_id, get_current_user
+from app.db.database import get_db
+from app.models.spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
+from app.models.user import User
 
 router = APIRouter()
 
 
 # ============== Pydantic Schemas ==============
+
 
 class CharacteristicCreate(BaseModel):
     name: str
@@ -153,6 +154,7 @@ d2_TABLE = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326, 6: 2.534, 7: 2.704, 8: 2.847
 
 # ============== Western Electric Rules ==============
 
+
 def check_western_electric_rules(values: List[float], center_line: float, ucl: float, lcl: float) -> List[dict]:
     """Check Western Electric rules for out-of-control signals.
     Returns list of violations with rule number and index."""
@@ -178,7 +180,7 @@ def check_western_electric_rules(values: List[float], center_line: float, ucl: f
 
         # Rule 2: Two of three consecutive points beyond 2-sigma (same side)
         if i >= 2:
-            window = values[i - 2:i + 1]
+            window = values[i - 2 : i + 1]
             above_2sigma = sum(1 for v in window if v > two_sigma_upper)
             below_2sigma = sum(1 for v in window if v < two_sigma_lower)
             if above_2sigma >= 2 or below_2sigma >= 2:
@@ -186,7 +188,7 @@ def check_western_electric_rules(values: List[float], center_line: float, ucl: f
 
         # Rule 3: Four of five consecutive points beyond 1-sigma (same side)
         if i >= 4:
-            window = values[i - 4:i + 1]
+            window = values[i - 4 : i + 1]
             above_1sigma = sum(1 for v in window if v > one_sigma_upper)
             below_1sigma = sum(1 for v in window if v < one_sigma_lower)
             if above_1sigma >= 4 or below_1sigma >= 4:
@@ -194,7 +196,7 @@ def check_western_electric_rules(values: List[float], center_line: float, ucl: f
 
         # Rule 4: Eight consecutive points on same side of center line
         if i >= 7:
-            window = values[i - 7:i + 1]
+            window = values[i - 7 : i + 1]
             above_center = sum(1 for v in window if v > center_line)
             below_center = sum(1 for v in window if v < center_line)
             if above_center == 8 or below_center == 8:
@@ -208,6 +210,7 @@ def check_western_electric_rules(values: List[float], center_line: float, ucl: f
 
 # ============== Characteristics CRUD ==============
 
+
 @router.get("/characteristics", response_model=List[CharacteristicResponse])
 def list_characteristics(
     skip: int = 0,
@@ -216,7 +219,7 @@ def list_characteristics(
     is_active: Optional[bool] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all SPC characteristics"""
     query = db.query(SPCCharacteristic).filter(SPCCharacteristic.company_id == company_id)
@@ -232,7 +235,7 @@ def create_characteristic(
     data: CharacteristicCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new SPC characteristic"""
     char = SPCCharacteristic(**data.model_dump())
@@ -248,10 +251,14 @@ def get_characteristic(
     char_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get a single SPC characteristic"""
-    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == char_id, SPCCharacteristic.company_id == company_id).first()
+    char = (
+        db.query(SPCCharacteristic)
+        .filter(SPCCharacteristic.id == char_id, SPCCharacteristic.company_id == company_id)
+        .first()
+    )
     if not char:
         raise HTTPException(status_code=404, detail="Characteristic not found")
     return char
@@ -263,10 +270,14 @@ def update_characteristic(
     data: CharacteristicUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an SPC characteristic"""
-    char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == char_id, SPCCharacteristic.company_id == company_id).first()
+    char = (
+        db.query(SPCCharacteristic)
+        .filter(SPCCharacteristic.id == char_id, SPCCharacteristic.company_id == company_id)
+        .first()
+    )
     if not char:
         raise HTTPException(status_code=404, detail="Characteristic not found")
 
@@ -281,11 +292,10 @@ def update_characteristic(
 
 # ============== Measurements ==============
 
+
 @router.post("/measurements", response_model=List[MeasurementResponse])
 def add_measurements(
-    batch: MeasurementBatchCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    batch: MeasurementBatchCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Add one or more measurements (batch entry for subgroups)"""
     created = []
@@ -316,12 +326,10 @@ def get_measurements(
     end_date: Optional[str] = None,
     limit: int = 500,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Get measurements for a characteristic, with optional date filters"""
-    query = db.query(SPCMeasurement).filter(
-        SPCMeasurement.characteristic_id == characteristic_id
-    )
+    query = db.query(SPCMeasurement).filter(SPCMeasurement.characteristic_id == characteristic_id)
     if start_date:
         query = query.filter(SPCMeasurement.measured_at >= datetime.fromisoformat(start_date))
     if end_date:
@@ -332,12 +340,13 @@ def get_measurements(
 
 # ============== Chart Data ==============
 
+
 @router.get("/chart-data/{characteristic_id}")
 def get_chart_data(
     characteristic_id: int,
     last_n_subgroups: int = 50,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Get formatted chart data: subgroup averages, ranges, and control/spec limits"""
     char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == characteristic_id).first()
@@ -345,9 +354,12 @@ def get_chart_data(
         raise HTTPException(status_code=404, detail="Characteristic not found")
 
     # Get measurements grouped by subgroup
-    measurements = db.query(SPCMeasurement).filter(
-        SPCMeasurement.characteristic_id == characteristic_id
-    ).order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number).all()
+    measurements = (
+        db.query(SPCMeasurement)
+        .filter(SPCMeasurement.characteristic_id == characteristic_id)
+        .order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
+        .all()
+    )
 
     # Group by subgroup_number
     subgroups = {}
@@ -374,21 +386,24 @@ def get_chart_data(
                 for rule in m.violation_rules.split(","):
                     violations.add(rule.strip())
 
-        chart_points.append({
-            "subgroup_number": sg_num,
-            "mean": round(sg_mean, 6),
-            "range": round(sg_range, 6),
-            "sample_count": len(values),
-            "is_out_of_control": any_ooc,
-            "violations": list(violations),
-            "measured_at": sg_measurements[0].measured_at.isoformat() if sg_measurements else None,
-        })
+        chart_points.append(
+            {
+                "subgroup_number": sg_num,
+                "mean": round(sg_mean, 6),
+                "range": round(sg_range, 6),
+                "sample_count": len(values),
+                "is_out_of_control": any_ooc,
+                "violations": list(violations),
+                "measured_at": sg_measurements[0].measured_at.isoformat() if sg_measurements else None,
+            }
+        )
 
     # Get current control limits
-    control_limit = db.query(SPCControlLimit).filter(
-        SPCControlLimit.characteristic_id == characteristic_id,
-        SPCControlLimit.is_current == True
-    ).first()
+    control_limit = (
+        db.query(SPCControlLimit)
+        .filter(SPCControlLimit.characteristic_id == characteristic_id, SPCControlLimit.is_current == True)
+        .first()
+    )
 
     cl_data = None
     if control_limit:
@@ -419,12 +434,13 @@ def get_chart_data(
 
 # ============== Control Limits ==============
 
+
 @router.post("/control-limits/{characteristic_id}/calculate", response_model=ControlLimitResponse)
 def calculate_control_limits(
     characteristic_id: int,
     last_n_subgroups: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Calculate control limits from measurement data and apply Western Electric rules"""
     char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == characteristic_id).first()
@@ -432,9 +448,12 @@ def calculate_control_limits(
         raise HTTPException(status_code=404, detail="Characteristic not found")
 
     # Get measurements
-    measurements = db.query(SPCMeasurement).filter(
-        SPCMeasurement.characteristic_id == characteristic_id
-    ).order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number).all()
+    measurements = (
+        db.query(SPCMeasurement)
+        .filter(SPCMeasurement.characteristic_id == characteristic_id)
+        .order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
+        .all()
+    )
 
     # Group by subgroup
     subgroups = {}
@@ -479,8 +498,7 @@ def calculate_control_limits(
 
     # Mark previous control limits as not current
     db.query(SPCControlLimit).filter(
-        SPCControlLimit.characteristic_id == characteristic_id,
-        SPCControlLimit.is_current == True
+        SPCControlLimit.characteristic_id == characteristic_id, SPCControlLimit.is_current == True
     ).update({"is_current": False})
 
     # Save new control limits
@@ -510,12 +528,13 @@ def calculate_control_limits(
         is_ooc = len(rules) > 0
         rule_str = ",".join(rules) if rules else None
         db.query(SPCMeasurement).filter(
-            SPCMeasurement.characteristic_id == characteristic_id,
-            SPCMeasurement.subgroup_number == sg_num
-        ).update({
-            "is_out_of_control": is_ooc,
-            "violation_rules": rule_str,
-        })
+            SPCMeasurement.characteristic_id == characteristic_id, SPCMeasurement.subgroup_number == sg_num
+        ).update(
+            {
+                "is_out_of_control": is_ooc,
+                "violation_rules": rule_str,
+            }
+        )
 
     db.commit()
     db.refresh(new_cl)
@@ -524,26 +543,26 @@ def calculate_control_limits(
 
 @router.get("/control-limits/{characteristic_id}", response_model=Optional[ControlLimitResponse])
 def get_control_limits(
-    characteristic_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    characteristic_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Get current control limits for a characteristic"""
-    cl = db.query(SPCControlLimit).filter(
-        SPCControlLimit.characteristic_id == characteristic_id,
-        SPCControlLimit.is_current == True
-    ).first()
+    cl = (
+        db.query(SPCControlLimit)
+        .filter(SPCControlLimit.characteristic_id == characteristic_id, SPCControlLimit.is_current == True)
+        .first()
+    )
     return cl
 
 
 # ============== Capability Study ==============
+
 
 @router.post("/capability-study/{characteristic_id}", response_model=CapabilityResponse)
 def run_capability_study(
     characteristic_id: int,
     last_n_subgroups: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Run a Cp/Cpk process capability study"""
     char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == characteristic_id).first()
@@ -554,9 +573,11 @@ def run_capability_study(
         raise HTTPException(status_code=400, detail="USL and LSL must be defined to run capability study")
 
     # Get all measurements
-    query = db.query(SPCMeasurement).filter(
-        SPCMeasurement.characteristic_id == characteristic_id
-    ).order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
+    query = (
+        db.query(SPCMeasurement)
+        .filter(SPCMeasurement.characteristic_id == characteristic_id)
+        .order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
+    )
 
     measurements = query.all()
     if len(measurements) < 2:
@@ -623,56 +644,56 @@ def run_capability_study(
 
 @router.get("/capability/{characteristic_id}", response_model=Optional[CapabilityResponse])
 def get_capability(
-    characteristic_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    characteristic_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Get the latest capability study results for a characteristic"""
-    return db.query(SPCProcessCapability).filter(
-        SPCProcessCapability.characteristic_id == characteristic_id
-    ).order_by(SPCProcessCapability.study_date.desc()).first()
+    return (
+        db.query(SPCProcessCapability)
+        .filter(SPCProcessCapability.characteristic_id == characteristic_id)
+        .order_by(SPCProcessCapability.study_date.desc())
+        .first()
+    )
 
 
 # ============== Out-of-Control & Violations ==============
 
+
 @router.get("/out-of-control")
-def get_out_of_control(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_out_of_control(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get all characteristics that have recent out-of-control points"""
     # Find characteristics with OOC points in recent measurements
-    ooc_chars = db.query(
-        SPCMeasurement.characteristic_id,
-        func.count(SPCMeasurement.id).label("ooc_count"),
-        func.max(SPCMeasurement.measured_at).label("last_ooc")
-    ).filter(
-        SPCMeasurement.is_out_of_control == True
-    ).group_by(
-        SPCMeasurement.characteristic_id
-    ).all()
+    ooc_chars = (
+        db.query(
+            SPCMeasurement.characteristic_id,
+            func.count(SPCMeasurement.id).label("ooc_count"),
+            func.max(SPCMeasurement.measured_at).label("last_ooc"),
+        )
+        .filter(SPCMeasurement.is_out_of_control == True)
+        .group_by(SPCMeasurement.characteristic_id)
+        .all()
+    )
 
     results = []
     for row in ooc_chars:
         char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == row.characteristic_id).first()
         if char and char.is_active:
-            results.append({
-                "characteristic_id": row.characteristic_id,
-                "characteristic_name": char.name,
-                "part_id": char.part_id,
-                "is_critical": char.is_critical,
-                "ooc_count": row.ooc_count,
-                "last_ooc": row.last_ooc.isoformat() if row.last_ooc else None,
-            })
+            results.append(
+                {
+                    "characteristic_id": row.characteristic_id,
+                    "characteristic_name": char.name,
+                    "part_id": char.part_id,
+                    "is_critical": char.is_critical,
+                    "ooc_count": row.ooc_count,
+                    "last_ooc": row.last_ooc.isoformat() if row.last_ooc else None,
+                }
+            )
 
     return results
 
 
 @router.get("/violations/{characteristic_id}")
 def check_violations(
-    characteristic_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    characteristic_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Check Western Electric rules for a characteristic and return violations"""
     char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == characteristic_id).first()
@@ -680,18 +701,22 @@ def check_violations(
         raise HTTPException(status_code=404, detail="Characteristic not found")
 
     # Get current control limits
-    cl = db.query(SPCControlLimit).filter(
-        SPCControlLimit.characteristic_id == characteristic_id,
-        SPCControlLimit.is_current == True
-    ).first()
+    cl = (
+        db.query(SPCControlLimit)
+        .filter(SPCControlLimit.characteristic_id == characteristic_id, SPCControlLimit.is_current == True)
+        .first()
+    )
 
     if not cl:
         return {"violations": [], "message": "No control limits calculated yet"}
 
     # Get measurements grouped by subgroup
-    measurements = db.query(SPCMeasurement).filter(
-        SPCMeasurement.characteristic_id == characteristic_id
-    ).order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number).all()
+    measurements = (
+        db.query(SPCMeasurement)
+        .filter(SPCMeasurement.characteristic_id == characteristic_id)
+        .order_by(SPCMeasurement.subgroup_number, SPCMeasurement.sample_number)
+        .all()
+    )
 
     subgroups = {}
     for m in measurements:
@@ -711,11 +736,13 @@ def check_violations(
     for v in violations:
         sg_idx = v["index"]
         sg_num = sorted_sg_numbers[sg_idx] if sg_idx < len(sorted_sg_numbers) else None
-        result_violations.append({
-            "subgroup_number": sg_num,
-            "subgroup_mean": round(sg_means[sg_idx], 6) if sg_idx < len(sg_means) else None,
-            "rules_violated": v["rules"],
-        })
+        result_violations.append(
+            {
+                "subgroup_number": sg_num,
+                "subgroup_mean": round(sg_means[sg_idx], 6) if sg_idx < len(sg_means) else None,
+                "rules_violated": v["rules"],
+            }
+        )
 
     return {
         "characteristic_id": characteristic_id,
@@ -733,36 +760,37 @@ def check_violations(
 
 # ============== Dashboard ==============
 
+
 @router.get("/dashboard")
-def get_dashboard(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """SPC Dashboard summary: total characteristics, OOC count, avg Cpk, attention needed"""
-    total_chars = db.query(func.count(SPCCharacteristic.id)).filter(
-        SPCCharacteristic.is_active == True
-    ).scalar() or 0
+    total_chars = db.query(func.count(SPCCharacteristic.id)).filter(SPCCharacteristic.is_active == True).scalar() or 0
 
     # Count characteristics with OOC points
-    ooc_char_ids = db.query(SPCMeasurement.characteristic_id).filter(
-        SPCMeasurement.is_out_of_control == True
-    ).distinct().all()
+    ooc_char_ids = (
+        db.query(SPCMeasurement.characteristic_id).filter(SPCMeasurement.is_out_of_control == True).distinct().all()
+    )
     ooc_count = len(ooc_char_ids)
 
     # Get latest Cpk for each characteristic
     # Subquery: latest capability study per characteristic
-    latest_caps = db.query(
-        SPCProcessCapability.characteristic_id,
-        func.max(SPCProcessCapability.study_date).label("max_date")
-    ).group_by(SPCProcessCapability.characteristic_id).subquery()
+    latest_caps = (
+        db.query(SPCProcessCapability.characteristic_id, func.max(SPCProcessCapability.study_date).label("max_date"))
+        .group_by(SPCProcessCapability.characteristic_id)
+        .subquery()
+    )
 
-    capabilities = db.query(SPCProcessCapability).join(
-        latest_caps,
-        and_(
-            SPCProcessCapability.characteristic_id == latest_caps.c.characteristic_id,
-            SPCProcessCapability.study_date == latest_caps.c.max_date
+    capabilities = (
+        db.query(SPCProcessCapability)
+        .join(
+            latest_caps,
+            and_(
+                SPCProcessCapability.characteristic_id == latest_caps.c.characteristic_id,
+                SPCProcessCapability.study_date == latest_caps.c.max_date,
+            ),
         )
-    ).all()
+        .all()
+    )
 
     cpk_values = [c.cpk for c in capabilities if c.cpk is not None]
     avg_cpk = round(sum(cpk_values) / len(cpk_values), 4) if cpk_values else None
@@ -779,14 +807,16 @@ def get_dashboard(
         char = db.query(SPCCharacteristic).filter(SPCCharacteristic.id == cid).first()
         if char and char.is_active:
             cap = next((c for c in capabilities if c.characteristic_id == cid), None)
-            attention_chars.append({
-                "id": char.id,
-                "name": char.name,
-                "part_id": char.part_id,
-                "is_critical": char.is_critical,
-                "cpk": cap.cpk if cap else None,
-                "has_ooc": cid in set(r[0] for r in ooc_char_ids),
-            })
+            attention_chars.append(
+                {
+                    "id": char.id,
+                    "name": char.name,
+                    "part_id": char.part_id,
+                    "is_critical": char.is_critical,
+                    "cpk": cap.cpk if cap else None,
+                    "has_ooc": cid in set(r[0] for r in ooc_char_ids),
+                }
+            )
 
     return {
         "total_characteristics": total_chars,

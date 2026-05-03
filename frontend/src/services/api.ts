@@ -84,7 +84,7 @@ class ApiService {
             try {
               await this.refreshAccessToken();
               config.headers['Authorization'] = `Bearer ${this.token}`;
-            } catch (error) {
+            } catch {
               // Refresh failed, will get 401 and redirect to login
             }
           }

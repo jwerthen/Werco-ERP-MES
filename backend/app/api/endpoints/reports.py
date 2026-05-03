@@ -1,16 +1,18 @@
+from datetime import date, datetime, timedelta
 from typing import Optional
-from datetime import datetime, timedelta, date
+
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, func, or_
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
+from app.models.inventory import InventoryItem
+from app.models.purchasing import POReceipt, PurchaseOrder
+from app.models.quality import NonConformanceReport
+from app.models.time_entry import TimeEntry
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
-from app.models.time_entry import TimeEntry
-from app.models.quality import NonConformanceReport
-from app.models.purchasing import PurchaseOrder, POReceipt
-from app.models.inventory import InventoryItem
 
 router = APIRouter()
 
@@ -20,53 +22,58 @@ def get_production_summary(
     days: int = 30,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get production metrics for dashboard"""
     cutoff = datetime.utcnow() - timedelta(days=days)
 
     # Work order counts by status
-    wo_stats = db.query(
-        WorkOrder.status,
-        func.count(WorkOrder.id)
-    ).filter(
-        WorkOrder.company_id == company_id,
-        WorkOrder.created_at >= cutoff
-    ).group_by(WorkOrder.status).all()
-    
+    wo_stats = (
+        db.query(WorkOrder.status, func.count(WorkOrder.id))
+        .filter(WorkOrder.company_id == company_id, WorkOrder.created_at >= cutoff)
+        .group_by(WorkOrder.status)
+        .all()
+    )
+
     wo_by_status = {str(s.value if hasattr(s, 'value') else s): c for s, c in wo_stats}
-    
+
     # Completed work orders
-    completed_wos = db.query(WorkOrder).filter(
-        WorkOrder.company_id == company_id,
-        WorkOrder.status == WorkOrderStatus.COMPLETE,
-        WorkOrder.actual_end >= cutoff
-    ).all()
-    
+    completed_wos = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.status == WorkOrderStatus.COMPLETE,
+            WorkOrder.actual_end >= cutoff,
+        )
+        .all()
+    )
+
     total_completed = len(completed_wos)
     on_time = sum(1 for wo in completed_wos if wo.due_date and wo.actual_end and wo.actual_end.date() <= wo.due_date)
-    
+
     # Hours worked
-    time_entries = db.query(
-        func.sum(TimeEntry.duration_hours)
-    ).filter(
-        TimeEntry.clock_in >= cutoff,
-        TimeEntry.duration_hours != None
-    ).scalar() or 0
-    
+    time_entries = (
+        db.query(func.sum(TimeEntry.duration_hours))
+        .filter(TimeEntry.clock_in >= cutoff, TimeEntry.duration_hours != None)
+        .scalar()
+        or 0
+    )
+
     # Scrap quantity
-    scrap_qty = db.query(
-        func.sum(WorkOrderOperation.quantity_scrapped)
-    ).filter(
-        WorkOrderOperation.updated_at >= cutoff
-    ).scalar() or 0
-    
-    produced_qty = db.query(
-        func.sum(WorkOrderOperation.quantity_complete)
-    ).filter(
-        WorkOrderOperation.updated_at >= cutoff
-    ).scalar() or 0
-    
+    scrap_qty = (
+        db.query(func.sum(WorkOrderOperation.quantity_scrapped))
+        .filter(WorkOrderOperation.updated_at >= cutoff)
+        .scalar()
+        or 0
+    )
+
+    produced_qty = (
+        db.query(func.sum(WorkOrderOperation.quantity_complete))
+        .filter(WorkOrderOperation.updated_at >= cutoff)
+        .scalar()
+        or 0
+    )
+
     return {
         "period_days": days,
         "work_orders_by_status": wo_by_status,
@@ -76,7 +83,7 @@ def get_production_summary(
         "total_hours_worked": round(time_entries, 1),
         "total_produced": produced_qty,
         "total_scrapped": scrap_qty,
-        "scrap_rate_pct": (scrap_qty / (produced_qty + scrap_qty) * 100) if (produced_qty + scrap_qty) > 0 else 0
+        "scrap_rate_pct": (scrap_qty / (produced_qty + scrap_qty) * 100) if (produced_qty + scrap_qty) > 0 else 0,
     }
 
 
@@ -85,17 +92,18 @@ def get_quality_metrics(
     days: int = 30,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get quality metrics"""
     cutoff = datetime.utcnow() - timedelta(days=days)
-    
+
     # NCR counts
-    ncrs = db.query(NonConformanceReport).filter(
-        NonConformanceReport.company_id == company_id,
-        NonConformanceReport.created_at >= cutoff
-    ).all()
-    
+    ncrs = (
+        db.query(NonConformanceReport)
+        .filter(NonConformanceReport.company_id == company_id, NonConformanceReport.created_at >= cutoff)
+        .all()
+    )
+
     ncr_by_status = {}
     ncr_by_source = {}
     for ncr in ncrs:
@@ -103,15 +111,13 @@ def get_quality_metrics(
         source = ncr.source.value if hasattr(ncr.source, 'value') else str(ncr.source)
         ncr_by_status[status] = ncr_by_status.get(status, 0) + 1
         ncr_by_source[source] = ncr_by_source.get(source, 0) + 1
-    
+
     # Receiving inspection
-    receipts = db.query(POReceipt).filter(
-        POReceipt.received_at >= cutoff
-    ).all()
-    
+    receipts = db.query(POReceipt).filter(POReceipt.received_at >= cutoff).all()
+
     total_received_qty = sum(r.quantity_received for r in receipts)
     rejected_qty = sum(r.quantity_rejected for r in receipts)
-    
+
     return {
         "period_days": days,
         "total_ncrs": len(ncrs),
@@ -120,7 +126,7 @@ def get_quality_metrics(
         "ncr_by_source": ncr_by_source,
         "receiving_total_qty": total_received_qty,
         "receiving_rejected_qty": rejected_qty,
-        "receiving_reject_rate_pct": (rejected_qty / total_received_qty * 100) if total_received_qty > 0 else 0
+        "receiving_reject_rate_pct": (rejected_qty / total_received_qty * 100) if total_received_qty > 0 else 0,
     }
 
 
@@ -128,30 +134,26 @@ def get_quality_metrics(
 def get_inventory_value(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get inventory value summary"""
     from app.models.part import Part
-    
-    items = db.query(
-        InventoryItem.part_id,
-        func.sum(InventoryItem.quantity_on_hand).label("qty"),
-        Part.standard_cost
-    ).join(Part).filter(
-        InventoryItem.company_id == company_id,
-        InventoryItem.is_active == True,
-        InventoryItem.quantity_on_hand > 0
-    ).group_by(InventoryItem.part_id, Part.standard_cost).all()
-    
+
+    items = (
+        db.query(InventoryItem.part_id, func.sum(InventoryItem.quantity_on_hand).label("qty"), Part.standard_cost)
+        .join(Part)
+        .filter(
+            InventoryItem.company_id == company_id, InventoryItem.is_active == True, InventoryItem.quantity_on_hand > 0
+        )
+        .group_by(InventoryItem.part_id, Part.standard_cost)
+        .all()
+    )
+
     total_value = sum((item.qty or 0) * (item.standard_cost or 0) for item in items)
     total_qty = sum(item.qty or 0 for item in items)
     unique_parts = len(items)
-    
-    return {
-        "total_value": round(total_value, 2),
-        "total_quantity": total_qty,
-        "unique_parts": unique_parts
-    }
+
+    return {"total_value": round(total_value, 2), "total_quantity": total_qty, "unique_parts": unique_parts}
 
 
 @router.get("/vendor-performance")
@@ -161,10 +163,10 @@ def get_vendor_performance(
     limit: int = Query(100, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get vendor performance metrics"""
-    from app.models.purchasing import Vendor, PurchaseOrderLine
+    from app.models.purchasing import PurchaseOrderLine, Vendor
 
     cutoff = datetime.utcnow() - timedelta(days=days)
 
@@ -176,41 +178,48 @@ def get_vendor_performance(
         .limit(limit)
         .all()
     )
-    
+
     result = []
     for vendor in vendors:
         # Get PO lines for vendor
-        lines = db.query(PurchaseOrderLine).join(PurchaseOrder).filter(
-            PurchaseOrder.vendor_id == vendor.id,
-            PurchaseOrder.created_at >= cutoff
-        ).all()
-        
+        lines = (
+            db.query(PurchaseOrderLine)
+            .join(PurchaseOrder)
+            .filter(PurchaseOrder.vendor_id == vendor.id, PurchaseOrder.created_at >= cutoff)
+            .all()
+        )
+
         if not lines:
             continue
-        
-        total_ordered = sum(l.quantity_ordered for l in lines)
-        total_received = sum(l.quantity_received for l in lines)
-        
+
+        total_ordered = sum(line.quantity_ordered for line in lines)
+        total_received = sum(line.quantity_received for line in lines)
+
         # Get receipts for reject rate
-        receipts = db.query(POReceipt).join(PurchaseOrderLine).join(PurchaseOrder).filter(
-            PurchaseOrder.vendor_id == vendor.id,
-            POReceipt.received_at >= cutoff
-        ).all()
-        
+        receipts = (
+            db.query(POReceipt)
+            .join(PurchaseOrderLine)
+            .join(PurchaseOrder)
+            .filter(PurchaseOrder.vendor_id == vendor.id, POReceipt.received_at >= cutoff)
+            .all()
+        )
+
         received_qty = sum(r.quantity_received for r in receipts)
         rejected_qty = sum(r.quantity_rejected for r in receipts)
-        
-        result.append({
-            "vendor_id": vendor.id,
-            "vendor_code": vendor.code,
-            "vendor_name": vendor.name,
-            "total_ordered": total_ordered,
-            "total_received": total_received,
-            "fill_rate_pct": (total_received / total_ordered * 100) if total_ordered > 0 else 0,
-            "reject_rate_pct": (rejected_qty / received_qty * 100) if received_qty > 0 else 0,
-            "po_count": len(set(l.purchase_order_id for l in lines))
-        })
-    
+
+        result.append(
+            {
+                "vendor_id": vendor.id,
+                "vendor_code": vendor.code,
+                "vendor_name": vendor.name,
+                "total_ordered": total_ordered,
+                "total_received": total_received,
+                "fill_rate_pct": (total_received / total_ordered * 100) if total_ordered > 0 else 0,
+                "reject_rate_pct": (rejected_qty / received_qty * 100) if received_qty > 0 else 0,
+                "po_count": len({line.purchase_order_id for line in lines}),
+            }
+        )
+
     return sorted(result, key=lambda x: x["total_ordered"], reverse=True)
 
 
@@ -221,7 +230,7 @@ def get_work_center_utilization(
     limit: int = Query(100, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get work center utilization"""
     from app.models.work_center import WorkCenter
@@ -236,30 +245,31 @@ def get_work_center_utilization(
         .limit(limit)
         .all()
     )
-    
+
     result = []
     for wc in work_centers:
         # Get time entries for work center
-        hours = db.query(
-            func.sum(TimeEntry.duration_hours)
-        ).filter(
-            TimeEntry.work_center_id == wc.id,
-            TimeEntry.clock_in >= cutoff,
-            TimeEntry.duration_hours != None
-        ).scalar() or 0
-        
+        hours = (
+            db.query(func.sum(TimeEntry.duration_hours))
+            .filter(TimeEntry.work_center_id == wc.id, TimeEntry.clock_in >= cutoff, TimeEntry.duration_hours != None)
+            .scalar()
+            or 0
+        )
+
         # Assume 8 hours/day available
         available_hours = days * 8
-        
-        result.append({
-            "work_center_id": wc.id,
-            "work_center_code": wc.code,
-            "work_center_name": wc.name,
-            "hours_worked": round(hours, 1),
-            "available_hours": available_hours,
-            "utilization_pct": round((hours / available_hours * 100) if available_hours > 0 else 0, 1)
-        })
-    
+
+        result.append(
+            {
+                "work_center_id": wc.id,
+                "work_center_code": wc.code,
+                "work_center_name": wc.name,
+                "hours_worked": round(hours, 1),
+                "available_hours": available_hours,
+                "utilization_pct": round((hours / available_hours * 100) if available_hours > 0 else 0, 1),
+            }
+        )
+
     return sorted(result, key=lambda x: x["utilization_pct"], reverse=True)
 
 
@@ -268,37 +278,33 @@ def get_daily_output(
     days: int = 14,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get daily production output"""
     result = []
-    
+
     for i in range(days - 1, -1, -1):
         day = date.today() - timedelta(days=i)
         day_start = datetime.combine(day, datetime.min.time())
         day_end = datetime.combine(day, datetime.max.time())
-        
+
         # Completed operations for the day
-        completed = db.query(
-            func.sum(WorkOrderOperation.quantity_complete)
-        ).filter(
-            WorkOrderOperation.actual_end >= day_start,
-            WorkOrderOperation.actual_end <= day_end
-        ).scalar() or 0
-        
-        scrapped = db.query(
-            func.sum(WorkOrderOperation.quantity_scrapped)
-        ).filter(
-            WorkOrderOperation.actual_end >= day_start,
-            WorkOrderOperation.actual_end <= day_end
-        ).scalar() or 0
-        
-        result.append({
-            "date": day.isoformat(),
-            "completed": completed,
-            "scrapped": scrapped
-        })
-    
+        completed = (
+            db.query(func.sum(WorkOrderOperation.quantity_complete))
+            .filter(WorkOrderOperation.actual_end >= day_start, WorkOrderOperation.actual_end <= day_end)
+            .scalar()
+            or 0
+        )
+
+        scrapped = (
+            db.query(func.sum(WorkOrderOperation.quantity_scrapped))
+            .filter(WorkOrderOperation.actual_end >= day_start, WorkOrderOperation.actual_end <= day_end)
+            .scalar()
+            or 0
+        )
+
+        result.append({"date": day.isoformat(), "completed": completed, "scrapped": scrapped})
+
     return result
 
 
@@ -308,79 +314,83 @@ def get_work_order_costing(
     days: int = 90,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get work order costing details"""
     from app.models.part import Part
-    
+
     query = db.query(WorkOrder).filter(
         WorkOrder.company_id == company_id,
-        WorkOrder.status.in_([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.IN_PROGRESS])
+        WorkOrder.status.in_([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.IN_PROGRESS]),
     )
-    
+
     if work_order_id:
         query = query.filter(WorkOrder.id == work_order_id)
     else:
         cutoff = datetime.utcnow() - timedelta(days=days)
         query = query.filter(WorkOrder.created_at >= cutoff)
-    
+
     work_orders = query.order_by(WorkOrder.created_at.desc()).limit(100).all()
-    
+
     result = []
     for wo in work_orders:
         # Get part info for material cost estimate
         part = db.query(Part).filter(Part.id == wo.part_id).first()
         material_cost = (part.unit_cost or 0) * wo.quantity_ordered if part else 0
-        
+
         # Calculate labor cost from time entries (assume $50/hr standard rate)
-        labor_hours = db.query(
-            func.sum(TimeEntry.duration_hours)
-        ).filter(
-            TimeEntry.work_order_id == wo.id,
-            TimeEntry.duration_hours != None
-        ).scalar() or 0
-        
+        labor_hours = (
+            db.query(func.sum(TimeEntry.duration_hours))
+            .filter(TimeEntry.work_order_id == wo.id, TimeEntry.duration_hours != None)
+            .scalar()
+            or 0
+        )
+
         labor_rate = 50.0  # Could make this configurable per work center
         labor_cost = labor_hours * labor_rate
-        
+
         # Overhead (typically 100-150% of labor for manufacturing)
         overhead_rate = 1.0
         overhead_cost = labor_cost * overhead_rate
-        
+
         # Total actual cost
         actual_total = material_cost + labor_cost + overhead_cost
-        
+
         # Estimated costs
         estimated_labor = (wo.estimated_hours or 0) * labor_rate
         estimated_overhead = estimated_labor * overhead_rate
         estimated_total = material_cost + estimated_labor + estimated_overhead
-        
-        result.append({
-            "work_order_id": wo.id,
-            "work_order_number": wo.work_order_number,
-            "part_number": part.part_number if part else None,
-            "part_name": part.name if part else None,
-            "quantity": wo.quantity_ordered,
-            "status": wo.status.value,
-            "customer_name": wo.customer_name,
-            # Estimated
-            "estimated_hours": wo.estimated_hours or 0,
-            "estimated_material": material_cost,
-            "estimated_labor": estimated_labor,
-            "estimated_overhead": estimated_overhead,
-            "estimated_total": estimated_total,
-            # Actual
-            "actual_hours": labor_hours,
-            "actual_material": material_cost,  # Same as estimated for now
-            "actual_labor": labor_cost,
-            "actual_overhead": overhead_cost,
-            "actual_total": actual_total,
-            # Variance
-            "hours_variance": labor_hours - (wo.estimated_hours or 0),
-            "cost_variance": actual_total - estimated_total,
-            "variance_pct": ((actual_total - estimated_total) / estimated_total * 100) if estimated_total > 0 else 0
-        })
-    
+
+        result.append(
+            {
+                "work_order_id": wo.id,
+                "work_order_number": wo.work_order_number,
+                "part_number": part.part_number if part else None,
+                "part_name": part.name if part else None,
+                "quantity": wo.quantity_ordered,
+                "status": wo.status.value,
+                "customer_name": wo.customer_name,
+                # Estimated
+                "estimated_hours": wo.estimated_hours or 0,
+                "estimated_material": material_cost,
+                "estimated_labor": estimated_labor,
+                "estimated_overhead": estimated_overhead,
+                "estimated_total": estimated_total,
+                # Actual
+                "actual_hours": labor_hours,
+                "actual_material": material_cost,  # Same as estimated for now
+                "actual_labor": labor_cost,
+                "actual_overhead": overhead_cost,
+                "actual_total": actual_total,
+                # Variance
+                "hours_variance": labor_hours - (wo.estimated_hours or 0),
+                "cost_variance": actual_total - estimated_total,
+                "variance_pct": (
+                    ((actual_total - estimated_total) / estimated_total * 100) if estimated_total > 0 else 0
+                ),
+            }
+        )
+
     return result
 
 
@@ -391,39 +401,43 @@ def get_employee_time_report(
     user_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get employee time report"""
     if not start_date:
         start_date = date.today() - timedelta(days=7)
     if not end_date:
         end_date = date.today()
-    
+
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
-    
-    query = db.query(TimeEntry).options(
-        joinedload(TimeEntry.user),
-        joinedload(TimeEntry.work_order),
-        joinedload(TimeEntry.operation),
-        joinedload(TimeEntry.work_center),
-    ).filter(
-        TimeEntry.company_id == company_id,
-        or_(
-            and_(TimeEntry.clock_in >= start_dt, TimeEntry.clock_in <= end_dt),
-            and_(
-                TimeEntry.clock_out.isnot(None),
-                TimeEntry.clock_out >= start_dt,
-                TimeEntry.clock_out <= end_dt,
+
+    query = (
+        db.query(TimeEntry)
+        .options(
+            joinedload(TimeEntry.user),
+            joinedload(TimeEntry.work_order),
+            joinedload(TimeEntry.operation),
+            joinedload(TimeEntry.work_center),
+        )
+        .filter(
+            TimeEntry.company_id == company_id,
+            or_(
+                and_(TimeEntry.clock_in >= start_dt, TimeEntry.clock_in <= end_dt),
+                and_(
+                    TimeEntry.clock_out.isnot(None),
+                    TimeEntry.clock_out >= start_dt,
+                    TimeEntry.clock_out <= end_dt,
+                ),
             ),
-        ),
+        )
     )
-    
+
     if user_id:
         query = query.filter(TimeEntry.user_id == user_id)
-    
+
     entries = query.order_by(TimeEntry.clock_in.desc()).all()
-    
+
     # Group by employee
     by_employee = {}
     seen_operation_completions = set()
@@ -438,9 +452,9 @@ def get_employee_time_report(
                 "completed_operations": 0,
                 "quantity_produced": 0,
                 "quantity_scrapped": 0,
-                "entries": []
+                "entries": [],
             }
-        
+
         hours = entry.duration_hours or 0
         quantity_produced = float(entry.quantity_produced or 0)
         quantity_scrapped = float(entry.quantity_scrapped or 0)
@@ -456,29 +470,35 @@ def get_employee_time_report(
         if operation_completed_by_user:
             by_employee[uid]["completed_operations"] += 1
             seen_operation_completions.add((uid, entry.operation_id))
-        by_employee[uid]["entries"].append({
-            "date": entry.clock_in.date().isoformat() if entry.clock_in else None,
-            "clock_in": entry.clock_in.isoformat() if entry.clock_in else None,
-            "clock_out": entry.clock_out.isoformat() if entry.clock_out else None,
-            "hours": hours,
-            "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
-            "operation": entry.operation.name if entry.operation else None,
-            "work_center": entry.work_center.name if entry.work_center else None,
-            "quantity_produced": quantity_produced,
-            "quantity_scrapped": quantity_scrapped,
-            "completed_at": entry.operation.actual_end.isoformat() if operation_completed_by_user else None,
-            "source": "time_entry",
-        })
+        by_employee[uid]["entries"].append(
+            {
+                "date": entry.clock_in.date().isoformat() if entry.clock_in else None,
+                "clock_in": entry.clock_in.isoformat() if entry.clock_in else None,
+                "clock_out": entry.clock_out.isoformat() if entry.clock_out else None,
+                "hours": hours,
+                "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
+                "operation": entry.operation.name if entry.operation else None,
+                "work_center": entry.work_center.name if entry.work_center else None,
+                "quantity_produced": quantity_produced,
+                "quantity_scrapped": quantity_scrapped,
+                "completed_at": entry.operation.actual_end.isoformat() if operation_completed_by_user else None,
+                "source": "time_entry",
+            }
+        )
 
-    completed_ops_query = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order),
-        joinedload(WorkOrderOperation.work_center),
-    ).filter(
-        WorkOrderOperation.company_id == company_id,
-        WorkOrderOperation.completed_by.isnot(None),
-        WorkOrderOperation.actual_end.isnot(None),
-        WorkOrderOperation.actual_end >= start_dt,
-        WorkOrderOperation.actual_end <= end_dt,
+    completed_ops_query = (
+        db.query(WorkOrderOperation)
+        .options(
+            joinedload(WorkOrderOperation.work_order),
+            joinedload(WorkOrderOperation.work_center),
+        )
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.completed_by.isnot(None),
+            WorkOrderOperation.actual_end.isnot(None),
+            WorkOrderOperation.actual_end >= start_dt,
+            WorkOrderOperation.actual_end <= end_dt,
+        )
     )
     if user_id:
         completed_ops_query = completed_ops_query.filter(WorkOrderOperation.completed_by == user_id)
@@ -489,10 +509,12 @@ def get_employee_time_report(
     if completed_user_ids:
         users_by_id = {
             user.id: user
-            for user in db.query(User).filter(
+            for user in db.query(User)
+            .filter(
                 User.company_id == company_id,
                 User.id.in_(completed_user_ids),
-            ).all()
+            )
+            .all()
         }
 
     for op in completed_ops:
@@ -508,26 +530,28 @@ def get_employee_time_report(
                 "completed_operations": 0,
                 "quantity_produced": 0,
                 "quantity_scrapped": 0,
-                "entries": []
+                "entries": [],
             }
 
         by_employee[uid]["completed_operations"] += 1
         by_employee[uid]["quantity_produced"] += float(op.quantity_complete or 0)
         by_employee[uid]["quantity_scrapped"] += float(op.quantity_scrapped or 0)
-        by_employee[uid]["entries"].append({
-            "date": op.actual_end.date().isoformat() if op.actual_end else None,
-            "clock_in": None,
-            "clock_out": op.actual_end.isoformat() if op.actual_end else None,
-            "hours": 0,
-            "work_order_number": op.work_order.work_order_number if op.work_order else None,
-            "operation": op.name,
-            "work_center": op.work_center.name if op.work_center else None,
-            "quantity_produced": float(op.quantity_complete or 0),
-            "quantity_scrapped": float(op.quantity_scrapped or 0),
-            "completed_at": op.actual_end.isoformat() if op.actual_end else None,
-            "source": "operation_completion",
-        })
-    
+        by_employee[uid]["entries"].append(
+            {
+                "date": op.actual_end.date().isoformat() if op.actual_end else None,
+                "clock_in": None,
+                "clock_out": op.actual_end.isoformat() if op.actual_end else None,
+                "hours": 0,
+                "work_order_number": op.work_order.work_order_number if op.work_order else None,
+                "operation": op.name,
+                "work_center": op.work_center.name if op.work_center else None,
+                "quantity_produced": float(op.quantity_complete or 0),
+                "quantity_scrapped": float(op.quantity_scrapped or 0),
+                "completed_at": op.actual_end.isoformat() if op.actual_end else None,
+                "source": "operation_completion",
+            }
+        )
+
     result = list(by_employee.values())
     for emp in result:
         emp["total_hours"] = round(emp["total_hours"], 2)

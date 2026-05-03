@@ -2,11 +2,12 @@
 LLM Service for Purchase Order Data Extraction
 Uses Claude API to extract structured data from PDF text.
 """
-import os
+
 import json
 import logging
-from typing import Optional, Dict, Any, List
+import os
 from datetime import datetime
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,11 @@ def extract_bom_data_with_llm(pdf_text: str, is_ocr: bool = False) -> Dict[str, 
         logger.error("ANTHROPIC_API_KEY not set")
         return _create_empty_bom_result("API key not configured")
 
-    ocr_note = "\n\nNote: This text was extracted via OCR and may contain errors. Be extra careful with quantities and part numbers." if is_ocr else ""
+    ocr_note = (
+        "\n\nNote: This text was extracted via OCR and may contain errors. Be extra careful with quantities and part numbers."
+        if is_ocr
+        else ""
+    )
 
     user_prompt = f"""Extract BOM or drawing data from the following text. Return JSON matching this schema exactly:
 
@@ -140,10 +145,8 @@ Return ONLY the JSON object, no other text."""
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
-            messages=[
-                {"role": "user", "content": user_prompt}
-            ],
-            system=SYSTEM_PROMPT
+            messages=[{"role": "user", "content": user_prompt}],
+            system=SYSTEM_PROMPT,
         )
 
         response_text = message.content[0].text.strip()
@@ -159,7 +162,7 @@ Return ONLY the JSON object, no other text."""
         result["_extraction_metadata"] = {
             "extracted_at": datetime.utcnow().isoformat(),
             "source_was_ocr": is_ocr,
-            "model": "claude-sonnet-4-20250514"
+            "model": "claude-sonnet-4-20250514",
         }
 
         logger.info(f"LLM BOM extraction successful: {len(result.get('items', []))} items")
@@ -185,16 +188,12 @@ def _create_empty_bom_result(error_message: str) -> Dict[str, Any]:
             "revision": None,
             "description": None,
             "drawing_number": None,
-            "part_type": None
+            "part_type": None,
         },
         "items": [],
         "extraction_confidence": "low",
         "_error": error_message,
-        "_extraction_metadata": {
-            "extracted_at": datetime.utcnow().isoformat(),
-            "source_was_ocr": False,
-            "model": None
-        }
+        "_extraction_metadata": {"extracted_at": datetime.utcnow().isoformat(), "source_was_ocr": False, "model": None},
     }
 
 
@@ -207,15 +206,19 @@ def extract_po_data_with_llm(pdf_text: str, is_ocr: bool = False, document_type:
     except ImportError:
         logger.error("anthropic package not installed")
         return _create_empty_result("LLM library not available")
-    
+
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         logger.error("ANTHROPIC_API_KEY not set")
         return _create_empty_result("API key not configured")
-    
+
     # Prepare the extraction prompt
-    ocr_note = "\n\nNote: This text was extracted via OCR and may contain errors. Be extra careful with numbers and part numbers." if is_ocr else ""
-    
+    ocr_note = (
+        "\n\nNote: This text was extracted via OCR and may contain errors. Be extra careful with numbers and part numbers."
+        if is_ocr
+        else ""
+    )
+
     user_prompt = f"""Extract purchasing document data from the following text. Return JSON matching this schema exactly:
 
 {EXTRACTION_SCHEMA}
@@ -238,18 +241,16 @@ Return ONLY the JSON object, no other text."""
 
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=LLM_API_TIMEOUT_SECONDS)
-        
+
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
-            messages=[
-                {"role": "user", "content": user_prompt}
-            ],
-            system=SYSTEM_PROMPT
+            messages=[{"role": "user", "content": user_prompt}],
+            system=SYSTEM_PROMPT,
         )
-        
+
         response_text = message.content[0].text.strip()
-        
+
         # Clean up response if needed
         if response_text.startswith("```json"):
             response_text = response_text[7:]
@@ -257,19 +258,19 @@ Return ONLY the JSON object, no other text."""
             response_text = response_text[3:]
         if response_text.endswith("```"):
             response_text = response_text[:-3]
-        
+
         result = json.loads(response_text.strip())
-        
+
         # Add metadata
         result["_extraction_metadata"] = {
             "extracted_at": datetime.utcnow().isoformat(),
             "source_was_ocr": is_ocr,
-            "model": "claude-sonnet-4-20250514"
+            "model": "claude-sonnet-4-20250514",
         }
-        
+
         logger.info(f"LLM extraction successful: {len(result.get('line_items', []))} line items")
         return result
-        
+
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response as JSON: {e}")
         return _create_empty_result(f"Invalid JSON response: {str(e)}")
@@ -302,11 +303,7 @@ def _create_empty_result(error_message: str) -> Dict[str, Any]:
         "notes": None,
         "extraction_confidence": "low",
         "_error": error_message,
-        "_extraction_metadata": {
-            "extracted_at": datetime.utcnow().isoformat(),
-            "source_was_ocr": False,
-            "model": None
-        }
+        "_extraction_metadata": {"extracted_at": datetime.utcnow().isoformat(), "source_was_ocr": False, "model": None},
     }
 
 
@@ -316,7 +313,7 @@ def validate_extracted_data(data: Dict[str, Any]) -> List[Dict[str, str]]:
     """
     issues = []
     document_type = (data.get("document_type") or "po").lower()
-    
+
     # Check PO number
     if document_type == "quote":
         if not data.get("po_number") and not data.get("quote_number"):
@@ -324,11 +321,11 @@ def validate_extracted_data(data: Dict[str, Any]) -> List[Dict[str, str]]:
     else:
         if not data.get("po_number"):
             issues.append({"field": "po_number", "severity": "error", "message": "PO number is required"})
-    
+
     # Check vendor
     if not data.get("vendor", {}).get("name"):
         issues.append({"field": "vendor.name", "severity": "error", "message": "Vendor name is required"})
-    
+
     # Check line items
     line_items = data.get("line_items", [])
     if not line_items:
@@ -336,18 +333,42 @@ def validate_extracted_data(data: Dict[str, Any]) -> List[Dict[str, str]]:
     else:
         for i, item in enumerate(line_items):
             if not item.get("part_number") and not item.get("description"):
-                issues.append({"field": f"line_items[{i}].part_number", "severity": "error", "message": f"Line {i+1}: Part number or description required"})
+                issues.append(
+                    {
+                        "field": f"line_items[{i}].part_number",
+                        "severity": "error",
+                        "message": f"Line {i+1}: Part number or description required",
+                    }
+                )
             if not item.get("qty_ordered") or item.get("qty_ordered", 0) <= 0:
-                issues.append({"field": f"line_items[{i}].qty_ordered", "severity": "error", "message": f"Line {i+1}: Quantity must be > 0"})
+                issues.append(
+                    {
+                        "field": f"line_items[{i}].qty_ordered",
+                        "severity": "error",
+                        "message": f"Line {i+1}: Quantity must be > 0",
+                    }
+                )
             if item.get("confidence") == "low":
-                issues.append({"field": f"line_items[{i}]", "severity": "warning", "message": f"Line {i+1}: Low confidence - please verify"})
-    
+                issues.append(
+                    {
+                        "field": f"line_items[{i}]",
+                        "severity": "warning",
+                        "message": f"Line {i+1}: Low confidence - please verify",
+                    }
+                )
+
     # Check total
     if not data.get("total_amount") and line_items:
         issues.append({"field": "total_amount", "severity": "warning", "message": "Total amount not found"})
-    
+
     # Overall confidence
     if data.get("extraction_confidence") == "low":
-        issues.append({"field": "extraction_confidence", "severity": "warning", "message": "Overall extraction confidence is low - please review all fields"})
-    
+        issues.append(
+            {
+                "field": "extraction_confidence",
+                "severity": "warning",
+                "message": "Overall extraction confidence is low - please review all fields",
+            }
+        )
+
     return issues

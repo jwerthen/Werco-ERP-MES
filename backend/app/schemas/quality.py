@@ -1,9 +1,11 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional, List
-from datetime import datetime, date
+from datetime import date, datetime
 from decimal import Decimal
-from app.models.quality import NCRStatus, NCRDisposition, NCRSource, CARStatus, CARType, FAIStatus
-from app.core.validation import Money, MoneySmall, DescriptionLong
+from typing import List, Optional
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.core.validation import DescriptionLong, Money, MoneySmall
+from app.models.quality import CARStatus, CARType, FAIStatus, NCRDisposition, NCRSource, NCRStatus
 
 
 # NCR Schemas
@@ -12,7 +14,9 @@ class NCRCreate(BaseModel):
     work_order_id: Optional[int] = Field(None, gt=0)
     lot_number: Optional[str] = Field(None, max_length=50, description="Required for AS9100D traceability")
     serial_number: Optional[str] = Field(None, max_length=100)
-    quantity_affected: Decimal = Field(default=Decimal('1.0'), gt=Decimal('0'), description="Quantity of affected parts")
+    quantity_affected: Decimal = Field(
+        default=Decimal('1.0'), gt=Decimal('0'), description="Quantity of affected parts"
+    )
     source: NCRSource = Field(..., description="Source of defect")
     title: str = Field(..., min_length=5, max_length=200, description="NCR title")
     description: DescriptionLong = Field(..., description="Detailed defect description")
@@ -59,7 +63,7 @@ class PartSummary(BaseModel):
     id: int
     part_number: str
     name: str
-    
+
     class Config:
         from_attributes = True
 
@@ -94,7 +98,7 @@ class NCRResponse(BaseModel):
     car_id: Optional[int]
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -161,7 +165,7 @@ class CARResponse(BaseModel):
     due_date: Optional[date]
     closed_date: Optional[date]
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -200,7 +204,7 @@ class FAICharacteristicResponse(BaseModel):
     is_critical: bool
     is_major: bool
     notes: Optional[str]
-    
+
     class Config:
         from_attributes = True
 
@@ -248,6 +252,6 @@ class FAIResponse(BaseModel):
     customer_approved: bool
     characteristics: List[FAICharacteristicResponse] = Field(default_factory=list)
     created_at: datetime
-    
+
     class Config:
         from_attributes = True

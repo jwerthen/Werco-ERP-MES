@@ -1,6 +1,10 @@
-from sqlalchemy import Column, Integer, String, Float, Text, Boolean, DateTime, JSON, Enum as SQLEnum, ForeignKey, UniqueConstraint
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import JSON, Boolean, Column, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -51,29 +55,30 @@ class MachineType(str, enum.Enum):
 
 class QuoteMaterial(Base, TenantMixin):
     """Materials available for quoting with pricing"""
+
     __tablename__ = "quote_materials"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    
+
     # Basic info
     name = Column(String(255), nullable=False)  # e.g., "6061-T6 Aluminum"
     category = Column(SQLEnum(MaterialCategory), nullable=False)
     description = Column(Text)
-    
+
     # For CNC - stock pricing (per cubic inch or pound)
     stock_price_per_cubic_inch = Column(Float, default=0.0)
     stock_price_per_pound = Column(Float, default=0.0)
     density_lb_per_cubic_inch = Column(Float, default=0.0)  # For weight calculations
-    
+
     # For Sheet Metal - per square foot by gauge
     sheet_pricing = Column(JSON)  # {"10ga": 5.50, "12ga": 4.25, "14ga": 3.75, ...}
-    
+
     # Cutting speed multiplier (1.0 = baseline, <1 = slower/harder)
     machinability_factor = Column(Float, default=1.0)
-    
+
     # Markup
     material_markup_pct = Column(Float, default=20.0)
-    
+
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -81,29 +86,30 @@ class QuoteMaterial(Base, TenantMixin):
 
 class QuoteMachine(Base, TenantMixin):
     """Machine configurations for quoting"""
+
     __tablename__ = "quote_machines"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    
+
     name = Column(String(255), nullable=False)  # e.g., "Haas VF-2"
     machine_type = Column(SQLEnum(MachineType), nullable=False)
     description = Column(Text)
-    
+
     # Hourly rates
     rate_per_hour = Column(Float, nullable=False)  # Shop rate including overhead
     setup_rate_per_hour = Column(Float)  # If different from run rate
-    
+
     # For laser/plasma/waterjet - cutting speeds by material thickness
     # {"steel": {"10ga": 150, "12ga": 200}, "aluminum": {...}}
     cutting_speeds = Column(JSON)  # inches per minute
-    
+
     # For press brake - time per bend
     bend_time_seconds = Column(Float, default=15.0)
     setup_time_per_bend_type = Column(Float, default=300.0)  # 5 min per unique bend
-    
+
     # CNC specific
     typical_setup_hours = Column(Float, default=1.0)
-    
+
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -111,33 +117,33 @@ class QuoteMachine(Base, TenantMixin):
 
 class QuoteFinish(Base, TenantMixin):
     """Finishing operations with pricing"""
+
     __tablename__ = "quote_finishes"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    
+
     name = Column(String(255), nullable=False)  # e.g., "Anodize Type II Clear"
     category = Column(String(100))  # plating, coating, heat_treat, etc.
     description = Column(Text)
-    
+
     # Pricing options
     price_per_part = Column(Float, default=0.0)
     price_per_sqft = Column(Float, default=0.0)
     price_per_lb = Column(Float, default=0.0)
     minimum_charge = Column(Float, default=0.0)
-    
+
     # Lead time impact
     additional_days = Column(Integer, default=0)
-    
+
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class QuoteSettings(Base, TenantMixin):
     """Per-company quote settings"""
+
     __tablename__ = "quote_settings"
-    __table_args__ = (
-        UniqueConstraint('company_id', 'setting_key', name='uq_quote_settings_company_key'),
-    )
+    __table_args__ = (UniqueConstraint('company_id', 'setting_key', name='uq_quote_settings_company_key'),)
 
     id = Column(Integer, primary_key=True, index=True)
     setting_key = Column(String(100), nullable=False)
@@ -158,8 +164,9 @@ class QuoteSettings(Base, TenantMixin):
 
 class LaborRate(Base, TenantMixin):
     """Labor rates by job function/role"""
+
     __tablename__ = "labor_rates"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False)  # e.g., "Welder", "Machinist", "Assembler"
     rate_per_hour = Column(Float, nullable=False)
@@ -171,8 +178,9 @@ class LaborRate(Base, TenantMixin):
 
 class OutsideService(Base, TenantMixin):
     """Outside/vendor services with default pricing"""
+
     __tablename__ = "outside_services"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)  # e.g., "Anodize - ABC Plating"
     vendor_name = Column(String(255))  # Standalone vendor name
@@ -189,8 +197,9 @@ class OutsideService(Base, TenantMixin):
 
 class SettingsAuditLog(Base, TenantMixin):
     """Audit log for all settings changes (AS9100D compliance)"""
+
     __tablename__ = "settings_audit_log"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     entity_type = Column(String(50), nullable=False)  # material, machine, labor_rate, etc.
     entity_id = Column(Integer)

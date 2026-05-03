@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date, UniqueConstraint
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -29,6 +33,7 @@ class CertificationStatus(str, enum.Enum):
 
 class OperatorCertification(Base, TenantMixin):
     """Operator certification records"""
+
     __tablename__ = "operator_certifications"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -56,6 +61,7 @@ class OperatorCertification(Base, TenantMixin):
 
 class TrainingRecord(Base, TenantMixin):
     """Training records for operators"""
+
     __tablename__ = "training_records"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -84,6 +90,7 @@ class TrainingRecord(Base, TenantMixin):
 
 class SkillMatrix(Base, TenantMixin):
     """Links operators to work centers they are qualified for"""
+
     __tablename__ = "skill_matrix"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -104,6 +111,4 @@ class SkillMatrix(Base, TenantMixin):
     work_center = relationship("WorkCenter")
     approver = relationship("User", foreign_keys=[approved_by])
 
-    __table_args__ = (
-        UniqueConstraint('user_id', 'work_center_id', name='uq_user_work_center'),
-    )
+    __table_args__ = (UniqueConstraint('user_id', 'work_center_id', name='uq_user_work_center'),)

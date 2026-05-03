@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from math import ceil
 from typing import Dict, Optional
 
-
 DEFAULT_DENSITY_LB_PER_IN3: Dict[str, float] = {
     "carbon_steel": 0.284,
     "stainless": 0.289,
@@ -60,7 +59,11 @@ def calc_required_weight_lbs(
     quantity: float,
     density_override: Optional[float] = None,
 ) -> float:
-    density = density_override if density_override and density_override > 0 else DEFAULT_DENSITY_LB_PER_IN3.get(material_key, 0.284)
+    density = (
+        density_override
+        if density_override and density_override > 0
+        else DEFAULT_DENSITY_LB_PER_IN3.get(material_key, 0.284)
+    )
     return max(flat_area_in2, 0.0) * max(thickness_in, 0.0) * density * max(quantity, 0.0)
 
 
@@ -80,7 +83,11 @@ def calc_cutting_cost(
     setup_minutes: float,
     cut_speed_ipm_override: Optional[float] = None,
 ) -> Dict[str, float]:
-    cut_speed = cut_speed_ipm_override if cut_speed_ipm_override and cut_speed_ipm_override > 0 else DEFAULT_CUT_SPEED_IPM.get(material_key, 180.0)
+    cut_speed = (
+        cut_speed_ipm_override
+        if cut_speed_ipm_override and cut_speed_ipm_override > 0
+        else DEFAULT_CUT_SPEED_IPM.get(material_key, 180.0)
+    )
     runtime_minutes = 0.0
     if cut_speed > 0:
         runtime_minutes = (max(cut_length_in, 0.0) * max(quantity, 0.0)) / cut_speed
@@ -156,7 +163,9 @@ def estimate_lead_time_range(
 ) -> Dict[str, float]:
     capacity_hours = max(effective_daily_capacity_hours, 1.0)
     run_days = ceil(max(total_shop_hours, 0.0) / capacity_hours)
-    nominal_days = max(base_queue_days, 0) + run_days + max(outside_service_days, 0) + max(extra_outside_service_buffer_days, 0)
+    nominal_days = (
+        max(base_queue_days, 0) + run_days + max(outside_service_days, 0) + max(extra_outside_service_buffer_days, 0)
+    )
     min_days = max(1, ceil(nominal_days * 0.85))
     max_days = max(min_days, ceil(nominal_days * 1.25))
     confidence = 0.85 if outside_service_days == 0 else 0.70

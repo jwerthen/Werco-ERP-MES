@@ -9,6 +9,7 @@ cleanup is required. On non-Postgres dialects (e.g. SQLite in tests) this
 is a no-op; those environments aren't concurrent enough for races to
 matter and Postgres-only SQL would break the test suite.
 """
+
 from __future__ import annotations
 
 import zlib

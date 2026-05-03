@@ -4,30 +4,34 @@ Auto-Evidence Discovery Service
 Scans live ERP/MES records and maps them to QMS clauses as compliance evidence.
 Uses keyword-based matching rules so it works across AS9100D, ISO 9001, IATF 16949, etc.
 """
+
 import logging
 from datetime import datetime, timedelta
-from typing import List, Callable
+from typing import List
 
-from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.orm import Session
 
+from app.models.audit_log import AuditLog
+from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
+from app.models.customer_complaint import ComplaintStatus, CustomerComplaint
+from app.models.document import Document, DocumentType
+from app.models.engineering_change import ECOStatus, EngineeringChangeOrder
+from app.models.maintenance import MaintenanceSchedule, MaintenanceStatus, MaintenanceWorkOrder
+from app.models.operator_certification import CertificationStatus, OperatorCertification, TrainingRecord
+from app.models.purchasing import Vendor
 from app.models.qms_standard import QMSClause
 from app.models.quality import (
-    NonConformanceReport, NCRStatus,
-    CorrectiveActionRequest, CARStatus, CARType,
-    FirstArticleInspection, FAIStatus,
+    CARStatus,
+    CorrectiveActionRequest,
+    FAIStatus,
+    FirstArticleInspection,
+    NCRStatus,
+    NonConformanceReport,
 )
-from app.models.calibration import Equipment, CalibrationRecord, CalibrationStatus
-from app.models.document import Document, DocumentType
-from app.models.customer_complaint import CustomerComplaint, ComplaintStatus
-from app.models.operator_certification import OperatorCertification, CertificationStatus, TrainingRecord
-from app.models.work_order import WorkOrder
 from app.models.spc import SPCCharacteristic
-from app.models.audit_log import AuditLog
-from app.models.maintenance import MaintenanceSchedule, MaintenanceWorkOrder, MaintenanceStatus
-from app.models.engineering_change import EngineeringChangeOrder, ECOStatus
-from app.models.purchasing import Vendor
 from app.models.supplier_scorecard import SupplierScorecard
+from app.models.work_order import WorkOrder
 
 logger = logging.getLogger(__name__)
 
@@ -44,23 +48,24 @@ def _recent_cutoff() -> datetime:
 # Each returns a dict matching AutoEvidenceResult schema fields
 # ---------------------------------------------------------------------------
 
+
 def _query_ncrs(db: Session) -> dict:
     cutoff = _recent_cutoff()
     total = db.query(func.count(NonConformanceReport.id)).scalar() or 0
-    recent = db.query(func.count(NonConformanceReport.id)).filter(
-        NonConformanceReport.created_at >= cutoff
-    ).scalar() or 0
-    open_count = db.query(func.count(NonConformanceReport.id)).filter(
-        NonConformanceReport.status.in_([NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION])
-    ).scalar() or 0
+    recent = (
+        db.query(func.count(NonConformanceReport.id)).filter(NonConformanceReport.created_at >= cutoff).scalar() or 0
+    )
+    open_count = (
+        db.query(func.count(NonConformanceReport.id))
+        .filter(
+            NonConformanceReport.status.in_([NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION])
+        )
+        .scalar()
+        or 0
+    )
     closed = total - open_count
 
-    examples = (
-        db.query(NonConformanceReport)
-        .order_by(NonConformanceReport.created_at.desc())
-        .limit(5)
-        .all()
-    )
+    examples = db.query(NonConformanceReport).order_by(NonConformanceReport.created_at.desc()).limit(5).all()
 
     if total == 0:
         health = "no_data"
@@ -103,25 +108,33 @@ def _query_ncrs(db: Session) -> dict:
 def _query_cars(db: Session) -> dict:
     cutoff = _recent_cutoff()
     total = db.query(func.count(CorrectiveActionRequest.id)).scalar() or 0
-    recent = db.query(func.count(CorrectiveActionRequest.id)).filter(
-        CorrectiveActionRequest.created_at >= cutoff
-    ).scalar() or 0
-    open_count = db.query(func.count(CorrectiveActionRequest.id)).filter(
-        CorrectiveActionRequest.status.in_([
-            CARStatus.OPEN, CARStatus.ROOT_CAUSE_ANALYSIS,
-            CARStatus.CORRECTIVE_ACTION, CARStatus.VERIFICATION,
-        ])
-    ).scalar() or 0
-    verified = db.query(func.count(CorrectiveActionRequest.id)).filter(
-        CorrectiveActionRequest.status == CARStatus.CLOSED
-    ).scalar() or 0
-
-    examples = (
-        db.query(CorrectiveActionRequest)
-        .order_by(CorrectiveActionRequest.created_at.desc())
-        .limit(5)
-        .all()
+    recent = (
+        db.query(func.count(CorrectiveActionRequest.id)).filter(CorrectiveActionRequest.created_at >= cutoff).scalar()
+        or 0
     )
+    open_count = (
+        db.query(func.count(CorrectiveActionRequest.id))
+        .filter(
+            CorrectiveActionRequest.status.in_(
+                [
+                    CARStatus.OPEN,
+                    CARStatus.ROOT_CAUSE_ANALYSIS,
+                    CARStatus.CORRECTIVE_ACTION,
+                    CARStatus.VERIFICATION,
+                ]
+            )
+        )
+        .scalar()
+        or 0
+    )
+    verified = (
+        db.query(func.count(CorrectiveActionRequest.id))
+        .filter(CorrectiveActionRequest.status == CARStatus.CLOSED)
+        .scalar()
+        or 0
+    )
+
+    examples = db.query(CorrectiveActionRequest).order_by(CorrectiveActionRequest.created_at.desc()).limit(5).all()
 
     if total == 0:
         health = "no_data"
@@ -164,22 +177,24 @@ def _query_cars(db: Session) -> dict:
 def _query_fais(db: Session) -> dict:
     cutoff = _recent_cutoff()
     total = db.query(func.count(FirstArticleInspection.id)).scalar() or 0
-    recent = db.query(func.count(FirstArticleInspection.id)).filter(
-        FirstArticleInspection.created_at >= cutoff
-    ).scalar() or 0
-    passed = db.query(func.count(FirstArticleInspection.id)).filter(
-        FirstArticleInspection.status == FAIStatus.PASSED
-    ).scalar() or 0
-    failed = db.query(func.count(FirstArticleInspection.id)).filter(
-        FirstArticleInspection.status == FAIStatus.FAILED
-    ).scalar() or 0
-
-    examples = (
-        db.query(FirstArticleInspection)
-        .order_by(FirstArticleInspection.created_at.desc())
-        .limit(5)
-        .all()
+    recent = (
+        db.query(func.count(FirstArticleInspection.id)).filter(FirstArticleInspection.created_at >= cutoff).scalar()
+        or 0
     )
+    passed = (
+        db.query(func.count(FirstArticleInspection.id))
+        .filter(FirstArticleInspection.status == FAIStatus.PASSED)
+        .scalar()
+        or 0
+    )
+    failed = (
+        db.query(func.count(FirstArticleInspection.id))
+        .filter(FirstArticleInspection.status == FAIStatus.FAILED)
+        .scalar()
+        or 0
+    )
+
+    examples = db.query(FirstArticleInspection).order_by(FirstArticleInspection.created_at.desc()).limit(5).all()
 
     if total == 0:
         health = "no_data"
@@ -225,19 +240,30 @@ def _query_fais(db: Session) -> dict:
 
 def _query_calibration(db: Session) -> dict:
     total_equip = db.query(func.count(Equipment.id)).filter(Equipment.is_active == True).scalar() or 0
-    overdue = db.query(func.count(Equipment.id)).filter(
-        Equipment.is_active == True,
-        Equipment.status == CalibrationStatus.OVERDUE,
-    ).scalar() or 0
-    due_soon = db.query(func.count(Equipment.id)).filter(
-        Equipment.is_active == True,
-        Equipment.status == CalibrationStatus.DUE,
-    ).scalar() or 0
+    overdue = (
+        db.query(func.count(Equipment.id))
+        .filter(
+            Equipment.is_active == True,
+            Equipment.status == CalibrationStatus.OVERDUE,
+        )
+        .scalar()
+        or 0
+    )
+    due_soon = (
+        db.query(func.count(Equipment.id))
+        .filter(
+            Equipment.is_active == True,
+            Equipment.status == CalibrationStatus.DUE,
+        )
+        .scalar()
+        or 0
+    )
 
     cutoff = _recent_cutoff()
-    recent_cals = db.query(func.count(CalibrationRecord.id)).filter(
-        CalibrationRecord.calibration_date >= cutoff.date()
-    ).scalar() or 0
+    recent_cals = (
+        db.query(func.count(CalibrationRecord.id)).filter(CalibrationRecord.calibration_date >= cutoff.date()).scalar()
+        or 0
+    )
 
     examples_eq = (
         db.query(Equipment)
@@ -290,13 +316,21 @@ def _query_calibration(db: Session) -> dict:
 
 
 def _query_documents(db: Session) -> dict:
-    procedures = db.query(func.count(Document.id)).filter(
-        Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION])
-    ).scalar() or 0
-    approved = db.query(func.count(Document.id)).filter(
-        Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]),
-        Document.status.in_(["approved", "released"]),
-    ).scalar() or 0
+    procedures = (
+        db.query(func.count(Document.id))
+        .filter(Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]))
+        .scalar()
+        or 0
+    )
+    approved = (
+        db.query(func.count(Document.id))
+        .filter(
+            Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]),
+            Document.status.in_(["approved", "released"]),
+        )
+        .scalar()
+        or 0
+    )
     total = db.query(func.count(Document.id)).scalar() or 0
     controlled = db.query(func.count(Document.id)).filter(Document.is_controlled == True).scalar() or 0
 
@@ -350,20 +384,16 @@ def _query_documents(db: Session) -> dict:
 def _query_complaints(db: Session) -> dict:
     cutoff = _recent_cutoff()
     total = db.query(func.count(CustomerComplaint.id)).scalar() or 0
-    recent = db.query(func.count(CustomerComplaint.id)).filter(
-        CustomerComplaint.created_at >= cutoff
-    ).scalar() or 0
-    resolved = db.query(func.count(CustomerComplaint.id)).filter(
-        CustomerComplaint.status.in_([ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED])
-    ).scalar() or 0
+    recent = db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.created_at >= cutoff).scalar() or 0
+    resolved = (
+        db.query(func.count(CustomerComplaint.id))
+        .filter(CustomerComplaint.status.in_([ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED]))
+        .scalar()
+        or 0
+    )
     open_count = total - resolved
 
-    examples = (
-        db.query(CustomerComplaint)
-        .order_by(CustomerComplaint.created_at.desc())
-        .limit(5)
-        .all()
-    )
+    examples = db.query(CustomerComplaint).order_by(CustomerComplaint.created_at.desc()).limit(5).all()
 
     if total == 0:
         health = "healthy"
@@ -405,26 +435,32 @@ def _query_complaints(db: Session) -> dict:
 
 def _query_training(db: Session) -> dict:
     total_certs = db.query(func.count(OperatorCertification.id)).scalar() or 0
-    active_certs = db.query(func.count(OperatorCertification.id)).filter(
-        OperatorCertification.status == CertificationStatus.ACTIVE
-    ).scalar() or 0
-    expired = db.query(func.count(OperatorCertification.id)).filter(
-        OperatorCertification.status == CertificationStatus.EXPIRED
-    ).scalar() or 0
-    expiring_soon = db.query(func.count(OperatorCertification.id)).filter(
-        OperatorCertification.status == CertificationStatus.EXPIRING_SOON
-    ).scalar() or 0
+    active_certs = (
+        db.query(func.count(OperatorCertification.id))
+        .filter(OperatorCertification.status == CertificationStatus.ACTIVE)
+        .scalar()
+        or 0
+    )
+    expired = (
+        db.query(func.count(OperatorCertification.id))
+        .filter(OperatorCertification.status == CertificationStatus.EXPIRED)
+        .scalar()
+        or 0
+    )
+    expiring_soon = (
+        db.query(func.count(OperatorCertification.id))
+        .filter(OperatorCertification.status == CertificationStatus.EXPIRING_SOON)
+        .scalar()
+        or 0
+    )
 
     cutoff = _recent_cutoff()
-    recent_training = db.query(func.count(TrainingRecord.id)).filter(
-        TrainingRecord.training_date >= cutoff.date()
-    ).scalar() or 0
+    recent_training = (
+        db.query(func.count(TrainingRecord.id)).filter(TrainingRecord.training_date >= cutoff.date()).scalar() or 0
+    )
 
     examples = (
-        db.query(OperatorCertification)
-        .order_by(OperatorCertification.updated_at.desc().nullslast())
-        .limit(5)
-        .all()
+        db.query(OperatorCertification).order_by(OperatorCertification.updated_at.desc().nullslast()).limit(5).all()
     )
 
     if total_certs == 0 and recent_training == 0:
@@ -472,12 +508,11 @@ def _query_training(db: Session) -> dict:
 def _query_work_orders(db: Session) -> dict:
     cutoff = _recent_cutoff()
     total = db.query(func.count(WorkOrder.id)).scalar() or 0
-    recent = db.query(func.count(WorkOrder.id)).filter(
-        WorkOrder.created_at >= cutoff
-    ).scalar() or 0
-    with_lot = db.query(func.count(WorkOrder.id)).filter(
-        WorkOrder.lot_number != None, WorkOrder.lot_number != ""
-    ).scalar() or 0
+    recent = db.query(func.count(WorkOrder.id)).filter(WorkOrder.created_at >= cutoff).scalar() or 0
+    with_lot = (
+        db.query(func.count(WorkOrder.id)).filter(WorkOrder.lot_number != None, WorkOrder.lot_number != "").scalar()
+        or 0
+    )
 
     examples = (
         db.query(WorkOrder)
@@ -528,12 +563,13 @@ def _query_work_orders(db: Session) -> dict:
 
 def _query_spc(db: Session) -> dict:
     total = db.query(func.count(SPCCharacteristic.id)).scalar() or 0
-    active = db.query(func.count(SPCCharacteristic.id)).filter(
-        SPCCharacteristic.is_active == True
-    ).scalar() or 0
-    critical = db.query(func.count(SPCCharacteristic.id)).filter(
-        SPCCharacteristic.is_critical == True, SPCCharacteristic.is_active == True
-    ).scalar() or 0
+    active = db.query(func.count(SPCCharacteristic.id)).filter(SPCCharacteristic.is_active == True).scalar() or 0
+    critical = (
+        db.query(func.count(SPCCharacteristic.id))
+        .filter(SPCCharacteristic.is_critical == True, SPCCharacteristic.is_active == True)
+        .scalar()
+        or 0
+    )
 
     examples = (
         db.query(SPCCharacteristic)
@@ -580,9 +616,7 @@ def _query_spc(db: Session) -> dict:
 def _query_audit_log(db: Session) -> dict:
     cutoff = _recent_cutoff()
     total = db.query(func.count(AuditLog.id)).scalar() or 0
-    recent = db.query(func.count(AuditLog.id)).filter(
-        AuditLog.timestamp >= cutoff
-    ).scalar() or 0
+    recent = db.query(func.count(AuditLog.id)).filter(AuditLog.timestamp >= cutoff).scalar() or 0
 
     if total == 0:
         health = "no_data"
@@ -609,21 +643,22 @@ def _query_audit_log(db: Session) -> dict:
 
 def _query_maintenance(db: Session) -> dict:
     total_schedules = db.query(func.count(MaintenanceSchedule.id)).scalar() or 0
-    cutoff = _recent_cutoff()
+    _recent_cutoff()
     total_wos = db.query(func.count(MaintenanceWorkOrder.id)).scalar() or 0
-    completed = db.query(func.count(MaintenanceWorkOrder.id)).filter(
-        MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED
-    ).scalar() or 0
-    overdue = db.query(func.count(MaintenanceWorkOrder.id)).filter(
-        MaintenanceWorkOrder.status == MaintenanceStatus.OVERDUE
-    ).scalar() or 0
-
-    examples = (
-        db.query(MaintenanceWorkOrder)
-        .order_by(MaintenanceWorkOrder.created_at.desc())
-        .limit(5)
-        .all()
+    completed = (
+        db.query(func.count(MaintenanceWorkOrder.id))
+        .filter(MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED)
+        .scalar()
+        or 0
     )
+    overdue = (
+        db.query(func.count(MaintenanceWorkOrder.id))
+        .filter(MaintenanceWorkOrder.status == MaintenanceStatus.OVERDUE)
+        .scalar()
+        or 0
+    )
+
+    examples = db.query(MaintenanceWorkOrder).order_by(MaintenanceWorkOrder.created_at.desc()).limit(5).all()
 
     if total_schedules == 0 and total_wos == 0:
         health = "no_data"
@@ -666,19 +701,18 @@ def _query_maintenance(db: Session) -> dict:
 def _query_ecos(db: Session) -> dict:
     total = db.query(func.count(EngineeringChangeOrder.id)).scalar() or 0
     cutoff = _recent_cutoff()
-    recent = db.query(func.count(EngineeringChangeOrder.id)).filter(
-        EngineeringChangeOrder.created_at >= cutoff
-    ).scalar() or 0
-    implemented = db.query(func.count(EngineeringChangeOrder.id)).filter(
-        EngineeringChangeOrder.status == ECOStatus.COMPLETED
-    ).scalar() or 0
-
-    examples = (
-        db.query(EngineeringChangeOrder)
-        .order_by(EngineeringChangeOrder.created_at.desc())
-        .limit(5)
-        .all()
+    recent = (
+        db.query(func.count(EngineeringChangeOrder.id)).filter(EngineeringChangeOrder.created_at >= cutoff).scalar()
+        or 0
     )
+    implemented = (
+        db.query(func.count(EngineeringChangeOrder.id))
+        .filter(EngineeringChangeOrder.status == ECOStatus.COMPLETED)
+        .scalar()
+        or 0
+    )
+
+    examples = db.query(EngineeringChangeOrder).order_by(EngineeringChangeOrder.created_at.desc()).limit(5).all()
 
     if total == 0:
         health = "no_data"
@@ -717,16 +751,9 @@ def _query_ecos(db: Session) -> dict:
 def _query_suppliers(db: Session) -> dict:
     total_vendors = db.query(func.count(Vendor.id)).scalar() or 0
     total_scorecards = db.query(func.count(SupplierScorecard.id)).scalar() or 0
-    approved = db.query(func.count(Vendor.id)).filter(
-        Vendor.is_active == True
-    ).scalar() or 0
+    approved = db.query(func.count(Vendor.id)).filter(Vendor.is_active == True).scalar() or 0
 
-    examples = (
-        db.query(SupplierScorecard)
-        .order_by(SupplierScorecard.period_end.desc())
-        .limit(5)
-        .all()
-    )
+    examples = db.query(SupplierScorecard).order_by(SupplierScorecard.period_end.desc()).limit(5).all()
 
     if total_vendors == 0:
         health = "no_data"
@@ -773,82 +800,149 @@ def _query_suppliers(db: Session) -> dict:
 EVIDENCE_MAPPING_RULES: List[dict] = [
     {
         "id": "ncr",
-        "keywords": ["nonconform", "control of nonconforming", "nonconforming output",
-                      "nonconforming product", "reject", "scrap", "rework"],
+        "keywords": [
+            "nonconform",
+            "control of nonconforming",
+            "nonconforming output",
+            "nonconforming product",
+            "reject",
+            "scrap",
+            "rework",
+        ],
         "query_fn": _query_ncrs,
     },
     {
         "id": "car",
-        "keywords": ["corrective action", "preventive action", "improvement",
-                      "continual improvement", "root cause", "capa"],
+        "keywords": [
+            "corrective action",
+            "preventive action",
+            "improvement",
+            "continual improvement",
+            "root cause",
+            "capa",
+        ],
         "query_fn": _query_cars,
     },
     {
         "id": "fai",
-        "keywords": ["first article", "production process verification",
-                      "initial inspection", "as9102", "product verification"],
+        "keywords": [
+            "first article",
+            "production process verification",
+            "initial inspection",
+            "as9102",
+            "product verification",
+        ],
         "query_fn": _query_fais,
     },
     {
         "id": "calibration",
-        "keywords": ["calibration", "monitoring and measuring", "measurement",
-                      "measuring equipment", "metrolog", "gauge", "instrument"],
+        "keywords": [
+            "calibration",
+            "monitoring and measuring",
+            "measurement",
+            "measuring equipment",
+            "metrolog",
+            "gauge",
+            "instrument",
+        ],
         "query_fn": _query_calibration,
     },
     {
         "id": "document_control",
-        "keywords": ["document control", "documented information", "procedure",
-                      "work instruction", "controlled document", "document approval",
-                      "records control", "retention"],
+        "keywords": [
+            "document control",
+            "documented information",
+            "procedure",
+            "work instruction",
+            "controlled document",
+            "document approval",
+            "records control",
+            "retention",
+        ],
         "query_fn": _query_documents,
     },
     {
         "id": "complaints",
-        "keywords": ["customer satisfaction", "customer complaint", "customer feedback",
-                      "customer communication", "complaint handling"],
+        "keywords": [
+            "customer satisfaction",
+            "customer complaint",
+            "customer feedback",
+            "customer communication",
+            "complaint handling",
+        ],
         "query_fn": _query_complaints,
     },
     {
         "id": "training",
-        "keywords": ["training", "competence", "awareness", "qualification",
-                      "personnel", "human resource", "skill"],
+        "keywords": ["training", "competence", "awareness", "qualification", "personnel", "human resource", "skill"],
         "query_fn": _query_training,
     },
     {
         "id": "traceability",
-        "keywords": ["traceability", "identification and traceability", "lot track",
-                      "serial number", "batch", "product identification"],
+        "keywords": [
+            "traceability",
+            "identification and traceability",
+            "lot track",
+            "serial number",
+            "batch",
+            "product identification",
+        ],
         "query_fn": _query_work_orders,
     },
     {
         "id": "spc",
-        "keywords": ["statistical", "spc", "process control", "statistical technique",
-                      "data analysis", "process capability"],
+        "keywords": [
+            "statistical",
+            "spc",
+            "process control",
+            "statistical technique",
+            "data analysis",
+            "process capability",
+        ],
         "query_fn": _query_spc,
     },
     {
         "id": "audit",
-        "keywords": ["internal audit", "audit program", "audit trail",
-                      "management review", "audit log"],
+        "keywords": ["internal audit", "audit program", "audit trail", "management review", "audit log"],
         "query_fn": _query_audit_log,
     },
     {
         "id": "maintenance",
-        "keywords": ["maintenance", "infrastructure", "preventive maintenance",
-                      "work environment", "facility", "equipment maintenance"],
+        "keywords": [
+            "maintenance",
+            "infrastructure",
+            "preventive maintenance",
+            "work environment",
+            "facility",
+            "equipment maintenance",
+        ],
         "query_fn": _query_maintenance,
     },
     {
         "id": "eco",
-        "keywords": ["engineering change", "design change", "design control",
-                      "configuration management", "change management", "design and development"],
+        "keywords": [
+            "engineering change",
+            "design change",
+            "design control",
+            "configuration management",
+            "change management",
+            "design and development",
+        ],
         "query_fn": _query_ecos,
     },
     {
         "id": "suppliers",
-        "keywords": ["purchasing", "external provider", "supplier", "vendor",
-                      "procurement", "outsource", "supply chain",
-                      "evaluation of supplier", "approved supplier"],
+        "keywords": [
+            "purchasing",
+            "external provider",
+            "supplier",
+            "vendor",
+            "procurement",
+            "outsource",
+            "supply chain",
+            "evaluation of supplier",
+            "approved supplier",
+        ],
         "query_fn": _query_suppliers,
     },
 ]

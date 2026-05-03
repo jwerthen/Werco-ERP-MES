@@ -1,6 +1,9 @@
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel
+
+
 class WorkCenterBase(BaseModel):
     code: str
     name: str
@@ -39,6 +42,6 @@ class WorkCenterResponse(WorkCenterBase):
     availability_rate: Optional[float] = None
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True

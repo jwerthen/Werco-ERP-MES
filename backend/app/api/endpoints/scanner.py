@@ -1,17 +1,17 @@
 from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_
-from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
-from app.models.user import User
-from app.models.part import Part
-from app.models.work_order import WorkOrder
-from app.models.supplier_part import SupplierPartMapping
-from app.models.purchasing import Vendor
-from app.models.inventory import InventoryLocation
 from pydantic import BaseModel
-from datetime import datetime
+from sqlalchemy import or_
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user
+from app.db.database import get_db
+from app.models.part import Part
+from app.models.purchasing import Vendor
+from app.models.supplier_part import SupplierPartMapping
+from app.models.user import User
+from app.models.work_order import WorkOrder
 
 router = APIRouter()
 
@@ -40,7 +40,7 @@ class SupplierMappingResponse(BaseModel):
     supplier_uom: Optional[str] = None
     conversion_factor: float
     is_active: bool
-    
+
     class Config:
         from_attributes = True
 
@@ -48,7 +48,7 @@ class SupplierMappingResponse(BaseModel):
 class ScanLookupResponse(BaseModel):
     found: bool
     match_type: Optional[str] = None  # 'supplier_mapping', 'part_number', 'work_order'
-    
+
     # Part info (if found)
     part_id: Optional[int] = None
     part_number: Optional[str] = None
@@ -56,19 +56,19 @@ class ScanLookupResponse(BaseModel):
     part_description: Optional[str] = None
     part_type: Optional[str] = None
     unit_of_measure: Optional[str] = None
-    
+
     # Supplier mapping info
     supplier_part_number: Optional[str] = None
     vendor_name: Optional[str] = None
     supplier_description: Optional[str] = None
-    
+
     # Work order info (if WO scan)
     work_order_id: Optional[int] = None
     work_order_number: Optional[str] = None
     work_order_status: Optional[str] = None
     quantity_ordered: Optional[float] = None
     customer_name: Optional[str] = None
-    
+
     # For manual entry
     scanned_code: str
 
@@ -78,7 +78,7 @@ def lookup_barcode(
     code: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Look up a scanned barcode/code.
@@ -89,28 +89,32 @@ def lookup_barcode(
     """
     code = code.strip()
     code_upper = code.upper()
-    
+
     # 1. Check supplier part mappings first
-    mapping = db.query(SupplierPartMapping).options(
-        joinedload(SupplierPartMapping.part),
-        joinedload(SupplierPartMapping.vendor)
-    ).filter(
-        SupplierPartMapping.company_id == company_id,
-        SupplierPartMapping.supplier_part_number == code,
-        SupplierPartMapping.is_active == True
-    ).first()
+    mapping = (
+        db.query(SupplierPartMapping)
+        .options(joinedload(SupplierPartMapping.part), joinedload(SupplierPartMapping.vendor))
+        .filter(
+            SupplierPartMapping.company_id == company_id,
+            SupplierPartMapping.supplier_part_number == code,
+            SupplierPartMapping.is_active == True,
+        )
+        .first()
+    )
 
     if not mapping:
         # Try case-insensitive
-        mapping = db.query(SupplierPartMapping).options(
-            joinedload(SupplierPartMapping.part),
-            joinedload(SupplierPartMapping.vendor)
-        ).filter(
-            SupplierPartMapping.company_id == company_id,
-            SupplierPartMapping.supplier_part_number.ilike(code),
-            SupplierPartMapping.is_active == True
-        ).first()
-    
+        mapping = (
+            db.query(SupplierPartMapping)
+            .options(joinedload(SupplierPartMapping.part), joinedload(SupplierPartMapping.vendor))
+            .filter(
+                SupplierPartMapping.company_id == company_id,
+                SupplierPartMapping.supplier_part_number.ilike(code),
+                SupplierPartMapping.is_active == True,
+            )
+            .first()
+        )
+
     if mapping:
         return ScanLookupResponse(
             found=True,
@@ -124,19 +128,20 @@ def lookup_barcode(
             supplier_part_number=mapping.supplier_part_number,
             vendor_name=mapping.vendor.name if mapping.vendor else None,
             supplier_description=mapping.supplier_description,
-            scanned_code=code
+            scanned_code=code,
         )
-    
+
     # 2. Check internal part numbers
-    part = db.query(Part).filter(
-        Part.company_id == company_id,
-        or_(
-            Part.part_number == code,
-            Part.part_number.ilike(code)
-        ),
-        Part.is_active == True
-    ).first()
-    
+    part = (
+        db.query(Part)
+        .filter(
+            Part.company_id == company_id,
+            or_(Part.part_number == code, Part.part_number.ilike(code)),
+            Part.is_active == True,
+        )
+        .first()
+    )
+
     if part:
         return ScanLookupResponse(
             found=True,
@@ -147,18 +152,18 @@ def lookup_barcode(
             part_description=part.description,
             part_type=part.part_type.value if part.part_type else None,
             unit_of_measure=part.unit_of_measure.value if part.unit_of_measure else None,
-            scanned_code=code
+            scanned_code=code,
         )
-    
+
     # 3. Check work order numbers
     if code_upper.startswith('WO') or code_upper.startswith('W0'):
-        wo = db.query(WorkOrder).options(
-            joinedload(WorkOrder.part)
-        ).filter(
-            WorkOrder.company_id == company_id,
-            WorkOrder.work_order_number.ilike(f"%{code}%")
-        ).first()
-        
+        wo = (
+            db.query(WorkOrder)
+            .options(joinedload(WorkOrder.part))
+            .filter(WorkOrder.company_id == company_id, WorkOrder.work_order_number.ilike(f"%{code}%"))
+            .first()
+        )
+
         if wo:
             return ScanLookupResponse(
                 found=True,
@@ -171,14 +176,11 @@ def lookup_barcode(
                 part_id=wo.part.id if wo.part else None,
                 part_number=wo.part.part_number if wo.part else None,
                 part_name=wo.part.name if wo.part else None,
-                scanned_code=code
+                scanned_code=code,
             )
-    
+
     # Not found - return for manual entry
-    return ScanLookupResponse(
-        found=False,
-        scanned_code=code
-    )
+    return ScanLookupResponse(found=False, scanned_code=code)
 
 
 @router.get("/mappings", response_model=List[SupplierMappingResponse])
@@ -188,30 +190,32 @@ def list_supplier_mappings(
     vendor_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List supplier part mappings"""
-    query = db.query(SupplierPartMapping).filter(SupplierPartMapping.company_id == company_id).options(
-        joinedload(SupplierPartMapping.part),
-        joinedload(SupplierPartMapping.vendor)
-    ).filter(SupplierPartMapping.is_active == True)
-    
+    query = (
+        db.query(SupplierPartMapping)
+        .filter(SupplierPartMapping.company_id == company_id)
+        .options(joinedload(SupplierPartMapping.part), joinedload(SupplierPartMapping.vendor))
+        .filter(SupplierPartMapping.is_active == True)
+    )
+
     if search:
         query = query.filter(
             or_(
                 SupplierPartMapping.supplier_part_number.ilike(f"%{search}%"),
-                SupplierPartMapping.supplier_description.ilike(f"%{search}%")
+                SupplierPartMapping.supplier_description.ilike(f"%{search}%"),
             )
         )
-    
+
     if part_id:
         query = query.filter(SupplierPartMapping.part_id == part_id)
-    
+
     if vendor_id:
         query = query.filter(SupplierPartMapping.vendor_id == vendor_id)
-    
+
     mappings = query.order_by(SupplierPartMapping.supplier_part_number).limit(200).all()
-    
+
     return [
         SupplierMappingResponse(
             id=m.id,
@@ -225,7 +229,7 @@ def list_supplier_mappings(
             supplier_description=m.supplier_description,
             supplier_uom=m.supplier_uom,
             conversion_factor=m.conversion_factor,
-            is_active=m.is_active
+            is_active=m.is_active,
         )
         for m in mappings
     ]
@@ -236,37 +240,49 @@ def create_supplier_mapping(
     mapping_in: SupplierMappingCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new supplier part mapping"""
     # Verify part exists within the caller's company
-    part = db.query(Part).filter(
-        Part.id == mapping_in.part_id,
-        Part.company_id == company_id,
-    ).first()
+    part = (
+        db.query(Part)
+        .filter(
+            Part.id == mapping_in.part_id,
+            Part.company_id == company_id,
+        )
+        .first()
+    )
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
 
     # Check if mapping already exists within this company
-    existing = db.query(SupplierPartMapping).filter(
-        SupplierPartMapping.company_id == company_id,
-        SupplierPartMapping.supplier_part_number == mapping_in.supplier_part_number,
-        SupplierPartMapping.vendor_id == mapping_in.vendor_id,
-        SupplierPartMapping.is_active == True
-    ).first()
+    existing = (
+        db.query(SupplierPartMapping)
+        .filter(
+            SupplierPartMapping.company_id == company_id,
+            SupplierPartMapping.supplier_part_number == mapping_in.supplier_part_number,
+            SupplierPartMapping.vendor_id == mapping_in.vendor_id,
+            SupplierPartMapping.is_active == True,
+        )
+        .first()
+    )
 
     if existing:
         raise HTTPException(status_code=400, detail="Mapping already exists for this supplier part number")
 
     vendor = None
     if mapping_in.vendor_id:
-        vendor = db.query(Vendor).filter(
-            Vendor.id == mapping_in.vendor_id,
-            Vendor.company_id == company_id,
-        ).first()
+        vendor = (
+            db.query(Vendor)
+            .filter(
+                Vendor.id == mapping_in.vendor_id,
+                Vendor.company_id == company_id,
+            )
+            .first()
+        )
         if not vendor:
             raise HTTPException(status_code=404, detail="Vendor not found")
-    
+
     mapping = SupplierPartMapping(
         supplier_part_number=mapping_in.supplier_part_number,
         part_id=mapping_in.part_id,
@@ -275,14 +291,14 @@ def create_supplier_mapping(
         supplier_uom=mapping_in.supplier_uom,
         conversion_factor=mapping_in.conversion_factor,
         default_location_id=mapping_in.default_location_id,
-        notes=mapping_in.notes
+        notes=mapping_in.notes,
     )
-    
+
     mapping.company_id = company_id
     db.add(mapping)
     db.commit()
     db.refresh(mapping)
-    
+
     return SupplierMappingResponse(
         id=mapping.id,
         supplier_part_number=mapping.supplier_part_number,
@@ -295,7 +311,7 @@ def create_supplier_mapping(
         supplier_description=mapping.supplier_description,
         supplier_uom=mapping.supplier_uom,
         conversion_factor=mapping.conversion_factor,
-        is_active=mapping.is_active
+        is_active=mapping.is_active,
     )
 
 
@@ -304,14 +320,18 @@ def delete_supplier_mapping(
     mapping_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Deactivate a supplier mapping"""
-    mapping = db.query(SupplierPartMapping).filter(SupplierPartMapping.id == mapping_id, SupplierPartMapping.company_id == company_id).first()
+    mapping = (
+        db.query(SupplierPartMapping)
+        .filter(SupplierPartMapping.id == mapping_id, SupplierPartMapping.company_id == company_id)
+        .first()
+    )
     if not mapping:
         raise HTTPException(status_code=404, detail="Mapping not found")
-    
+
     mapping.is_active = False
     db.commit()
-    
+
     return {"message": "Mapping deleted"}

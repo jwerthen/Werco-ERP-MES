@@ -1,12 +1,14 @@
+from datetime import date, datetime, timedelta
 from typing import List, Optional
-from datetime import datetime, date, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
-from app.models.user import User
-from app.models.calibration import Equipment, CalibrationRecord, CalibrationStatus
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_company_id, get_current_user
+from app.db.database import get_db
+from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
+from app.models.user import User
 
 router = APIRouter()
 
@@ -74,7 +76,7 @@ class EquipmentResponse(BaseModel):
     status: str
     is_active: bool
     days_until_due: Optional[int] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -90,7 +92,7 @@ class CalibrationRecordResponse(BaseModel):
     result: Optional[str] = None
     cost: float
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -99,10 +101,10 @@ def update_equipment_status(equipment: Equipment):
     """Update equipment status based on calibration dates"""
     if not equipment.next_calibration_date:
         return
-    
+
     today = date.today()
     days_until = (equipment.next_calibration_date - today).days
-    
+
     if days_until < 0:
         equipment.status = CalibrationStatus.OVERDUE
     elif days_until <= 30:
@@ -117,19 +119,19 @@ def list_equipment(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all equipment"""
     query = db.query(Equipment).filter(Equipment.company_id == company_id)
-    
+
     if not include_inactive:
         query = query.filter(Equipment.is_active == True)
-    
+
     if status:
         query = query.filter(Equipment.status == status)
-    
+
     equipment_list = query.order_by(Equipment.next_calibration_date).all()
-    
+
     result = []
     today = date.today()
     for eq in equipment_list:
@@ -137,27 +139,29 @@ def list_equipment(
         days_until = None
         if eq.next_calibration_date:
             days_until = (eq.next_calibration_date - today).days
-        
-        result.append(EquipmentResponse(
-            id=eq.id,
-            equipment_id=eq.equipment_id,
-            name=eq.name,
-            description=eq.description,
-            equipment_type=eq.equipment_type,
-            manufacturer=eq.manufacturer,
-            model=eq.model,
-            serial_number=eq.serial_number,
-            location=eq.location,
-            assigned_to=eq.assigned_to,
-            calibration_interval_days=eq.calibration_interval_days,
-            last_calibration_date=eq.last_calibration_date,
-            next_calibration_date=eq.next_calibration_date,
-            calibration_provider=eq.calibration_provider,
-            status=eq.status.value if hasattr(eq.status, 'value') else eq.status,
-            is_active=eq.is_active,
-            days_until_due=days_until
-        ))
-    
+
+        result.append(
+            EquipmentResponse(
+                id=eq.id,
+                equipment_id=eq.equipment_id,
+                name=eq.name,
+                description=eq.description,
+                equipment_type=eq.equipment_type,
+                manufacturer=eq.manufacturer,
+                model=eq.model,
+                serial_number=eq.serial_number,
+                location=eq.location,
+                assigned_to=eq.assigned_to,
+                calibration_interval_days=eq.calibration_interval_days,
+                last_calibration_date=eq.last_calibration_date,
+                next_calibration_date=eq.next_calibration_date,
+                calibration_provider=eq.calibration_provider,
+                status=eq.status.value if hasattr(eq.status, 'value') else eq.status,
+                is_active=eq.is_active,
+                days_until_due=days_until,
+            )
+        )
+
     db.commit()  # Save status updates
     return result
 
@@ -167,25 +171,31 @@ def get_equipment_due_soon(
     days: int = 30,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get equipment due for calibration within specified days"""
     cutoff = date.today() + timedelta(days=days)
 
-    equipment = db.query(Equipment).filter(
-        Equipment.company_id == company_id,
-        Equipment.is_active == True,
-        Equipment.next_calibration_date <= cutoff
-    ).order_by(Equipment.next_calibration_date).all()
-    
-    return [{
-        "id": eq.id,
-        "equipment_id": eq.equipment_id,
-        "name": eq.name,
-        "next_calibration_date": eq.next_calibration_date.isoformat() if eq.next_calibration_date else None,
-        "days_until_due": (eq.next_calibration_date - date.today()).days if eq.next_calibration_date else None,
-        "status": eq.status.value if hasattr(eq.status, 'value') else eq.status
-    } for eq in equipment]
+    equipment = (
+        db.query(Equipment)
+        .filter(
+            Equipment.company_id == company_id, Equipment.is_active == True, Equipment.next_calibration_date <= cutoff
+        )
+        .order_by(Equipment.next_calibration_date)
+        .all()
+    )
+
+    return [
+        {
+            "id": eq.id,
+            "equipment_id": eq.equipment_id,
+            "name": eq.name,
+            "next_calibration_date": eq.next_calibration_date.isoformat() if eq.next_calibration_date else None,
+            "days_until_due": (eq.next_calibration_date - date.today()).days if eq.next_calibration_date else None,
+            "status": eq.status.value if hasattr(eq.status, 'value') else eq.status,
+        }
+        for eq in equipment
+    ]
 
 
 @router.post("/equipment", response_model=EquipmentResponse)
@@ -193,18 +203,22 @@ def create_equipment(
     equipment_in: EquipmentCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create new equipment"""
-    if db.query(Equipment).filter(Equipment.equipment_id == equipment_in.equipment_id, Equipment.company_id == company_id).first():
+    if (
+        db.query(Equipment)
+        .filter(Equipment.equipment_id == equipment_in.equipment_id, Equipment.company_id == company_id)
+        .first()
+    ):
         raise HTTPException(status_code=400, detail="Equipment ID already exists")
-    
+
     equipment = Equipment(**equipment_in.model_dump())
     equipment.company_id = company_id
     db.add(equipment)
     db.commit()
     db.refresh(equipment)
-    
+
     return EquipmentResponse(
         id=equipment.id,
         equipment_id=equipment.equipment_id,
@@ -222,7 +236,7 @@ def create_equipment(
         calibration_provider=equipment.calibration_provider,
         status=equipment.status.value,
         is_active=equipment.is_active,
-        days_until_due=None
+        days_until_due=None,
     )
 
 
@@ -231,21 +245,21 @@ def get_equipment(
     equipment_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get equipment with calibration history"""
     equipment = db.query(Equipment).filter(Equipment.id == equipment_id, Equipment.company_id == company_id).first()
     if not equipment:
         raise HTTPException(status_code=404, detail="Equipment not found")
-    
-    records = db.query(CalibrationRecord).filter(
-        CalibrationRecord.equipment_id == equipment_id
-    ).order_by(CalibrationRecord.calibration_date.desc()).all()
-    
-    return {
-        "equipment": equipment,
-        "calibration_history": records
-    }
+
+    records = (
+        db.query(CalibrationRecord)
+        .filter(CalibrationRecord.equipment_id == equipment_id)
+        .order_by(CalibrationRecord.calibration_date.desc())
+        .all()
+    )
+
+    return {"equipment": equipment, "calibration_history": records}
 
 
 @router.put("/equipment/{equipment_id}", response_model=EquipmentResponse)
@@ -254,27 +268,27 @@ def update_equipment(
     equipment_in: EquipmentUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update equipment"""
     equipment = db.query(Equipment).filter(Equipment.id == equipment_id, Equipment.company_id == company_id).first()
     if not equipment:
         raise HTTPException(status_code=404, detail="Equipment not found")
-    
+
     update_data = equipment_in.model_dump(exclude_unset=True)
     if "status" in update_data:
         update_data["status"] = CalibrationStatus(update_data["status"])
-    
+
     for field, value in update_data.items():
         setattr(equipment, field, value)
-    
+
     db.commit()
     db.refresh(equipment)
-    
+
     days_until = None
     if equipment.next_calibration_date:
         days_until = (equipment.next_calibration_date - date.today()).days
-    
+
     return EquipmentResponse(
         id=equipment.id,
         equipment_id=equipment.equipment_id,
@@ -292,7 +306,7 @@ def update_equipment(
         calibration_provider=equipment.calibration_provider,
         status=equipment.status.value if hasattr(equipment.status, 'value') else equipment.status,
         is_active=equipment.is_active,
-        days_until_due=days_until
+        days_until_due=days_until,
     )
 
 
@@ -302,16 +316,16 @@ def record_calibration(
     record_in: CalibrationRecordCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Record a calibration for equipment"""
     equipment = db.query(Equipment).filter(Equipment.id == equipment_id, Equipment.company_id == company_id).first()
     if not equipment:
         raise HTTPException(status_code=404, detail="Equipment not found")
-    
+
     # Calculate next due date
     due_date = record_in.calibration_date + timedelta(days=equipment.calibration_interval_days)
-    
+
     record = CalibrationRecord(
         equipment_id=equipment_id,
         calibration_date=record_in.calibration_date,
@@ -325,30 +339,31 @@ def record_calibration(
         standards_used=record_in.standards_used,
         cost=record_in.cost,
         notes=record_in.notes,
-        created_by=current_user.id
+        created_by=current_user.id,
     )
     db.add(record)
-    
+
     # Update equipment
     equipment.last_calibration_date = record_in.calibration_date
     equipment.next_calibration_date = due_date
     equipment.status = CalibrationStatus.ACTIVE
-    
+
     db.commit()
     db.refresh(record)
-    
+
     return record
 
 
 @router.get("/equipment/{equipment_id}/history", response_model=List[CalibrationRecordResponse])
 def get_calibration_history(
-    equipment_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    equipment_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Get calibration history for equipment"""
-    records = db.query(CalibrationRecord).filter(
-        CalibrationRecord.equipment_id == equipment_id
-    ).order_by(CalibrationRecord.calibration_date.desc()).all()
-    
+    records = (
+        db.query(CalibrationRecord)
+        .filter(CalibrationRecord.equipment_id == equipment_id)
+        .order_by(CalibrationRecord.calibration_date.desc())
+        .all()
+    )
+
     return records

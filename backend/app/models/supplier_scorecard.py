@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -15,6 +19,7 @@ class ScorecardPeriod(str, enum.Enum):
 
 class SupplierScorecard(Base, TenantMixin):
     """Performance scorecard per vendor per period - AS9100D supplier monitoring"""
+
     __tablename__ = "supplier_scorecards"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -66,6 +71,7 @@ class SupplierScorecard(Base, TenantMixin):
 
 class SupplierAudit(Base, TenantMixin):
     """Supplier audit tracking for AS9100D compliance"""
+
     __tablename__ = "supplier_audits"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -94,6 +100,7 @@ class SupplierAudit(Base, TenantMixin):
 
 class ApprovedSupplierList(Base, TenantMixin):
     """Formal Approved Supplier List (ASL) entry"""
+
     __tablename__ = "approved_supplier_list"
 
     id = Column(Integer, primary_key=True, index=True)

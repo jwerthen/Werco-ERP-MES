@@ -2,6 +2,7 @@
 Integration tests for health check endpoints.
 Tests liveness, readiness, and detailed health checks.
 """
+
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
@@ -52,24 +53,24 @@ class TestHealthEndpoints:
         response = client.get("/health/detailed")
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        
+
         # Check structure
         assert "status" in data
         assert "timestamp" in data
         assert "checks" in data
-        
+
         # Check database info
         assert "database" in data["checks"]
-        
+
         # Check system info
         assert "system" in data["checks"]
         assert "python_version" in data["checks"]["system"]
-        
+
         # Check application info
         assert "application" in data["checks"]
         assert "name" in data["checks"]["application"]
         assert "environment" in data["checks"]["application"]
-        
+
         # Check features
         assert "features" in data["checks"]
         assert "rate_limiting" in data["checks"]["features"]

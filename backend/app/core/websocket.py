@@ -2,12 +2,15 @@
 WebSocket connection manager for real-time updates.
 Handles broadcasting messages to connected clients.
 """
+
 from __future__ import annotations
-from typing import List, Dict, Any
-from datetime import datetime, timezone
-from fastapi import WebSocket, WebSocketDisconnect
-import logging
+
 import json
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
+from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +42,11 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
-        candidate_user_ids = [str(user_id)] if user_id else [
-            uid for uid, connections in self.user_connections.items() if websocket in connections
-        ]
+        candidate_user_ids = (
+            [str(user_id)]
+            if user_id
+            else [uid for uid, connections in self.user_connections.items() if websocket in connections]
+        )
 
         for candidate_user_id in candidate_user_ids:
             if candidate_user_id not in self.user_connections:
@@ -59,11 +64,7 @@ class ConnectionManager:
         if not self.active_connections:
             return
 
-        data = {
-            "type": message_type,
-            "data": message,
-            "timestamp": None  # Will be set by frontend
-        }
+        data = {"type": message_type, "data": message, "timestamp": None}  # Will be set by frontend
 
         message_json = json.dumps(data)
         disconnected = []
@@ -84,11 +85,7 @@ class ConnectionManager:
         if user_id not in self.user_connections:
             return
 
-        data = {
-            "type": message_type,
-            "data": message,
-            "timestamp": None
-        }
+        data = {"type": message_type, "data": message, "timestamp": None}
 
         message_json = json.dumps(data)
         disconnected = []
@@ -133,19 +130,11 @@ async def broadcast_dashboard_update(update_data: Dict[str, Any]):
 
 async def broadcast_work_order_update(work_order_id: int, update_data: Dict[str, Any]):
     """Broadcast work order status updates."""
-    message = {
-        "work_order_id": work_order_id,
-        **update_data
-    }
+    message = {"work_order_id": work_order_id, **update_data}
     await manager.broadcast(message, message_type="work_order_update")
 
 
 async def broadcast_shop_floor_update(work_center_id: int, update_data: Dict[str, Any]):
     """Broadcast shop floor updates for a work center."""
-    message = {
-        "work_center_id": work_center_id,
-        **update_data
-    }
+    message = {"work_center_id": work_center_id, **update_data}
     await manager.broadcast(message, message_type="shop_floor_update")
-
-

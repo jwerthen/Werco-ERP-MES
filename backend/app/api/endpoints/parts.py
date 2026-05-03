@@ -1,16 +1,18 @@
 import csv
 import io
 from typing import List, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, status, Query, Request, UploadFile
-from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import or_, func
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import func, or_
+from sqlalchemy.orm import Session, selectinload
+
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id, require_role
-from app.models.user import User, UserRole
-from app.models.part import Part, PartType, UnitOfMeasure
 from app.models.bom import BOM, BOMItem
-from app.schemas.part import PartCreate, PartUpdate, PartResponse
+from app.models.part import Part, PartType, UnitOfMeasure
+from app.models.user import User, UserRole
+from app.schemas.part import PartCreate, PartResponse, PartUpdate
 from app.services.audit_service import AuditService
 from app.services.part_number_service import generate_werco_part_number, normalize_description
 
@@ -77,14 +79,18 @@ def _parse_int(value: str, field_name: str, default: int = 0) -> int:
 def list_parts(
     skip: int = Query(0, ge=0, description="Number of records to skip for pagination"),
     limit: int = Query(100, ge=1, le=500, description="Maximum number of records to return"),
-    search: Optional[str] = Query(None, description="Search in part number, name, description, or customer part number"),
-    part_type: Optional[PartType] = Query(None, description="Filter by part type (manufactured, purchased, assembly, raw_material)"),
+    search: Optional[str] = Query(
+        None, description="Search in part number, name, description, or customer part number"
+    ),
+    part_type: Optional[PartType] = Query(
+        None, description="Filter by part type (manufactured, purchased, assembly, raw_material)"
+    ),
     active_only: bool = Query(True, description="Only return active parts"),
     include_bom_components: bool = Query(True, description="Include parts used as active BOM components"),
     include_deleted: bool = Query(False, description="Include soft-deleted parts (admin only)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Retrieve a list of parts with optional filtering and pagination.
@@ -98,18 +104,19 @@ def list_parts(
 
     Returns parts ordered by part number.
     """
-    query = db.query(Part).filter(Part.company_id == company_id).options(
-        selectinload(Part.bom),
-        selectinload(Part.inventory_items)
+    query = (
+        db.query(Part)
+        .filter(Part.company_id == company_id)
+        .options(selectinload(Part.bom), selectinload(Part.inventory_items))
     )
 
     # Filter out soft-deleted unless explicitly requested by admin
     if not (include_deleted and current_user.role == UserRole.ADMIN):
         query = query.filter(Part.is_deleted == False)
-    
+
     if active_only:
         query = query.filter(Part.is_active == True)
-    
+
     if part_type:
         query = query.filter(Part.part_type == part_type)
 
@@ -123,7 +130,7 @@ def list_parts(
             )
         )
         query = query.filter(~Part.id.in_(component_part_ids))
-    
+
     if search:
         search_filter = f"%{search}%"
         query = query.filter(
@@ -131,15 +138,15 @@ def list_parts(
                 Part.part_number.ilike(search_filter),
                 Part.name.ilike(search_filter),
                 Part.description.ilike(search_filter),
-                Part.customer_part_number.ilike(search_filter)
+                Part.customer_part_number.ilike(search_filter),
             )
         )
-    
+
     # Also filter out parts with NULL part_type to prevent serialization errors
     query = query.filter(Part.part_type.isnot(None))
-    
+
     parts = query.order_by(Part.part_number).offset(skip).limit(limit).all()
-    
+
     def normalize_enum(value, fallback):
         if hasattr(value, "value"):
             return str(value.value).strip().lower()
@@ -153,37 +160,39 @@ def list_parts(
         try:
             part_type_val = normalize_enum(part.part_type, PartType.MANUFACTURED.value)
             uom_val = normalize_enum(part.unit_of_measure, UnitOfMeasure.EACH.value)
-            result.append(PartResponse(
-                id=part.id,
-                part_number=part.part_number or "",
-                revision=part.revision or "A",
-                name=part.name or "",
-                description=part.description,
-                part_type=PartType(part_type_val),
-                unit_of_measure=UnitOfMeasure(uom_val),
-                standard_cost=part.standard_cost or 0.0,
-                material_cost=part.material_cost or 0.0,
-                labor_cost=part.labor_cost or 0.0,
-                overhead_cost=part.overhead_cost or 0.0,
-                lead_time_days=part.lead_time_days or 0,
-                safety_stock=part.safety_stock or 0.0,
-                reorder_point=part.reorder_point or 0.0,
-                reorder_quantity=part.reorder_quantity or 0.0,
-                is_critical=part.is_critical or False,
-                requires_inspection=part.requires_inspection if part.requires_inspection is not None else True,
-                inspection_requirements=part.inspection_requirements,
-                customer_name=part.customer_name,
-                customer_part_number=part.customer_part_number,
-                drawing_number=part.drawing_number,
-                is_active=part.is_active if part.is_active is not None else True,
-                status=part.status or "active",
-                created_at=part.created_at,
-                updated_at=part.updated_at,
-                version=0
-            ))
+            result.append(
+                PartResponse(
+                    id=part.id,
+                    part_number=part.part_number or "",
+                    revision=part.revision or "A",
+                    name=part.name or "",
+                    description=part.description,
+                    part_type=PartType(part_type_val),
+                    unit_of_measure=UnitOfMeasure(uom_val),
+                    standard_cost=part.standard_cost or 0.0,
+                    material_cost=part.material_cost or 0.0,
+                    labor_cost=part.labor_cost or 0.0,
+                    overhead_cost=part.overhead_cost or 0.0,
+                    lead_time_days=part.lead_time_days or 0,
+                    safety_stock=part.safety_stock or 0.0,
+                    reorder_point=part.reorder_point or 0.0,
+                    reorder_quantity=part.reorder_quantity or 0.0,
+                    is_critical=part.is_critical or False,
+                    requires_inspection=part.requires_inspection if part.requires_inspection is not None else True,
+                    inspection_requirements=part.inspection_requirements,
+                    customer_name=part.customer_name,
+                    customer_part_number=part.customer_part_number,
+                    drawing_number=part.drawing_number,
+                    is_active=part.is_active if part.is_active is not None else True,
+                    status=part.status or "active",
+                    created_at=part.created_at,
+                    updated_at=part.updated_at,
+                    version=0,
+                )
+            )
         except Exception:
             pass  # Skip parts that fail to serialize
-    
+
     return result
 
 
@@ -193,7 +202,7 @@ def create_part(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Create a new part in the system.
@@ -208,11 +217,8 @@ def create_part(
     - 400: Part number already exists
     """
     if db.query(Part).filter(Part.part_number == part_in.part_number, Part.company_id == company_id).first():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Part number already exists"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Part number already exists")
+
     data = part_in.model_dump()
     # Normalize enum inputs in case clients send uppercase values or enum objects.
     part_type_val = data.get("part_type")
@@ -232,11 +238,11 @@ def create_part(
     db.add(part)
     db.commit()
     db.refresh(part)
-    
+
     # Audit log
     audit = AuditService(db, current_user, request)
     audit.log_create("part", part.id, part.part_number, new_values=part)
-    
+
     return part
 
 
@@ -349,7 +355,7 @@ def get_part(
     part_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get a specific part"""
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
@@ -363,7 +369,7 @@ def get_part_by_number(
     part_number: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get a part by part number"""
     part = db.query(Part).filter(Part.part_number == part_number, Part.company_id == company_id).first()
@@ -379,17 +385,17 @@ def update_part(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a part"""
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    
+
     # Capture old values for audit
     audit = AuditService(db, current_user, request)
     old_values = {c.key: getattr(part, c.key) for c in part.__table__.columns}
-    
+
     update_data = part_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         if field == "part_type":
@@ -403,13 +409,13 @@ def update_part(
             elif isinstance(value, str):
                 value = value.strip().lower()
         setattr(part, field, value)
-    
+
     db.commit()
     db.refresh(part)
-    
+
     # Audit log
     audit.log_update("part", part.id, part.part_number, old_values=old_values, new_values=part)
-    
+
     return part
 
 
@@ -419,21 +425,21 @@ def create_new_revision(
     new_revision: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new revision of a part (for AS9100D revision control)"""
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    
+
     old_revision = part.revision
     part.revision = new_revision
     db.commit()
-    
+
     return {
         "message": f"Part revision updated from {old_revision} to {new_revision}",
         "part_number": part.part_number,
-        "new_revision": new_revision
+        "new_revision": new_revision,
     }
 
 
@@ -444,7 +450,7 @@ def delete_part(
     hard_delete: bool = Query(False, description="Permanently delete the record (admin only, use with caution)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Soft delete a part (default) or permanently delete (hard_delete=true).
@@ -458,38 +464,37 @@ def delete_part(
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    
+
     audit = AuditService(db, current_user, request)
-    
+
     if hard_delete:
         # Check for dependencies before hard delete
-        from app.models.work_order import WorkOrder
         from app.models.bom import BOM, BOMItem
-        
+        from app.models.work_order import WorkOrder
+
         wo_count = db.query(WorkOrder).filter(WorkOrder.part_id == part_id).count()
         bom_count = db.query(BOM).filter(BOM.part_id == part_id).count()
         bom_item_count = db.query(BOMItem).filter(BOMItem.component_part_id == part_id).count()
-        
+
         if wo_count > 0 or bom_count > 0 or bom_item_count > 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot hard delete: Part has {wo_count} work orders, {bom_count} BOMs, {bom_item_count} BOM references"
+                detail=f"Cannot hard delete: Part has {wo_count} work orders, {bom_count} BOMs, {bom_item_count} BOM references",
             )
-        
+
         audit.log_delete("part", part.id, part.part_number)
         db.delete(part)
         db.commit()
         return {"message": "Part permanently deleted"}
-    
+
     # Soft delete
-    old_values = {"is_deleted": part.is_deleted, "status": part.status}
     part.soft_delete(current_user.id)
     part.is_active = False
     part.status = "obsolete"
     db.commit()
-    
+
     audit.log_delete("part", part.id, part.part_number, soft_delete=True)
-    
+
     return {"message": "Part marked as deleted (soft delete)", "can_restore": True}
 
 
@@ -499,7 +504,7 @@ def restore_part(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Restore a soft-deleted part.
@@ -511,40 +516,50 @@ def restore_part(
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    
+
     if not part.is_deleted:
         raise HTTPException(status_code=400, detail="Part is not deleted")
-    
+
     audit = AuditService(db, current_user, request)
-    
+
     part.restore()
     part.is_active = True
     part.status = "active"
     db.commit()
-    
-    audit.log_update("part", part.id, part.part_number, 
-                    old_values={"is_deleted": True, "status": "obsolete"},
-                    new_values={"is_deleted": False, "status": "active"},
-                    action="restore")
-    
+
+    audit.log_update(
+        "part",
+        part.id,
+        part.part_number,
+        old_values={"is_deleted": True, "status": "obsolete"},
+        new_values={"is_deleted": False, "status": "active"},
+        action="restore",
+    )
+
     return {"message": "Part restored successfully", "part_id": part.id}
+
+
 @router.get("/generate-number", summary="Generate Werco part number for raw material or hardware")
 def generate_part_number(
     description: str = Query(..., min_length=3, description="Part description"),
     part_type: PartType = Query(..., description="Part type"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     if part_type not in [PartType.RAW_MATERIAL, PartType.HARDWARE, PartType.CONSUMABLE]:
         return {"suggested_part_number": None, "existing": False}
 
     normalized = " ".join(normalize_description(description).lower().split())
-    existing = db.query(Part).filter(
-        Part.company_id == company_id,
-        Part.part_type == part_type,
-        func.lower(func.trim(Part.description)) == normalized
-    ).first()
+    existing = (
+        db.query(Part)
+        .filter(
+            Part.company_id == company_id,
+            Part.part_type == part_type,
+            func.lower(func.trim(Part.description)) == normalized,
+        )
+        .first()
+    )
     if existing:
         return {"suggested_part_number": existing.part_number, "existing": True}
 

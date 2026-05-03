@@ -1,11 +1,13 @@
+import logging
+import os
+from typing import Dict
+
+from cryptography.fernet import Fernet
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from typing import Dict, Optional
-from app.models.webhook import Webhook, WebhookDelivery
+
 from app.core.queue import enqueue_job
-from cryptography.fernet import Fernet
-import os
-import logging
+from app.models.webhook import Webhook, WebhookDelivery
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +23,7 @@ class WebhookService:
         self.db = db
 
     def create_webhook(
-        self,
-        name: str,
-        url: str,
-        events: list,
-        secret: str,
-        description: str = None,
-        created_by: str = None
+        self, name: str, url: str, events: list, secret: str, description: str = None, created_by: str = None
     ) -> Webhook:
         """Create a new webhook subscription"""
 
@@ -35,12 +31,7 @@ class WebhookService:
         encrypted_secret = cipher.encrypt(secret.encode()).decode()
 
         webhook = Webhook(
-            name=name,
-            url=url,
-            events=events,
-            secret=encrypted_secret,
-            description=description,
-            created_by=created_by
+            name=name, url=url, events=events, secret=encrypted_secret, description=description, created_by=created_by
         )
 
         self.db.add(webhook)
@@ -55,9 +46,7 @@ class WebhookService:
 
     def get_webhooks_for_event(self, event: str) -> list[Webhook]:
         """Get all active webhooks subscribed to an event"""
-        webhooks = self.db.query(Webhook).filter(
-            Webhook.is_active == True
-        ).all()
+        webhooks = self.db.query(Webhook).filter(Webhook.is_active == True).all()
 
         # Filter webhooks that subscribe to this event
         matching = []
@@ -83,12 +72,7 @@ class WebhookService:
 
         # Enqueue delivery jobs for each webhook
         for webhook in webhooks:
-            await enqueue_job(
-                "send_webhook_job",
-                webhook_id=webhook.id,
-                event=event,
-                payload=payload
-            )
+            await enqueue_job("send_webhook_job", webhook_id=webhook.id, event=event, payload=payload)
 
         logger.info(f"Dispatched event {event} to {len(webhooks)} webhooks")
 
@@ -100,7 +84,7 @@ class WebhookService:
         status_code: int = None,
         response_body: str = None,
         error: str = None,
-        delivered: bool = False
+        delivered: bool = False,
     ) -> WebhookDelivery:
         """Record webhook delivery attempt"""
 
@@ -111,7 +95,7 @@ class WebhookService:
             status_code=status_code,
             response_body=response_body,
             error=error,
-            delivered=delivered
+            delivered=delivered,
         )
 
         self.db.add(delivery)
@@ -138,21 +122,12 @@ class WebhookService:
 
         return delivery
 
-    def get_deliveries(
-        self,
-        webhook_id: int,
-        limit: int = 50,
-        delivered_only: bool = False
-    ) -> list[WebhookDelivery]:
+    def get_deliveries(self, webhook_id: int, limit: int = 50, delivered_only: bool = False) -> list[WebhookDelivery]:
         """Get delivery history for a webhook"""
 
-        query = self.db.query(WebhookDelivery).filter(
-            WebhookDelivery.webhook_id == webhook_id
-        )
+        query = self.db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == webhook_id)
 
         if delivered_only:
             query = query.filter(WebhookDelivery.delivered == True)
 
-        return query.order_by(
-            WebhookDelivery.sent_at.desc()
-        ).limit(limit).all()
+        return query.order_by(WebhookDelivery.sent_at.desc()).limit(limit).all()

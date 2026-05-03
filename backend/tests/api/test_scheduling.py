@@ -217,9 +217,7 @@ class TestSchedulingAPI:
         assert target_op.scheduled_start.date() == expected_start
         assert target_op.status == OperationStatus.READY
 
-    def test_capacity_heatmap_flags_overloaded_day(
-        self, client: TestClient, auth_headers: dict, db_session
-    ):
+    def test_capacity_heatmap_flags_overloaded_day(self, client: TestClient, auth_headers: dict, db_session):
         start = date.today() + timedelta(days=2)
 
         part = Part(

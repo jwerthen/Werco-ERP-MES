@@ -1,17 +1,24 @@
-from typing import List, Optional
-from datetime import datetime, date
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from datetime import date, datetime
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, and_
-from app.db.database import get_db, atomic_transaction
-from app.api.deps import get_current_user, get_current_company_id, require_role
-from app.models.user import User, UserRole
+
+from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.db.database import atomic_transaction, get_db
 from app.models.inventory import (
-    InventoryItem, InventoryTransaction, InventoryLocation,
-    CycleCount, CycleCountItem, TransactionType, CycleCountStatus
+    CycleCount,
+    CycleCountItem,
+    CycleCountStatus,
+    InventoryItem,
+    InventoryLocation,
+    InventoryTransaction,
+    TransactionType,
 )
 from app.models.part import Part
-from pydantic import BaseModel
+from app.models.user import User, UserRole
 
 router = APIRouter()
 
@@ -21,7 +28,7 @@ def get_low_stock_alerts(
     limit: int = Query(500, le=2000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get parts with inventory below reorder point.
 
@@ -58,17 +65,19 @@ def get_low_stock_alerts(
     alerts = []
     for part, total_qty in rows:
         total_qty = float(total_qty or 0)
-        alerts.append({
-            "part_id": part.id,
-            "part_number": part.part_number,
-            "part_name": part.name,
-            "quantity_on_hand": total_qty,
-            "reorder_point": part.reorder_point,
-            "reorder_quantity": part.reorder_quantity,
-            "safety_stock": part.safety_stock,
-            "shortage": part.reorder_point - total_qty,
-            "is_critical": total_qty <= (part.safety_stock or 0),
-        })
+        alerts.append(
+            {
+                "part_id": part.id,
+                "part_number": part.part_number,
+                "part_name": part.name,
+                "quantity_on_hand": total_qty,
+                "reorder_point": part.reorder_point,
+                "reorder_quantity": part.reorder_quantity,
+                "safety_stock": part.safety_stock,
+                "shortage": part.reorder_point - total_qty,
+                "is_critical": total_qty <= (part.safety_stock or 0),
+            }
+        )
 
     # Sort by critical first, then by shortage
     alerts.sort(key=lambda x: (not x["is_critical"], -x["shortage"]))
@@ -144,7 +153,7 @@ def list_locations(
     active_only: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     query = db.query(InventoryLocation).filter(InventoryLocation.company_id == company_id)
     if warehouse:
@@ -159,12 +168,16 @@ def create_location(
     loc_in: LocationCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
-    existing = db.query(InventoryLocation).filter(InventoryLocation.code == loc_in.code, InventoryLocation.company_id == company_id).first()
+    existing = (
+        db.query(InventoryLocation)
+        .filter(InventoryLocation.code == loc_in.code, InventoryLocation.company_id == company_id)
+        .first()
+    )
     if existing:
         raise HTTPException(status_code=400, detail="Location code already exists")
-    
+
     location = InventoryLocation(**loc_in.model_dump())
     location.company_id = company_id
     db.add(location)
@@ -182,9 +195,11 @@ def list_inventory(
     has_quantity: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
+    query = (
+        db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
+    )
 
     if part_id:
         query = query.filter(InventoryItem.part_id == part_id)
@@ -194,7 +209,7 @@ def list_inventory(
         query = query.filter(InventoryItem.location == location_code)
     if has_quantity:
         query = query.filter(InventoryItem.quantity_on_hand > 0)
-    
+
     return query.order_by(InventoryItem.part_id, InventoryItem.location).all()
 
 
@@ -202,18 +217,19 @@ def list_inventory(
 def get_inventory_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get inventory summary by part with locations"""
     # Get all inventory items with quantity
-    items = db.query(InventoryItem).options(
-        joinedload(InventoryItem.part)
-    ).filter(
-        InventoryItem.company_id == company_id,
-        InventoryItem.is_active == True,
-        InventoryItem.quantity_on_hand > 0
-    ).all()
-    
+    items = (
+        db.query(InventoryItem)
+        .options(joinedload(InventoryItem.part))
+        .filter(
+            InventoryItem.company_id == company_id, InventoryItem.is_active == True, InventoryItem.quantity_on_hand > 0
+        )
+        .all()
+    )
+
     # Group by part
     by_part = {}
     for item in items:
@@ -225,21 +241,19 @@ def get_inventory_summary(
                 "part_name": item.part.name if item.part else "",
                 "total_on_hand": 0,
                 "total_allocated": 0,
-                "locations": []
+                "locations": [],
             }
         by_part[pid]["total_on_hand"] += item.quantity_on_hand
         by_part[pid]["total_allocated"] += item.quantity_allocated
-        by_part[pid]["locations"].append({
-            "location": item.location,
-            "quantity": item.quantity_on_hand,
-            "lot_number": item.lot_number
-        })
-    
+        by_part[pid]["locations"].append(
+            {"location": item.location, "quantity": item.quantity_on_hand, "lot_number": item.lot_number}
+        )
+
     result = []
     for data in by_part.values():
         data["available"] = data["total_on_hand"] - data["total_allocated"]
         result.append(data)
-    
+
     return result
 
 
@@ -248,26 +262,30 @@ def receive_inventory(
     receive_in: ReceiveItemRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Receive inventory into stock"""
     # Verify part exists
     part = db.query(Part).filter(Part.id == receive_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    
+
     # Verify location exists
     location = db.query(InventoryLocation).filter(InventoryLocation.code == receive_in.location_code).first()
     if not location:
         raise HTTPException(status_code=404, detail="Location not found")
-    
+
     # Check for existing inventory at this location with same lot
-    existing = db.query(InventoryItem).filter(
-        InventoryItem.part_id == receive_in.part_id,
-        InventoryItem.location == receive_in.location_code,
-        InventoryItem.lot_number == receive_in.lot_number
-    ).first()
-    
+    existing = (
+        db.query(InventoryItem)
+        .filter(
+            InventoryItem.part_id == receive_in.part_id,
+            InventoryItem.location == receive_in.location_code,
+            InventoryItem.lot_number == receive_in.lot_number,
+        )
+        .first()
+    )
+
     with atomic_transaction(db):
         if existing:
             existing.quantity_on_hand += receive_in.quantity
@@ -286,7 +304,7 @@ def receive_inventory(
                 unit_cost=receive_in.unit_cost,
                 cert_number=receive_in.cert_number,
                 heat_lot=receive_in.heat_lot,
-                received_date=datetime.utcnow()
+                received_date=datetime.utcnow(),
             )
             inv_item.company_id = company_id
             db.add(inv_item)
@@ -307,7 +325,7 @@ def receive_inventory(
             unit_cost=receive_in.unit_cost,
             total_cost=receive_in.quantity * receive_in.unit_cost,
             notes=receive_in.notes,
-            created_by=current_user.id
+            created_by=current_user.id,
         )
         db.add(txn)
 
@@ -319,16 +337,20 @@ def issue_inventory(
     issue_in: IssueItemRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Issue inventory to work order"""
-    inv_item = db.query(InventoryItem).filter(InventoryItem.id == issue_in.inventory_item_id, InventoryItem.company_id == company_id).first()
+    inv_item = (
+        db.query(InventoryItem)
+        .filter(InventoryItem.id == issue_in.inventory_item_id, InventoryItem.company_id == company_id)
+        .first()
+    )
     if not inv_item:
         raise HTTPException(status_code=404, detail="Inventory item not found")
-    
+
     if inv_item.quantity_available < issue_in.quantity:
         raise HTTPException(status_code=400, detail=f"Insufficient quantity. Available: {inv_item.quantity_available}")
-    
+
     with atomic_transaction(db):
         inv_item.quantity_on_hand -= issue_in.quantity
         inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
@@ -346,7 +368,7 @@ def issue_inventory(
             unit_cost=inv_item.unit_cost,
             total_cost=issue_in.quantity * inv_item.unit_cost,
             notes=issue_in.notes,
-            created_by=current_user.id
+            created_by=current_user.id,
         )
         db.add(txn)
 
@@ -358,20 +380,24 @@ def transfer_inventory(
     transfer_in: TransferRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Transfer inventory between locations"""
-    inv_item = db.query(InventoryItem).filter(InventoryItem.id == transfer_in.inventory_item_id, InventoryItem.company_id == company_id).first()
+    inv_item = (
+        db.query(InventoryItem)
+        .filter(InventoryItem.id == transfer_in.inventory_item_id, InventoryItem.company_id == company_id)
+        .first()
+    )
     if not inv_item:
         raise HTTPException(status_code=404, detail="Inventory item not found")
-    
+
     to_location = db.query(InventoryLocation).filter(InventoryLocation.code == transfer_in.to_location_code).first()
     if not to_location:
         raise HTTPException(status_code=404, detail="Destination location not found")
-    
+
     if inv_item.quantity_available < transfer_in.quantity:
         raise HTTPException(status_code=400, detail="Insufficient quantity")
-    
+
     from_location = inv_item.location
 
     with atomic_transaction(db):
@@ -380,11 +406,15 @@ def transfer_inventory(
         inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
 
         # Add to destination (or create new)
-        dest_inv = db.query(InventoryItem).filter(
-            InventoryItem.part_id == inv_item.part_id,
-            InventoryItem.location == transfer_in.to_location_code,
-            InventoryItem.lot_number == inv_item.lot_number
-        ).first()
+        dest_inv = (
+            db.query(InventoryItem)
+            .filter(
+                InventoryItem.part_id == inv_item.part_id,
+                InventoryItem.location == transfer_in.to_location_code,
+                InventoryItem.lot_number == inv_item.lot_number,
+            )
+            .first()
+        )
 
         if dest_inv:
             dest_inv.quantity_on_hand += transfer_in.quantity
@@ -399,7 +429,7 @@ def transfer_inventory(
                 lot_number=inv_item.lot_number,
                 serial_number=inv_item.serial_number,
                 unit_cost=inv_item.unit_cost,
-                received_date=inv_item.received_date
+                received_date=inv_item.received_date,
             )
             dest_inv.company_id = company_id
             db.add(dest_inv)
@@ -414,7 +444,7 @@ def transfer_inventory(
             to_location=transfer_in.to_location_code,
             lot_number=inv_item.lot_number,
             notes=transfer_in.notes,
-            created_by=current_user.id
+            created_by=current_user.id,
         )
         db.add(txn)
 
@@ -426,13 +456,17 @@ def adjust_inventory(
     adjust_in: AdjustmentRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Adjust inventory quantity"""
-    inv_item = db.query(InventoryItem).filter(InventoryItem.id == adjust_in.inventory_item_id, InventoryItem.company_id == company_id).first()
+    inv_item = (
+        db.query(InventoryItem)
+        .filter(InventoryItem.id == adjust_in.inventory_item_id, InventoryItem.company_id == company_id)
+        .first()
+    )
     if not inv_item:
         raise HTTPException(status_code=404, detail="Inventory item not found")
-    
+
     old_qty = inv_item.quantity_on_hand
     variance = adjust_in.new_quantity - old_qty
 
@@ -452,7 +486,7 @@ def adjust_inventory(
             notes=f"Adjusted from {old_qty} to {adjust_in.new_quantity}. {adjust_in.notes or ''}",
             unit_cost=inv_item.unit_cost,
             total_cost=abs(variance) * inv_item.unit_cost,
-            created_by=current_user.id
+            created_by=current_user.id,
         )
         db.add(txn)
 
@@ -465,7 +499,7 @@ def list_cycle_counts(
     status: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     query = db.query(CycleCount).filter(CycleCount.company_id == company_id).options(joinedload(CycleCount.items))
     if status:
@@ -478,59 +512,64 @@ def create_cycle_count(
     count_in: CycleCountCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new cycle count"""
     # Generate count number
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"CC-{today}-"
-    last = db.query(CycleCount).filter(CycleCount.count_number.like(f"{prefix}%"), CycleCount.company_id == company_id).order_by(CycleCount.count_number.desc()).first()
+    last = (
+        db.query(CycleCount)
+        .filter(CycleCount.count_number.like(f"{prefix}%"), CycleCount.company_id == company_id)
+        .order_by(CycleCount.count_number.desc())
+        .first()
+    )
     num = int(last.count_number.split("-")[-1]) + 1 if last else 1
-    
+
     count = CycleCount(
         count_number=f"{prefix}{num:03d}",
         warehouse=count_in.warehouse,
         part_id=count_in.part_id,
         scheduled_date=count_in.scheduled_date,
         notes=count_in.notes,
-        created_by=current_user.id
+        created_by=current_user.id,
     )
     count.company_id = company_id
-    
+
     # Get location if specified
     if count_in.location_code:
         loc = db.query(InventoryLocation).filter(InventoryLocation.code == count_in.location_code).first()
         if loc:
             count.location_id = loc.id
             count.warehouse = loc.warehouse
-    
+
     db.add(count)
     db.flush()
-    
+
     # Add items to count
     query = db.query(InventoryItem).filter(InventoryItem.is_active == True, InventoryItem.quantity_on_hand > 0)
-    
+
     if count.warehouse:
         query = query.filter(InventoryItem.warehouse == count.warehouse)
     if count_in.location_code:
         query = query.filter(InventoryItem.location == count_in.location_code)
     if count.part_id:
         query = query.filter(InventoryItem.part_id == count.part_id)
-    
+
     items = query.all()
     for inv in items:
         count_item = CycleCountItem(
             cycle_count_id=count.id,
             inventory_item_id=inv.id,
             system_quantity=inv.quantity_on_hand,
-            unit_cost=inv.unit_cost
+            unit_cost=inv.unit_cost,
         )
         db.add(count_item)
-    
+
     count.total_items = len(items)
     db.commit()
     db.refresh(count)
-    
+
     return count
 
 
@@ -539,7 +578,7 @@ def start_cycle_count(
     count_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     count = db.query(CycleCount).filter(CycleCount.id == count_id, CycleCount.company_id == company_id).first()
     if not count:
@@ -549,7 +588,7 @@ def start_cycle_count(
     count.started_at = datetime.utcnow()
     count.assigned_to = current_user.id
     db.commit()
-    
+
     return {"message": "Cycle count started"}
 
 
@@ -559,17 +598,16 @@ def record_count(
     item_id: int,
     count_in: CountItemRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Record a count for an item"""
-    item = db.query(CycleCountItem).filter(
-        CycleCountItem.id == item_id,
-        CycleCountItem.cycle_count_id == count_id
-    ).first()
-    
+    item = (
+        db.query(CycleCountItem).filter(CycleCountItem.id == item_id, CycleCountItem.cycle_count_id == count_id).first()
+    )
+
     if not item:
         raise HTTPException(status_code=404, detail="Count item not found")
-    
+
     item.counted_quantity = count_in.counted_quantity
     item.variance = count_in.counted_quantity - item.system_quantity
     item.variance_value = item.variance * item.unit_cost
@@ -577,16 +615,17 @@ def record_count(
     item.counted_at = datetime.utcnow()
     item.counted_by = current_user.id
     item.notes = count_in.notes
-    
+
     # Update count progress
     count = db.query(CycleCount).filter(CycleCount.id == count_id).first()
-    count.items_counted = db.query(CycleCountItem).filter(
-        CycleCountItem.cycle_count_id == count_id,
-        CycleCountItem.is_counted == True
-    ).count()
-    
+    count.items_counted = (
+        db.query(CycleCountItem)
+        .filter(CycleCountItem.cycle_count_id == count_id, CycleCountItem.is_counted == True)
+        .count()
+    )
+
     db.commit()
-    
+
     return {"message": "Count recorded", "variance": item.variance}
 
 
@@ -596,13 +635,18 @@ def complete_cycle_count(
     apply_adjustments: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Complete cycle count and optionally apply adjustments"""
-    count = db.query(CycleCount).options(joinedload(CycleCount.items)).filter(CycleCount.id == count_id, CycleCount.company_id == company_id).first()
+    count = (
+        db.query(CycleCount)
+        .options(joinedload(CycleCount.items))
+        .filter(CycleCount.id == count_id, CycleCount.company_id == company_id)
+        .first()
+    )
     if not count:
         raise HTTPException(status_code=404, detail="Cycle count not found")
-    
+
     # Calculate totals and apply adjustments atomically
     total_variance = 0
     items_adjusted = 0
@@ -633,7 +677,7 @@ def complete_cycle_count(
                             notes=f"Cycle count {count.count_number}. System: {old_qty}, Counted: {item.counted_quantity}",
                             unit_cost=inv.unit_cost,
                             total_cost=abs(item.variance) * inv.unit_cost,
-                            created_by=current_user.id
+                            created_by=current_user.id,
                         )
                         db.add(txn)
                         items_adjusted += 1
@@ -643,11 +687,11 @@ def complete_cycle_count(
         count.completed_by = current_user.id
         count.items_adjusted = items_adjusted
         count.total_variance_value = total_variance
-    
+
     return {
         "message": "Cycle count completed",
         "items_adjusted": items_adjusted,
-        "total_variance_value": total_variance
+        "total_variance_value": total_variance,
     }
 
 
@@ -659,13 +703,17 @@ def list_transactions(
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(InventoryTransaction).filter(InventoryTransaction.company_id == company_id).options(joinedload(InventoryTransaction.part))
+    query = (
+        db.query(InventoryTransaction)
+        .filter(InventoryTransaction.company_id == company_id)
+        .options(joinedload(InventoryTransaction.part))
+    )
 
     if part_id:
         query = query.filter(InventoryTransaction.part_id == part_id)
     if transaction_type:
         query = query.filter(InventoryTransaction.transaction_type == transaction_type)
-    
+
     return query.order_by(InventoryTransaction.created_at.desc()).limit(limit).all()

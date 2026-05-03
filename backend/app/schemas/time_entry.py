@@ -1,6 +1,8 @@
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel
+
 from app.core.time_utils import to_utc_iso
 from app.models.time_entry import TimeEntryType
 
@@ -15,6 +17,7 @@ class TimeEntryBase(BaseModel):
 
 class ClockIn(BaseModel):
     """For starting work on an operation"""
+
     work_order_id: int
     operation_id: int
     work_center_id: int
@@ -24,6 +27,7 @@ class ClockIn(BaseModel):
 
 class ClockOut(BaseModel):
     """For completing work"""
+
     quantity_produced: float = 0.0
     quantity_scrapped: float = 0.0
     scrap_reason: Optional[str] = None
@@ -60,9 +64,7 @@ class TimeEntryResponse(TimeEntryBase):
     approved_by: Optional[int]
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
-        json_encoders = {
-            datetime: to_utc_iso
-        }
+        json_encoders = {datetime: to_utc_iso}

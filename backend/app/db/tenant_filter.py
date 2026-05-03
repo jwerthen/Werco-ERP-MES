@@ -11,7 +11,8 @@ Usage:
     query = db.query(WorkOrder).join(Part)
     query = tenant_filter(query, WorkOrder, company_id)
 """
-from sqlalchemy.orm import Session, Query
+
+from sqlalchemy.orm import Query, Session
 
 
 def tenant_query(db: Session, model, company_id: int) -> Query:

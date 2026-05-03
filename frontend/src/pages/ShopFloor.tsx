@@ -214,7 +214,7 @@ export default function ShopFloor() {
       }
     }
     // Only run when queue first loads with highlight param
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [highlightWO, queue.length]);
 
   const handleRefresh = async () => {
@@ -434,7 +434,7 @@ export default function ShopFloor() {
           <p className="page-subtitle">Clock in/out and manage work center queues</p>
         </div>
         <div className="page-actions">
-          <button 
+          <button
             onClick={handleRefresh}
             disabled={refreshing}
             className="btn-secondary"
@@ -459,7 +459,7 @@ export default function ShopFloor() {
                   backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,0.1) 10px, rgba(255,255,255,0.1) 20px)'
                 }} />
               </div>
-              
+
               <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-6">
                 <div className="flex items-start gap-4">
                   <div className="p-3 bg-[#151b28]/20 rounded-xl">
@@ -477,7 +477,7 @@ export default function ShopFloor() {
                     </p>
                   </div>
                 </div>
-                
+
                 <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
                   <div className="text-center sm:text-right">
                     <p className="text-emerald-100 text-sm mb-1">
@@ -514,7 +514,7 @@ export default function ShopFloor() {
             key={wc.id}
             onClick={() => setSelectedWorkCenter(wc.id)}
             className={`
-              px-5 py-3 rounded-xl font-semibold transition-all duration-200 
+              px-5 py-3 rounded-xl font-semibold transition-all duration-200
               ${selectedWorkCenter === wc.id
                 ? 'bg-werco-600 text-white shadow-md shadow-werco-600/30'
                 : 'bg-[#151b28] text-slate-200 border border-slate-700 hover:border-werco-400 hover:bg-werco-500/10'
@@ -590,7 +590,7 @@ export default function ShopFloor() {
             </div>
           )}
         </div>
-        
+
         {sortedQueue.length === 0 ? (
           <div className="text-center py-16">
             <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
@@ -621,10 +621,10 @@ export default function ShopFloor() {
                   const isOverdue = Boolean(item.due_date && isDateBeforeTodayInCentral(item.due_date));
                   const isExpanded = expandedRows.has(item.work_order_id);
                   const details = workOrderDetails[item.work_order_id];
-                  
+
                   return (
                     <React.Fragment key={item.operation_id}>
-                      <tr 
+                      <tr
                         className={`${isOverdue ? 'bg-red-500/10/50' : ''} ${isExpanded ? 'bg-werco-50/50' : ''} cursor-pointer hover:bg-surface-50`}
                         onClick={() => toggleRowExpansion(item.work_order_id)}
                       >
@@ -683,7 +683,7 @@ export default function ShopFloor() {
                               <span className="text-surface-500">{Math.round(progress)}%</span>
                             </div>
                             <div className="h-2 bg-surface-200 rounded-full overflow-hidden">
-                              <div 
+                              <div
                                 className="h-full bg-werco-500 rounded-full transition-all"
                                 style={{ width: `${Math.min(100, progress)}%` }}
                               />
@@ -701,15 +701,15 @@ export default function ShopFloor() {
                         <td>
                           <span className={`
                             inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold
-                            ${item.status === 'in_progress' 
-                              ? 'bg-emerald-500/20 text-emerald-400' 
-                              : item.status === 'ready' 
-                              ? 'bg-blue-500/20 text-blue-400' 
+                            ${item.status === 'in_progress'
+                              ? 'bg-emerald-500/20 text-emerald-400'
+                              : item.status === 'ready'
+                              ? 'bg-blue-500/20 text-blue-400'
                             : 'bg-surface-100 text-surface-600'
                           }
                         `}>
                           <span className={`w-1.5 h-1.5 rounded-full ${
-                            item.status === 'in_progress' ? 'bg-emerald-500/100' : 
+                            item.status === 'in_progress' ? 'bg-emerald-500/100' :
                             item.status === 'ready' ? 'bg-blue-500/100' : 'bg-surface-400'
                           }`}></span>
                           {item.status.replace('_', ' ')}
@@ -737,7 +737,7 @@ export default function ShopFloor() {
                           )}
                         </td>
                       </tr>
-                      
+
                       {/* Expanded Details Row */}
                       {isExpanded && (
                         <tr className="bg-surface-50">
@@ -761,7 +761,7 @@ export default function ShopFloor() {
                                       Open Full View
                                     </button>
                                   </div>
-                                  
+
                                   {/* Info Cards */}
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                     <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
@@ -785,7 +785,7 @@ export default function ShopFloor() {
                                       </p>
                                     </div>
                                   </div>
-                                  
+
                                   {/* Notes */}
                                   {details.notes && (
                                     <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
@@ -798,7 +798,7 @@ export default function ShopFloor() {
                                       </div>
                                     </div>
                                   )}
-                                  
+
                                   {/* Operations Table */}
                                   <div>
                                     <h4 className="font-medium text-surface-700 mb-2">All Operations</h4>
@@ -816,8 +816,8 @@ export default function ShopFloor() {
                                         </thead>
                                         <tbody>
                                           {details.operations.map((op) => (
-                                            <tr 
-                                              key={op.id} 
+                                            <tr
+                                              key={op.id}
                                               className={`border-t border-surface-100 ${op.id === item.operation_id ? 'bg-werco-50' : ''}`}
                                             >
                                               <td className="px-4 py-2 font-medium">{op.operation_number}</td>
@@ -868,7 +868,7 @@ export default function ShopFloor() {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="text-lg font-semibold text-surface-900">Clock Out</h3>
-              <button 
+              <button
                 onClick={closeClockOutModal}
                 disabled={clockingOut}
                 className="p-2 rounded-lg text-surface-400 hover:text-surface-600 hover:bg-surface-100"
@@ -876,7 +876,7 @@ export default function ShopFloor() {
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
-            
+
             <div className="modal-body space-y-4">
               <div className="bg-surface-50 rounded-xl p-4 mb-4">
                 <p className="text-sm text-surface-500 mb-1">Completing work on</p>
@@ -935,7 +935,7 @@ export default function ShopFloor() {
                 </>
               )}
             </div>
-            
+
             <div className="modal-footer">
               <button
                 onClick={closeClockOutModal}

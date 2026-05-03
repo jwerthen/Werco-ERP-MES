@@ -1,11 +1,13 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Text, ForeignKey
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.sql import func
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
 
 class Webhook(Base, TenantMixin):
     """Webhook subscription"""
+
     __tablename__ = "webhooks"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -33,6 +35,7 @@ class Webhook(Base, TenantMixin):
 
 class WebhookDelivery(Base, TenantMixin):
     """Webhook delivery log"""
+
     __tablename__ = "webhook_deliveries"
 
     id = Column(Integer, primary_key=True, index=True)

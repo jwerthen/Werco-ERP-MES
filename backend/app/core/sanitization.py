@@ -1,5 +1,4 @@
 from bleach import clean
-from typing import Any
 
 
 def sanitize_string(value: str, allow_tags: list = None) -> str:
@@ -38,14 +37,9 @@ def sanitize_dict(data: dict, keys: list[str] = None) -> dict:
             elif isinstance(value, dict):
                 result[key] = sanitize_dict(value, keys)
             elif isinstance(value, list):
-                result[key] = [
-                    sanitize_string(item) if isinstance(item, str) else item
-                    for item in value
-                ]
+                result[key] = [sanitize_string(item) if isinstance(item, str) else item for item in value]
             else:
                 result[key] = value
         else:
             result[key] = value
     return result
-
-

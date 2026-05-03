@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, UniqueConstraint
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import SoftDeleteMixin, TenantMixin
 
@@ -28,9 +32,7 @@ class UnitOfMeasure(str, enum.Enum):
 
 class Part(Base, SoftDeleteMixin, TenantMixin):
     __tablename__ = "parts"
-    __table_args__ = (
-        UniqueConstraint('company_id', 'part_number', name='uq_parts_company_part_number'),
-    )
+    __table_args__ = (UniqueConstraint('company_id', 'part_number', name='uq_parts_company_part_number'),)
 
     id = Column(Integer, primary_key=True, index=True)
     part_number = Column(String(100), index=True, nullable=False)
@@ -39,59 +41,56 @@ class Part(Base, SoftDeleteMixin, TenantMixin):
     description = Column(Text)
     part_type = Column(
         SQLEnum(
-            PartType,
-            name="parttype",
-            values_callable=lambda enum: [e.value for e in enum],
-            validate_strings=False
+            PartType, name="parttype", values_callable=lambda enum: [e.value for e in enum], validate_strings=False
         ),
-        nullable=False
+        nullable=False,
     )
     unit_of_measure = Column(
         SQLEnum(
             UnitOfMeasure,
             name="unitofmeasure",
             values_callable=lambda enum: [e.value for e in enum],
-            validate_strings=False
+            validate_strings=False,
         ),
-        default=UnitOfMeasure.EACH
+        default=UnitOfMeasure.EACH,
     )
-    
+
     # Costing
     standard_cost = Column(Float, default=0.0)
     material_cost = Column(Float, default=0.0)
     labor_cost = Column(Float, default=0.0)
     overhead_cost = Column(Float, default=0.0)
-    
+
     # Lead times (in days)
     lead_time_days = Column(Integer, default=0)
-    
+
     # Inventory settings
     safety_stock = Column(Float, default=0.0)
     reorder_point = Column(Float, default=0.0)
     reorder_quantity = Column(Float, default=0.0)
-    
+
     # Classification for AS9100D
     is_critical = Column(Boolean, default=False)  # Critical characteristic tracking
     requires_inspection = Column(Boolean, default=True)
     inspection_requirements = Column(Text)
-    
+
     # Status
     is_active = Column(Boolean, default=True)
     status = Column(String(50), default="active")  # active, obsolete, pending_approval
-    
+
     # Customer/Supplier info
     customer_name = Column(String(255), nullable=True)
     customer_part_number = Column(String(100))
     primary_supplier_id = Column(Integer, nullable=True)
-    
+
     # Drawing/Document references
     drawing_number = Column(String(100))
-    
+
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_by = Column(Integer, nullable=True)
-    
+
     # Relationships
     bom = relationship("BOM", back_populates="part", uselist=False)
     inventory_items = relationship("InventoryItem", back_populates="part")

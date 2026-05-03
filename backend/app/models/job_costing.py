@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import Column, Date, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -28,6 +32,7 @@ class CostEntrySource(str, enum.Enum):
 
 class JobCost(Base, TenantMixin):
     """Job costing record linked to a work order"""
+
     __tablename__ = "job_costs"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -73,6 +78,7 @@ class JobCost(Base, TenantMixin):
 
 class CostEntry(Base, TenantMixin):
     """Individual cost line item for a job cost record"""
+
     __tablename__ = "cost_entries"
 
     id = Column(Integer, primary_key=True, index=True)

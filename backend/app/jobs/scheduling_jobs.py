@@ -1,16 +1,13 @@
-from app.db.session import SessionLocal
-from app.services.scheduling_service import SchedulingService
-from app.services.notification_service import NotificationService, NotificationEvent, get_notification_recipients
 import logging
+
+from app.db.session import SessionLocal
+from app.services.notification_service import NotificationEvent, NotificationService, get_notification_recipients
+from app.services.scheduling_service import SchedulingService
 
 logger = logging.getLogger(__name__)
 
 
-async def run_scheduling_task(
-    work_center_ids: list = None,
-    horizon_days: int = 90,
-    optimize_setup: bool = False
-):
+async def run_scheduling_task(work_center_ids: list = None, horizon_days: int = 90, optimize_setup: bool = False):
     """
     Background job to run constraint-based scheduling
 
@@ -27,13 +24,13 @@ async def run_scheduling_task(
 
         # Run scheduling algorithm
         results = scheduling_service.run_scheduling(
-            work_center_ids=work_center_ids,
-            horizon_days=horizon_days,
-            optimize_setup=optimize_setup
+            work_center_ids=work_center_ids, horizon_days=horizon_days, optimize_setup=optimize_setup
         )
 
-        logger.info(f"Scheduling complete: {results['scheduled_count']} operations scheduled, "
-                   f"{results['conflict_count']} conflicts")
+        logger.info(
+            f"Scheduling complete: {results['scheduled_count']} operations scheduled, "
+            f"{results['conflict_count']} conflicts"
+        )
 
         # Check for capacity conflicts
         conflicts = scheduling_service.detect_conflicts()
@@ -50,18 +47,15 @@ async def run_scheduling_task(
                     event_type=NotificationEvent.CAPACITY_OVERLOAD,
                     users=managers,
                     subject=f"Production Scheduling: {len(conflicts)} Capacity Conflicts Detected",
-                    context={
-                        "conflicts": conflicts,
-                        "scheduled_count": results["scheduled_count"]
-                    },
-                    template="scheduling_conflicts"
+                    context={"conflicts": conflicts, "scheduled_count": results["scheduled_count"]},
+                    template="scheduling_conflicts",
                 )
 
         return {
             "scheduled_count": results["scheduled_count"],
             "conflict_count": results["conflict_count"],
             "capacity_conflicts": len(conflicts),
-            "conflicts": conflicts[:10]  # Return first 10 conflicts
+            "conflicts": conflicts[:10],  # Return first 10 conflicts
         }
 
     except Exception as e:

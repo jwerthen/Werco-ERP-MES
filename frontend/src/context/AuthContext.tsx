@@ -176,7 +176,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (permData?.role_permissions) {
         setCustomPermissions(permData.role_permissions);
       }
-    } catch (e) {
+    } catch {
       // Permissions loading failed - use defaults
       console.warn('Failed to load custom permissions, using defaults');
     }
@@ -196,7 +196,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (permData?.role_permissions) {
         setCustomPermissions(permData.role_permissions);
       }
-    } catch (e) {
+    } catch {
       console.warn('Failed to load custom permissions, using defaults');
     }
   };

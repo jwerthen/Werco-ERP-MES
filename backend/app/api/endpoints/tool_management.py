@@ -1,17 +1,20 @@
-from typing import List, Optional
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
-from app.models.user import User
-from app.models.tool_management import Tool, ToolCheckout, ToolUsageLog, ToolStatus, ToolType
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_company_id, get_current_user
+from app.db.database import get_db
+from app.models.tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsageLog
+from app.models.user import User
 
 router = APIRouter()
 
 
 # ── Pydantic Schemas ──────────────────────────────────────────────────────────
+
 
 class ToolCreate(BaseModel):
     tool_id: str
@@ -105,6 +108,7 @@ class ToolResponse(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _calc_life_remaining(tool: Tool) -> Optional[float]:
     """Return life remaining as a percentage 0-100, or None if no max is set."""
     pct_hours = None
@@ -157,7 +161,9 @@ def _checkout_to_dict(co: ToolCheckout) -> dict:
         "id": co.id,
         "tool_id": co.tool_id,
         "checked_out_by": co.checked_out_by,
-        "checked_out_by_name": co.user.full_name if co.user and hasattr(co.user, 'full_name') else str(co.checked_out_by),
+        "checked_out_by_name": (
+            co.user.full_name if co.user and hasattr(co.user, 'full_name') else str(co.checked_out_by)
+        ),
         "checked_out_at": co.checked_out_at.isoformat() if co.checked_out_at else None,
         "checked_in_at": co.checked_in_at.isoformat() if co.checked_in_at else None,
         "work_center_id": co.work_center_id,
@@ -185,6 +191,7 @@ def _usage_to_dict(ul: ToolUsageLog) -> dict:
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/tools/dashboard")
 def get_dashboard(
@@ -225,16 +232,21 @@ def get_dashboard(
 
 # ── Checked-out / Replacement / Inspection lists ─────────────────────────────
 
+
 @router.get("/tools/checked-out")
 def list_checked_out(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """List all currently checked-out tools"""
-    tools = db.query(Tool).filter(
-        Tool.is_active == True,
-        Tool.status == ToolStatus.IN_USE,
-    ).all()
+    tools = (
+        db.query(Tool)
+        .filter(
+            Tool.is_active == True,
+            Tool.status == ToolStatus.IN_USE,
+        )
+        .all()
+    )
     return [_tool_to_dict(t) for t in tools]
 
 
@@ -260,15 +272,21 @@ def list_inspection_due(
 ):
     """Tools overdue or due for inspection"""
     today = date.today()
-    tools = db.query(Tool).filter(
-        Tool.is_active == True,
-        Tool.next_inspection_date != None,
-        Tool.next_inspection_date <= today,
-    ).order_by(Tool.next_inspection_date).all()
+    tools = (
+        db.query(Tool)
+        .filter(
+            Tool.is_active == True,
+            Tool.next_inspection_date != None,
+            Tool.next_inspection_date <= today,
+        )
+        .order_by(Tool.next_inspection_date)
+        .all()
+    )
     return [_tool_to_dict(t) for t in tools]
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
+
 
 @router.get("/tools/")
 def list_tools(
@@ -291,10 +309,10 @@ def list_tools(
     if search:
         search_term = f"%{search}%"
         query = query.filter(
-            (Tool.tool_id.ilike(search_term)) |
-            (Tool.name.ilike(search_term)) |
-            (Tool.manufacturer.ilike(search_term)) |
-            (Tool.serial_number.ilike(search_term))
+            (Tool.tool_id.ilike(search_term))
+            | (Tool.name.ilike(search_term))
+            | (Tool.manufacturer.ilike(search_term))
+            | (Tool.serial_number.ilike(search_term))
         )
     tools = query.order_by(Tool.tool_id).all()
     return [_tool_to_dict(t) for t in tools]
@@ -390,6 +408,7 @@ def retire_tool(
 
 # ── Check-out / Check-in ─────────────────────────────────────────────────────
 
+
 @router.post("/tools/{tool_id}/checkout")
 def checkout_tool(
     tool_id: int,
@@ -443,10 +462,15 @@ def checkin_tool(
         raise HTTPException(status_code=400, detail="Tool is not currently checked out")
 
     # Find the open checkout record
-    checkout = db.query(ToolCheckout).filter(
-        ToolCheckout.tool_id == tool.id,
-        ToolCheckout.checked_in_at == None,
-    ).order_by(ToolCheckout.checked_out_at.desc()).first()
+    checkout = (
+        db.query(ToolCheckout)
+        .filter(
+            ToolCheckout.tool_id == tool.id,
+            ToolCheckout.checked_in_at == None,
+        )
+        .order_by(ToolCheckout.checked_out_at.desc())
+        .first()
+    )
 
     if checkout:
         checkout.checked_in_at = datetime.utcnow()
@@ -470,6 +494,7 @@ def checkin_tool(
 
 
 # ── Usage Logging ─────────────────────────────────────────────────────────────
+
 
 @router.post("/tools/{tool_id}/log-usage")
 def log_usage(
@@ -508,6 +533,7 @@ def log_usage(
 
 # ── History ───────────────────────────────────────────────────────────────────
 
+
 @router.get("/tools/{tool_id}/history")
 def get_tool_history(
     tool_id: int,
@@ -519,13 +545,16 @@ def get_tool_history(
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
 
-    checkouts = db.query(ToolCheckout).filter(
-        ToolCheckout.tool_id == tool_id
-    ).order_by(ToolCheckout.checked_out_at.desc()).all()
+    checkouts = (
+        db.query(ToolCheckout)
+        .filter(ToolCheckout.tool_id == tool_id)
+        .order_by(ToolCheckout.checked_out_at.desc())
+        .all()
+    )
 
-    usage_logs = db.query(ToolUsageLog).filter(
-        ToolUsageLog.tool_id == tool_id
-    ).order_by(ToolUsageLog.usage_date.desc()).all()
+    usage_logs = (
+        db.query(ToolUsageLog).filter(ToolUsageLog.tool_id == tool_id).order_by(ToolUsageLog.usage_date.desc()).all()
+    )
 
     return {
         "tool": _tool_to_dict(tool),

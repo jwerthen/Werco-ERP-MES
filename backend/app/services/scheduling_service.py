@@ -7,16 +7,18 @@ Schedules work order operations considering:
 - Due dates and priorities
 - Setup time optimization
 """
-from datetime import datetime, date, timedelta
-from typing import List, Dict, Optional, Tuple
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-from dataclasses import dataclass
-import logging
 
-from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
-from app.models.work_center import WorkCenter
+import logging
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 from app.core.cache import invalidate_work_centers_cache
+from app.models.work_center import WorkCenter
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ScheduledSlot:
     """A scheduled time slot for an operation"""
+
     operation_id: int
     work_center_id: int
     start_date: date
@@ -36,6 +39,7 @@ class ScheduledSlot:
 @dataclass
 class WorkCenterCapacity:
     """Work center capacity tracking"""
+
     work_center_id: int
     hours_per_day: float
     # Dict of date -> hours used
@@ -54,7 +58,7 @@ class SchedulingService:
         work_center_ids: List[int] = None,
         horizon_days: int = 90,
         optimize_setup: bool = False,
-        work_order_ids: List[int] = None
+        work_order_ids: List[int] = None,
     ) -> Dict[str, any]:
         """
         Run constraint-based scheduling algorithm
@@ -68,8 +72,7 @@ class SchedulingService:
         Returns:
             Dict with scheduling results
         """
-        logger.info(f"Starting scheduling run: horizon={horizon_days} days, "
-                   f"optimize_setup={optimize_setup}")
+        logger.info(f"Starting scheduling run: horizon={horizon_days} days, " f"optimize_setup={optimize_setup}")
 
         # Get all work centers
         work_centers = self._get_work_centers(work_center_ids)
@@ -80,8 +83,7 @@ class SchedulingService:
 
         if not operations:
             self.update_availability_rates(
-                work_center_ids=[wc.id for wc in work_centers] or None,
-                horizon_days=horizon_days
+                work_center_ids=[wc.id for wc in work_centers] or None, horizon_days=horizon_days
             )
             return {"scheduled_count": 0, "message": "No operations to schedule"}
 
@@ -98,29 +100,28 @@ class SchedulingService:
             if result["success"]:
                 scheduled.append(result)
             else:
-                conflicts.append({
-                    "operation_id": op.id,
-                    "work_order": op.work_order.work_order_number,
-                    "reason": result.get("reason", "Unknown")
-                })
+                conflicts.append(
+                    {
+                        "operation_id": op.id,
+                        "work_order": op.work_order.work_order_number,
+                        "reason": result.get("reason", "Unknown"),
+                    }
+                )
 
         # Commit changes
         self.update_availability_rates(
-            work_center_ids=[wc.id for wc in work_centers] or None,
-            horizon_days=horizon_days,
-            commit=False
+            work_center_ids=[wc.id for wc in work_centers] or None, horizon_days=horizon_days, commit=False
         )
         self.db.commit()
         invalidate_work_centers_cache()
 
-        logger.info(f"Scheduling complete: {len(scheduled)} scheduled, "
-                   f"{len(conflicts)} conflicts")
+        logger.info(f"Scheduling complete: {len(scheduled)} scheduled, " f"{len(conflicts)} conflicts")
 
         return {
             "scheduled_count": len(scheduled),
             "conflict_count": len(conflicts),
             "scheduled_operations": scheduled,
-            "conflicts": conflicts
+            "conflicts": conflicts,
         }
 
     def _get_work_centers(self, work_center_ids: List[int] = None) -> List[WorkCenter]:
@@ -136,51 +137,44 @@ class SchedulingService:
         """Initialize capacity tracking for work centers"""
         for wc in work_centers:
             self.capacity_map[wc.id] = WorkCenterCapacity(
-                work_center_id=wc.id,
-                hours_per_day=wc.capacity_hours_per_day or 8.0,  # Default 8 hours
-                daily_load={}
+                work_center_id=wc.id, hours_per_day=wc.capacity_hours_per_day or 8.0, daily_load={}  # Default 8 hours
             )
 
             # Load existing scheduled operations
             start_date = date.today()
             end_date = start_date + timedelta(days=horizon_days)
 
-            scheduled_ops = self.db.query(WorkOrderOperation).filter(
-                WorkOrderOperation.work_center_id == wc.id,
-                WorkOrderOperation.scheduled_start != None,
-                WorkOrderOperation.scheduled_start >= start_date,
-                WorkOrderOperation.scheduled_start <= end_date,
-                WorkOrderOperation.status != OperationStatus.COMPLETE
-            ).all()
+            scheduled_ops = (
+                self.db.query(WorkOrderOperation)
+                .filter(
+                    WorkOrderOperation.work_center_id == wc.id,
+                    WorkOrderOperation.scheduled_start != None,
+                    WorkOrderOperation.scheduled_start >= start_date,
+                    WorkOrderOperation.scheduled_start <= end_date,
+                    WorkOrderOperation.status != OperationStatus.COMPLETE,
+                )
+                .all()
+            )
 
             # Populate daily load from existing schedule
             for op in scheduled_ops:
-                self._add_to_capacity(
-                    wc.id,
-                    op.scheduled_start,
-                    (op.setup_time_hours or 0) + (op.run_time_hours or 0)
-                )
+                self._add_to_capacity(wc.id, op.scheduled_start, (op.setup_time_hours or 0) + (op.run_time_hours or 0))
 
     def _get_operations_to_schedule(
-        self,
-        work_center_ids: List[int] = None,
-        work_order_ids: List[int] = None
+        self, work_center_ids: List[int] = None, work_order_ids: List[int] = None
     ) -> List[WorkOrderOperation]:
         """Get operations that need scheduling"""
         from sqlalchemy.orm import joinedload
 
-        query = self.db.query(WorkOrderOperation).options(
-            joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
-        ).join(WorkOrder).filter(
-            WorkOrder.status.in_([
-                WorkOrderStatus.RELEASED,
-                WorkOrderStatus.IN_PROGRESS
-            ]),
-            WorkOrderOperation.status.in_([
-                OperationStatus.PENDING,
-                OperationStatus.READY
-            ]),
-            WorkOrderOperation.scheduled_start == None  # Unscheduled
+        query = (
+            self.db.query(WorkOrderOperation)
+            .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
+            .join(WorkOrder)
+            .filter(
+                WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
+                WorkOrderOperation.status.in_([OperationStatus.PENDING, OperationStatus.READY]),
+                WorkOrderOperation.scheduled_start == None,  # Unscheduled
+            )
         )
 
         if work_center_ids:
@@ -192,35 +186,27 @@ class SchedulingService:
         return query.all()
 
     def _prioritize_operations(
-        self,
-        operations: List[WorkOrderOperation],
-        optimize_setup: bool
+        self, operations: List[WorkOrderOperation], optimize_setup: bool
     ) -> List[WorkOrderOperation]:
         """Sort operations by priority, due date, and optionally part grouping"""
 
         if optimize_setup:
             # Group by part for setup optimization
-            operations.sort(key=lambda op: (
-                -op.work_order.priority,  # Higher priority first (descending)
-                op.work_order.due_date or date.max,  # Earlier due date first
-                op.work_order.part_id,  # Group same parts together
-                op.sequence  # Operation sequence
-            ))
+            operations.sort(
+                key=lambda op: (
+                    -op.work_order.priority,  # Higher priority first (descending)
+                    op.work_order.due_date or date.max,  # Earlier due date first
+                    op.work_order.part_id,  # Group same parts together
+                    op.sequence,  # Operation sequence
+                )
+            )
         else:
             # Standard priority + due date sorting
-            operations.sort(key=lambda op: (
-                -op.work_order.priority,
-                op.work_order.due_date or date.max,
-                op.sequence
-            ))
+            operations.sort(key=lambda op: (-op.work_order.priority, op.work_order.due_date or date.max, op.sequence))
 
         return operations
 
-    def _schedule_operation(
-        self,
-        operation: WorkOrderOperation,
-        horizon_days: int
-    ) -> Dict[str, any]:
+    def _schedule_operation(self, operation: WorkOrderOperation, horizon_days: int) -> Dict[str, any]:
         """
         Schedule a single operation
 
@@ -229,10 +215,7 @@ class SchedulingService:
         """
         work_center_id = operation.work_center_id
         if not work_center_id or work_center_id not in self.capacity_map:
-            return {
-                "success": False,
-                "reason": "No work center assigned or work center not active"
-            }
+            return {"success": False, "reason": "No work center assigned or work center not active"}
 
         # Calculate hours needed
         hours_needed = (operation.setup_time_hours or 0) + (operation.run_time_hours or 0)
@@ -243,18 +226,10 @@ class SchedulingService:
         earliest_start = self._get_earliest_start_date(operation)
 
         # Find available capacity
-        scheduled_date = self._find_available_capacity(
-            work_center_id,
-            hours_needed,
-            earliest_start,
-            horizon_days
-        )
+        scheduled_date = self._find_available_capacity(work_center_id, hours_needed, earliest_start, horizon_days)
 
         if not scheduled_date:
-            return {
-                "success": False,
-                "reason": f"No available capacity in {horizon_days}-day horizon"
-            }
+            return {"success": False, "reason": f"No available capacity in {horizon_days}-day horizon"}
 
         # Calculate end date
         capacity = self.capacity_map[work_center_id]
@@ -278,7 +253,7 @@ class SchedulingService:
             "operation": operation.operation_number,
             "scheduled_start": scheduled_date.isoformat(),
             "scheduled_end": end_date.isoformat(),
-            "hours": hours_needed
+            "hours": hours_needed,
         }
 
     def _get_earliest_start_date(self, operation: WorkOrderOperation) -> date:
@@ -287,24 +262,29 @@ class SchedulingService:
         # Check if there are predecessor operations in same work order
         if operation.sequence > 10:
             # Find previous operation
-            prev_op = self.db.query(WorkOrderOperation).filter(
-                WorkOrderOperation.work_order_id == operation.work_order_id,
-                WorkOrderOperation.sequence < operation.sequence
-            ).order_by(WorkOrderOperation.sequence.desc()).first()
+            prev_op = (
+                self.db.query(WorkOrderOperation)
+                .filter(
+                    WorkOrderOperation.work_order_id == operation.work_order_id,
+                    WorkOrderOperation.sequence < operation.sequence,
+                )
+                .order_by(WorkOrderOperation.sequence.desc())
+                .first()
+            )
 
             if prev_op and prev_op.scheduled_end:
-                prev_end = prev_op.scheduled_end.date() if isinstance(prev_op.scheduled_end, datetime) else prev_op.scheduled_end
+                prev_end = (
+                    prev_op.scheduled_end.date()
+                    if isinstance(prev_op.scheduled_end, datetime)
+                    else prev_op.scheduled_end
+                )
                 return prev_end + timedelta(days=1)
 
         # Otherwise, earliest is today
         return date.today()
 
     def _find_available_capacity(
-        self,
-        work_center_id: int,
-        hours_needed: float,
-        earliest_start: date,
-        horizon_days: int
+        self, work_center_id: int, hours_needed: float, earliest_start: date, horizon_days: int
     ) -> Optional[date]:
         """Find first available date with sufficient capacity"""
 
@@ -357,10 +337,7 @@ class SchedulingService:
         return count
 
     def _get_scheduled_hours_by_work_center(
-        self,
-        start_date: date,
-        end_date: date,
-        work_center_ids: Optional[List[int]] = None
+        self, start_date: date, end_date: date, work_center_ids: Optional[List[int]] = None
     ) -> Dict[int, float]:
         """Get total scheduled hours by work center for a date range"""
         hours_expr = func.coalesce(WorkOrderOperation.setup_time_hours, 0) + func.coalesce(
@@ -368,13 +345,12 @@ class SchedulingService:
         )
 
         query = self.db.query(
-            WorkOrderOperation.work_center_id,
-            func.coalesce(func.sum(hours_expr), 0).label("scheduled_hours")
+            WorkOrderOperation.work_center_id, func.coalesce(func.sum(hours_expr), 0).label("scheduled_hours")
         ).filter(
             WorkOrderOperation.scheduled_start != None,
             WorkOrderOperation.scheduled_start >= start_date,
             WorkOrderOperation.scheduled_start <= end_date,
-            WorkOrderOperation.status != OperationStatus.COMPLETE
+            WorkOrderOperation.status != OperationStatus.COMPLETE,
         )
 
         if work_center_ids:
@@ -385,10 +361,7 @@ class SchedulingService:
         return {wc_id: float(hours or 0) for wc_id, hours in results}
 
     def update_availability_rates(
-        self,
-        work_center_ids: Optional[List[int]] = None,
-        horizon_days: int = 90,
-        commit: bool = True
+        self, work_center_ids: Optional[List[int]] = None, horizon_days: int = 90, commit: bool = True
     ) -> Dict[int, float]:
         """Update work center availability rates based on scheduled load"""
         work_centers = self._get_work_centers(work_center_ids)
@@ -398,11 +371,7 @@ class SchedulingService:
         start_date = date.today()
         end_date = start_date + timedelta(days=horizon_days)
         business_days = self._count_business_days(start_date, end_date)
-        scheduled_hours = self._get_scheduled_hours_by_work_center(
-            start_date,
-            end_date,
-            [wc.id for wc in work_centers]
-        )
+        scheduled_hours = self._get_scheduled_hours_by_work_center(start_date, end_date, [wc.id for wc in work_centers])
 
         availability_rates = {}
         for wc in work_centers:
@@ -423,12 +392,7 @@ class SchedulingService:
 
         return availability_rates
 
-    def get_load_chart(
-        self,
-        work_center_id: int,
-        start_date: date,
-        end_date: date
-    ) -> List[Dict]:
+    def get_load_chart(self, work_center_id: int, start_date: date, end_date: date) -> List[Dict]:
         """
         Get work center load chart data
 
@@ -452,12 +416,14 @@ class SchedulingService:
             used_hours = capacity.daily_load.get(current, 0)
             utilization_pct = (used_hours / capacity.hours_per_day * 100) if capacity.hours_per_day > 0 else 0
 
-            result.append({
-                "date": current.isoformat(),
-                "used_hours": used_hours,
-                "available_hours": capacity.hours_per_day,
-                "utilization_pct": round(utilization_pct, 1)
-            })
+            result.append(
+                {
+                    "date": current.isoformat(),
+                    "used_hours": used_hours,
+                    "available_hours": capacity.hours_per_day,
+                    "utilization_pct": round(utilization_pct, 1),
+                }
+            )
 
             current += timedelta(days=1)
 
@@ -481,13 +447,15 @@ class SchedulingService:
 
             for date_key, used_hours in capacity.daily_load.items():
                 if used_hours > capacity.hours_per_day:
-                    conflicts.append({
-                        "work_center_id": wc_id,
-                        "date": date_key.isoformat(),
-                        "used_hours": used_hours,
-                        "capacity_hours": capacity.hours_per_day,
-                        "overload_hours": used_hours - capacity.hours_per_day,
-                        "utilization_pct": round(used_hours / capacity.hours_per_day * 100, 1)
-                    })
+                    conflicts.append(
+                        {
+                            "work_center_id": wc_id,
+                            "date": date_key.isoformat(),
+                            "used_hours": used_hours,
+                            "capacity_hours": capacity.hours_per_day,
+                            "overload_hours": used_hours - capacity.hours_per_day,
+                            "utilization_pct": round(used_hours / capacity.hours_per_day * 100, 1),
+                        }
+                    )
 
         return conflicts

@@ -1,0 +1,21 @@
+[flake8]
+max-line-length = 120
+extend-ignore =
+    E203,
+    W503,
+    # SQLAlchemy query expressions legitimately use == None/True/False.
+    E711,
+    E712,
+    # Black handles wrapping; it intentionally leaves some long literals intact.
+    E501,
+    # Several scripts/tests intentionally adjust sys.path before app imports.
+    E402
+exclude =
+    .git,
+    .venv,
+    .venv311,
+    __pycache__,
+    alembic/versions,
+    build,
+    dist,
+    htmlcov

@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-
 CENTRAL_TIME_ZONE = ZoneInfo("America/Chicago")
 
 

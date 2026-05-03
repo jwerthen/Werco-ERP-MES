@@ -1,7 +1,9 @@
-from pydantic import BaseModel
-from typing import Optional, List, Any, Dict, Union
 from datetime import datetime
-from app.models.custom_field import FieldType, EntityType
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
+
+from app.models.custom_field import EntityType, FieldType
 
 
 class CustomFieldDefinitionBase(BaseModel):
@@ -47,7 +49,7 @@ class CustomFieldDefinitionResponse(CustomFieldDefinitionBase):
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -60,6 +62,7 @@ class CustomFieldValueBase(BaseModel):
 
 class CustomFieldValueSet(BaseModel):
     """Set a value for a custom field"""
+
     field_key: str  # Can use field_key instead of ID
     value: Any  # Will be converted based on field type
 
@@ -75,13 +78,14 @@ class CustomFieldValueResponse(BaseModel):
     value: Any  # Parsed value based on field type
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 class EntityCustomFields(BaseModel):
     """All custom field values for an entity"""
+
     entity_type: EntityType
     entity_id: int
     fields: Dict[str, Any]  # field_key -> value
@@ -89,6 +93,7 @@ class EntityCustomFields(BaseModel):
 
 class BulkSetCustomFields(BaseModel):
     """Set multiple custom field values at once"""
+
     entity_type: EntityType
     entity_id: int
     values: Dict[str, Any]  # field_key -> value

@@ -1,18 +1,18 @@
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import json
-import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_user, get_current_company_id, require_role
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.core.logging import get_logger
 from app.db.database import get_db
 from app.models.customer import Customer
@@ -132,12 +132,7 @@ def _generate_rfq_number(db: Session) -> str:
 def _generate_quote_number(db: Session) -> str:
     today = datetime.utcnow().strftime("%Y%m")
     prefix = f"QTE-{today}-"
-    last = (
-        db.query(Quote)
-        .filter(Quote.quote_number.like(f"{prefix}%"))
-        .order_by(Quote.quote_number.desc())
-        .first()
-    )
+    last = db.query(Quote).filter(Quote.quote_number.like(f"{prefix}%")).order_by(Quote.quote_number.desc()).first()
     next_num = 1
     if last:
         try:
@@ -353,12 +348,9 @@ def generate_estimate(
         if float(part.get("flat_area") or 0) > 0 and float(part.get("cut_length") or 0) > 0
     ]
     if not geometry_ready_parts:
-        package.parsing_warnings = (
-            parsed["warnings"]
-            + [
-                "No usable geometry extracted. Provide flat pattern DXF or BOM length/width columns before generating estimate."
-            ]
-        )
+        package.parsing_warnings = parsed["warnings"] + [
+            "No usable geometry extracted. Provide flat pattern DXF or BOM length/width columns before generating estimate."
+        ]
         package.status = "needs_review"
         db.commit()
         raise HTTPException(

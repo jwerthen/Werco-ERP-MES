@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import Column, Date, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -36,6 +40,7 @@ class ECOType(str, enum.Enum):
 
 class EngineeringChangeOrder(Base, TenantMixin):
     """Engineering Change Order (ECO/ECN) for AS9100D compliance"""
+
     __tablename__ = "engineering_change_orders"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -90,6 +95,7 @@ class EngineeringChangeOrder(Base, TenantMixin):
 
 class ECOApproval(Base, TenantMixin):
     """Approval workflow for ECOs"""
+
     __tablename__ = "eco_approvals"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -108,6 +114,7 @@ class ECOApproval(Base, TenantMixin):
 
 class ECOImplementationTask(Base, TenantMixin):
     """Implementation tasks for ECOs"""
+
     __tablename__ = "eco_implementation_tasks"
 
     id = Column(Integer, primary_key=True, index=True)

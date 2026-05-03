@@ -1,18 +1,20 @@
 import csv
 import io
-from typing import List, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_
-from pydantic import BaseModel, EmailStr, ValidationError
-from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id, require_role
-from app.models.user import User, UserRole
-from app.models.customer import Customer
-from app.services.audit_service import AuditService
-from app.models.part import Part, PartType
-from app.models.work_order import WorkOrder, WorkOrderStatus
 from datetime import datetime
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel, EmailStr, ValidationError
+from sqlalchemy import or_
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.db.database import get_db
+from app.models.customer import Customer
+from app.models.part import Part, PartType
+from app.models.user import User, UserRole
+from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.services.audit_service import AuditService
 
 router = APIRouter()
 
@@ -144,9 +146,7 @@ def generate_customer_code(db: Session, name: str, company_id: Optional[int] = N
 def list_customers(
     active_only: bool = True,
     search: Optional[str] = None,
-    include_deleted: bool = Query(
-        False, description="Include soft-deleted customers (admin only)"
-    ),
+    include_deleted: bool = Query(False, description="Include soft-deleted customers (admin only)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -171,8 +171,9 @@ def list_customers(
 
 @router.get("/names")
 def list_customer_names(
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get simple list of customer names for dropdowns"""
     customers = (
@@ -344,9 +345,7 @@ def get_customer_stats(
     part_ids = [part.id for part in customer_parts]
 
     work_orders_query = (
-        db.query(WorkOrder)
-        .options(joinedload(WorkOrder.part))
-        .filter(WorkOrder.is_deleted == False)  # noqa: E712
+        db.query(WorkOrder).options(joinedload(WorkOrder.part)).filter(WorkOrder.is_deleted == False)  # noqa: E712
     )
 
     if part_ids:
@@ -357,9 +356,7 @@ def get_customer_stats(
             )
         )
     else:
-        work_orders_query = work_orders_query.filter(
-            WorkOrder.customer_name == customer.name
-        )
+        work_orders_query = work_orders_query.filter(WorkOrder.customer_name == customer.name)
 
     work_orders = work_orders_query.order_by(WorkOrder.created_at.desc()).all()
 
@@ -380,9 +377,7 @@ def get_customer_stats(
         }
 
     def _serialize_work_order(wo: WorkOrder) -> dict:
-        status_value = (
-            wo.status.value if hasattr(wo.status, "value") else str(wo.status)
-        )
+        status_value = wo.status.value if hasattr(wo.status, "value") else str(wo.status)
         return {
             "id": wo.id,
             "work_order_number": wo.work_order_number,
@@ -398,16 +393,8 @@ def get_customer_stats(
         }
 
     serialized_parts = [_serialize_part(part) for part in customer_parts]
-    assemblies = [
-        part
-        for part in serialized_parts
-        if part["part_type"] == PartType.ASSEMBLY.value
-    ]
-    non_assemblies = [
-        part
-        for part in serialized_parts
-        if part["part_type"] != PartType.ASSEMBLY.value
-    ]
+    assemblies = [part for part in serialized_parts if part["part_type"] == PartType.ASSEMBLY.value]
+    non_assemblies = [part for part in serialized_parts if part["part_type"] != PartType.ASSEMBLY.value]
 
     serialized_work_orders = [_serialize_work_order(wo) for wo in work_orders]
     status_counts: dict[str, int] = {}
@@ -427,12 +414,8 @@ def get_customer_stats(
         WorkOrderStatus.CANCELLED.value,
     }
 
-    current_work_orders = [
-        wo for wo in serialized_work_orders if wo["status"] in current_statuses
-    ]
-    past_work_orders = [
-        wo for wo in serialized_work_orders if wo["status"] in past_statuses
-    ]
+    current_work_orders = [wo for wo in serialized_work_orders if wo["status"] in current_statuses]
+    past_work_orders = [wo for wo in serialized_work_orders if wo["status"] in past_statuses]
     part_count = len(serialized_parts)
 
     return {
@@ -505,9 +488,7 @@ def update_customer(
 def delete_customer(
     customer_id: int,
     request: Request,
-    hard_delete: bool = Query(
-        False, description="Permanently delete (use with caution)"
-    ),
+    hard_delete: bool = Query(False, description="Permanently delete (use with caution)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),

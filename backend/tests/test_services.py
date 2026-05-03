@@ -1,16 +1,17 @@
 """Unit tests for backend services."""
+
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.models.part import Part
 from app.models.purchasing import Vendor
 from app.services.matching_service import (
     MatchResult,
-    match_vendor,
+    check_po_number_exists,
     match_part,
     match_po_line_items,
-    check_po_number_exists
+    match_vendor,
 )
 
 
@@ -21,11 +22,7 @@ class TestMatchResult:
     def test_match_result_initialization(self):
         """Test MatchResult initialization."""
         result = MatchResult(
-            matched=True,
-            match_id=1,
-            match_name="Test Vendor",
-            confidence=95.5,
-            suggestions=[{"id": 1, "name": "Test"}]
+            matched=True, match_id=1, match_name="Test Vendor", confidence=95.5, suggestions=[{"id": 1, "name": "Test"}]
         )
         assert result.matched is True
         assert result.match_id == 1
@@ -35,20 +32,9 @@ class TestMatchResult:
 
     def test_match_result_to_dict(self):
         """Test MatchResult to_dict conversion."""
-        result = MatchResult(
-            matched=True,
-            match_id=1,
-            match_name="Test",
-            confidence=90.0
-        )
+        result = MatchResult(matched=True, match_id=1, match_name="Test", confidence=90.0)
         data = result.to_dict()
-        assert data == {
-            "matched": True,
-            "match_id": 1,
-            "match_name": "Test",
-            "confidence": 90.0,
-            "suggestions": []
-        }
+        assert data == {"matched": True, "match_id": 1, "match_name": "Test", "confidence": 90.0, "suggestions": []}
 
     def test_match_result_empty_suggestions(self):
         """Test MatchResult with empty suggestions."""
@@ -173,7 +159,7 @@ class TestMatchPOLineItems:
         line_items = [
             {"part_number": test_part.part_number, "quantity": 10},
             {"part_number": "P-INVALID-001", "quantity": 5},
-            {"part_number": test_part.part_number.upper(), "quantity": 20}
+            {"part_number": test_part.part_number.upper(), "quantity": 20},
         ]
         result = match_po_line_items(line_items, db_session)
 
@@ -241,10 +227,10 @@ class TestMatchingIntegration:
 
         # High threshold - might not match
         result_high = match_part("P-1234", db_session, threshold=95)
-        
+
         # Low threshold - should match fuzzy
         result_low = match_part("P-1234", db_session, threshold=60)
-        
+
         # Results will depend on fuzzy matching algorithm
         assert isinstance(result_high, MatchResult)
         assert isinstance(result_low, MatchResult)

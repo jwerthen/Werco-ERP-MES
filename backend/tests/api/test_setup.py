@@ -207,26 +207,28 @@ class TestSetupHealth:
         )
         db_session.add_all([bom, routing])
         db_session.flush()
-        db_session.add_all([
-            BOMItem(
-                bom_id=bom.id,
-                component_part_id=component.id,
-                item_number=10,
-                quantity=1,
-                item_type="make",
-                line_type="component",
-                company_id=1,
-            ),
-            RoutingOperation(
-                routing_id=routing.id,
-                sequence=10,
-                operation_number="Op 10",
-                name="Machine Component",
-                work_center_id=work_center.id,
-                is_active=True,
-                company_id=1,
-            ),
-        ])
+        db_session.add_all(
+            [
+                BOMItem(
+                    bom_id=bom.id,
+                    component_part_id=component.id,
+                    item_number=10,
+                    quantity=1,
+                    item_type="make",
+                    line_type="component",
+                    company_id=1,
+                ),
+                RoutingOperation(
+                    routing_id=routing.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Machine Component",
+                    work_center_id=work_center.id,
+                    is_active=True,
+                    company_id=1,
+                ),
+            ]
+        )
         db_session.commit()
 
         response = client.get(f"/api/v1/setup/readiness/part/{assembly.id}", headers=auth_headers)
@@ -274,26 +276,28 @@ class TestSetupHealth:
         routing = Routing(part_id=component.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add_all([bom, routing])
         db_session.flush()
-        db_session.add_all([
-            BOMItem(
-                bom_id=bom.id,
-                component_part_id=component.id,
-                item_number=10,
-                quantity=1,
-                item_type="make",
-                line_type="component",
-                company_id=1,
-            ),
-            RoutingOperation(
-                routing_id=routing.id,
-                sequence=10,
-                operation_number="Op 10",
-                name="Machine Component",
-                work_center_id=work_center.id,
-                is_active=True,
-                company_id=1,
-            ),
-        ])
+        db_session.add_all(
+            [
+                BOMItem(
+                    bom_id=bom.id,
+                    component_part_id=component.id,
+                    item_number=10,
+                    quantity=1,
+                    item_type="make",
+                    line_type="component",
+                    company_id=1,
+                ),
+                RoutingOperation(
+                    routing_id=routing.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Machine Component",
+                    work_center_id=work_center.id,
+                    is_active=True,
+                    company_id=1,
+                ),
+            ]
+        )
         db_session.commit()
 
         response = client.get(f"/api/v1/setup/readiness/part/{parent.id}", headers=auth_headers)

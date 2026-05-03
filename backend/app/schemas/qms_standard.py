@@ -1,9 +1,10 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
 from datetime import datetime
+from typing import List, Optional
 
+from pydantic import BaseModel, Field
 
 # ============ QMS Standard Schemas ============
+
 
 class QMSStandardCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=255, description="Standard name (e.g. AS9100D)")
@@ -24,6 +25,7 @@ class QMSStandardUpdate(BaseModel):
 
 # ============ QMS Clause Schemas ============
 
+
 class QMSClauseCreate(BaseModel):
     clause_number: str = Field(..., min_length=1, max_length=50, description="Clause number (e.g. 8.5.2)")
     title: str = Field(..., min_length=2, max_length=500, description="Clause title")
@@ -38,17 +40,21 @@ class QMSClauseUpdate(BaseModel):
     description: Optional[str] = Field(None, max_length=10000)
     parent_clause_id: Optional[int] = None
     sort_order: Optional[int] = Field(None, ge=0)
-    compliance_status: Optional[str] = Field(None, pattern=r'^(not_assessed|compliant|partial|non_compliant|not_applicable)$')
+    compliance_status: Optional[str] = Field(
+        None, pattern=r'^(not_assessed|compliant|partial|non_compliant|not_applicable)$'
+    )
     compliance_notes: Optional[str] = Field(None, max_length=5000)
     next_review_date: Optional[datetime] = None
 
 
 class QMSClauseBulkCreate(BaseModel):
     """For importing multiple clauses at once (e.g., from a parsed standard document)"""
+
     clauses: List[QMSClauseCreate] = Field(..., min_length=1, max_length=500)
 
 
 # ============ QMS Evidence Schemas ============
+
 
 class QMSEvidenceCreate(BaseModel):
     evidence_type: str = Field(..., pattern=r'^(document|module|ncr|car|fai|calibration|training|procedure|spc|other)$')
@@ -70,6 +76,7 @@ class QMSEvidenceUpdate(BaseModel):
 
 
 # ============ Response Schemas ============
+
 
 class QMSEvidenceResponse(BaseModel):
     id: int
@@ -138,6 +145,7 @@ class QMSStandardResponse(BaseModel):
 
 class QMSStandardListResponse(BaseModel):
     """Lightweight response for listing standards (without full clause tree)"""
+
     id: int
     name: str
     version: Optional[str]
@@ -157,6 +165,7 @@ class QMSStandardListResponse(BaseModel):
 
 class QMSAuditReadinessSummary(BaseModel):
     """Dashboard summary for audit readiness across all active standards"""
+
     total_standards: int
     total_clauses: int
     compliant: int
@@ -173,8 +182,10 @@ class QMSAuditReadinessSummary(BaseModel):
 
 # ============ Auto-Evidence Discovery Schemas ============
 
+
 class AutoEvidenceExample(BaseModel):
     """A single real record from the ERP/MES used as evidence"""
+
     record_id: int
     record_identifier: str  # e.g. "NCR-2024-0042"
     record_type: str  # e.g. "ncr"
@@ -186,6 +197,7 @@ class AutoEvidenceExample(BaseModel):
 
 class AutoEvidenceResult(BaseModel):
     """Discovered evidence from a single ERP/MES module for a clause"""
+
     evidence_type: str  # ncr, car, fai, calibration, etc.
     title: str  # e.g. "Non-Conformance Reports (NCR)"
     description: str  # e.g. "12 NCRs processed in last 12 months, 2 currently open"
@@ -200,6 +212,7 @@ class AutoEvidenceResult(BaseModel):
 
 class ClauseAutoEvidenceResponse(BaseModel):
     """Auto-discovered evidence for a single clause"""
+
     clause_id: int
     clause_number: str
     discovered_evidence: List[AutoEvidenceResult] = Field(default_factory=list)
@@ -208,6 +221,7 @@ class ClauseAutoEvidenceResponse(BaseModel):
 
 class AutoLinkSummary(BaseModel):
     """Summary of auto-link operation across all clauses in a standard"""
+
     standard_id: int
     standard_name: str
     total_clauses: int

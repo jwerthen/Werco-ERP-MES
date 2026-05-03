@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
-from sqlalchemy.orm import relationship
-from datetime import datetime, date
 import enum
+from datetime import date, datetime
+
+from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -34,6 +38,7 @@ class RMAStatus(str, enum.Enum):
 
 class CustomerComplaint(Base, TenantMixin):
     """Customer Complaint tracking for AS9100D compliance"""
+
     __tablename__ = "customer_complaints"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -107,6 +112,7 @@ class CustomerComplaint(Base, TenantMixin):
 
 class ReturnMaterialAuthorization(Base, TenantMixin):
     """RMA - Return Material Authorization tracking"""
+
     __tablename__ = "return_material_authorizations"
 
     id = Column(Integer, primary_key=True, index=True)

@@ -140,7 +140,7 @@ class ErrorLoggingService {
           body: JSON.stringify({ errors: entries }),
         });
       }
-    } catch (e) {
+    } catch {
       // Re-queue on failure (but don't cause infinite loop)
       if (this.queue.length < this.maxQueueSize) {
         this.queue = [...entries, ...this.queue].slice(-this.maxQueueSize);

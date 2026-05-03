@@ -1,20 +1,23 @@
 """
 Report Builder Service - Dynamic query execution for custom reports
 """
-import logging
-from typing import List, Dict, Any
-from sqlalchemy.orm import Session
-from sqlalchemy import func, or_, asc, desc
 
-from app.models.work_order import WorkOrder
-from app.models.part import Part
+import logging
+from typing import Any, Dict, List
+
+from sqlalchemy import asc, desc, func
+from sqlalchemy.orm import Session
+
 from app.models.inventory import InventoryItem
-from app.models.quality import NonConformanceReport
+from app.models.part import Part
 from app.models.purchasing import PurchaseOrder
+from app.models.quality import NonConformanceReport
 from app.models.quote import Quote
+from app.models.work_order import WorkOrder
 from app.schemas.analytics import (
-    CustomReportRequest, ReportDataSource, ReportFilter,
-    ReportColumn, ReportGroupBy, ReportSort, AggregateFunction
+    AggregateFunction,
+    CustomReportRequest,
+    ReportDataSource,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,23 +106,23 @@ FIELD_MAPPINGS = {
 class ReportBuilderService:
     def __init__(self, db: Session):
         self.db = db
-    
+
     def execute_report(self, request: CustomReportRequest) -> List[Dict[str, Any]]:
         """Execute a custom report query and return results."""
         model = DATA_SOURCE_MODELS.get(request.data_source)
         if not model:
             raise ValueError(f"Unknown data source: {request.data_source}")
-        
+
         field_map = FIELD_MAPPINGS.get(request.data_source, {})
-        
+
         # Build column list
         columns = []
         for col in request.columns:
             if col.field not in field_map:
                 continue
-            
+
             db_field = field_map[col.field]
-            
+
             if col.aggregate:
                 if col.aggregate == AggregateFunction.SUM:
                     db_field = func.sum(db_field)
@@ -131,23 +134,23 @@ class ReportBuilderService:
                     db_field = func.min(db_field)
                 elif col.aggregate == AggregateFunction.MAX:
                     db_field = func.max(db_field)
-            
+
             alias = col.alias or col.field
             columns.append(db_field.label(alias))
-        
+
         if not columns:
             raise ValueError("No valid columns specified")
-        
+
         # Build query
         query = self.db.query(*columns)
-        
+
         # Apply filters
         for f in request.filters:
             if f.field not in field_map:
                 continue
-            
+
             db_field = field_map[f.field]
-            
+
             if f.operator == "eq":
                 query = query.filter(db_field == f.value)
             elif f.operator == "ne":
@@ -166,46 +169,40 @@ class ReportBuilderService:
                 query = query.filter(db_field.ilike(f"%{f.value}%"))
             elif f.operator == "between" and f.value2:
                 query = query.filter(db_field.between(f.value, f.value2))
-        
+
         # Apply group by
         group_fields = []
         for g in request.group_by:
             if g.field not in field_map:
                 continue
             group_fields.append(field_map[g.field])
-        
+
         if group_fields:
             query = query.group_by(*group_fields)
-        
+
         # Apply sorting
         for s in request.sort:
             if s.field not in field_map:
                 continue
-            
+
             db_field = field_map[s.field]
             if s.direction.lower() == "desc":
                 query = query.order_by(desc(db_field))
             else:
                 query = query.order_by(asc(db_field))
-        
+
         # Apply limit
         if request.limit:
             query = query.limit(request.limit)
-        
+
         # Execute and format results
         results = query.all()
-        
+
         # Convert to list of dicts
         column_names = [col.alias or col.field for col in request.columns if col.field in field_map]
-        
-        return [
-            {
-                column_names[i]: self._format_value(row[i])
-                for i in range(len(column_names))
-            }
-            for row in results
-        ]
-    
+
+        return [{column_names[i]: self._format_value(row[i]) for i in range(len(column_names))} for row in results]
+
     def _format_value(self, value: Any) -> Any:
         """Format a value for JSON serialization."""
         if value is None:

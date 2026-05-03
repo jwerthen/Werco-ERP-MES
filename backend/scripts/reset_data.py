@@ -7,12 +7,15 @@ Usage:
 WARNING: This will DELETE all data. The database schema (tables) is preserved.
 After running this, the first user to register at /register will become the admin.
 """
-import sys
+
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import text
-from app.db.database import SessionLocal, engine
+
+from app.db.database import SessionLocal
 
 
 def reset_database():
@@ -26,10 +29,9 @@ def reset_database():
 
     try:
         # Get all table names
-        result = db.execute(text(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
-            "AND tablename != 'alembic_version'"
-        ))
+        result = db.execute(
+            text("SELECT tablename FROM pg_tables WHERE schemaname = 'public' " "AND tablename != 'alembic_version'")
+        )
         tables = [row[0] for row in result]
 
         if not tables:

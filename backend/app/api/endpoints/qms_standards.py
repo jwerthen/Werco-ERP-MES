@@ -1,24 +1,35 @@
-from typing import List, Optional
-from datetime import datetime
 import json
 import logging
 import os
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from datetime import datetime
+from typing import List
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role, get_current_company_id
+from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
-from app.models.qms_standard import QMSStandard, QMSClause, QMSClauseEvidence
 from app.schemas.qms_standard import (
-    QMSStandardCreate, QMSStandardUpdate, QMSStandardResponse, QMSStandardListResponse,
-    QMSClauseCreate, QMSClauseUpdate, QMSClauseResponse, QMSClauseBulkCreate,
-    QMSEvidenceCreate, QMSEvidenceUpdate, QMSEvidenceResponse,
+    AutoLinkSummary,
+    ClauseAutoEvidenceResponse,
     QMSAuditReadinessSummary,
-    AutoEvidenceResult, ClauseAutoEvidenceResponse, AutoLinkSummary,
+    QMSClauseBulkCreate,
+    QMSClauseCreate,
+    QMSClauseResponse,
+    QMSClauseUpdate,
+    QMSEvidenceCreate,
+    QMSEvidenceResponse,
+    QMSEvidenceUpdate,
+    QMSStandardCreate,
+    QMSStandardListResponse,
+    QMSStandardResponse,
+    QMSStandardUpdate,
 )
 from app.services.auto_evidence_service import (
-    discover_evidence_for_clause, compute_overall_compliance,
+    compute_overall_compliance,
+    discover_evidence_for_clause,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,6 +37,7 @@ router = APIRouter()
 
 
 # ============== QMS Standards ==============
+
 
 @router.get("/", response_model=List[QMSStandardListResponse])
 def list_standards(
@@ -44,20 +56,22 @@ def list_standards(
     for std in standards:
         clauses = db.query(QMSClause).filter(QMSClause.standard_id == std.id).all()
         statuses = [c.compliance_status for c in clauses]
-        results.append(QMSStandardListResponse(
-            id=std.id,
-            name=std.name,
-            version=std.version,
-            description=std.description,
-            standard_body=std.standard_body,
-            is_active=std.is_active,
-            total_clauses=len(clauses),
-            compliant_clauses=statuses.count("compliant"),
-            partial_clauses=statuses.count("partial"),
-            non_compliant_clauses=statuses.count("non_compliant"),
-            not_assessed_clauses=statuses.count("not_assessed"),
-            created_at=std.created_at,
-        ))
+        results.append(
+            QMSStandardListResponse(
+                id=std.id,
+                name=std.name,
+                version=std.version,
+                description=std.description,
+                standard_body=std.standard_body,
+                is_active=std.is_active,
+                total_clauses=len(clauses),
+                compliant_clauses=statuses.count("compliant"),
+                partial_clauses=statuses.count("partial"),
+                non_compliant_clauses=statuses.count("non_compliant"),
+                not_assessed_clauses=statuses.count("not_assessed"),
+                created_at=std.created_at,
+            )
+        )
     return results
 
 
@@ -105,8 +119,10 @@ async def upload_pdf_and_extract_clauses(
 
     # Extract text from PDF
     try:
-        from pypdf import PdfReader
         import io
+
+        from pypdf import PdfReader
+
         reader = PdfReader(io.BytesIO(content))
         pages_text = []
         for page in reader.pages:
@@ -119,7 +135,9 @@ async def upload_pdf_and_extract_clauses(
         raise HTTPException(status_code=400, detail=f"Failed to read PDF: {str(e)}")
 
     if not pdf_text or len(pdf_text.strip()) < 50:
-        raise HTTPException(status_code=400, detail="Could not extract text from PDF. The file may be scanned/image-based or empty.")
+        raise HTTPException(
+            status_code=400, detail="Could not extract text from PDF. The file may be scanned/image-based or empty."
+        )
 
     # Use Claude AI to extract clauses
     try:
@@ -186,7 +204,9 @@ Return ONLY a valid JSON array. No markdown, no explanations."""
 
     except json.JSONDecodeError as e:
         logger.error(f"AI returned invalid JSON: {e}")
-        raise HTTPException(status_code=500, detail="AI extraction returned invalid data. Try again or use manual entry.")
+        raise HTTPException(
+            status_code=500, detail="AI extraction returned invalid data. Try again or use manual entry."
+        )
     except Exception as e:
         logger.error(f"AI clause extraction failed: {e}")
         raise HTTPException(status_code=500, detail=f"AI extraction failed: {str(e)}")
@@ -227,12 +247,7 @@ def get_audit_readiness(
     """Get audit readiness summary across all active standards."""
     active_standards = db.query(QMSStandard).filter(QMSStandard.is_active == True).count()
 
-    clauses = (
-        db.query(QMSClause)
-        .join(QMSStandard)
-        .filter(QMSStandard.is_active == True)
-        .all()
-    )
+    clauses = db.query(QMSClause).join(QMSStandard).filter(QMSStandard.is_active == True).all()
 
     statuses = [c.compliance_status for c in clauses]
     total = len(clauses)
@@ -246,11 +261,7 @@ def get_audit_readiness(
     compliance_pct = (compliant / assessable * 100) if assessable > 0 else 0.0
 
     total_evidence = (
-        db.query(QMSClauseEvidence)
-        .join(QMSClause)
-        .join(QMSStandard)
-        .filter(QMSStandard.is_active == True)
-        .count()
+        db.query(QMSClauseEvidence).join(QMSClause).join(QMSStandard).filter(QMSStandard.is_active == True).count()
     )
     verified_evidence = (
         db.query(QMSClauseEvidence)
@@ -298,10 +309,7 @@ def get_standard(
     """Get a QMS standard with all its clauses and evidence."""
     standard = (
         db.query(QMSStandard)
-        .options(
-            joinedload(QMSStandard.clauses)
-            .joinedload(QMSClause.evidence_links)
-        )
+        .options(joinedload(QMSStandard.clauses).joinedload(QMSClause.evidence_links))
         .filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id)
         .first()
     )
@@ -347,6 +355,7 @@ def delete_standard(
 
 
 # ============== QMS Clauses ==============
+
 
 @router.get("/{standard_id}/clauses", response_model=List[QMSClauseResponse])
 def list_clauses(
@@ -455,6 +464,7 @@ def delete_clause(
 
 # ============== Auto-Evidence Discovery ==============
 
+
 @router.get("/clauses/{clause_id}/auto-evidence", response_model=ClauseAutoEvidenceResponse)
 def get_clause_auto_evidence(
     clause_id: int,
@@ -494,11 +504,7 @@ def auto_link_standard(
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
-    clauses = (
-        db.query(QMSClause)
-        .filter(QMSClause.standard_id == standard_id)
-        .all()
-    )
+    clauses = db.query(QMSClause).filter(QMSClause.standard_id == standard_id).all()
 
     now = datetime.utcnow()
     total_created = 0
@@ -577,6 +583,7 @@ def auto_link_standard(
 
 # ============== Evidence Links ==============
 
+
 @router.post("/clauses/{clause_id}/evidence", response_model=QMSEvidenceResponse, status_code=status.HTTP_201_CREATED)
 def add_evidence(
     clause_id: int,
@@ -639,5 +646,3 @@ def delete_evidence(
         raise HTTPException(status_code=404, detail="Evidence not found")
     db.delete(evidence)
     db.commit()
-
-

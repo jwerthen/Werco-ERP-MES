@@ -8,15 +8,18 @@ Features:
 - Pattern-based cache invalidation
 - Cached decorator for easy caching of functions
 """
-from typing import Optional, Any, Callable, TypeVar, List
+
 import json
 from datetime import datetime
+from typing import Any, Callable, List, Optional, TypeVar
+
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
 try:
     import redis
+
     REDIS_AVAILABLE = True
 except ImportError:
     logger.warning("Redis not installed. Caching will be disabled.")
@@ -25,54 +28,56 @@ except ImportError:
 
 T = TypeVar('T')
 
+
 # Cache key prefixes
 class CacheKeys:
     """Cache key prefixes for different entity types."""
+
     PARTS = "parts"
     PARTS_LIST = "parts:list"
     PART = "parts:id"
-    
+
     WORK_CENTERS = "work_centers"
     WORK_CENTERS_LIST = "work_centers:list"
     WORK_CENTER = "work_centers:id"
-    
+
     CUSTOMERS = "customers"
     CUSTOMERS_LIST = "customers:list"
     CUSTOMER = "customers:id"
-    
+
     WORK_ORDERS = "work_orders"
     WORK_ORDER = "work_orders:id"
-    
+
     ROUTINGS = "routings"
     ROUTING = "routings:id"
-    
+
     BOMS = "boms"
     BOM = "boms:id"
-    
+
     DASHBOARD = "dashboard"
     ANALYTICS = "analytics"
     SEARCH = "search"
-    
+
     @staticmethod
     def part(part_id: int) -> str:
         return f"parts:id:{part_id}"
-    
+
     @staticmethod
     def work_center(wc_id: int) -> str:
         return f"work_centers:id:{wc_id}"
-    
+
     @staticmethod
     def customer(customer_id: int) -> str:
         return f"customers:id:{customer_id}"
-    
+
     @staticmethod
     def work_order(wo_id: int) -> str:
         return f"work_orders:id:{wo_id}"
-    
+
     @staticmethod
     def routing(routing_id: int) -> str:
         return f"routings:id:{routing_id}"
-    
+
     @staticmethod
     def bom(bom_id: int) -> str:
         return f"boms:id:{bom_id}"
@@ -81,11 +86,12 @@ class CacheKeys:
 # Default TTLs in seconds
 class CacheTTL:
     """Default cache TTLs for different data types."""
+
     SHORT = 60  # 1 minute - for frequently changing data
     MEDIUM = 300  # 5 minutes - for moderately stable data
     LONG = 900  # 15 minutes - for stable data
     VERY_LONG = 3600  # 1 hour - for rarely changing data
-    
+
     # Specific TTLs
     PARTS_LIST = 300  # 5 minutes
     WORK_CENTERS_LIST = 900  # 15 minutes (rarely changes)
@@ -117,7 +123,7 @@ class CacheBackend:
         """Initialize Redis connection."""
         if redis_url:
             self._redis_url = redis_url
-            
+
         if not REDIS_AVAILABLE or not self._redis_url:
             logger.info("Caching is disabled (Redis not available or not configured)")
             return
@@ -168,12 +174,7 @@ class CacheBackend:
             self._stats["misses"] += 1
         return None
 
-    def set(
-        self,
-        key: str,
-        value: Any,
-        ttl: Optional[int] = CacheTTL.MEDIUM
-    ) -> bool:
+    def set(self, key: str, value: Any, ttl: Optional[int] = CacheTTL.MEDIUM) -> bool:
         """Set value in cache with optional TTL."""
         if not self._enabled:
             return False
@@ -228,7 +229,7 @@ class CacheBackend:
         # Invalidate list cache
         self.delete_pattern(f"{entity_type}:list*")
         # Invalidate search cache that might include this entity
-        self.delete_pattern(f"search:*")
+        self.delete_pattern("search:*")
 
     def exists(self, key: str) -> bool:
         """Check if key exists in cache."""
@@ -241,17 +242,12 @@ class CacheBackend:
             logger.error(f"Cache exists error for key {key}: {e}")
             return False
 
-    def get_or_set(
-        self,
-        key: str,
-        factory: Callable[[], T],
-        ttl: Optional[int] = CacheTTL.MEDIUM
-    ) -> T:
+    def get_or_set(self, key: str, factory: Callable[[], T], ttl: Optional[int] = CacheTTL.MEDIUM) -> T:
         """Get value from cache or compute and set it."""
         cached = self.get(key)
         if cached is not None:
             return cached
-        
+
         value = factory()
         self.set(key, value, ttl)
         return value
@@ -279,5 +275,3 @@ def get_cached_work_centers_list() -> Optional[List[dict]]:
 def invalidate_work_centers_cache(wc_id: Optional[int] = None):
     """Invalidate work centers cache."""
     cache.invalidate_entity(CacheKeys.WORK_CENTERS, wc_id)
-
-

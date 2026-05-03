@@ -1,6 +1,7 @@
 """
 Tests for security headers and middleware behavior.
 """
+
 import pytest
 from fastapi.testclient import TestClient
 

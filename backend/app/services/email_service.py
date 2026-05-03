@@ -1,11 +1,12 @@
-import aiosmtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-from pathlib import Path
-from typing import Dict, Optional, List
-import os
 import logging
+import os
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
+from typing import Dict, List
+
+import aiosmtplib
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,7 @@ class EmailService:
         template_dir.mkdir(parents=True, exist_ok=True)
 
         self.env = Environment(
-            loader=FileSystemLoader(str(template_dir)),
-            autoescape=select_autoescape(['html', 'xml'])
+            loader=FileSystemLoader(str(template_dir)), autoescape=select_autoescape(['html', 'xml'])
         )
 
     async def send_email(
@@ -38,7 +38,7 @@ class EmailService:
         body: str = None,
         template: str = None,
         context: Dict = None,
-        html: bool = True
+        html: bool = True,
     ) -> bool:
         """
         Send email
@@ -104,10 +104,10 @@ class EmailService:
         """Convert HTML to plain text (basic)"""
         # Simple HTML to text conversion
         import re
+
         text = re.sub('<[^<]+?>', '', html)
         text = re.sub(r'\n\s*\n', '\n\n', text)
         return text.strip()
-
 
 
 # Singleton instance

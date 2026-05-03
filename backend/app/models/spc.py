@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -18,6 +22,7 @@ class ChartType(str, enum.Enum):
 
 class SPCCharacteristic(Base, TenantMixin):
     """SPC Characteristic - defines what measurement is being tracked"""
+
     __tablename__ = "spc_characteristics"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -43,11 +48,14 @@ class SPCCharacteristic(Base, TenantMixin):
     work_center = relationship("WorkCenter")
     control_limits = relationship("SPCControlLimit", back_populates="characteristic", cascade="all, delete-orphan")
     measurements = relationship("SPCMeasurement", back_populates="characteristic", cascade="all, delete-orphan")
-    capability_studies = relationship("SPCProcessCapability", back_populates="characteristic", cascade="all, delete-orphan")
+    capability_studies = relationship(
+        "SPCProcessCapability", back_populates="characteristic", cascade="all, delete-orphan"
+    )
 
 
 class SPCControlLimit(Base, TenantMixin):
     """Calculated control limits for an SPC characteristic"""
+
     __tablename__ = "spc_control_limits"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -71,6 +79,7 @@ class SPCControlLimit(Base, TenantMixin):
 
 class SPCMeasurement(Base, TenantMixin):
     """Individual measurement data point for SPC"""
+
     __tablename__ = "spc_measurements"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -95,6 +104,7 @@ class SPCMeasurement(Base, TenantMixin):
 
 class SPCProcessCapability(Base, TenantMixin):
     """Cp/Cpk process capability study results"""
+
     __tablename__ = "spc_process_capabilities"
 
     id = Column(Integer, primary_key=True, index=True)

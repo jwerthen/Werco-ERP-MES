@@ -1,25 +1,33 @@
-import os
 import logging
-from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id, require_role
-from app.models.user import User, UserRole
-from app.models.routing import Routing, RoutingOperation
-from app.models.part import Part
-from app.models.work_center import WorkCenter
 from app.models.bom import BOM, BOMItem
+from app.models.part import Part
+from app.models.routing import Routing, RoutingOperation
+from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
 from app.schemas.routing import (
-    RoutingCreate, RoutingUpdate, RoutingResponse, RoutingListResponse,
-    RoutingOperationCreate, RoutingOperationUpdate, RoutingOperationResponse,
-    PartSummary, WorkCenterSummary
+    PartSummary,
+    RoutingCreate,
+    RoutingListResponse,
+    RoutingOperationCreate,
+    RoutingOperationResponse,
+    RoutingOperationUpdate,
+    RoutingResponse,
+    RoutingUpdate,
 )
 from app.schemas.routing_generation import (
-    RoutingGenerationResult, RoutingCreateFromGeneration,
-    DrawingExtractionInfo, ProposedOperation,
+    DrawingExtractionInfo,
+    ProposedOperation,
+    RoutingCreateFromGeneration,
+    RoutingGenerationResult,
 )
 from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
 
@@ -34,29 +42,29 @@ def calculate_routing_totals(routing: Routing, db: Session):
     total_run = 0.0
     total_labor = 0.0
     total_overhead = 0.0
-    
+
     for op in routing.operations:
         if not op.is_active:
             continue
         total_setup += op.setup_hours
         total_run += op.run_hours_per_unit
-        
+
         # Get labor rate (override or work center rate)
         labor_rate = op.labor_rate_override
         if labor_rate is None and op.work_center:
             labor_rate = op.work_center.hourly_rate
         labor_rate = labor_rate or 0.0
-        
+
         # Calculate costs
         op_labor = (op.setup_hours + op.run_hours_per_unit) * labor_rate
         op_overhead = (op.setup_hours + op.run_hours_per_unit) * op.overhead_rate
-        
+
         if op.is_outside_operation:
             op_labor += op.outside_cost
-        
+
         total_labor += op_labor
         total_overhead += op_overhead
-    
+
     routing.total_setup_hours = total_setup
     routing.total_run_hours_per_unit = total_run
     routing.total_labor_cost = total_labor
@@ -108,11 +116,15 @@ async def generate_routing_from_drawing(
 
     # Check for existing active routing (warn but don't block)
     existing_routing_warning = None
-    existing = db.query(Routing).filter(
-        Routing.part_id == part_id,
-        Routing.company_id == company_id,
-        Routing.is_active == True,
-    ).first()
+    existing = (
+        db.query(Routing)
+        .filter(
+            Routing.part_id == part_id,
+            Routing.company_id == company_id,
+            Routing.is_active == True,
+        )
+        .first()
+    )
     if existing:
         existing_routing_warning = (
             f"Part already has an active routing (Rev {existing.revision}, status: {existing.status}). "
@@ -121,10 +133,14 @@ async def generate_routing_from_drawing(
 
     # Build work_centers_by_type lookup from this company's active work centers.
     allowed_work_center_types = get_work_center_types(db, include_in_use=True, company_id=company_id)
-    active_wcs = db.query(WorkCenter).filter(
-        WorkCenter.company_id == company_id,
-        WorkCenter.is_active == True,
-    ).all()
+    active_wcs = (
+        db.query(WorkCenter)
+        .filter(
+            WorkCenter.company_id == company_id,
+            WorkCenter.is_active == True,
+        )
+        .all()
+    )
     work_centers_by_type: Dict[str, List[Dict[str, Any]]] = {}
     for wc in active_wcs:
         wc_type = normalize_work_center_type(wc.work_center_type or "")
@@ -141,6 +157,7 @@ async def generate_routing_from_drawing(
 
     if ext == ".pdf":
         from app.services.pdf_service import extract_text_from_pdf
+
         result = extract_text_from_pdf(str(file_path))
         drawing_text = result.text
         is_ocr = result.is_ocr
@@ -149,6 +166,7 @@ async def generate_routing_from_drawing(
 
     elif ext == ".dxf":
         from app.services.rfq_parsing_service import parse_dxf_geometry
+
         geometry = parse_dxf_geometry(str(file_path), file.filename or safe_name)
         # Build a text summary from geometry for the LLM
         parts_desc = []
@@ -165,22 +183,19 @@ async def generate_routing_from_drawing(
             w = (bbox.get("max_x", 0) or 0) - (bbox.get("min_x", 0) or 0)
             h = (bbox.get("max_y", 0) or 0) - (bbox.get("min_y", 0) or 0)
             parts_desc.append(f"Bounding box: {w:.1f} x {h:.1f} inches")
-        drawing_text = (
-            f"DXF flat pattern for part {part.part_number} ({part.name}).\n"
-            + "\n".join(parts_desc)
-        )
+        drawing_text = f"DXF flat pattern for part {part.part_number} ({part.name}).\n" + "\n".join(parts_desc)
 
     elif ext in (".step", ".stp"):
         from app.services.rfq_parsing_service import parse_step_fallback
+
         geometry = parse_step_fallback(str(file_path), file.filename or safe_name)
-        drawing_text = (
-            f"STEP file for part {part.part_number} ({part.name})."
-        )
+        drawing_text = f"STEP file for part {part.part_number} ({part.name})."
         if geometry.get("warning"):
             warnings.append(geometry["warning"])
 
     # Generate the draft routing
     from app.services.routing_generation_service import generate_draft_routing
+
     gen_result = generate_draft_routing(
         drawing_text=drawing_text,
         geometry=geometry,
@@ -267,11 +282,15 @@ def create_routing_from_generation(
         raise HTTPException(status_code=404, detail="Part not found")
 
     # Check for existing active routing
-    existing = db.query(Routing).filter(
-        Routing.part_id == data.part_id,
-        Routing.company_id == company_id,
-        Routing.is_active == True,
-    ).first()
+    existing = (
+        db.query(Routing)
+        .filter(
+            Routing.part_id == data.part_id,
+            Routing.company_id == company_id,
+            Routing.is_active == True,
+        )
+        .first()
+    )
     if existing:
         raise HTTPException(
             status_code=400,
@@ -280,10 +299,14 @@ def create_routing_from_generation(
 
     # Validate all work_center_ids exist
     for op in data.operations:
-        wc = db.query(WorkCenter).filter(
-            WorkCenter.id == op.work_center_id,
-            WorkCenter.company_id == company_id,
-        ).first()
+        wc = (
+            db.query(WorkCenter)
+            .filter(
+                WorkCenter.id == op.work_center_id,
+                WorkCenter.company_id == company_id,
+            )
+            .first()
+        )
         if not wc:
             raise HTTPException(
                 status_code=400,
@@ -339,14 +362,18 @@ def list_routings(
     include_bom_components: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all routings with optional filtering"""
-    query = db.query(Routing).filter(Routing.company_id == company_id).options(joinedload(Routing.part), joinedload(Routing.operations))
-    
+    query = (
+        db.query(Routing)
+        .filter(Routing.company_id == company_id)
+        .options(joinedload(Routing.part), joinedload(Routing.operations))
+    )
+
     if active_only:
         query = query.filter(Routing.is_active == True)
-    
+
     if part_id:
         query = query.filter(Routing.part_id == part_id)
     elif not include_bom_components:
@@ -359,32 +386,35 @@ def list_routings(
             )
         )
         query = query.filter(~Routing.part_id.in_(component_part_ids))
-    
+
     if status:
         query = query.filter(Routing.status == status)
-    
+
     routings = query.order_by(Routing.created_at.desc()).offset(skip).limit(limit).all()
-    
+
     result = []
     for r in routings:
-        result.append(RoutingListResponse(
-            id=r.id,
-            part_id=r.part_id,
-            part=PartSummary(
-                id=r.part.id,
-                part_number=r.part.part_number,
-                name=r.part.name,
-                part_type=r.part.part_type.value
-            ) if r.part else None,
-            revision=r.revision,
-            status=r.status,
-            is_active=r.is_active,
-            total_setup_hours=r.total_setup_hours,
-            total_run_hours_per_unit=r.total_run_hours_per_unit,
-            operation_count=len([op for op in r.operations if op.is_active]),
-            created_at=r.created_at
-        ))
-    
+        result.append(
+            RoutingListResponse(
+                id=r.id,
+                part_id=r.part_id,
+                part=(
+                    PartSummary(
+                        id=r.part.id, part_number=r.part.part_number, name=r.part.name, part_type=r.part.part_type.value
+                    )
+                    if r.part
+                    else None
+                ),
+                revision=r.revision,
+                status=r.status,
+                is_active=r.is_active,
+                total_setup_hours=r.total_setup_hours,
+                total_run_hours_per_unit=r.total_run_hours_per_unit,
+                operation_count=len([op for op in r.operations if op.is_active]),
+                created_at=r.created_at,
+            )
+        )
+
     return result
 
 
@@ -393,31 +423,28 @@ def create_routing(
     routing_in: RoutingCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new routing for a part"""
     # Check part exists
     part = db.query(Part).filter(Part.id == routing_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    
+
     # Check for existing active routing
-    existing = db.query(Routing).filter(
-        Routing.part_id == routing_in.part_id,
-        Routing.company_id == company_id,
-        Routing.is_active == True
-    ).first()
-    
+    existing = (
+        db.query(Routing)
+        .filter(Routing.part_id == routing_in.part_id, Routing.company_id == company_id, Routing.is_active == True)
+        .first()
+    )
+
     if existing:
         raise HTTPException(
             status_code=400,
-            detail=f"Part already has an active routing (Rev {existing.revision}). Deactivate it first or create a new revision."
+            detail=f"Part already has an active routing (Rev {existing.revision}). Deactivate it first or create a new revision.",
         )
-    
-    routing = Routing(
-        **routing_in.model_dump(),
-        created_by=current_user.id
-    )
+
+    routing = Routing(**routing_in.model_dump(), created_by=current_user.id)
     routing.company_id = company_id
     db.add(routing)
     db.commit()
@@ -431,17 +458,19 @@ def get_routing(
     routing_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get routing details with operations"""
-    routing = db.query(Routing).options(
-        joinedload(Routing.part),
-        joinedload(Routing.operations).joinedload(RoutingOperation.work_center)
-    ).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
-    
+    routing = (
+        db.query(Routing)
+        .options(joinedload(Routing.part), joinedload(Routing.operations).joinedload(RoutingOperation.work_center))
+        .filter(Routing.id == routing_id, Routing.company_id == company_id)
+        .first()
+    )
+
     if not routing:
         raise HTTPException(status_code=404, detail="Routing not found")
-    
+
     return routing
 
 
@@ -450,18 +479,16 @@ def get_routing_by_part(
     part_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get the active routing for a part"""
-    routing = db.query(Routing).options(
-        joinedload(Routing.part),
-        joinedload(Routing.operations).joinedload(RoutingOperation.work_center)
-    ).filter(
-        Routing.part_id == part_id,
-        Routing.company_id == company_id,
-        Routing.is_active == True
-    ).first()
-    
+    routing = (
+        db.query(Routing)
+        .options(joinedload(Routing.part), joinedload(Routing.operations).joinedload(RoutingOperation.work_center))
+        .filter(Routing.part_id == part_id, Routing.company_id == company_id, Routing.is_active == True)
+        .first()
+    )
+
     return routing
 
 
@@ -471,7 +498,7 @@ def update_routing(
     routing_in: RoutingUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update routing details"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -481,14 +508,16 @@ def update_routing(
     update_data = routing_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(routing, field, value)
-    
+
     db.commit()
     db.refresh(routing)
-    
-    return db.query(Routing).options(
-        joinedload(Routing.part),
-        joinedload(Routing.operations).joinedload(RoutingOperation.work_center)
-    ).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
+
+    return (
+        db.query(Routing)
+        .options(joinedload(Routing.part), joinedload(Routing.operations).joinedload(RoutingOperation.work_center))
+        .filter(Routing.id == routing_id, Routing.company_id == company_id)
+        .first()
+    )
 
 
 @router.post("/{routing_id}/release")
@@ -496,7 +525,7 @@ def release_routing(
     routing_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Release a routing for production use"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -505,17 +534,17 @@ def release_routing(
 
     if routing.status == "released":
         raise HTTPException(status_code=400, detail="Routing is already released")
-    
+
     if not routing.operations:
         raise HTTPException(status_code=400, detail="Cannot release routing with no operations")
-    
+
     routing.status = "released"
     routing.effective_date = datetime.utcnow()
     routing.approved_by = current_user.id
     routing.approved_at = datetime.utcnow()
-    
+
     db.commit()
-    
+
     return {"message": "Routing released", "routing_id": routing_id}
 
 
@@ -524,13 +553,13 @@ def delete_routing(
     routing_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Delete a routing - hard delete for draft, soft delete for released"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
     if not routing:
         raise HTTPException(status_code=404, detail="Routing not found")
-    
+
     if routing.status == "draft":
         # Hard delete draft routings
         for op in routing.operations:
@@ -554,7 +583,7 @@ def add_operation(
     operation_in: RoutingOperationCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Add an operation to a routing"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -565,38 +594,41 @@ def add_operation(
         raise HTTPException(status_code=400, detail="Cannot modify released routing")
 
     # Verify work center exists
-    work_center = db.query(WorkCenter).filter(
-        WorkCenter.id == operation_in.work_center_id,
-        WorkCenter.company_id == company_id,
-    ).first()
+    work_center = (
+        db.query(WorkCenter)
+        .filter(
+            WorkCenter.id == operation_in.work_center_id,
+            WorkCenter.company_id == company_id,
+        )
+        .first()
+    )
     if not work_center:
         raise HTTPException(status_code=404, detail="Work center not found")
-    
+
     # Auto-generate operation number if not provided
     op_data = operation_in.model_dump()
     if not op_data.get('operation_number'):
         op_data['operation_number'] = f"Op {operation_in.sequence}"
-    
-    operation = RoutingOperation(
-        routing_id=routing_id,
-        company_id=company_id,
-        **op_data
-    )
+
+    operation = RoutingOperation(routing_id=routing_id, company_id=company_id, **op_data)
     db.add(operation)
-    
+
     # Recalculate totals
     db.flush()
     db.refresh(routing)
     calculate_routing_totals(routing, db)
-    
+
     db.commit()
     db.refresh(operation)
-    
+
     # Load work center for response
-    operation = db.query(RoutingOperation).options(
-        joinedload(RoutingOperation.work_center)
-    ).filter(RoutingOperation.id == operation.id).first()
-    
+    operation = (
+        db.query(RoutingOperation)
+        .options(joinedload(RoutingOperation.work_center))
+        .filter(RoutingOperation.id == operation.id)
+        .first()
+    )
+
     return operation
 
 
@@ -607,7 +639,7 @@ def update_operation(
     operation_in: RoutingOperationUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an operation"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -617,37 +649,45 @@ def update_operation(
     if routing.status == "released":
         raise HTTPException(status_code=400, detail="Cannot modify released routing")
 
-    operation = db.query(RoutingOperation).filter(
-        RoutingOperation.id == operation_id,
-        RoutingOperation.routing_id == routing_id
-    ).first()
-    
+    operation = (
+        db.query(RoutingOperation)
+        .filter(RoutingOperation.id == operation_id, RoutingOperation.routing_id == routing_id)
+        .first()
+    )
+
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    
+
     update_data = operation_in.model_dump(exclude_unset=True)
-    
+
     # Verify work center if changing
     if "work_center_id" in update_data:
-        work_center = db.query(WorkCenter).filter(
-            WorkCenter.id == update_data["work_center_id"],
-            WorkCenter.company_id == company_id,
-        ).first()
+        work_center = (
+            db.query(WorkCenter)
+            .filter(
+                WorkCenter.id == update_data["work_center_id"],
+                WorkCenter.company_id == company_id,
+            )
+            .first()
+        )
         if not work_center:
             raise HTTPException(status_code=404, detail="Work center not found")
-    
+
     for field, value in update_data.items():
         setattr(operation, field, value)
-    
+
     # Recalculate totals
     calculate_routing_totals(routing, db)
-    
+
     db.commit()
-    
-    operation = db.query(RoutingOperation).options(
-        joinedload(RoutingOperation.work_center)
-    ).filter(RoutingOperation.id == operation_id).first()
-    
+
+    operation = (
+        db.query(RoutingOperation)
+        .options(joinedload(RoutingOperation.work_center))
+        .filter(RoutingOperation.id == operation_id)
+        .first()
+    )
+
     return operation
 
 
@@ -657,7 +697,7 @@ def delete_operation(
     operation_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Delete an operation from a routing"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -667,21 +707,22 @@ def delete_operation(
     if routing.status == "released":
         raise HTTPException(status_code=400, detail="Cannot modify released routing")
 
-    operation = db.query(RoutingOperation).filter(
-        RoutingOperation.id == operation_id,
-        RoutingOperation.routing_id == routing_id
-    ).first()
-    
+    operation = (
+        db.query(RoutingOperation)
+        .filter(RoutingOperation.id == operation_id, RoutingOperation.routing_id == routing_id)
+        .first()
+    )
+
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    
+
     db.delete(operation)
-    
+
     # Recalculate totals
     calculate_routing_totals(routing, db)
-    
+
     db.commit()
-    
+
     return {"message": "Operation deleted"}
 
 
@@ -691,7 +732,7 @@ def reorder_operations(
     operation_order: List[dict],  # [{"id": 1, "sequence": 10}, {"id": 2, "sequence": 20}]
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Reorder operations in a routing"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -700,18 +741,19 @@ def reorder_operations(
 
     if routing.status == "released":
         raise HTTPException(status_code=400, detail="Cannot modify released routing")
-    
+
     for item in operation_order:
-        operation = db.query(RoutingOperation).filter(
-            RoutingOperation.id == item["id"],
-            RoutingOperation.routing_id == routing_id
-        ).first()
+        operation = (
+            db.query(RoutingOperation)
+            .filter(RoutingOperation.id == item["id"], RoutingOperation.routing_id == routing_id)
+            .first()
+        )
         if operation:
             operation.sequence = item["sequence"]
             operation.operation_number = f"Op {item['sequence']}"
-    
+
     db.commit()
-    
+
     return {"message": "Operations reordered"}
 
 
@@ -722,33 +764,36 @@ def copy_routing(
     new_revision: str = "A",
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Copy a routing to another part or create new revision"""
-    source = db.query(Routing).options(
-        joinedload(Routing.operations)
-    ).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
-    
+    source = (
+        db.query(Routing)
+        .options(joinedload(Routing.operations))
+        .filter(Routing.id == routing_id, Routing.company_id == company_id)
+        .first()
+    )
+
     if not source:
         raise HTTPException(status_code=404, detail="Source routing not found")
-    
+
     # Check target part exists
     target_part = db.query(Part).filter(Part.id == target_part_id, Part.company_id == company_id).first()
     if not target_part:
         raise HTTPException(status_code=404, detail="Target part not found")
-    
+
     # Create new routing
     new_routing = Routing(
         part_id=target_part_id,
         revision=new_revision,
         description=source.description,
         status="draft",
-        created_by=current_user.id
+        created_by=current_user.id,
     )
     new_routing.company_id = company_id
     db.add(new_routing)
     db.flush()
-    
+
     # Copy operations
     for op in source.operations:
         new_op = RoutingOperation(
@@ -776,15 +821,15 @@ def copy_routing(
             is_outside_operation=op.is_outside_operation,
             vendor_id=op.vendor_id,
             outside_cost=op.outside_cost,
-            outside_lead_days=op.outside_lead_days
+            outside_lead_days=op.outside_lead_days,
         )
         db.add(new_op)
-    
+
     # Calculate totals
     db.flush()
     db.refresh(new_routing)
     calculate_routing_totals(new_routing, db)
-    
+
     db.commit()
-    
+
     return {"message": "Routing copied", "new_routing_id": new_routing.id}

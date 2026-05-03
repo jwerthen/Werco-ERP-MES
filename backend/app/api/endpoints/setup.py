@@ -21,11 +21,15 @@ router = APIRouter()
 
 
 def _active_bom_for_part(db: Session, part_id: int, company_id: int) -> Optional[BOM]:
-    return db.query(BOM).filter(
-        BOM.part_id == part_id,
-        BOM.company_id == company_id,
-        BOM.is_active == True,
-    ).first()
+    return (
+        db.query(BOM)
+        .filter(
+            BOM.part_id == part_id,
+            BOM.company_id == company_id,
+            BOM.is_active == True,
+        )
+        .first()
+    )
 
 
 def _bom_has_released_component_routing(
@@ -37,21 +41,29 @@ def _bom_has_released_component_routing(
     if visited_part_ids is None:
         visited_part_ids = {bom.part_id}
 
-    items = db.query(BOMItem).filter(
-        BOMItem.bom_id == bom.id,
-        BOMItem.company_id == company_id,
-    ).all()
+    items = (
+        db.query(BOMItem)
+        .filter(
+            BOMItem.bom_id == bom.id,
+            BOMItem.company_id == company_id,
+        )
+        .all()
+    )
 
     for item in items:
         if not item.component_part_id or item.component_part_id in visited_part_ids:
             continue
 
-        routing_exists = db.query(Routing.id).filter(
-            Routing.part_id == item.component_part_id,
-            Routing.company_id == company_id,
-            Routing.is_active == True,
-            Routing.status == "released",
-        ).first()
+        routing_exists = (
+            db.query(Routing.id)
+            .filter(
+                Routing.part_id == item.component_part_id,
+                Routing.company_id == company_id,
+                Routing.is_active == True,
+                Routing.status == "released",
+            )
+            .first()
+        )
         if routing_exists:
             return True
 
@@ -146,7 +158,9 @@ def get_setup_health(
     component_part_ids = _component_part_ids(db, company_id)
 
     counts = {
-        "users": _count(db, db.query(func.count(User.id)).filter(User.company_id == company_id, User.is_active == True)),
+        "users": _count(
+            db, db.query(func.count(User.id)).filter(User.company_id == company_id, User.is_active == True)
+        ),
         "employees": _count(
             db,
             db.query(func.count(User.id)).filter(
@@ -155,8 +169,18 @@ def get_setup_health(
                 User.employee_id.isnot(None),
             ),
         ),
-        "work_centers": _count(db, db.query(func.count(WorkCenter.id)).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True)),
-        "parts": _count(db, db.query(func.count(Part.id)).filter(Part.company_id == company_id, Part.is_active == True, Part.is_deleted == False)),
+        "work_centers": _count(
+            db,
+            db.query(func.count(WorkCenter.id)).filter(
+                WorkCenter.company_id == company_id, WorkCenter.is_active == True
+            ),
+        ),
+        "parts": _count(
+            db,
+            db.query(func.count(Part.id)).filter(
+                Part.company_id == company_id, Part.is_active == True, Part.is_deleted == False
+            ),
+        ),
         "make_parts": _count(db, db.query(func.count(active_make_parts.c.id))),
         "top_level_make_parts": _count(
             db,
@@ -169,28 +193,76 @@ def get_setup_health(
             ),
         ),
         "boms": _count(db, db.query(func.count(BOM.id)).filter(BOM.company_id == company_id, BOM.is_active == True)),
-        "released_boms": _count(db, db.query(func.count(BOM.id)).filter(BOM.company_id == company_id, BOM.is_active == True, BOM.status == "released")),
-        "routings": _count(db, db.query(func.count(Routing.id)).filter(Routing.company_id == company_id, Routing.is_active == True)),
-        "released_routings": _count(db, db.query(func.count(Routing.id)).filter(Routing.company_id == company_id, Routing.is_active == True, Routing.status == "released")),
+        "released_boms": _count(
+            db,
+            db.query(func.count(BOM.id)).filter(
+                BOM.company_id == company_id, BOM.is_active == True, BOM.status == "released"
+            ),
+        ),
+        "routings": _count(
+            db, db.query(func.count(Routing.id)).filter(Routing.company_id == company_id, Routing.is_active == True)
+        ),
+        "released_routings": _count(
+            db,
+            db.query(func.count(Routing.id)).filter(
+                Routing.company_id == company_id, Routing.is_active == True, Routing.status == "released"
+            ),
+        ),
         "work_orders": _count(db, db.query(func.count(WorkOrder.id)).filter(WorkOrder.company_id == company_id)),
-        "customers": _count(db, db.query(func.count(Customer.id)).filter(Customer.company_id == company_id, Customer.is_active == True, Customer.is_deleted == False)),
-        "vendors": _count(db, db.query(func.count(Vendor.id)).filter(Vendor.company_id == company_id, Vendor.is_active == True)),
-        "inventory_items": _count(db, db.query(func.count(InventoryItem.id)).filter(InventoryItem.company_id == company_id, InventoryItem.is_active == True)),
+        "customers": _count(
+            db,
+            db.query(func.count(Customer.id)).filter(
+                Customer.company_id == company_id, Customer.is_active == True, Customer.is_deleted == False
+            ),
+        ),
+        "vendors": _count(
+            db, db.query(func.count(Vendor.id)).filter(Vendor.company_id == company_id, Vendor.is_active == True)
+        ),
+        "inventory_items": _count(
+            db,
+            db.query(func.count(InventoryItem.id)).filter(
+                InventoryItem.company_id == company_id, InventoryItem.is_active == True
+            ),
+        ),
     }
 
     steps = [
         _step("company", "Company account", 1, "/admin/settings", "Company account is not initialized."),
-        _step("employees", "Employees imported", counts["employees"], "/import-center?type=employees", "Import or add operator employees."),
-        _step("work_centers", "Work centers configured", counts["work_centers"], "/work-centers", "Create at least one active work center."),
+        _step(
+            "employees",
+            "Employees imported",
+            counts["employees"],
+            "/import-center?type=employees",
+            "Import or add operator employees.",
+        ),
+        _step(
+            "work_centers",
+            "Work centers configured",
+            counts["work_centers"],
+            "/work-centers",
+            "Create at least one active work center.",
+        ),
         _step("parts", "Parts loaded", counts["parts"], "/import-center?type=parts", "Import or create parts."),
-        _step("boms", "BOMs created", counts["boms"], "/import-center?type=boms", "Create or import BOMs for assemblies."),
-        _step("routings", "Routings created", counts["routings"], "/routing", "Create or generate routings for make parts."),
-        _step("work_orders", "First work order", counts["work_orders"], "/work-orders/new", "Create the first work order."),
+        _step(
+            "boms", "BOMs created", counts["boms"], "/import-center?type=boms", "Create or import BOMs for assemblies."
+        ),
+        _step(
+            "routings",
+            "Routings created",
+            counts["routings"],
+            "/routing",
+            "Create or generate routings for make parts.",
+        ),
+        _step(
+            "work_orders", "First work order", counts["work_orders"], "/work-orders/new", "Create the first work order."
+        ),
     ]
     progress = round(sum(1 for step in steps if step.status == "complete") / len(steps) * 100)
 
     make_part_ids_with_bom = db.query(BOM.part_id).filter(BOM.company_id == company_id, BOM.is_active == True)
-    make_part_ids_with_routing = db.query(Routing.part_id).filter(Routing.company_id == company_id, Routing.is_active == True)
+    make_part_ids_with_routing = db.query(Routing.part_id).filter(
+        Routing.company_id == company_id, Routing.is_active == True
+    )
 
     parts_without_bom = _count(
         db,
@@ -314,7 +386,11 @@ def get_part_readiness(
     warnings: List[str] = []
     checks: Dict[str, str] = {}
 
-    routing = db.query(Routing).filter(Routing.part_id == part_id, Routing.company_id == company_id, Routing.is_active == True).first()
+    routing = (
+        db.query(Routing)
+        .filter(Routing.part_id == part_id, Routing.company_id == company_id, Routing.is_active == True)
+        .first()
+    )
     bom = _active_bom_for_part(db, part_id, company_id)
 
     is_bom_routed_part = part.part_type == PartType.ASSEMBLY or bom is not None
@@ -380,7 +456,9 @@ def get_part_readiness(
         .filter(
             WorkOrder.part_id == part_id,
             WorkOrder.company_id == company_id,
-            WorkOrder.status.in_([WorkOrderStatus.DRAFT, WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]),
+            WorkOrder.status.in_(
+                [WorkOrderStatus.DRAFT, WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]
+            ),
         )
         .scalar()
         or 0

@@ -1,22 +1,31 @@
-from typing import Optional
-from collections import defaultdict
-import math
-from datetime import datetime, date
 import hashlib
 import json
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Header, Response
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_, func, case
+import math
+from collections import defaultdict
+from datetime import date, datetime
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
-from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
-from app.models.user import User
-from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, OperationStatus
-from app.models.work_center import WorkCenter
-from app.models.time_entry import TimeEntry, TimeEntryType
-from app.models.audit_log import AuditLog
-from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
+from sqlalchemy import and_, case, func, or_
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user
+from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
+from app.core.websocket import (
+    broadcast_dashboard_update,
+    broadcast_shop_floor_update,
+    broadcast_work_order_update,
+    manager,
+)
+from app.db.database import get_db
+from app.models.audit_log import AuditLog
+from app.models.time_entry import TimeEntry, TimeEntryType
+from app.models.user import User
+from app.models.work_center import WorkCenter
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
 from app.services.audit_service import AuditService
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_state_service import (
@@ -26,13 +35,6 @@ from app.services.work_order_state_service import (
     release_next_ready_operation,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
-)
-from app.core.realtime import safe_broadcast
-from app.core.websocket import (
-    manager,
-    broadcast_dashboard_update,
-    broadcast_shop_floor_update,
-    broadcast_work_order_update,
 )
 
 
@@ -45,6 +47,7 @@ class ProductionReportRequest(BaseModel):
     quantity_complete_delta: float = 0.0
     quantity_scrapped_delta: float = 0.0
     notes: Optional[str] = None
+
 
 router = APIRouter()
 
@@ -59,7 +62,8 @@ def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dic
         allow_same_work_center=True,
     )
     can_check_in = (
-        operation.status in [
+        operation.status
+        in [
             OperationStatus.PENDING,
             OperationStatus.READY,
             OperationStatus.IN_PROGRESS,
@@ -72,11 +76,12 @@ def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dic
         "blocked_by_previous_operations": blocked,
     }
 
+
 @router.get("/my-active-job")
 def get_my_active_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get the current user's active time entries (clocked in jobs)"""
     # Eager-load operation, work_order, and work_order.part in a single
@@ -105,24 +110,32 @@ def get_my_active_job(
         operation = entry.operation
         work_order = entry.work_order
 
-        jobs.append({
-            "time_entry_id": entry.id,
-            "clock_in": to_utc_iso(entry.clock_in),
-            "entry_type": entry.entry_type,
-            "work_order_id": entry.work_order_id,
-            "operation_id": entry.operation_id,
-            "work_center_id": entry.work_center_id,
-            "work_order_number": work_order.work_order_number if work_order else None,
-            "part_number": work_order.part.part_number if work_order and work_order.part else None,
-            "part_name": work_order.part.name if work_order and work_order.part else None,
-            "operation_name": operation.name if operation else None,
-            "operation_number": operation.operation_number if operation else None,
-            "work_center_name": entry.work_center.name if entry.work_center else None,
-            "quantity_ordered": operation_target_quantity(operation, work_order),
-            "work_order_quantity_ordered": float(work_order.quantity_ordered) if work_order and work_order.quantity_ordered else 0,
-            "component_quantity": float(operation.component_quantity) if operation and operation.component_quantity else None,
-            "quantity_complete": float(operation.quantity_complete) if operation and operation.quantity_complete else 0,
-        })
+        jobs.append(
+            {
+                "time_entry_id": entry.id,
+                "clock_in": to_utc_iso(entry.clock_in),
+                "entry_type": entry.entry_type,
+                "work_order_id": entry.work_order_id,
+                "operation_id": entry.operation_id,
+                "work_center_id": entry.work_center_id,
+                "work_order_number": work_order.work_order_number if work_order else None,
+                "part_number": work_order.part.part_number if work_order and work_order.part else None,
+                "part_name": work_order.part.name if work_order and work_order.part else None,
+                "operation_name": operation.name if operation else None,
+                "operation_number": operation.operation_number if operation else None,
+                "work_center_name": entry.work_center.name if entry.work_center else None,
+                "quantity_ordered": operation_target_quantity(operation, work_order),
+                "work_order_quantity_ordered": (
+                    float(work_order.quantity_ordered) if work_order and work_order.quantity_ordered else 0
+                ),
+                "component_quantity": (
+                    float(operation.component_quantity) if operation and operation.component_quantity else None
+                ),
+                "quantity_complete": (
+                    float(operation.quantity_complete) if operation and operation.quantity_complete else 0
+                ),
+            }
+        )
 
     return {
         "active_jobs": jobs,
@@ -135,32 +148,36 @@ def clock_in(
     clock_in_data: ClockIn,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Clock in to a work order operation"""
     # Prevent duplicate clock-ins for the same operation
-    existing = db.query(TimeEntry).filter(
-        and_(
-            TimeEntry.user_id == current_user.id,
-            TimeEntry.operation_id == clock_in_data.operation_id,
-            TimeEntry.clock_out.is_(None)
+    existing = (
+        db.query(TimeEntry)
+        .filter(
+            and_(
+                TimeEntry.user_id == current_user.id,
+                TimeEntry.operation_id == clock_in_data.operation_id,
+                TimeEntry.clock_out.is_(None),
+            )
         )
-    ).first()
-    
+        .first()
+    )
+
     if existing:
-        raise HTTPException(
-            status_code=400,
-            detail="You are already clocked in to this operation."
-        )
-    
+        raise HTTPException(status_code=400, detail="You are already clocked in to this operation.")
+
     # Verify work order and operation
-    operation = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
-    ).filter(WorkOrderOperation.id == clock_in_data.operation_id).first()
-    
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
+        .filter(WorkOrderOperation.id == clock_in_data.operation_id)
+        .first()
+    )
+
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    
+
     if operation.work_order_id != clock_in_data.work_order_id:
         raise HTTPException(status_code=400, detail="Operation does not belong to this work order")
 
@@ -182,23 +199,20 @@ def clock_in(
         operation.work_center_id,
         allow_same_work_center=True,
     ):
-        raise HTTPException(
-            status_code=400,
-            detail="Previous operations must be completed first"
-        )
-    
+        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
+
     # Update operation status
     if operation.status in [OperationStatus.PENDING, OperationStatus.READY]:
         operation.status = OperationStatus.IN_PROGRESS
         if not operation.actual_start:
             operation.actual_start = datetime.utcnow()
         operation.started_by = current_user.id
-    
+
     # Update work order status
     if work_order.status == WorkOrderStatus.RELEASED:
         work_order.status = WorkOrderStatus.IN_PROGRESS
         work_order.actual_start = datetime.utcnow()
-    
+
     # Create time entry
     time_entry = TimeEntry(
         user_id=current_user.id,
@@ -210,7 +224,7 @@ def clock_in(
         notes=clock_in_data.notes,
         company_id=company_id,
     )
-    
+
     db.add(time_entry)
     db.commit()
     db.refresh(time_entry)
@@ -223,7 +237,7 @@ def clock_in(
             "work_order_id": clock_in_data.work_order_id,
             "operation_id": clock_in_data.operation_id,
             "user_id": current_user.id,
-        }
+        },
     )
     safe_broadcast(
         broadcast_work_order_update,
@@ -232,7 +246,7 @@ def clock_in(
             "event": "clock_in",
             "operation_id": clock_in_data.operation_id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
-        }
+        },
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -240,9 +254,9 @@ def clock_in(
             "event": "clock_in",
             "work_order_id": work_order.id,
             "operation_id": clock_in_data.operation_id,
-        }
+        },
     )
-    
+
     return time_entry
 
 
@@ -252,19 +266,16 @@ def clock_out(
     clock_out_data: ClockOut,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Clock out from a work order operation"""
-    time_entry = db.query(TimeEntry).filter(
-        and_(
-            TimeEntry.id == time_entry_id,
-            TimeEntry.user_id == current_user.id
-        )
-    ).first()
-    
+    time_entry = (
+        db.query(TimeEntry).filter(and_(TimeEntry.id == time_entry_id, TimeEntry.user_id == current_user.id)).first()
+    )
+
     if not time_entry:
         raise HTTPException(status_code=404, detail="Time entry not found")
-    
+
     if time_entry.clock_out:
         raise HTTPException(status_code=400, detail="Already clocked out")
 
@@ -279,9 +290,7 @@ def clock_out(
     # Look up related work order / operation BEFORE mutating the time entry
     # so we can return a clean 404 instead of leaving a half-updated row
     # in the session if the referenced work order was deleted.
-    work_order = db.query(WorkOrder).filter(
-        WorkOrder.id == time_entry.work_order_id
-    ).first()
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == time_entry.work_order_id).first()
     if not work_order:
         raise HTTPException(
             status_code=404,
@@ -290,9 +299,7 @@ def clock_out(
 
     operation = None
     if time_entry.operation_id is not None:
-        operation = db.query(WorkOrderOperation).filter(
-            WorkOrderOperation.id == time_entry.operation_id
-        ).first()
+        operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == time_entry.operation_id).first()
         if not operation:
             raise HTTPException(
                 status_code=404,
@@ -306,8 +313,12 @@ def clock_out(
     # Update time entry
     time_entry.clock_out = datetime.utcnow()
     time_entry.duration_hours = (time_entry.clock_out - time_entry.clock_in).total_seconds() / 3600
-    time_entry.quantity_produced = float(time_entry.quantity_produced or 0) + float(clock_out_data.quantity_produced or 0)
-    time_entry.quantity_scrapped = float(time_entry.quantity_scrapped or 0) + float(clock_out_data.quantity_scrapped or 0)
+    time_entry.quantity_produced = float(time_entry.quantity_produced or 0) + float(
+        clock_out_data.quantity_produced or 0
+    )
+    time_entry.quantity_scrapped = float(time_entry.quantity_scrapped or 0) + float(
+        clock_out_data.quantity_scrapped or 0
+    )
     time_entry.scrap_reason = clock_out_data.scrap_reason
     time_entry.notes = clock_out_data.notes or time_entry.notes
 
@@ -317,8 +328,12 @@ def clock_out(
         else:
             operation.actual_run_hours += time_entry.duration_hours
 
-        operation.quantity_complete = float(operation.quantity_complete or 0) + float(clock_out_data.quantity_produced or 0)
-        operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + float(clock_out_data.quantity_scrapped or 0)
+        operation.quantity_complete = float(operation.quantity_complete or 0) + float(
+            clock_out_data.quantity_produced or 0
+        )
+        operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + float(
+            clock_out_data.quantity_scrapped or 0
+        )
 
     work_order.actual_hours += time_entry.duration_hours
 
@@ -332,21 +347,24 @@ def clock_out(
             operation.actual_end = datetime.utcnow()
             operation.completed_by = current_user.id
 
-            remaining_ops = db.query(WorkOrderOperation).filter(
-                and_(
-                    WorkOrderOperation.work_order_id == work_order.id,
-                    WorkOrderOperation.id != operation.id,
-                    WorkOrderOperation.status != OperationStatus.COMPLETE
+            remaining_ops = (
+                db.query(WorkOrderOperation)
+                .filter(
+                    and_(
+                        WorkOrderOperation.work_order_id == work_order.id,
+                        WorkOrderOperation.id != operation.id,
+                        WorkOrderOperation.status != OperationStatus.COMPLETE,
+                    )
                 )
-            ).count()
+                .count()
+            )
 
             if remaining_ops == 0:
                 work_order.status = WorkOrderStatus.COMPLETE
                 work_order.actual_end = datetime.utcnow()
                 sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
                 SchedulingService(db).update_availability_rates(
-                    work_center_ids=[operation.work_center_id],
-                    horizon_days=90
+                    work_center_ids=[operation.work_center_id], horizon_days=90
                 )
             else:
                 release_next_ready_operation(db, work_order, operation)
@@ -357,8 +375,7 @@ def clock_out(
                 }
                 affected_work_centers = {operation.work_center_id} | ready_wcs
                 SchedulingService(db).update_availability_rates(
-                    work_center_ids=list(affected_work_centers),
-                    horizon_days=90
+                    work_center_ids=list(affected_work_centers), horizon_days=90
                 )
 
         sync_work_order_quantity_complete(
@@ -367,7 +384,7 @@ def clock_out(
             all_operations_complete=work_order.status == WorkOrderStatus.COMPLETE,
         )
         work_order.updated_at = datetime.utcnow()
-    
+
     db.commit()
     db.refresh(time_entry)
 
@@ -380,7 +397,7 @@ def clock_out(
                 "work_order_id": time_entry.work_order_id,
                 "operation_id": operation.id,
                 "user_id": current_user.id,
-            }
+            },
         )
     safe_broadcast(
         broadcast_work_order_update,
@@ -389,7 +406,7 @@ def clock_out(
             "event": "clock_out",
             "operation_id": operation.id if operation else None,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
-        }
+        },
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -397,7 +414,7 @@ def clock_out(
             "event": "clock_out",
             "work_order_id": work_order.id,
             "operation_id": operation.id if operation else None,
-        }
+        },
     )
 
     return time_entry
@@ -408,44 +425,51 @@ def get_work_center_queue(
     work_center_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get operations queued at a work center"""
-    operations = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
-    ).join(WorkOrder).filter(
-        and_(
-            WorkOrder.company_id == company_id,
-            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
-            WorkOrderOperation.work_center_id == work_center_id,
-            WorkOrderOperation.status.in_([OperationStatus.READY, OperationStatus.IN_PROGRESS])
+    operations = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
+        .join(WorkOrder)
+        .filter(
+            and_(
+                WorkOrder.company_id == company_id,
+                WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
+                WorkOrderOperation.work_center_id == work_center_id,
+                WorkOrderOperation.status.in_([OperationStatus.READY, OperationStatus.IN_PROGRESS]),
+            )
         )
-    ).order_by(WorkOrderOperation.scheduled_start).all()
-    
+        .order_by(WorkOrderOperation.scheduled_start)
+        .all()
+    )
+
     queue = []
     for op in operations:
         wo = op.work_order
         target_qty = operation_target_quantity(op, wo)
-        queue.append({
-            "operation_id": op.id,
-            "work_order_id": wo.id,
-            "work_order_number": wo.work_order_number,
-            "part_number": wo.part.part_number if wo.part else None,
-            "part_name": wo.part.name if wo.part else None,
-            "operation_number": op.operation_number,
-            "operation_name": op.name,
-            "work_center_id": op.work_center_id,
-            "status": op.status,
-            "quantity_ordered": target_qty,
-            "work_order_quantity_ordered": wo.quantity_ordered,
-            "component_quantity": op.component_quantity,
-            "quantity_complete": op.quantity_complete,
-            "priority": wo.priority,
-            "due_date": wo.due_date,
-            "setup_time_hours": op.setup_time_hours,
-            "run_time_hours": op.run_time_hours,
-        })
-    
+        queue.append(
+            {
+                "operation_id": op.id,
+                "work_order_id": wo.id,
+                "work_order_number": wo.work_order_number,
+                "part_number": wo.part.part_number if wo.part else None,
+                "part_name": wo.part.name if wo.part else None,
+                "operation_number": op.operation_number,
+                "operation_name": op.name,
+                "work_center_id": op.work_center_id,
+                "status": op.status,
+                "quantity_ordered": target_qty,
+                "work_order_quantity_ordered": wo.quantity_ordered,
+                "component_quantity": op.component_quantity,
+                "quantity_complete": op.quantity_complete,
+                "priority": wo.priority,
+                "due_date": wo.due_date,
+                "setup_time_hours": op.setup_time_hours,
+                "run_time_hours": op.run_time_hours,
+            }
+        )
+
     return {"queue": queue}
 
 
@@ -455,83 +479,94 @@ def shop_floor_dashboard(
     if_none_match: Optional[str] = Header(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Get shop floor dashboard data with ETag support for conditional requests.
-    
+
     Supports If-None-Match header for cache validation.
     Returns 304 Not Modified if data hasn't changed, saving bandwidth.
-    
+
     OPTIMIZATION: Uses aggregation queries to avoid N+1 query problem.
     Before: 1 query for work centers + 2 queries per work center (N+1 pattern)
             For 25 work centers = 51 queries
     After:  3 queries total (work centers + aggregated operation counts + summary stats)
     """
     from datetime import date
-    
+
     # Active work orders
-    active_wos = db.query(WorkOrder).filter(
-        WorkOrder.company_id == company_id,
-        WorkOrder.status == WorkOrderStatus.IN_PROGRESS
-    ).count()
+    active_wos = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.company_id == company_id, WorkOrder.status == WorkOrderStatus.IN_PROGRESS)
+        .count()
+    )
 
     # Work orders due today
-    due_today = db.query(WorkOrder).filter(
-        and_(
-            WorkOrder.company_id == company_id,
-            WorkOrder.due_date == date.today(),
-            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED])
+    due_today = (
+        db.query(WorkOrder)
+        .filter(
+            and_(
+                WorkOrder.company_id == company_id,
+                WorkOrder.due_date == date.today(),
+                WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED]),
+            )
         )
-    ).count()
+        .count()
+    )
 
     # Overdue work orders
-    overdue = db.query(WorkOrder).filter(
-        and_(
-            WorkOrder.company_id == company_id,
-            WorkOrder.due_date < date.today(),
-            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED])
+    overdue = (
+        db.query(WorkOrder)
+        .filter(
+            and_(
+                WorkOrder.company_id == company_id,
+                WorkOrder.due_date < date.today(),
+                WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
+            )
         )
-    ).count()
-    
+        .count()
+    )
+
     # OPTIMIZATION: Single aggregation query for operation counts by work center
     # Uses conditional aggregation (SUM with CASE) instead of N separate COUNT queries
-    operation_counts = db.query(
-        WorkOrderOperation.work_center_id,
-        func.sum(
-            case((WorkOrderOperation.status == OperationStatus.IN_PROGRESS, 1), else_=0)
-        ).label('active_count'),
-        func.sum(
-            case((WorkOrderOperation.status == OperationStatus.READY, 1), else_=0)
-        ).label('queued_count')
-    ).join(
-        WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id
-    ).filter(
-        WorkOrder.company_id == company_id,
-        WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
-        WorkOrderOperation.work_center_id.isnot(None)
-    ).group_by(
-        WorkOrderOperation.work_center_id
-    ).all()
-    
+    operation_counts = (
+        db.query(
+            WorkOrderOperation.work_center_id,
+            func.sum(case((WorkOrderOperation.status == OperationStatus.IN_PROGRESS, 1), else_=0)).label(
+                'active_count'
+            ),
+            func.sum(case((WorkOrderOperation.status == OperationStatus.READY, 1), else_=0)).label('queued_count'),
+        )
+        .join(WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
+            WorkOrderOperation.work_center_id.isnot(None),
+        )
+        .group_by(WorkOrderOperation.work_center_id)
+        .all()
+    )
+
     # Build lookup dict for O(1) access - avoids repeated dictionary lookups in loop
     op_counts_by_wc = {
-        row.work_center_id: {
-            'active': int(row.active_count or 0),
-            'queued': int(row.queued_count or 0)
-        }
+        row.work_center_id: {'active': int(row.active_count or 0), 'queued': int(row.queued_count or 0)}
         for row in operation_counts
     }
-    
+
     # Get work centers (single query)
     work_centers = db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True).all()
 
-    active_entries = db.query(TimeEntry).options(
-        joinedload(TimeEntry.user),
-        joinedload(TimeEntry.work_order).joinedload(WorkOrder.part),
-        joinedload(TimeEntry.operation),
-        joinedload(TimeEntry.work_center)
-    ).filter(TimeEntry.clock_out.is_(None)).all()
+    active_entries = (
+        db.query(TimeEntry)
+        .options(
+            joinedload(TimeEntry.user),
+            joinedload(TimeEntry.work_order).joinedload(WorkOrder.part),
+            joinedload(TimeEntry.operation),
+            joinedload(TimeEntry.work_center),
+        )
+        .filter(TimeEntry.clock_out.is_(None))
+        .all()
+    )
 
     assignments_by_user: dict[int, list[dict]] = defaultdict(list)
     assignments_by_work_center: dict[int, list[dict]] = defaultdict(list)
@@ -546,18 +581,30 @@ def shop_floor_dashboard(
                 "id": entry.user.id if entry.user else None,
                 "employee_id": entry.user.employee_id if entry.user else None,
                 "name": entry.user.full_name if entry.user else None,
-                "role": entry.user.role.value if entry.user and hasattr(entry.user.role, "value") else (entry.user.role if entry.user else None),
+                "role": (
+                    entry.user.role.value
+                    if entry.user and hasattr(entry.user.role, "value")
+                    else (entry.user.role if entry.user else None)
+                ),
                 "department": entry.user.department if entry.user else None,
             },
             "work_order": {
                 "id": entry.work_order.id if entry.work_order else None,
                 "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
-                "status": entry.work_order.status.value if entry.work_order and hasattr(entry.work_order.status, "value") else (entry.work_order.status if entry.work_order else None),
-                "part_number": entry.work_order.part.part_number if entry.work_order and entry.work_order.part else None,
+                "status": (
+                    entry.work_order.status.value
+                    if entry.work_order and hasattr(entry.work_order.status, "value")
+                    else (entry.work_order.status if entry.work_order else None)
+                ),
+                "part_number": (
+                    entry.work_order.part.part_number if entry.work_order and entry.work_order.part else None
+                ),
                 "part_name": entry.work_order.part.name if entry.work_order and entry.work_order.part else None,
                 "customer_name": entry.work_order.customer_name if entry.work_order else None,
                 "priority": entry.work_order.priority if entry.work_order else None,
-                "due_date": entry.work_order.due_date.isoformat() if entry.work_order and entry.work_order.due_date else None,
+                "due_date": (
+                    entry.work_order.due_date.isoformat() if entry.work_order and entry.work_order.due_date else None
+                ),
                 "quantity_ordered": entry.work_order.quantity_ordered if entry.work_order else None,
                 "quantity_complete": entry.work_order.quantity_complete if entry.work_order else None,
             },
@@ -565,7 +612,11 @@ def shop_floor_dashboard(
                 "id": entry.operation.id if entry.operation else None,
                 "operation_number": entry.operation.operation_number if entry.operation else None,
                 "name": entry.operation.name if entry.operation else None,
-                "status": entry.operation.status.value if entry.operation and hasattr(entry.operation.status, "value") else (entry.operation.status if entry.operation else None),
+                "status": (
+                    entry.operation.status.value
+                    if entry.operation and hasattr(entry.operation.status, "value")
+                    else (entry.operation.status if entry.operation else None)
+                ),
                 "sequence": entry.operation.sequence if entry.operation else None,
                 "quantity_complete": entry.operation.quantity_complete if entry.operation else None,
                 "quantity_scrapped": entry.operation.quantity_scrapped if entry.operation else None,
@@ -593,33 +644,31 @@ def shop_floor_dashboard(
     for wc in work_centers:
         counts = op_counts_by_wc.get(wc.id, {'active': 0, 'queued': 0})
         active_people = assignments_by_work_center.get(wc.id, [])
-        wc_status.append({
-            "id": wc.id,
-            "code": wc.code,
-            "name": wc.name,
-            "type": wc.work_center_type.value if hasattr(wc.work_center_type, 'value') else wc.work_center_type,
-            "status": wc.current_status,
-            "active_operations": counts['active'],
-            "queued_operations": counts['queued'],
-            "active_people_count": len(active_people),
-            "active_people": [
-                {
-                    "user_id": assignment["user"]["id"],
-                    "name": assignment["user"]["name"],
-                    "employee_id": assignment["user"]["employee_id"],
-                    "work_order_number": assignment["work_order"]["work_order_number"],
-                    "operation_name": assignment["operation"]["name"],
-                    "clock_in": assignment["clock_in"],
-                }
-                for assignment in active_people
-            ],
-        })
+        wc_status.append(
+            {
+                "id": wc.id,
+                "code": wc.code,
+                "name": wc.name,
+                "type": wc.work_center_type.value if hasattr(wc.work_center_type, 'value') else wc.work_center_type,
+                "status": wc.current_status,
+                "active_operations": counts['active'],
+                "queued_operations": counts['queued'],
+                "active_people_count": len(active_people),
+                "active_people": [
+                    {
+                        "user_id": assignment["user"]["id"],
+                        "name": assignment["user"]["name"],
+                        "employee_id": assignment["user"]["employee_id"],
+                        "work_order_number": assignment["work_order"]["work_order_number"],
+                        "operation_name": assignment["operation"]["name"],
+                        "clock_in": assignment["clock_in"],
+                    }
+                    for assignment in active_people
+                ],
+            }
+        )
 
-    connected_user_ids = {
-        int(user_id)
-        for user_id in manager.get_connected_user_ids()
-        if str(user_id).isdigit()
-    }
+    connected_user_ids = {int(user_id) for user_id in manager.get_connected_user_ids() if str(user_id).isdigit()}
     signed_in_users: list[dict] = []
     if connected_user_ids:
         connected_users = db.query(User).filter(User.id.in_(connected_user_ids)).all()
@@ -633,44 +682,57 @@ def shop_floor_dashboard(
                 "connected_since": manager.get_connected_since(str(user.id)),
                 "has_active_job": bool(assignments_by_user.get(user.id)),
                 "active_job_count": len(assignments_by_user.get(user.id, [])),
-                "active_work_centers": sorted({
-                    assignment["work_center"]["name"]
-                    for assignment in assignments_by_user.get(user.id, [])
-                    if assignment["work_center"]["name"]
-                }),
-                "active_work_orders": sorted({
-                    assignment["work_order"]["work_order_number"]
-                    for assignment in assignments_by_user.get(user.id, [])
-                    if assignment["work_order"]["work_order_number"]
-                }),
+                "active_work_centers": sorted(
+                    {
+                        assignment["work_center"]["name"]
+                        for assignment in assignments_by_user.get(user.id, [])
+                        if assignment["work_center"]["name"]
+                    }
+                ),
+                "active_work_orders": sorted(
+                    {
+                        assignment["work_order"]["work_order_number"]
+                        for assignment in assignments_by_user.get(user.id, [])
+                        if assignment["work_order"]["work_order_number"]
+                    }
+                ),
             }
             for user in connected_users
         ]
         signed_in_users.sort(key=lambda user: (not user["has_active_job"], user["name"] or ""))
-    
+
     # Recent operation completions. Work orders can remain open while operators
     # finish individual ops, so use operation completions for the live feed.
-    recent_operations = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order),
-        joinedload(WorkOrderOperation.work_center),
-    ).filter(
-        WorkOrderOperation.company_id == company_id,
-        WorkOrderOperation.status == OperationStatus.COMPLETE,
-        WorkOrderOperation.actual_end.isnot(None),
-    ).order_by(WorkOrderOperation.actual_end.desc()).limit(10).all()
+    recent_operations = (
+        db.query(WorkOrderOperation)
+        .options(
+            joinedload(WorkOrderOperation.work_order),
+            joinedload(WorkOrderOperation.work_center),
+        )
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.status == OperationStatus.COMPLETE,
+            WorkOrderOperation.actual_end.isnot(None),
+        )
+        .order_by(WorkOrderOperation.actual_end.desc())
+        .limit(10)
+        .all()
+    )
     completed_user_ids = {op.completed_by for op in recent_operations if op.completed_by}
     completed_users_by_id = {}
     if completed_user_ids:
         completed_users_by_id = {
             user.id: user
-            for user in db.query(User).filter(
+            for user in db.query(User)
+            .filter(
                 User.company_id == company_id,
                 User.id.in_(completed_user_ids),
-            ).all()
+            )
+            .all()
         }
 
     checked_in_user_ids = {entry.user_id for entry in active_entries if entry.user_id}
-    
+
     data = {
         "summary": {
             "active_work_orders": active_wos,
@@ -688,27 +750,30 @@ def shop_floor_dashboard(
                 "work_order_number": op.work_order.work_order_number if op.work_order else None,
                 "operation_name": op.name,
                 "work_center_name": op.work_center.name if op.work_center else None,
-                "operator_name": completed_users_by_id[op.completed_by].full_name
-                if op.completed_by in completed_users_by_id
-                else None,
+                "operator_name": (
+                    completed_users_by_id[op.completed_by].full_name
+                    if op.completed_by in completed_users_by_id
+                    else None
+                ),
                 "completed_at": op.actual_end.isoformat() if op.actual_end else None,
-                "quantity_complete": op.quantity_complete
-            } for op in recent_operations
-        ]
+                "quantity_complete": op.quantity_complete,
+            }
+            for op in recent_operations
+        ],
     }
-    
+
     # Generate ETag from response data
     etag = hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
     etag_header = f'"{etag}"'
-    
+
     # Check If-None-Match header for conditional request
     if if_none_match and if_none_match.strip('"') == etag:
         return Response(status_code=304)
-    
+
     # Set cache headers
     response.headers["ETag"] = etag_header
     response.headers["Cache-Control"] = "private, max-age=10"
-    
+
     return data
 
 
@@ -716,32 +781,40 @@ def shop_floor_dashboard(
 def get_active_shop_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get list of users currently clocked in"""
-    active_entries = db.query(TimeEntry).options(
-        joinedload(TimeEntry.user),
-        joinedload(TimeEntry.work_order),
-        joinedload(TimeEntry.operation),
-        joinedload(TimeEntry.work_center)
-    ).filter(TimeEntry.clock_out.is_(None)).all()
-    
+    active_entries = (
+        db.query(TimeEntry)
+        .options(
+            joinedload(TimeEntry.user),
+            joinedload(TimeEntry.work_order),
+            joinedload(TimeEntry.operation),
+            joinedload(TimeEntry.work_center),
+        )
+        .filter(TimeEntry.clock_out.is_(None))
+        .all()
+    )
+
     users = []
     for entry in active_entries:
-        users.append({
-            "user_id": entry.user_id,
-            "user_name": entry.user.full_name if entry.user else None,
-            "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
-            "operation": entry.operation.name if entry.operation else None,
-            "work_center": entry.work_center.name if entry.work_center else None,
-            "clock_in": to_utc_iso(entry.clock_in),
-            "entry_type": entry.entry_type
-        })
-    
+        users.append(
+            {
+                "user_id": entry.user_id,
+                "user_name": entry.user.full_name if entry.user else None,
+                "work_order_number": entry.work_order.work_order_number if entry.work_order else None,
+                "operation": entry.operation.name if entry.operation else None,
+                "work_center": entry.work_center.name if entry.work_center else None,
+                "clock_in": to_utc_iso(entry.clock_in),
+                "entry_type": entry.entry_type,
+            }
+        )
+
     return {"active_users": users}
 
 
 # ============ SIMPLIFIED OPERATION WORKFLOW ============
+
 
 @router.get("/operations")
 def get_all_operations(
@@ -753,33 +826,37 @@ def get_all_operations(
     page_size: int = Query(50, ge=1, le=200, description="Items per page (max 200)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Get operations with filters and pagination for the shop floor view.
-    
+
     Returns paginated operations that are not complete or cancelled.
     Default: 50 items per page, max 200.
-    
+
     Response includes pagination metadata for building UI controls.
     """
     from app.core.pagination import paginate_query
-    
-    query = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
-        joinedload(WorkOrderOperation.work_center)
-    ).join(WorkOrder)
-    
+
+    query = (
+        db.query(WorkOrderOperation)
+        .options(
+            joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+            joinedload(WorkOrderOperation.work_center),
+        )
+        .join(WorkOrder)
+    )
+
     # Scope to company and exclude completed/cancelled work orders
     query = query.filter(
         WorkOrder.company_id == company_id,
-        WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED])
+        WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
     )
-    
+
     # Filter by work center
     if work_center_id:
         query = query.filter(WorkOrderOperation.work_center_id == work_center_id)
-    
+
     # Filter by operation status
     if status:
         try:
@@ -790,32 +867,26 @@ def get_all_operations(
     else:
         # Default: exclude completed operations
         query = query.filter(WorkOrderOperation.status != OperationStatus.COMPLETE)
-    
+
     # Search by WO number or part number
     if search:
         search_term = f"%{search}%"
         from app.models.part import Part
+
         query = query.join(Part, WorkOrder.part_id == Part.id).filter(
-            or_(
-                WorkOrder.work_order_number.ilike(search_term),
-                Part.part_number.ilike(search_term)
-            )
+            or_(WorkOrder.work_order_number.ilike(search_term), Part.part_number.ilike(search_term))
         )
 
     if due_today:
         query = query.filter(WorkOrder.due_date == date.today())
-    
+
     # Order by priority, then due date
-    query = query.order_by(
-        WorkOrder.priority,
-        WorkOrder.due_date,
-        WorkOrderOperation.sequence
-    )
-    
+    query = query.order_by(WorkOrder.priority, WorkOrder.due_date, WorkOrderOperation.sequence)
+
     # Apply pagination
     paginated_query, pagination_meta = paginate_query(query, page, page_size)
     operations = paginated_query.all()
-    
+
     # Build response data
     result = []
     for op in operations:
@@ -823,34 +894,36 @@ def get_all_operations(
         wc = op.work_center
         target_qty = operation_target_quantity(op, wo)
         check_in_state = _operation_check_in_state(db, op)
-        result.append({
-            "id": op.id,
-            "work_order_id": wo.id,
-            "work_order_number": wo.work_order_number,
-            "part_number": wo.part.part_number if wo.part else None,
-            "part_name": wo.part.name if wo.part else None,
-            "operation_number": op.operation_number,
-            "operation_name": op.name,
-            "description": op.description,
-            "work_center_id": wc.id if wc else None,
-            "work_center_name": wc.name if wc else None,
-            "status": op.status.value,
-            "quantity_ordered": target_qty,
-            "work_order_quantity_ordered": wo.quantity_ordered,
-            "component_quantity": op.component_quantity,
-            "quantity_complete": op.quantity_complete,
-            "quantity_scrapped": op.quantity_scrapped,
-            "priority": wo.priority,
-            "due_date": wo.due_date.isoformat() if wo.due_date else None,
-            "customer_name": wo.customer_name,
-            "customer_po": wo.customer_po,
-            "actual_start": op.actual_start.isoformat() if op.actual_start else None,
-            "setup_instructions": op.setup_instructions,
-            "run_instructions": op.run_instructions,
-            "requires_inspection": op.requires_inspection,
-            **check_in_state,
-        })
-    
+        result.append(
+            {
+                "id": op.id,
+                "work_order_id": wo.id,
+                "work_order_number": wo.work_order_number,
+                "part_number": wo.part.part_number if wo.part else None,
+                "part_name": wo.part.name if wo.part else None,
+                "operation_number": op.operation_number,
+                "operation_name": op.name,
+                "description": op.description,
+                "work_center_id": wc.id if wc else None,
+                "work_center_name": wc.name if wc else None,
+                "status": op.status.value,
+                "quantity_ordered": target_qty,
+                "work_order_quantity_ordered": wo.quantity_ordered,
+                "component_quantity": op.component_quantity,
+                "quantity_complete": op.quantity_complete,
+                "quantity_scrapped": op.quantity_scrapped,
+                "priority": wo.priority,
+                "due_date": wo.due_date.isoformat() if wo.due_date else None,
+                "customer_name": wo.customer_name,
+                "customer_po": wo.customer_po,
+                "actual_start": op.actual_start.isoformat() if op.actual_start else None,
+                "setup_instructions": op.setup_instructions,
+                "run_instructions": op.run_instructions,
+                "requires_inspection": op.requires_inspection,
+                **check_in_state,
+            }
+        )
+
     return {
         "operations": result,
         "total": pagination_meta.total_count,  # Backward compatibility
@@ -860,8 +933,8 @@ def get_all_operations(
             "total_count": pagination_meta.total_count,
             "total_pages": pagination_meta.total_pages,
             "has_next": pagination_meta.has_next,
-            "has_previous": pagination_meta.has_previous
-        }
+            "has_previous": pagination_meta.has_previous,
+        },
     }
 
 
@@ -870,7 +943,7 @@ def start_operation(
     operation_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Mark operation as in progress and create a time entry.
@@ -879,9 +952,12 @@ def start_operation(
     - Creates a TimeEntry so the dashboard shows the operator on this job
     - Updates work order status if needed
     """
-    operation = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
-    ).filter(WorkOrderOperation.id == operation_id).first()
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
+        .filter(WorkOrderOperation.id == operation_id)
+        .first()
+    )
 
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
@@ -905,10 +981,7 @@ def start_operation(
         operation.work_center_id,
         allow_same_work_center=True,
     ):
-        raise HTTPException(
-            status_code=400,
-            detail="Previous operations must be completed first"
-        )
+        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
 
     # Update operation
     operation.status = OperationStatus.IN_PROGRESS
@@ -923,13 +996,17 @@ def start_operation(
             work_order.actual_start = datetime.utcnow()
 
     # Create a time entry so the dashboard shows this operator on this job
-    existing_entry = db.query(TimeEntry).filter(
-        and_(
-            TimeEntry.user_id == current_user.id,
-            TimeEntry.operation_id == operation_id,
-            TimeEntry.clock_out.is_(None)
+    existing_entry = (
+        db.query(TimeEntry)
+        .filter(
+            and_(
+                TimeEntry.user_id == current_user.id,
+                TimeEntry.operation_id == operation_id,
+                TimeEntry.clock_out.is_(None),
+            )
         )
-    ).first()
+        .first()
+    )
 
     time_entry = None
     if not existing_entry:
@@ -949,7 +1026,7 @@ def start_operation(
         action="START_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
-        description=f"Started operation {operation.operation_number} on WO {work_order.work_order_number}"
+        description=f"Started operation {operation.operation_number} on WO {work_order.work_order_number}",
     )
 
     db.commit()
@@ -963,7 +1040,7 @@ def start_operation(
                 "event": "operation_started",
                 "work_order_id": work_order.id,
                 "operation_id": operation.id,
-            }
+            },
         )
     safe_broadcast(
         broadcast_work_order_update,
@@ -972,7 +1049,7 @@ def start_operation(
             "event": "operation_started",
             "operation_id": operation.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
-        }
+        },
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -980,16 +1057,16 @@ def start_operation(
             "event": "operation_started",
             "work_order_id": work_order.id,
             "operation_id": operation.id,
-        }
+        },
     )
-    
+
     return {
         "message": "Operation started successfully",
         "operation": {
             "id": operation.id,
             "status": operation.status.value,
-            "actual_start": operation.actual_start.isoformat() if operation.actual_start else None
-        }
+            "actual_start": operation.actual_start.isoformat() if operation.actual_start else None,
+        },
     }
 
 
@@ -999,7 +1076,7 @@ def report_operation_production(
     production_data: ProductionReportRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Add produced/scrapped quantity while keeping the operator clocked in.
@@ -1008,12 +1085,15 @@ def report_operation_production(
     active time entry production counters, but does not close time or complete
     the operation automatically when the target quantity is reached.
     """
-    operation = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
-    ).filter(
-        WorkOrderOperation.id == operation_id,
-        WorkOrderOperation.company_id == company_id,
-    ).first()
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
+        .filter(
+            WorkOrderOperation.id == operation_id,
+            WorkOrderOperation.company_id == company_id,
+        )
+        .first()
+    )
 
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
@@ -1025,14 +1105,18 @@ def report_operation_production(
     if operation.status != OperationStatus.IN_PROGRESS:
         raise HTTPException(status_code=400, detail="Operation must be in progress to add completed quantity")
 
-    active_entry = db.query(TimeEntry).filter(
-        and_(
-            TimeEntry.user_id == current_user.id,
-            TimeEntry.operation_id == operation_id,
-            TimeEntry.clock_out.is_(None),
-            TimeEntry.company_id == company_id,
+    active_entry = (
+        db.query(TimeEntry)
+        .filter(
+            and_(
+                TimeEntry.user_id == current_user.id,
+                TimeEntry.operation_id == operation_id,
+                TimeEntry.clock_out.is_(None),
+                TimeEntry.company_id == company_id,
+            )
         )
-    ).first()
+        .first()
+    )
     if not active_entry:
         raise HTTPException(status_code=400, detail="You must be clocked in to add completed quantity")
 
@@ -1049,8 +1133,7 @@ def report_operation_production(
     next_complete_qty = float(operation.quantity_complete or 0) + good_delta
     if target_qty > 0 and next_complete_qty > target_qty:
         raise HTTPException(
-            status_code=400,
-            detail=f"Quantity ({next_complete_qty}) cannot exceed quantity ordered ({target_qty})"
+            status_code=400, detail=f"Quantity ({next_complete_qty}) cannot exceed quantity ordered ({target_qty})"
         )
 
     operation.quantity_complete = next_complete_qty
@@ -1061,9 +1144,7 @@ def report_operation_production(
     active_entry.quantity_scrapped = float(active_entry.quantity_scrapped or 0) + scrap_delta
     if production_data.notes:
         active_entry.notes = (
-            f"{active_entry.notes}\n{production_data.notes}"
-            if active_entry.notes
-            else production_data.notes
+            f"{active_entry.notes}\n{production_data.notes}" if active_entry.notes else production_data.notes
         )
     active_entry.updated_at = datetime.utcnow()
 
@@ -1079,7 +1160,7 @@ def report_operation_production(
             f"Added good: {good_delta}, scrap: {scrap_delta}. "
             f"Qty: {operation.quantity_complete}/{target_qty}"
             + (f". Notes: {production_data.notes}" if production_data.notes else "")
-        )
+        ),
     )
 
     db.commit()
@@ -1096,7 +1177,7 @@ def report_operation_production(
                 "operation_id": operation.id,
                 "quantity_complete": operation.quantity_complete,
                 "quantity_scrapped": operation.quantity_scrapped,
-            }
+            },
         )
     safe_broadcast(
         broadcast_work_order_update,
@@ -1104,7 +1185,7 @@ def report_operation_production(
         {
             "event": "operation_production_reported",
             "operation_id": operation.id,
-        }
+        },
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1112,7 +1193,7 @@ def report_operation_production(
             "event": "operation_production_reported",
             "work_order_id": work_order.id,
             "operation_id": operation.id,
-        }
+        },
     )
 
     return {
@@ -1129,7 +1210,7 @@ def report_operation_production(
             "quantity_produced": active_entry.quantity_produced,
             "quantity_scrapped": active_entry.quantity_scrapped,
             "clock_out": active_entry.clock_out.isoformat() if active_entry.clock_out else None,
-        }
+        },
     }
 
 
@@ -1139,7 +1220,7 @@ def complete_operation(
     completion_data: OperationCompleteRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Mark operation as complete (full or partial).
@@ -1148,27 +1229,27 @@ def complete_operation(
     - If qty_complete < qty_ordered: status remains IN_PROGRESS
     - Optionally record notes
     """
-    operation = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part)
-    ).filter(WorkOrderOperation.id == operation_id).first()
-    
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
+        .filter(WorkOrderOperation.id == operation_id)
+        .first()
+    )
+
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    
+
     work_order = operation.work_order
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found for this operation")
-    
+
     # Validate operation state
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Operation is already complete")
-    
+
     if operation.status not in [OperationStatus.IN_PROGRESS, OperationStatus.READY]:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Cannot complete operation with status: {operation.status.value}"
-        )
-    
+        raise HTTPException(status_code=400, detail=f"Cannot complete operation with status: {operation.status.value}")
+
     ordered_qty = operation_target_quantity(operation, work_order)
     try:
         validate_operation_quantity(completion_data.quantity_complete, ordered_qty)
@@ -1183,41 +1264,42 @@ def complete_operation(
         operation.work_center_id,
         allow_same_work_center=True,
     ):
-        raise HTTPException(
-            status_code=400,
-            detail="Previous operations must be completed first"
-        )
-    
+        raise HTTPException(status_code=400, detail="Previous operations must be completed first")
+
     # Auto-start if not already in progress
     if operation.status != OperationStatus.IN_PROGRESS:
         operation.status = OperationStatus.IN_PROGRESS
         if not operation.actual_start:
             operation.actual_start = datetime.utcnow()
             operation.started_by = current_user.id
-    
+
     previous_quantity_complete = float(operation.quantity_complete or 0)
 
     # Update quantity
     operation.quantity_complete = completion_data.quantity_complete
     operation.updated_at = datetime.utcnow()
-    
+
     # Check if fully complete
     is_fully_complete = completion_data.quantity_complete >= ordered_qty
-    
+
     if is_fully_complete:
         operation.status = OperationStatus.COMPLETE
         operation.actual_end = datetime.utcnow()
         operation.completed_by = current_user.id
-        
+
         # Check if this is the last operation
-        remaining_ops = db.query(WorkOrderOperation).filter(
-            and_(
-                WorkOrderOperation.work_order_id == work_order.id,
-                WorkOrderOperation.id != operation_id,
-                WorkOrderOperation.status != OperationStatus.COMPLETE
+        remaining_ops = (
+            db.query(WorkOrderOperation)
+            .filter(
+                and_(
+                    WorkOrderOperation.work_order_id == work_order.id,
+                    WorkOrderOperation.id != operation_id,
+                    WorkOrderOperation.status != OperationStatus.COMPLETE,
+                )
             )
-        ).count()
-        
+            .count()
+        )
+
         if remaining_ops == 0:
             # All operations complete - mark work order complete
             work_order.status = WorkOrderStatus.COMPLETE
@@ -1225,8 +1307,7 @@ def complete_operation(
             sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
             if operation.work_center_id:
                 SchedulingService(db).update_availability_rates(
-                    work_center_ids=[operation.work_center_id],
-                    horizon_days=90
+                    work_center_ids=[operation.work_center_id], horizon_days=90
                 )
         else:
             release_next_ready_operation(db, work_order, operation)
@@ -1237,10 +1318,9 @@ def complete_operation(
             }
             affected_work_centers = {operation.work_center_id} | ready_wcs
             SchedulingService(db).update_availability_rates(
-                work_center_ids=list(affected_work_centers),
-                horizon_days=90
+                work_center_ids=list(affected_work_centers), horizon_days=90
             )
-    
+
     # Update work order quantity tracking
     sync_work_order_quantity_complete(
         work_order,
@@ -1251,12 +1331,12 @@ def complete_operation(
 
     # Close any open time entries for this operation when fully complete
     if is_fully_complete:
-        open_entries = db.query(TimeEntry).filter(
-            and_(
-                TimeEntry.operation_id == operation_id,
-                TimeEntry.clock_out.is_(None)
-            )
-        ).order_by((TimeEntry.user_id == current_user.id).desc(), TimeEntry.clock_in.asc()).all()
+        open_entries = (
+            db.query(TimeEntry)
+            .filter(and_(TimeEntry.operation_id == operation_id, TimeEntry.clock_out.is_(None)))
+            .order_by((TimeEntry.user_id == current_user.id).desc(), TimeEntry.clock_in.asc())
+            .all()
+        )
         now = datetime.utcnow()
         completion_delta = max(0.0, float(completion_data.quantity_complete or 0) - previous_quantity_complete)
         for entry in open_entries:
@@ -1275,7 +1355,7 @@ def complete_operation(
             f"{'Completed' if is_fully_complete else 'Updated'} operation {operation.operation_number} on WO {work_order.work_order_number}. "
             f"Qty: {completion_data.quantity_complete}/{work_order.quantity_ordered}"
             + (f". Notes: {completion_data.notes}" if completion_data.notes else "")
-        )
+        ),
     )
 
     db.commit()
@@ -1290,7 +1370,7 @@ def complete_operation(
                 "work_order_id": work_order.id,
                 "operation_id": operation.id,
                 "is_fully_complete": is_fully_complete,
-            }
+            },
         )
     safe_broadcast(
         broadcast_work_order_update,
@@ -1300,7 +1380,7 @@ def complete_operation(
             "operation_id": operation.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
             "is_fully_complete": is_fully_complete,
-        }
+        },
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1309,9 +1389,9 @@ def complete_operation(
             "work_order_id": work_order.id,
             "operation_id": operation.id,
             "is_fully_complete": is_fully_complete,
-        }
+        },
     )
-    
+
     return {
         "message": "Operation completed" if is_fully_complete else "Progress updated",
         "operation": {
@@ -1324,9 +1404,9 @@ def complete_operation(
         "work_order": {
             "id": work_order.id,
             "status": work_order.status.value,
-            "quantity_complete": work_order.quantity_complete
+            "quantity_complete": work_order.quantity_complete,
         },
-        "is_fully_complete": is_fully_complete
+        "is_fully_complete": is_fully_complete,
     }
 
 
@@ -1335,37 +1415,48 @@ def get_operation_details(
     operation_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get detailed information about a specific operation"""
-    operation = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
-        joinedload(WorkOrderOperation.work_center)
-    ).filter(
-        WorkOrderOperation.id == operation_id,
-        WorkOrderOperation.company_id == company_id,
-    ).first()
-    
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(
+            joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+            joinedload(WorkOrderOperation.work_center),
+        )
+        .filter(
+            WorkOrderOperation.id == operation_id,
+            WorkOrderOperation.company_id == company_id,
+        )
+        .first()
+    )
+
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    
+
     wo = operation.work_order
     wc = operation.work_center
-    
+
     # Get all operations for this work order
-    all_ops = db.query(WorkOrderOperation).filter(
-        WorkOrderOperation.work_order_id == wo.id,
-        WorkOrderOperation.company_id == company_id,
-    ).order_by(WorkOrderOperation.sequence).all()
-    
-    # Get recent history (audit logs)
-    history = db.query(AuditLog).filter(
-        and_(
-            AuditLog.resource_type == "work_order_operation",
-            AuditLog.resource_id == operation_id
+    all_ops = (
+        db.query(WorkOrderOperation)
+        .filter(
+            WorkOrderOperation.work_order_id == wo.id,
+            WorkOrderOperation.company_id == company_id,
         )
-    ).order_by(AuditLog.timestamp.desc()).limit(10).all()
-    
+        .order_by(WorkOrderOperation.sequence)
+        .all()
+    )
+
+    # Get recent history (audit logs)
+    history = (
+        db.query(AuditLog)
+        .filter(and_(AuditLog.resource_type == "work_order_operation", AuditLog.resource_id == operation_id))
+        .order_by(AuditLog.timestamp.desc())
+        .limit(10)
+        .all()
+    )
+
     return {
         "operation": {
             "id": operation.id,
@@ -1406,7 +1497,7 @@ def get_operation_details(
                 "part_number": wo.part.part_number if wo.part else None,
                 "name": wo.part.name if wo.part else None,
                 "description": wo.part.description if wo.part else None,
-            }
+            },
         },
         "work_center": {
             "id": wc.id if wc else None,
@@ -1440,40 +1531,38 @@ def get_operation_details(
             {
                 "action": h.action,
                 "details": h.description,
-                "created_at": h.timestamp.isoformat() if h.timestamp else None
+                "created_at": h.timestamp.isoformat() if h.timestamp else None,
             }
             for h in history
-        ]
+        ],
     }
 
 
 @router.put("/operations/{operation_id}/hold")
 def put_operation_on_hold(
-    operation_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    operation_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Put an operation on hold"""
-    operation = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order)
-    ).filter(WorkOrderOperation.id == operation_id).first()
-    
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order))
+        .filter(WorkOrderOperation.id == operation_id)
+        .first()
+    )
+
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    
+
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Cannot put completed operation on hold")
-    
+
     operation.status = OperationStatus.ON_HOLD
     operation.updated_at = datetime.utcnow()
 
     # Close any open time entries for this operation
-    open_entries = db.query(TimeEntry).filter(
-        and_(
-            TimeEntry.operation_id == operation_id,
-            TimeEntry.clock_out.is_(None)
-        )
-    ).all()
+    open_entries = (
+        db.query(TimeEntry).filter(and_(TimeEntry.operation_id == operation_id, TimeEntry.clock_out.is_(None))).all()
+    )
     now = datetime.utcnow()
     for entry in open_entries:
         entry.clock_out = now
@@ -1485,7 +1574,7 @@ def put_operation_on_hold(
         action="HOLD_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
-        description=f"Put operation {operation.operation_number} on hold"
+        description=f"Put operation {operation.operation_number} on hold",
     )
 
     db.commit()
@@ -1499,7 +1588,7 @@ def put_operation_on_hold(
                 "event": "operation_hold",
                 "work_order_id": work_order.id if work_order else None,
                 "operation_id": operation.id,
-            }
+            },
         )
     if work_order:
         safe_broadcast(
@@ -1509,7 +1598,7 @@ def put_operation_on_hold(
                 "event": "operation_hold",
                 "operation_id": operation.id,
                 "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
-            }
+            },
         )
         safe_broadcast(
             broadcast_dashboard_update,
@@ -1517,41 +1606,40 @@ def put_operation_on_hold(
                 "event": "operation_hold",
                 "work_order_id": work_order.id,
                 "operation_id": operation.id,
-            }
+            },
         )
-    
+
     return {"message": "Operation placed on hold", "status": operation.status.value}
 
 
 @router.put("/operations/{operation_id}/resume")
-def resume_operation(
-    operation_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def resume_operation(operation_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Resume an operation that was on hold"""
-    operation = db.query(WorkOrderOperation).options(
-        joinedload(WorkOrderOperation.work_order)
-    ).filter(WorkOrderOperation.id == operation_id).first()
-    
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order))
+        .filter(WorkOrderOperation.id == operation_id)
+        .first()
+    )
+
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    
+
     if operation.status != OperationStatus.ON_HOLD:
         raise HTTPException(status_code=400, detail="Operation is not on hold")
-    
+
     # Resume to previous state
     operation.status = OperationStatus.IN_PROGRESS if operation.actual_start else OperationStatus.READY
     operation.updated_at = datetime.utcnow()
-    
+
     # Create audit log
     AuditService(db, current_user).log(
         action="RESUME_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
-        description=f"Resumed operation {operation.operation_number}"
+        description=f"Resumed operation {operation.operation_number}",
     )
-    
+
     db.commit()
 
     work_order = operation.work_order
@@ -1563,7 +1651,7 @@ def resume_operation(
                 "event": "operation_resumed",
                 "work_order_id": work_order.id if work_order else None,
                 "operation_id": operation.id,
-            }
+            },
         )
     if work_order:
         safe_broadcast(
@@ -1573,7 +1661,7 @@ def resume_operation(
                 "event": "operation_resumed",
                 "operation_id": operation.id,
                 "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
-            }
+            },
         )
         safe_broadcast(
             broadcast_dashboard_update,
@@ -1581,7 +1669,7 @@ def resume_operation(
                 "event": "operation_resumed",
                 "work_order_id": work_order.id,
                 "operation_id": operation.id,
-            }
+            },
         )
-    
+
     return {"message": "Operation resumed", "status": operation.status.value}

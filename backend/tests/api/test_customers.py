@@ -11,9 +11,7 @@ from app.models.work_order import WorkOrder, WorkOrderStatus
 @pytest.mark.api
 @pytest.mark.requires_db
 class TestCustomersAPI:
-    def test_get_customer_names(
-        self, client: TestClient, auth_headers: dict, db_session: Session
-    ):
+    def test_get_customer_names(self, client: TestClient, auth_headers: dict, db_session: Session):
         customer = Customer(name="Acme Aerospace", code="ACM001", is_active=True, company_id=1)
         db_session.add(customer)
         db_session.commit()
@@ -102,9 +100,7 @@ class TestCustomersAPI:
         )
         db_session.commit()
 
-        response = client.get(
-            f"/api/v1/customers/{customer.id}/stats", headers=auth_headers
-        )
+        response = client.get(f"/api/v1/customers/{customer.id}/stats", headers=auth_headers)
         assert response.status_code == status.HTTP_200_OK
 
         data = response.json()
@@ -115,9 +111,7 @@ class TestCustomersAPI:
         assert len(data["parts"]) == 1
         assert data["parts"][0]["part_number"] == part.part_number
 
-        current_wo_numbers = {
-            wo["work_order_number"] for wo in data["current_work_orders"]
-        }
+        current_wo_numbers = {wo["work_order_number"] for wo in data["current_work_orders"]}
         assert "WO-CURRENT-001" in current_wo_numbers
         assert "WO-CURRENT-002" in current_wo_numbers
         assert "WO-OTHER-001" not in current_wo_numbers

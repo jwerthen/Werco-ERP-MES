@@ -1,7 +1,9 @@
 """WebSocket API endpoints for real-time updates."""
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from typing import Optional
+
 import logging
+from typing import Optional
+
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.core.websocket import manager
 
@@ -11,10 +13,7 @@ router = APIRouter()
 
 
 @router.websocket("/ws/updates")
-async def websocket_updates(
-    websocket: WebSocket,
-    token: Optional[str] = Query(None)
-):
+async def websocket_updates(websocket: WebSocket, token: Optional[str] = Query(None)):
     """
     WebSocket endpoint for real-time dashboard and system updates.
 
@@ -27,6 +26,7 @@ async def websocket_updates(
     if token:
         try:
             from app.core.security import verify_token
+
             user_id = verify_token(token)
             if user_id:
                 user_id = user_id
@@ -37,13 +37,9 @@ async def websocket_updates(
 
     try:
         # Welcome message
-        await websocket.send_json({
-            "type": "connected",
-            "data": {
-                "message": "Connected to Werco ERP real-time updates",
-                "user_id": user_id
-            }
-        })
+        await websocket.send_json(
+            {"type": "connected", "data": {"message": "Connected to Werco ERP real-time updates", "user_id": user_id}}
+        )
 
         # Keep connection alive
         while True:
@@ -60,11 +56,7 @@ async def websocket_updates(
 
 
 @router.websocket("/ws/shop-floor/{work_center_id}")
-async def websocket_shop_floor(
-    websocket: WebSocket,
-    work_center_id: int,
-    token: str = Query(...)
-):
+async def websocket_shop_floor(websocket: WebSocket, work_center_id: int, token: str = Query(...)):
     """
     WebSocket endpoint for real-time shop floor updates for a specific work center.
     Requires authentication.
@@ -82,14 +74,16 @@ async def websocket_shop_floor(
 
     try:
         # Send initial data
-        await websocket.send_json({
-            "type": "connected",
-            "data": {
-                "work_center_id": work_center_id,
-                "user_id": user_id,
-                "message": f"Connected to work center {work_center_id} updates"
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "data": {
+                    "work_center_id": work_center_id,
+                    "user_id": user_id,
+                    "message": f"Connected to work center {work_center_id} updates",
+                },
             }
-        })
+        )
 
         while True:
             # Receive heartbeat or commands
@@ -106,11 +100,7 @@ async def websocket_shop_floor(
 
 
 @router.websocket("/ws/work-order/{work_order_id}")
-async def websocket_work_order(
-    websocket: WebSocket,
-    work_order_id: int,
-    token: str = Query(...)
-):
+async def websocket_work_order(websocket: WebSocket, work_order_id: int, token: str = Query(...)):
     """
     WebSocket endpoint for real-time work order status updates.
     Requires authentication.
@@ -126,14 +116,16 @@ async def websocket_work_order(
     await manager.connect(websocket, user_id)
 
     try:
-        await websocket.send_json({
-            "type": "connected",
-            "data": {
-                "work_order_id": work_order_id,
-                "user_id": user_id,
-                "message": f"Connected to work order {work_order_id} updates"
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "data": {
+                    "work_order_id": work_order_id,
+                    "user_id": user_id,
+                    "message": f"Connected to work order {work_order_id} updates",
+                },
             }
-        })
+        )
 
         while True:
             data = await websocket.receive_json()

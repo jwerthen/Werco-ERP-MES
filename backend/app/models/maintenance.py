@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -53,6 +57,7 @@ FREQUENCY_DAYS_MAP = {
 
 class MaintenanceSchedule(Base, TenantMixin):
     """Preventive Maintenance schedule template"""
+
     __tablename__ = "maintenance_schedules"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -87,6 +92,7 @@ class MaintenanceSchedule(Base, TenantMixin):
 
 class MaintenanceWorkOrder(Base, TenantMixin):
     """Individual maintenance work order / task"""
+
     __tablename__ = "maintenance_work_orders"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -133,6 +139,7 @@ class MaintenanceWorkOrder(Base, TenantMixin):
 
 class MaintenanceLog(Base, TenantMixin):
     """History entry for maintenance events"""
+
     __tablename__ = "maintenance_logs"
 
     id = Column(Integer, primary_key=True, index=True)

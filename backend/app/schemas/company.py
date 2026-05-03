@@ -1,12 +1,15 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
-from typing import Optional
-from datetime import datetime
 import re
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class CompanyBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Company name")
-    slug: Optional[str] = Field(None, max_length=100, description="URL-safe identifier (auto-generated if not provided)")
+    slug: Optional[str] = Field(
+        None, max_length=100, description="URL-safe identifier (auto-generated if not provided)"
+    )
     logo_url: Optional[str] = Field(None, max_length=500)
     timezone: str = Field(default="America/Chicago", max_length=50)
     address: Optional[str] = None
@@ -16,6 +19,7 @@ class CompanyBase(BaseModel):
 
 class CompanyRegister(BaseModel):
     """Self-registration: creates a new company + admin user"""
+
     company_name: str = Field(..., min_length=1, max_length=255)
     admin_email: EmailStr
     admin_first_name: str = Field(..., min_length=1, max_length=50)
@@ -43,6 +47,7 @@ class CompanyRegister(BaseModel):
 
 class CompanyCreate(CompanyBase):
     """Platform admin creates a company + initial admin"""
+
     admin_email: EmailStr
     admin_first_name: str = Field(..., min_length=1, max_length=50)
     admin_last_name: str = Field(..., min_length=1, max_length=50)

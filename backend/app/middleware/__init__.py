@@ -1,4 +1,5 @@
 """Middleware components for Werco ERP."""
+
 from app.middleware.logging_middleware import (
     CorrelationIdMiddleware,
     RequestLoggingMiddleware,

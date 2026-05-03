@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
 from datetime import datetime
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class RoutingOperationBase(BaseModel):
@@ -66,7 +67,7 @@ class WorkCenterSummary(BaseModel):
     name: str
     work_center_type: str
     hourly_rate: float
-    
+
     class Config:
         from_attributes = True
 
@@ -78,7 +79,7 @@ class RoutingOperationResponse(RoutingOperationBase):
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
         use_enum_values = True
@@ -106,7 +107,7 @@ class PartSummary(BaseModel):
     part_number: str
     name: str
     part_type: str
-    
+
     class Config:
         from_attributes = True
         use_enum_values = True
@@ -125,7 +126,7 @@ class RoutingResponse(RoutingBase):
     operations: List[RoutingOperationResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -141,6 +142,6 @@ class RoutingListResponse(BaseModel):
     total_run_hours_per_unit: float
     operation_count: int = 0
     created_at: datetime
-    
+
     class Config:
         from_attributes = True

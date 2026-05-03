@@ -1,16 +1,18 @@
-from typing import List, Optional
 import csv
 import io
 import re
 import secrets
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
-from sqlalchemy.orm import Session
-from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id, require_role
-from app.models.user import User, UserRole
-from app.core.security import get_password_hash, verify_password
-from pydantic import BaseModel, EmailStr
 from datetime import datetime
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, EmailStr
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.core.security import get_password_hash, verify_password
+from app.db.database import get_db
+from app.models.user import User, UserRole
 
 router = APIRouter()
 
@@ -62,7 +64,7 @@ class UserResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -113,7 +115,7 @@ def list_users(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all users"""
     query = db.query(User).filter(User.company_id == company_id)
@@ -134,7 +136,7 @@ def get_user(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get user by ID"""
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
@@ -148,17 +150,17 @@ def create_user(
     user_in: UserCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new user (Admin only)"""
     # Check if email exists
     if db.query(User).filter(User.email == user_in.email, User.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     # Check if employee_id exists
     if db.query(User).filter(User.employee_id == user_in.employee_id, User.company_id == company_id).first():
         raise HTTPException(status_code=400, detail="Employee ID already exists")
-    
+
     user = User(
         email=user_in.email,
         employee_id=user_in.employee_id,
@@ -181,7 +183,7 @@ async def import_users_csv(
     default_password: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Import users from CSV (Admin only)."""
     if not file.filename or not file.filename.lower().endswith(".csv"):
@@ -204,18 +206,14 @@ async def import_users_csv(
     required_headers = {"employee_id", "first_name", "last_name"}
     missing_headers = sorted(required_headers - set(header_map.values()))
     if missing_headers:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing required CSV columns: {', '.join(missing_headers)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Missing required CSV columns: {', '.join(missing_headers)}")
 
     existing_employee_ids = {
         (value or "").strip().lower()
         for (value,) in db.query(User.employee_id).filter(User.company_id == company_id).all()
     }
     existing_emails = {
-        (value or "").strip().lower()
-        for (value,) in db.query(User.email).filter(User.company_id == company_id).all()
+        (value or "").strip().lower() for (value,) in db.query(User.email).filter(User.company_id == company_id).all()
     }
 
     errors: List[UserCsvImportError] = []
@@ -368,23 +366,23 @@ def update_user(
     user_in: UserUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a user (Admin only)"""
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     update_data = user_in.model_dump(exclude_unset=True)
-    
+
     # Check email uniqueness if changing
     if "email" in update_data and update_data["email"] != user.email:
         if db.query(User).filter(User.email == update_data["email"], User.company_id == company_id).first():
             raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     for field, value in update_data.items():
         setattr(user, field, value)
-    
+
     db.commit()
     db.refresh(user)
     return user
@@ -396,32 +394,30 @@ def reset_user_password(
     password_data: PasswordReset,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Reset a user's password (Admin only)"""
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     user.hashed_password = get_password_hash(password_data.new_password)
     db.commit()
-    
+
     return {"message": "Password reset successfully"}
 
 
 @router.post("/change-password")
 def change_own_password(
-    password_data: PasswordChange,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    password_data: PasswordChange, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Change own password"""
     if not verify_password(password_data.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
-    
+
     current_user.hashed_password = get_password_hash(password_data.new_password)
     db.commit()
-    
+
     return {"message": "Password changed successfully"}
 
 
@@ -430,7 +426,7 @@ def deactivate_user(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Deactivate a user (Admin only)"""
     if user_id == current_user.id:
@@ -439,10 +435,10 @@ def deactivate_user(
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     user.is_active = False
     db.commit()
-    
+
     return {"message": "User deactivated"}
 
 
@@ -451,14 +447,14 @@ def activate_user(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Reactivate a user (Admin only)"""
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     user.is_active = True
     db.commit()
-    
+
     return {"message": "User activated"}

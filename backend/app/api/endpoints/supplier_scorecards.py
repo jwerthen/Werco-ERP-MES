@@ -1,21 +1,22 @@
+from datetime import date, datetime, timedelta
 from typing import List, Optional
-from datetime import datetime, date, timedelta
-from pydantic import BaseModel
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.api.deps import get_current_user, require_role, get_current_company_id
-from app.models.user import User, UserRole
-from app.models.purchasing import Vendor, PurchaseOrder, PurchaseOrderLine, POReceipt, POStatus
+from app.models.purchasing import POReceipt, POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.quality import NonConformanceReport
-from app.models.supplier_scorecard import (
-    SupplierScorecard, SupplierAudit, ApprovedSupplierList, ScorecardPeriod
-)
+from app.models.supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
+from app.models.user import User, UserRole
 
 router = APIRouter()
 
 
 # ============ Pydantic Schemas ============
+
 
 class ScorecardCreate(BaseModel):
     vendor_id: int
@@ -205,6 +206,7 @@ class ASLResponse(BaseModel):
 
 # ============ Helper Functions ============
 
+
 def calculate_rating(score: float) -> str:
     """Determine rating from overall score."""
     if score >= 90:
@@ -222,10 +224,10 @@ def calculate_rating(score: float) -> str:
 def calculate_overall(scorecard: SupplierScorecard) -> float:
     """Calculate weighted overall score."""
     return (
-        scorecard.quality_score * scorecard.quality_weight +
-        scorecard.delivery_score * scorecard.delivery_weight +
-        scorecard.responsiveness_score * scorecard.responsiveness_weight +
-        scorecard.price_score * scorecard.price_weight
+        scorecard.quality_score * scorecard.quality_weight
+        + scorecard.delivery_score * scorecard.delivery_weight
+        + scorecard.responsiveness_score * scorecard.responsiveness_weight
+        + scorecard.price_score * scorecard.price_weight
     )
 
 
@@ -310,11 +312,9 @@ def asl_to_response(a: ApprovedSupplierList) -> dict:
 
 # ============ Scorecard Endpoints ============
 
+
 @router.get("/supplier-scorecards/dashboard")
-def scorecard_dashboard(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def scorecard_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Dashboard stats: avg score, suppliers below threshold, audits due, probationary count."""
     scorecards = db.query(SupplierScorecard).all()
 
@@ -333,16 +333,18 @@ def scorecard_dashboard(
 
     # Audits due within 30 days
     thirty_days = date.today() + timedelta(days=30)
-    audits_due = db.query(SupplierAudit).filter(
-        SupplierAudit.next_audit_date != None,
-        SupplierAudit.next_audit_date <= thirty_days
-    ).count()
+    audits_due = (
+        db.query(SupplierAudit)
+        .filter(SupplierAudit.next_audit_date != None, SupplierAudit.next_audit_date <= thirty_days)
+        .count()
+    )
 
     # Reviews due (ASL)
-    reviews_due = db.query(ApprovedSupplierList).filter(
-        ApprovedSupplierList.next_review_date != None,
-        ApprovedSupplierList.next_review_date <= thirty_days
-    ).count()
+    reviews_due = (
+        db.query(ApprovedSupplierList)
+        .filter(ApprovedSupplierList.next_review_date != None, ApprovedSupplierList.next_review_date <= thirty_days)
+        .count()
+    )
 
     # Top and worst performer
     top_performer = max(latest, key=lambda s: s.overall_score) if latest else None
@@ -356,30 +358,33 @@ def scorecard_dashboard(
         "disqualified_count": disqualified_count,
         "audits_due_30_days": audits_due,
         "reviews_due_30_days": reviews_due,
-        "top_performer": {
-            "vendor_id": top_performer.vendor_id,
-            "vendor_name": top_performer.vendor.name if top_performer.vendor else "Unknown",
-            "score": round(top_performer.overall_score, 1),
-            "rating": top_performer.rating,
-        } if top_performer else None,
-        "worst_performer": {
-            "vendor_id": worst_performer.vendor_id,
-            "vendor_name": worst_performer.vendor.name if worst_performer.vendor else "Unknown",
-            "score": round(worst_performer.overall_score, 1),
-            "rating": worst_performer.rating,
-        } if worst_performer else None,
+        "top_performer": (
+            {
+                "vendor_id": top_performer.vendor_id,
+                "vendor_name": top_performer.vendor.name if top_performer.vendor else "Unknown",
+                "score": round(top_performer.overall_score, 1),
+                "rating": top_performer.rating,
+            }
+            if top_performer
+            else None
+        ),
+        "worst_performer": (
+            {
+                "vendor_id": worst_performer.vendor_id,
+                "vendor_name": worst_performer.vendor.name if worst_performer.vendor else "Unknown",
+                "score": round(worst_performer.overall_score, 1),
+                "rating": worst_performer.rating,
+            }
+            if worst_performer
+            else None
+        ),
     }
 
 
 @router.get("/supplier-scorecards/ranking")
-def scorecard_ranking(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def scorecard_ranking(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """All vendors ranked by their latest overall score."""
-    scorecards = db.query(SupplierScorecard).options(
-        joinedload(SupplierScorecard.vendor)
-    ).all()
+    scorecards = db.query(SupplierScorecard).options(joinedload(SupplierScorecard.vendor)).all()
 
     # Get latest scorecard per vendor
     latest_by_vendor = {}
@@ -393,33 +398,32 @@ def scorecard_ranking(
 
 @router.get("/supplier-scorecards/vendor/{vendor_id}/history")
 def vendor_scorecard_history(
-    vendor_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    vendor_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Performance history for a specific vendor over time."""
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
-    scorecards = db.query(SupplierScorecard).options(
-        joinedload(SupplierScorecard.vendor)
-    ).filter(
-        SupplierScorecard.vendor_id == vendor_id
-    ).order_by(SupplierScorecard.period_start.asc()).all()
+    scorecards = (
+        db.query(SupplierScorecard)
+        .options(joinedload(SupplierScorecard.vendor))
+        .filter(SupplierScorecard.vendor_id == vendor_id)
+        .order_by(SupplierScorecard.period_start.asc())
+        .all()
+    )
 
     return [scorecard_to_response(sc) for sc in scorecards]
 
 
 @router.get("/supplier-scorecards/{scorecard_id}", response_model=ScorecardResponse)
-def get_scorecard(
-    scorecard_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    sc = db.query(SupplierScorecard).options(
-        joinedload(SupplierScorecard.vendor)
-    ).filter(SupplierScorecard.id == scorecard_id).first()
+def get_scorecard(scorecard_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    sc = (
+        db.query(SupplierScorecard)
+        .options(joinedload(SupplierScorecard.vendor))
+        .filter(SupplierScorecard.id == scorecard_id)
+        .first()
+    )
     if not sc:
         raise HTTPException(status_code=404, detail="Scorecard not found")
     return scorecard_to_response(sc)
@@ -434,11 +438,13 @@ def list_scorecards(
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List scorecards with filters."""
-    query = db.query(SupplierScorecard).filter(SupplierScorecard.company_id == company_id).options(
-        joinedload(SupplierScorecard.vendor)
+    query = (
+        db.query(SupplierScorecard)
+        .filter(SupplierScorecard.company_id == company_id)
+        .options(joinedload(SupplierScorecard.vendor))
     )
     if vendor_id:
         query = query.filter(SupplierScorecard.vendor_id == vendor_id)
@@ -447,9 +453,7 @@ def list_scorecards(
     if rating:
         query = query.filter(SupplierScorecard.rating == rating)
 
-    scorecards = query.order_by(
-        SupplierScorecard.period_end.desc()
-    ).offset(skip).limit(limit).all()
+    scorecards = query.order_by(SupplierScorecard.period_end.desc()).offset(skip).limit(limit).all()
     return [scorecard_to_response(sc) for sc in scorecards]
 
 
@@ -458,7 +462,7 @@ def create_scorecard(
     data: ScorecardCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new scorecard."""
     vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
@@ -506,12 +510,15 @@ def update_scorecard(
     data: ScorecardUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an existing scorecard."""
-    sc = db.query(SupplierScorecard).options(
-        joinedload(SupplierScorecard.vendor)
-    ).filter(SupplierScorecard.id == scorecard_id).first()
+    sc = (
+        db.query(SupplierScorecard)
+        .options(joinedload(SupplierScorecard.vendor))
+        .filter(SupplierScorecard.id == scorecard_id)
+        .first()
+    )
     if not sc:
         raise HTTPException(status_code=404, detail="Scorecard not found")
 
@@ -533,7 +540,7 @@ def auto_calculate_scorecard(
     vendor_id: int,
     data: CalculateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
 ):
     """Auto-calculate scorecard from PO/receipt/NCR data for a vendor and date range."""
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
@@ -541,13 +548,17 @@ def auto_calculate_scorecard(
         raise HTTPException(status_code=404, detail="Vendor not found")
 
     # Get POs in the period
-    pos = db.query(PurchaseOrder).filter(
-        PurchaseOrder.vendor_id == vendor_id,
-        PurchaseOrder.order_date >= data.period_start,
-        PurchaseOrder.order_date <= data.period_end,
-        PurchaseOrder.status != POStatus.CANCELLED,
-        PurchaseOrder.status != POStatus.DRAFT,
-    ).all()
+    pos = (
+        db.query(PurchaseOrder)
+        .filter(
+            PurchaseOrder.vendor_id == vendor_id,
+            PurchaseOrder.order_date >= data.period_start,
+            PurchaseOrder.order_date <= data.period_end,
+            PurchaseOrder.status != POStatus.CANCELLED,
+            PurchaseOrder.status != POStatus.DRAFT,
+        )
+        .all()
+    )
 
     total_pos = len(pos)
     po_ids = [po.id for po in pos]
@@ -555,18 +566,14 @@ def auto_calculate_scorecard(
     # Get PO lines
     lines = []
     if po_ids:
-        lines = db.query(PurchaseOrderLine).filter(
-            PurchaseOrderLine.purchase_order_id.in_(po_ids)
-        ).all()
+        lines = db.query(PurchaseOrderLine).filter(PurchaseOrderLine.purchase_order_id.in_(po_ids)).all()
     total_lines = len(lines)
-    line_ids = [l.id for l in lines]
+    line_ids = [line.id for line in lines]
 
     # Get receipts
     receipts = []
     if line_ids:
-        receipts = db.query(POReceipt).filter(
-            POReceipt.po_line_id.in_(line_ids)
-        ).all()
+        receipts = db.query(POReceipt).filter(POReceipt.po_line_id.in_(line_ids)).all()
 
     total_received_qty = sum(r.quantity_received for r in receipts)
     rejected_qty = sum(r.quantity_rejected for r in receipts)
@@ -576,9 +583,9 @@ def auto_calculate_scorecard(
     late = 0
     for receipt in receipts:
         po_line = None
-        for l in lines:
-            if l.id == receipt.po_line_id:
-                po_line = l
+        for line in lines:
+            if line.id == receipt.po_line_id:
+                po_line = line
                 break
         if po_line:
             required = po_line.required_date
@@ -616,22 +623,30 @@ def auto_calculate_scorecard(
     if line_ids:
         receipt_ids = [r.id for r in receipts]
         if receipt_ids:
-            ncr_count = db.query(NonConformanceReport).filter(
-                NonConformanceReport.receipt_id.in_(receipt_ids),
-                NonConformanceReport.detected_date >= data.period_start,
-                NonConformanceReport.detected_date <= data.period_end,
-            ).count()
+            ncr_count = (
+                db.query(NonConformanceReport)
+                .filter(
+                    NonConformanceReport.receipt_id.in_(receipt_ids),
+                    NonConformanceReport.detected_date >= data.period_start,
+                    NonConformanceReport.detected_date <= data.period_end,
+                )
+                .count()
+            )
 
     # CAR count linked to NCRs
     car_count = 0
     if ncr_count > 0 and line_ids:
         receipt_ids = [r.id for r in receipts]
-        ncrs_with_car = db.query(NonConformanceReport).filter(
-            NonConformanceReport.receipt_id.in_(receipt_ids),
-            NonConformanceReport.car_id != None,
-            NonConformanceReport.detected_date >= data.period_start,
-            NonConformanceReport.detected_date <= data.period_end,
-        ).all()
+        ncrs_with_car = (
+            db.query(NonConformanceReport)
+            .filter(
+                NonConformanceReport.receipt_id.in_(receipt_ids),
+                NonConformanceReport.car_id != None,
+                NonConformanceReport.detected_date >= data.period_start,
+                NonConformanceReport.detected_date <= data.period_end,
+            )
+            .all()
+        )
         car_ids = set(n.car_id for n in ncrs_with_car if n.car_id)
         car_count = len(car_ids)
 
@@ -670,20 +685,18 @@ def auto_calculate_scorecard(
 
 # ============ Audit Endpoints ============
 
+
 @router.get("/supplier-audits/due-soon")
-def audits_due_soon(
-    days: int = 30,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def audits_due_soon(days: int = 30, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get audits due within N days."""
     cutoff = date.today() + timedelta(days=days)
-    audits = db.query(SupplierAudit).options(
-        joinedload(SupplierAudit.vendor)
-    ).filter(
-        SupplierAudit.next_audit_date != None,
-        SupplierAudit.next_audit_date <= cutoff
-    ).order_by(SupplierAudit.next_audit_date.asc()).all()
+    audits = (
+        db.query(SupplierAudit)
+        .options(joinedload(SupplierAudit.vendor))
+        .filter(SupplierAudit.next_audit_date != None, SupplierAudit.next_audit_date <= cutoff)
+        .order_by(SupplierAudit.next_audit_date.asc())
+        .all()
+    )
     return [audit_to_response(a) for a in audits]
 
 
@@ -694,7 +707,7 @@ def list_audits(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     query = db.query(SupplierAudit).options(joinedload(SupplierAudit.vendor))
     if vendor_id:
@@ -710,7 +723,7 @@ def create_audit(
     data: AuditCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
     if not vendor:
@@ -729,11 +742,11 @@ def update_audit(
     audit_id: int,
     data: AuditUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
 ):
-    audit = db.query(SupplierAudit).options(
-        joinedload(SupplierAudit.vendor)
-    ).filter(SupplierAudit.id == audit_id).first()
+    audit = (
+        db.query(SupplierAudit).options(joinedload(SupplierAudit.vendor)).filter(SupplierAudit.id == audit_id).first()
+    )
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
@@ -747,13 +760,14 @@ def update_audit(
 
 # ============ Approved Supplier List Endpoints ============
 
+
 @router.get("/approved-suppliers/", response_model=List[ASLResponse])
 def list_approved_suppliers(
     status: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     query = db.query(ApprovedSupplierList).options(joinedload(ApprovedSupplierList.vendor))
     if status:
@@ -763,14 +777,13 @@ def list_approved_suppliers(
 
 
 @router.get("/approved-suppliers/{asl_id}", response_model=ASLResponse)
-def get_approved_supplier(
-    asl_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    entry = db.query(ApprovedSupplierList).options(
-        joinedload(ApprovedSupplierList.vendor)
-    ).filter(ApprovedSupplierList.id == asl_id).first()
+def get_approved_supplier(asl_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    entry = (
+        db.query(ApprovedSupplierList)
+        .options(joinedload(ApprovedSupplierList.vendor))
+        .filter(ApprovedSupplierList.id == asl_id)
+        .first()
+    )
     if not entry:
         raise HTTPException(status_code=404, detail="ASL entry not found")
     return asl_to_response(entry)
@@ -781,15 +794,13 @@ def create_approved_supplier(
     data: ASLCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
-    existing = db.query(ApprovedSupplierList).filter(
-        ApprovedSupplierList.vendor_id == data.vendor_id
-    ).first()
+    existing = db.query(ApprovedSupplierList).filter(ApprovedSupplierList.vendor_id == data.vendor_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="Vendor already has an ASL entry")
 
@@ -813,11 +824,14 @@ def update_approved_supplier(
     asl_id: int,
     data: ASLUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
 ):
-    entry = db.query(ApprovedSupplierList).options(
-        joinedload(ApprovedSupplierList.vendor)
-    ).filter(ApprovedSupplierList.id == asl_id).first()
+    entry = (
+        db.query(ApprovedSupplierList)
+        .options(joinedload(ApprovedSupplierList.vendor))
+        .filter(ApprovedSupplierList.id == asl_id)
+        .first()
+    )
     if not entry:
         raise HTTPException(status_code=404, detail="ASL entry not found")
 

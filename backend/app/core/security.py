@@ -1,18 +1,24 @@
 from __future__ import annotations
-from datetime import datetime, timedelta
-from typing import Optional, Any, Tuple, Union
-from jose import jwt, JWTError
-from passlib.context import CryptContext
+
 import secrets
-from .config import settings
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, timedelta
+from typing import Any, Optional, Tuple
+
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models.user import User
+
+from .config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def create_access_token(subject: str | Any, expires_delta: Optional[timedelta] = None, company_id: Optional[int] = None) -> str:
+def create_access_token(
+    subject: str | Any, expires_delta: Optional[timedelta] = None, company_id: Optional[int] = None
+) -> str:
     """Create a short-lived access token (default 15 minutes)."""
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -31,7 +37,9 @@ def create_access_token(subject: str | Any, expires_delta: Optional[timedelta] =
     return encoded_jwt
 
 
-def create_refresh_token(subject: str | Any, session_id: Optional[str] = None, company_id: Optional[int] = None) -> Tuple[str, str, datetime]:
+def create_refresh_token(
+    subject: str | Any, session_id: Optional[str] = None, company_id: Optional[int] = None
+) -> Tuple[str, str, datetime]:
     """
     Create a longer-lived refresh token (default 7 days).
     Returns: (token, session_id, expiry_time)
@@ -81,14 +89,14 @@ def verify_refresh_token(token: str) -> Optional[dict]:
         payload = jwt.decode(token, settings.REFRESH_TOKEN_SECRET_KEY, algorithms=[settings.ALGORITHM])
         if payload.get("type") != "refresh":
             return None
-        
+
         # Check absolute session timeout
         absolute_timeout_str = payload.get("absolute_timeout")
         if absolute_timeout_str:
             absolute_timeout = datetime.fromisoformat(absolute_timeout_str)
             if datetime.utcnow() > absolute_timeout:
                 return None  # Session has exceeded absolute timeout
-        
+
         return {
             "user_id": payload.get("sub"),
             "session_id": payload.get("session_id"),
@@ -101,7 +109,6 @@ def verify_refresh_token(token: str) -> Optional[dict]:
 
 async def get_current_user_from_token(token: str, db: AsyncSession) -> User:
     """Get current user from JWT token (async version for WebSockets)."""
-    credentials_exception = None
 
     user_id = verify_token(token)
     if user_id is None:

@@ -1,11 +1,11 @@
 import json
 import re
 from typing import List, Optional
+
 from sqlalchemy.orm import Session
 
 from app.models.quote_config import QuoteSettings
 from app.models.work_center import WorkCenter
-
 
 DEFAULT_WORK_CENTER_TYPES = [
     "fabrication",
@@ -69,11 +69,7 @@ def get_in_use_work_center_types(db: Session, company_id: Optional[int] = None) 
     query = db.query(WorkCenter.work_center_type)
     if company_id is not None:
         query = query.filter(WorkCenter.company_id == company_id)
-    in_use = [
-        normalize_work_center_type(row[0])
-        for row in query.distinct().all()
-        if row and row[0]
-    ]
+    in_use = [normalize_work_center_type(row[0]) for row in query.distinct().all() if row and row[0]]
     # De-duplicate while preserving order
     seen = set()
     result = []

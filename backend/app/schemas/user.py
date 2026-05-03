@@ -1,15 +1,21 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
-from typing import Optional
-from datetime import datetime
-from app.models.user import UserRole
 import re
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from app.models.user import UserRole
 
 
 class UserBase(BaseModel):
     email: EmailStr = Field(..., max_length=255, description="Email address")
     employee_id: str = Field(..., min_length=1, max_length=50, pattern=r'^[A-Za-z0-9\-_]+$', description="Employee ID")
-    first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="First name (letters only)")
-    last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="Last name (letters only)")
+    first_name: str = Field(
+        ..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="First name (letters only)"
+    )
+    last_name: str = Field(
+        ..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="Last name (letters only)"
+    )
     role: UserRole = Field(default=UserRole.OPERATOR)
     department: Optional[str] = Field(None, max_length=100)
 
@@ -51,7 +57,13 @@ class PublicRegister(BaseModel):
     email: EmailStr = Field(..., max_length=255, description="Email address")
     first_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="First name")
     last_name: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-zA-Z\s\-\'\.,]+$', description="Last name")
-    employee_id: Optional[str] = Field(None, min_length=1, max_length=50, pattern=r'^[A-Za-z0-9\-_]+$', description="Employee ID (auto-generated if not provided)")
+    employee_id: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=50,
+        pattern=r'^[A-Za-z0-9\-_]+$',
+        description="Employee ID (auto-generated if not provided)",
+    )
     password: str = Field(..., min_length=12, max_length=128, description="Password")
 
     @field_validator('password')

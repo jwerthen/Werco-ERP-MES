@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
+
+from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -28,6 +32,7 @@ class DowntimePlannedType(str, enum.Enum):
 
 class DowntimeEvent(Base, TenantMixin):
     """Machine downtime event tracking for OEE and production analysis"""
+
     __tablename__ = "downtime_events"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -60,6 +65,7 @@ class DowntimeEvent(Base, TenantMixin):
 
 class DowntimeReasonCode(Base, TenantMixin):
     """Predefined reason codes for categorizing downtime events"""
+
     __tablename__ = "downtime_reason_codes"
 
     id = Column(Integer, primary_key=True, index=True)

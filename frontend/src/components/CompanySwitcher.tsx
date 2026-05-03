@@ -27,7 +27,7 @@ export default function CompanySwitcher() {
       setIsOpen(false);
       // Reload the page to refresh all data
       window.location.reload();
-    } catch (e) {
+    } catch {
       console.error('Failed to switch company');
     } finally {
       setIsLoading(false);
@@ -40,7 +40,7 @@ export default function CompanySwitcher() {
       await switchBackToHome();
       setIsOpen(false);
       window.location.reload();
-    } catch (e) {
+    } catch {
       console.error('Failed to switch back');
     } finally {
       setIsLoading(false);

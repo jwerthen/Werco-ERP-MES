@@ -1,6 +1,7 @@
 """
 Werco part number generation for raw material and hardware.
 """
+
 import re
 import zlib
 from typing import Optional, Tuple
@@ -73,7 +74,26 @@ def _find_grade(desc: str) -> str:
     er_match = re.search(r"\bER\s*([0-9A-Z\-]+)\b", desc)
     if er_match:
         return f"ER{er_match.group(1)}".replace(" ", "")
-    grade_map = ["A36", "1018", "4140", "304", "304L", "316", "316L", "6061", "5052", "7075", "17-4PH", "AR400", "AR500", "G2", "G5", "G8", "A2", "A4"]
+    grade_map = [
+        "A36",
+        "1018",
+        "4140",
+        "304",
+        "304L",
+        "316",
+        "316L",
+        "6061",
+        "5052",
+        "7075",
+        "17-4PH",
+        "AR400",
+        "AR500",
+        "G2",
+        "G5",
+        "G8",
+        "A2",
+        "A4",
+    ]
     for g in grade_map:
         if g in desc:
             return g
@@ -179,17 +199,20 @@ def _extract_dims(desc: str) -> Tuple[Optional[float], Optional[float], Optional
             dia = _parse_fraction(m.group(1))
 
     # X-separated dims
-    m = re.search(r"([0-9./-]+)\s*(?:IN|MM|\")?\s*[Xx]\s*([0-9./-]+)\s*(?:IN|MM|\")?(?:\s*[Xx]\s*([0-9./-]+)\s*(?:IN|MM|\")?)?", desc)
-    w = l = None
+    m = re.search(
+        r"([0-9./-]+)\s*(?:IN|MM|\")?\s*[Xx]\s*([0-9./-]+)\s*(?:IN|MM|\")?(?:\s*[Xx]\s*([0-9./-]+)\s*(?:IN|MM|\")?)?",
+        desc,
+    )
+    w = length = None
     if m:
         n1 = _parse_fraction(m.group(1))
         n2 = _parse_fraction(m.group(2))
         n3 = _parse_fraction(m.group(3)) if m.group(3) else None
         if thk is None and n3 is not None:
-            thk, w, l = n1, n2, n3
+            thk, w, length = n1, n2, n3
         elif n2 is not None:
-            w, l = n1, n2
-    return thk, w, l, dia
+            w, length = n1, n2
+    return thk, w, length, dia
 
 
 def _gauge_to_thickness_in(gauge: str) -> Optional[float]:

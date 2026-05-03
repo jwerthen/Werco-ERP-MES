@@ -62,7 +62,7 @@ export default function PrintTraveler() {
         ]);
         setPart(partRes);
         setMaterialReqs(matReqsRes);
-      } catch (err) {
+      } catch {
         // Material requirements or part data may not exist for all WOs
       }
     } catch (err) {

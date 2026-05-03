@@ -1,15 +1,16 @@
-import pytest
 from datetime import datetime
+
+import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
 from app.models.part import Part
 from app.models.routing import Routing, RoutingOperation
-from app.models.work_center import WorkCenter
-from app.models.audit_log import AuditLog
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User
+from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 
 
@@ -25,9 +26,7 @@ class TestWorkOrdersAPI:
         data = response.json()
         assert len(data) == 0
 
-    def test_list_work_orders(
-        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
-    ):
+    def test_list_work_orders(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test listing work orders with existing data."""
         response = client.get("/api/v1/work-orders/", headers=auth_headers)
         assert response.status_code == status.HTTP_200_OK
@@ -68,42 +67,41 @@ class TestWorkOrdersAPI:
         db_session.add(work_order)
         db_session.flush()
 
-        db_session.add_all([
-            WorkOrderOperation(
-                work_order_id=work_order.id,
-                work_center_id=work_center.id,
-                component_part_id=part.id,
-                component_quantity=2,
-                sequence=10,
-                operation_number="Op 10",
-                name="Completed Component Cut",
-                status=OperationStatus.COMPLETE,
-                quantity_complete=2,
-                actual_end=datetime.utcnow(),
-                company_id=1,
-            ),
-            WorkOrderOperation(
-                work_order_id=work_order.id,
-                work_center_id=work_center.id,
-                component_part_id=part.id,
-                component_quantity=1,
-                sequence=20,
-                operation_number="Op 20",
-                name="Pending Component Cut",
-                status=OperationStatus.PENDING,
-                quantity_complete=0,
-                company_id=1,
-            ),
-        ])
+        db_session.add_all(
+            [
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    component_part_id=part.id,
+                    component_quantity=2,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Completed Component Cut",
+                    status=OperationStatus.COMPLETE,
+                    quantity_complete=2,
+                    actual_end=datetime.utcnow(),
+                    company_id=1,
+                ),
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    component_part_id=part.id,
+                    component_quantity=1,
+                    sequence=20,
+                    operation_number="Op 20",
+                    name="Pending Component Cut",
+                    status=OperationStatus.PENDING,
+                    quantity_complete=0,
+                    company_id=1,
+                ),
+            ]
+        )
         db_session.commit()
 
         response = client.get("/api/v1/work-orders/", headers=auth_headers)
 
         assert response.status_code == status.HTTP_200_OK
-        item = next(
-            row for row in response.json()
-            if row["work_order_number"] == "WO-PROG-001"
-        )
+        item = next(row for row in response.json() if row["work_order_number"] == "WO-PROG-001")
         assert item["quantity_complete"] == 0
         assert item["operation_count"] == 2
         assert item["operations_complete"] == 1
@@ -142,89 +140,75 @@ class TestWorkOrdersAPI:
         db_session.add(work_order)
         db_session.flush()
 
-        db_session.add_all([
-            WorkOrderOperation(
-                work_order_id=work_order.id,
-                work_center_id=work_center.id,
-                component_part_id=part.id,
-                component_quantity=2,
-                sequence=10,
-                operation_number="Op 10",
-                name="05883 - Cut CNC 05883",
-                status=OperationStatus.COMPLETE,
-                quantity_complete=2,
-                actual_end=datetime.utcnow(),
-                completed_by=operator_user.id,
-                company_id=1,
-            ),
-            WorkOrderOperation(
-                work_order_id=work_order.id,
-                work_center_id=work_center.id,
-                component_part_id=part.id,
-                component_quantity=2,
-                sequence=10,
-                operation_number="Op 10",
-                name="05883 - Cut CNC 05883",
-                status=OperationStatus.PENDING,
-                quantity_complete=0,
-                company_id=1,
-            ),
-            WorkOrderOperation(
-                work_order_id=work_order.id,
-                work_center_id=work_center.id,
-                component_part_id=part.id,
-                component_quantity=1,
-                sequence=20,
-                operation_number="Op 20",
-                name="05884 - Cut CNC 05884",
-                status=OperationStatus.PENDING,
-                quantity_complete=0,
-                company_id=1,
-            ),
-        ])
+        db_session.add_all(
+            [
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    component_part_id=part.id,
+                    component_quantity=2,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="05883 - Cut CNC 05883",
+                    status=OperationStatus.COMPLETE,
+                    quantity_complete=2,
+                    actual_end=datetime.utcnow(),
+                    completed_by=operator_user.id,
+                    company_id=1,
+                ),
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    component_part_id=part.id,
+                    component_quantity=2,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="05883 - Cut CNC 05883",
+                    status=OperationStatus.PENDING,
+                    quantity_complete=0,
+                    company_id=1,
+                ),
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    component_part_id=part.id,
+                    component_quantity=1,
+                    sequence=20,
+                    operation_number="Op 20",
+                    name="05884 - Cut CNC 05884",
+                    status=OperationStatus.PENDING,
+                    quantity_complete=0,
+                    company_id=1,
+                ),
+            ]
+        )
         db_session.commit()
 
         response = client.get("/api/v1/work-orders/", headers=auth_headers)
 
         assert response.status_code == status.HTTP_200_OK
-        item = next(
-            row for row in response.json()
-            if row["work_order_number"] == "WO-PROG-HIST-001"
-        )
+        item = next(row for row in response.json() if row["work_order_number"] == "WO-PROG-HIST-001")
         assert item["operation_count"] == 2
         assert item["operations_complete"] == 1
         assert item["operation_progress_percent"] == 50.0
 
-    def test_create_work_order(
-        self, client: TestClient, auth_headers: dict, sample_work_order_data: dict
-    ):
+    def test_create_work_order(self, client: TestClient, auth_headers: dict, sample_work_order_data: dict):
         """Test creating a new work order."""
-        response = client.post(
-            "/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data
-        )
+        response = client.post("/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data)
         assert response.status_code == status.HTTP_201_CREATED
         data = response.json()
         assert data["work_order_number"].startswith("WO-")
         assert data["customer_name"] == sample_work_order_data["customer_name"]
-        assert (
-            float(data["quantity_ordered"])
-            == sample_work_order_data["quantity_ordered"]
-        )
+        assert float(data["quantity_ordered"]) == sample_work_order_data["quantity_ordered"]
 
-    def test_create_work_order_unauthorized(
-        self, client: TestClient, sample_work_order_data: dict
-    ):
+    def test_create_work_order_unauthorized(self, client: TestClient, sample_work_order_data: dict):
         """Test creating a work order without authentication."""
         response = client.post("/api/v1/work-orders/", json=sample_work_order_data)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_get_work_order_by_id(
-        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
-    ):
+    def test_get_work_order_by_id(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test retrieving a single work order by ID."""
-        response = client.get(
-            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
-        )
+        response = client.get(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["id"] == test_work_order.id
@@ -239,9 +223,7 @@ class TestWorkOrdersAPI:
         operation.actual_start = datetime(2026, 5, 1, 18, 17, 0)
         db_session.commit()
 
-        response = client.get(
-            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
-        )
+        response = client.get(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
@@ -253,9 +235,7 @@ class TestWorkOrdersAPI:
         response = client.get("/api/v1/work-orders/99999", headers=auth_headers)
         assert response.status_code == status.HTTP_404_NOT_FOUND
 
-    def test_update_work_order(
-        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
-    ):
+    def test_update_work_order(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test updating an existing work order."""
         update_data = {"version": 0, "status": "released", "priority": 1}
         response = client.put(
@@ -268,9 +248,7 @@ class TestWorkOrdersAPI:
         assert data["status"] == "released"
         assert data["priority"] == 1
 
-    def test_update_work_order_priority_quick(
-        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
-    ):
+    def test_update_work_order_priority_quick(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Priority can be changed quickly without full work order payload."""
         response = client.put(
             f"/api/v1/work-orders/{test_work_order.id}/priority",
@@ -282,9 +260,7 @@ class TestWorkOrdersAPI:
         assert data["work_order_id"] == test_work_order.id
         assert data["priority"] == 1
 
-        wo_response = client.get(
-            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
-        )
+        wo_response = client.get(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
         assert wo_response.status_code == status.HTTP_200_OK
         assert wo_response.json()["priority"] == 1
 
@@ -322,13 +298,9 @@ class TestWorkOrdersAPI:
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    def test_delete_work_order(
-        self, client: TestClient, admin_headers: dict, test_work_order: WorkOrder, db_session
-    ):
+    def test_delete_work_order(self, client: TestClient, admin_headers: dict, test_work_order: WorkOrder, db_session):
         """Test deleting a work order (admin only)."""
-        response = client.delete(
-            f"/api/v1/work-orders/{test_work_order.id}", headers=admin_headers
-        )
+        response = client.delete(f"/api/v1/work-orders/{test_work_order.id}", headers=admin_headers)
         assert response.status_code == status.HTTP_204_NO_CONTENT
         db_session.refresh(test_work_order)
         assert test_work_order.is_deleted is True
@@ -340,9 +312,7 @@ class TestWorkOrdersAPI:
         test_work_order.status = WorkOrderStatus.RELEASED
         db_session.commit()
 
-        response = client.delete(
-            f"/api/v1/work-orders/{test_work_order.id}", headers=admin_headers
-        )
+        response = client.delete(f"/api/v1/work-orders/{test_work_order.id}", headers=admin_headers)
 
         assert response.status_code == status.HTTP_204_NO_CONTENT
         db_session.refresh(test_work_order)
@@ -350,29 +320,19 @@ class TestWorkOrdersAPI:
         assert test_work_order.is_deleted is True
         assert test_work_order.deleted_at is not None
 
-    def test_delete_work_order_forbidden(
-        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
-    ):
+    def test_delete_work_order_forbidden(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test that non-admin cannot delete work orders."""
-        response = client.delete(
-            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
-        )
+        response = client.delete(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    def test_release_work_order(
-        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
-    ):
+    def test_release_work_order(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test releasing a work order."""
-        response = client.post(
-            f"/api/v1/work-orders/{test_work_order.id}/release", headers=auth_headers
-        )
+        response = client.post(f"/api/v1/work-orders/{test_work_order.id}/release", headers=auth_headers)
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["status"] == "released"
 
-    def test_search_work_orders(
-        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
-    ):
+    def test_search_work_orders(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test searching work orders by customer name."""
         response = client.get(
             f"/api/v1/work-orders/?search={test_work_order.customer_name}",
@@ -387,9 +347,7 @@ class TestWorkOrdersAPI:
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
     ):
         """Started/completed operator IDs should be visible on work order operations."""
-        work_order_response = client.get(
-            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
-        )
+        work_order_response = client.get(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
         assert work_order_response.status_code == status.HTTP_200_OK
         operation_id = work_order_response.json()["operations"][0]["id"]
 
@@ -409,9 +367,7 @@ class TestWorkOrdersAPI:
         )
         assert complete_response.status_code == status.HTTP_200_OK
 
-        refreshed_work_order = client.get(
-            f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers
-        )
+        refreshed_work_order = client.get(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
         assert refreshed_work_order.status_code == status.HTTP_200_OK
         operation = refreshed_work_order.json()["operations"][0]
         assert operation["started_by"] is not None
@@ -596,18 +552,12 @@ class TestWorkOrdersAPI:
             ]
         )
 
-        routing_one = Routing(
-            part_id=component_one.id, revision="A", status="released", is_active=True, company_id=1
-        )
-        routing_two = Routing(
-            part_id=component_two.id, revision="A", status="released", is_active=True, company_id=1
-        )
+        routing_one = Routing(part_id=component_one.id, revision="A", status="released", is_active=True, company_id=1)
+        routing_two = Routing(part_id=component_two.id, revision="A", status="released", is_active=True, company_id=1)
         routing_nested = Routing(
             part_id=nested_component.id, revision="A", status="released", is_active=True, company_id=1
         )
-        assembly_routing = Routing(
-            part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1
-        )
+        assembly_routing = Routing(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add_all([routing_one, routing_two, routing_nested, assembly_routing])
         db_session.flush()
 
@@ -700,9 +650,7 @@ class TestWorkOrdersAPI:
             "Final Inspection",
         ]
         preview_component_quantities = [
-            op["component_quantity"]
-            for op in preview_response.json()["operations_preview"]
-            if op["component_part_id"]
+            op["component_quantity"] for op in preview_response.json()["operations_preview"] if op["component_part_id"]
         ]
         assert preview_component_quantities == [3, 3, 1, 2]
 
@@ -870,9 +818,7 @@ class TestWorkOrdersAPI:
         assert operation["component_part_number"] == component.part_number
         assert operation["component_quantity"] == 8
 
-    def test_assembly_work_order_places_final_inspection_last(
-        self, client: TestClient, auth_headers: dict, db_session
-    ):
+    def test_assembly_work_order_places_final_inspection_last(self, client: TestClient, auth_headers: dict, db_session):
         """Final inspection should be moved to the last assembly stage."""
         assembly = Part(
             part_number="ASM-FINAL-001",
@@ -933,12 +879,8 @@ class TestWorkOrdersAPI:
             )
         )
 
-        component_routing = Routing(
-            part_id=component.id, revision="A", status="released", is_active=True, company_id=1
-        )
-        assembly_routing = Routing(
-            part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1
-        )
+        component_routing = Routing(part_id=component.id, revision="A", status="released", is_active=True, company_id=1)
+        assembly_routing = Routing(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add_all([component_routing, assembly_routing])
         db_session.flush()
 
@@ -1033,29 +975,31 @@ class TestWorkOrdersAPI:
         routing = Routing(part_id=component.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add_all([bom, routing])
         db_session.flush()
-        db_session.add_all([
-            BOMItem(
-                bom_id=bom.id,
-                component_part_id=component.id,
-                item_number=10,
-                quantity=2,
-                item_type="make",
-                line_type="component",
-                unit_of_measure="each",
-                company_id=1,
-            ),
-            RoutingOperation(
-                routing_id=routing.id,
-                sequence=10,
-                operation_number="Op 10",
-                name="Machine BOM Component",
-                work_center_id=work_center.id,
-                setup_hours=0,
-                run_hours_per_unit=0.1,
-                is_active=True,
-                company_id=1,
-            ),
-        ])
+        db_session.add_all(
+            [
+                BOMItem(
+                    bom_id=bom.id,
+                    component_part_id=component.id,
+                    item_number=10,
+                    quantity=2,
+                    item_type="make",
+                    line_type="component",
+                    unit_of_measure="each",
+                    company_id=1,
+                ),
+                RoutingOperation(
+                    routing_id=routing.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Machine BOM Component",
+                    work_center_id=work_center.id,
+                    setup_hours=0,
+                    run_hours_per_unit=0.1,
+                    is_active=True,
+                    company_id=1,
+                ),
+            ]
+        )
         db_session.commit()
 
         preview_response = client.get(
@@ -1081,9 +1025,7 @@ class TestWorkOrdersAPI:
         assert operation["component_part_id"] == component.id
         assert operation["component_quantity"] == 6
 
-        release_response = client.post(
-            f"/api/v1/work-orders/{response.json()['id']}/release", headers=auth_headers
-        )
+        release_response = client.post(f"/api/v1/work-orders/{response.json()['id']}/release", headers=auth_headers)
         assert release_response.status_code == status.HTTP_200_OK
 
         shop_floor_response = client.get(
@@ -1143,26 +1085,28 @@ class TestWorkOrdersAPI:
         )
         db_session.add(work_order)
         db_session.flush()
-        db_session.add_all([
-            WorkOrderOperation(
-                work_order_id=work_order.id,
-                work_center_id=work_center.id,
-                sequence=10,
-                operation_number="Op 10",
-                name="Ready Shop Operation",
-                status=OperationStatus.READY,
-                company_id=1,
-            ),
-            WorkOrderOperation(
-                work_order_id=work_order.id,
-                work_center_id=work_center.id,
-                sequence=20,
-                operation_number="Op 20",
-                name="Active Shop Operation",
-                status=OperationStatus.IN_PROGRESS,
-                company_id=1,
-            ),
-        ])
+        db_session.add_all(
+            [
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Ready Shop Operation",
+                    status=OperationStatus.READY,
+                    company_id=1,
+                ),
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    sequence=20,
+                    operation_number="Op 20",
+                    name="Active Shop Operation",
+                    status=OperationStatus.IN_PROGRESS,
+                    company_id=1,
+                ),
+            ]
+        )
         db_session.commit()
 
         dashboard_response = client.get("/api/v1/shop-floor/dashboard", headers=auth_headers)
@@ -1180,18 +1124,13 @@ class TestWorkOrdersAPI:
         assert operations_response.status_code == status.HTTP_200_OK
         assert queue_response.status_code == status.HTTP_200_OK
 
-        center = next(
-            item for item in dashboard_response.json()["work_centers"]
-            if item["id"] == work_center.id
-        )
+        center = next(item for item in dashboard_response.json()["work_centers"] if item["id"] == work_center.id)
         assert center["queued_operations"] == 1
         assert center["active_operations"] == 1
         assert operations_response.json()["total"] == 2
         assert len(queue_response.json()["queue"]) == 2
 
-    def test_assembly_work_order_blocks_out_of_sequence_start(
-        self, client: TestClient, auth_headers: dict, db_session
-    ):
+    def test_assembly_work_order_blocks_out_of_sequence_start(self, client: TestClient, auth_headers: dict, db_session):
         """Operators cannot start a later operation before predecessors are complete."""
         assembly = Part(
             part_number="ASM-SEQ-001",
@@ -1245,9 +1184,7 @@ class TestWorkOrdersAPI:
             )
         )
 
-        assembly_routing = Routing(
-            part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1
-        )
+        assembly_routing = Routing(part_id=assembly.id, revision="A", status="released", is_active=True, company_id=1)
         db_session.add(assembly_routing)
         db_session.flush()
         db_session.add_all(
@@ -1288,9 +1225,7 @@ class TestWorkOrdersAPI:
         operations = sorted(create_response.json()["operations"], key=lambda op: op["sequence"])
         second_operation_id = operations[1]["id"]
 
-        release_response = client.post(
-            f"/api/v1/work-orders/{work_order_id}/release", headers=auth_headers
-        )
+        release_response = client.post(f"/api/v1/work-orders/{work_order_id}/release", headers=auth_headers)
         assert release_response.status_code == status.HTTP_200_OK
 
         start_response = client.put(
@@ -1360,9 +1295,7 @@ class TestWorkOrdersAPI:
             params={"work_center_id": work_center.id},
         )
         assert operations_response.status_code == status.HTTP_200_OK
-        second_shop_op = next(
-            op for op in operations_response.json()["operations"] if op["id"] == second_op.id
-        )
+        second_shop_op = next(op for op in operations_response.json()["operations"] if op["id"] == second_op.id)
         assert second_shop_op["can_check_in"] is True
         assert second_shop_op["blocked_by_previous_operations"] is False
 
@@ -1475,43 +1408,31 @@ class TestWorkOrdersAPI:
 class TestWorkOrdersValidation:
     """Test work order validation."""
 
-    def test_create_work_order_missing_required_fields(
-        self, client: TestClient, auth_headers: dict
-    ):
+    def test_create_work_order_missing_required_fields(self, client: TestClient, auth_headers: dict):
         """Test creating a work order with missing required fields."""
         invalid_data = {"customer_name": "Test Customer"}
-        response = client.post(
-            "/api/v1/work-orders/", headers=auth_headers, json=invalid_data
-        )
+        response = client.post("/api/v1/work-orders/", headers=auth_headers, json=invalid_data)
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
-    def test_create_work_order_invalid_quantity(
-        self, client: TestClient, auth_headers: dict, test_part: Part
-    ):
+    def test_create_work_order_invalid_quantity(self, client: TestClient, auth_headers: dict, test_part: Part):
         """Test creating a work order with invalid quantity."""
         invalid_data = {
             "customer_name": "Test Customer",
             "part_id": test_part.id,
             "quantity_ordered": -10,
         }
-        response = client.post(
-            "/api/v1/work-orders/", headers=auth_headers, json=invalid_data
-        )
+        response = client.post("/api/v1/work-orders/", headers=auth_headers, json=invalid_data)
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
     def test_create_work_order_generates_unique_numbers(
         self, client: TestClient, auth_headers: dict, sample_work_order_data: dict
     ):
         """Test that work order numbers are generated uniquely."""
-        response_one = client.post(
-            "/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data
-        )
+        response_one = client.post("/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data)
         assert response_one.status_code == status.HTTP_201_CREATED
         wo_number_one = response_one.json()["work_order_number"]
 
-        response_two = client.post(
-            "/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data
-        )
+        response_two = client.post("/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data)
         assert response_two.status_code == status.HTTP_201_CREATED
         wo_number_two = response_two.json()["work_order_number"]
 

@@ -1,5 +1,6 @@
 import logging
 from typing import Any, Callable
+
 from anyio import from_thread
 
 logger = logging.getLogger(__name__)

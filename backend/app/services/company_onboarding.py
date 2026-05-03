@@ -8,13 +8,16 @@ Handles creating a new company with all its default seed data:
 - Default labor rates
 - Default role permissions
 """
+
 import re
+
 from sqlalchemy.orm import Session
-from app.models.company import Company
-from app.models.user import User, UserRole
-from app.models.quote_config import QuoteSettings, LaborRate
-from app.models.role_permission import RolePermission, DEFAULT_ROLE_PERMISSIONS
+
 from app.core.security import get_password_hash
+from app.models.company import Company
+from app.models.quote_config import LaborRate, QuoteSettings
+from app.models.role_permission import DEFAULT_ROLE_PERMISSIONS, RolePermission
+from app.models.user import User, UserRole
 
 
 def _generate_slug(name: str, db: Session) -> str:
@@ -87,13 +90,15 @@ def onboard_company(
         ("tolerance_surcharges", '{"+/-.005": 1.0, "+/-.001": 1.25, "+/-.0005": 1.5}', "json", "Tolerance surcharges"),
     ]
     for key, value, stype, desc in default_settings:
-        db.add(QuoteSettings(
-            setting_key=key,
-            setting_value=value,
-            setting_type=stype,
-            description=desc,
-            company_id=company.id,
-        ))
+        db.add(
+            QuoteSettings(
+                setting_key=key,
+                setting_value=value,
+                setting_type=stype,
+                description=desc,
+                company_id=company.id,
+            )
+        )
 
     # Seed default labor rates
     default_labor = [
@@ -104,19 +109,23 @@ def onboard_company(
         ("General Labor", 30.0),
     ]
     for labor_name, rate in default_labor:
-        db.add(LaborRate(
-            name=labor_name,
-            rate_per_hour=rate,
-            company_id=company.id,
-        ))
+        db.add(
+            LaborRate(
+                name=labor_name,
+                rate_per_hour=rate,
+                company_id=company.id,
+            )
+        )
 
     # Seed default role permissions
     for role, permissions in DEFAULT_ROLE_PERMISSIONS.items():
-        db.add(RolePermission(
-            role=role,
-            permissions=permissions,
-            company_id=company.id,
-        ))
+        db.add(
+            RolePermission(
+                role=role,
+                permissions=permissions,
+                company_id=company.id,
+            )
+        )
 
     db.commit()
     db.refresh(company)

@@ -1,13 +1,15 @@
+from datetime import date, datetime
 from typing import List, Optional
-from datetime import datetime, date
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
-from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
-from app.models.user import User
-from app.models.shipping import Shipment, ShipmentStatus
-from app.models.work_order import WorkOrder, WorkOrderStatus
 from pydantic import BaseModel
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user
+from app.db.database import get_db
+from app.models.shipping import Shipment, ShipmentStatus
+from app.models.user import User
+from app.models.work_order import WorkOrder, WorkOrderStatus
 
 router = APIRouter()
 
@@ -51,7 +53,7 @@ class ShipmentResponse(BaseModel):
     quantity_shipped: float
     ship_date: Optional[date] = None
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
         use_enum_values = True
@@ -60,17 +62,20 @@ class ShipmentResponse(BaseModel):
 def generate_shipment_number(db: Session) -> str:
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"SHP-{today}-"
-    
-    last = db.query(Shipment).filter(
-        Shipment.shipment_number.like(f"{prefix}%")
-    ).order_by(Shipment.shipment_number.desc()).first()
-    
+
+    last = (
+        db.query(Shipment)
+        .filter(Shipment.shipment_number.like(f"{prefix}%"))
+        .order_by(Shipment.shipment_number.desc())
+        .first()
+    )
+
     if last:
         last_num = int(last.shipment_number.split("-")[-1])
         new_num = last_num + 1
     else:
         new_num = 1
-    
+
     return f"{prefix}{new_num:03d}"
 
 
@@ -79,34 +84,34 @@ def list_shipments(
     status: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(Shipment).filter(Shipment.company_id == company_id).options(
-        joinedload(Shipment.work_order)
-    )
-    
+    query = db.query(Shipment).filter(Shipment.company_id == company_id).options(joinedload(Shipment.work_order))
+
     if status:
         query = query.filter(Shipment.status == status)
-    
+
     shipments = query.order_by(Shipment.created_at.desc()).limit(100).all()
-    
+
     result = []
     for s in shipments:
-        result.append(ShipmentResponse(
-            id=s.id,
-            shipment_number=s.shipment_number,
-            work_order_id=s.work_order_id,
-            work_order_number=s.work_order.work_order_number if s.work_order else None,
-            customer_name=s.work_order.customer_name if s.work_order else None,
-            part_number=s.work_order.part.part_number if s.work_order and s.work_order.part else None,
-            status=s.status.value if hasattr(s.status, 'value') else s.status,
-            ship_to_name=s.ship_to_name,
-            carrier=s.carrier,
-            tracking_number=s.tracking_number,
-            quantity_shipped=s.quantity_shipped,
-            ship_date=s.ship_date,
-            created_at=s.created_at
-        ))
+        result.append(
+            ShipmentResponse(
+                id=s.id,
+                shipment_number=s.shipment_number,
+                work_order_id=s.work_order_id,
+                work_order_number=s.work_order.work_order_number if s.work_order else None,
+                customer_name=s.work_order.customer_name if s.work_order else None,
+                part_number=s.work_order.part.part_number if s.work_order and s.work_order.part else None,
+                status=s.status.value if hasattr(s.status, 'value') else s.status,
+                ship_to_name=s.ship_to_name,
+                carrier=s.carrier,
+                tracking_number=s.tracking_number,
+                quantity_shipped=s.quantity_shipped,
+                ship_date=s.ship_date,
+                created_at=s.created_at,
+            )
+        )
     return result
 
 
@@ -115,16 +120,19 @@ def get_shipment(
     shipment_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get single shipment with full details"""
-    shipment = db.query(Shipment).options(
-        joinedload(Shipment.work_order).joinedload(WorkOrder.part)
-    ).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
-    
+    shipment = (
+        db.query(Shipment)
+        .options(joinedload(Shipment.work_order).joinedload(WorkOrder.part))
+        .filter(Shipment.id == shipment_id, Shipment.company_id == company_id)
+        .first()
+    )
+
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
-    
+
     return {
         "id": shipment.id,
         "shipment_number": shipment.shipment_number,
@@ -132,7 +140,9 @@ def get_shipment(
         "work_order_number": shipment.work_order.work_order_number if shipment.work_order else None,
         "customer_name": shipment.work_order.customer_name if shipment.work_order else None,
         "customer_po": shipment.work_order.customer_po if shipment.work_order else None,
-        "part_number": shipment.work_order.part.part_number if shipment.work_order and shipment.work_order.part else None,
+        "part_number": (
+            shipment.work_order.part.part_number if shipment.work_order and shipment.work_order.part else None
+        ),
         "part_name": shipment.work_order.part.name if shipment.work_order and shipment.work_order.part else None,
         "lot_number": shipment.work_order.lot_number if shipment.work_order else None,
         "status": shipment.status.value if hasattr(shipment.status, 'value') else shipment.status,
@@ -146,7 +156,7 @@ def get_shipment(
         "ship_date": shipment.ship_date.isoformat() if shipment.ship_date else None,
         "cert_of_conformance": shipment.cert_of_conformance,
         "packing_notes": shipment.packing_notes,
-        "created_at": shipment.created_at.isoformat()
+        "created_at": shipment.created_at.isoformat(),
     }
 
 
@@ -154,34 +164,40 @@ def get_shipment(
 def get_ready_to_ship(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get completed work orders ready to ship"""
-    work_orders = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(
-        joinedload(WorkOrder.part)
-    ).filter(
-        WorkOrder.status == WorkOrderStatus.COMPLETE
-    ).order_by(WorkOrder.due_date).all()
-    
+    work_orders = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.company_id == company_id)
+        .options(joinedload(WorkOrder.part))
+        .filter(WorkOrder.status == WorkOrderStatus.COMPLETE)
+        .order_by(WorkOrder.due_date)
+        .all()
+    )
+
     result = []
     for wo in work_orders:
         # Check if already shipped
-        existing = db.query(Shipment).filter(
-            Shipment.work_order_id == wo.id,
-            Shipment.status != ShipmentStatus.CANCELLED
-        ).first()
-        
+        existing = (
+            db.query(Shipment)
+            .filter(Shipment.work_order_id == wo.id, Shipment.status != ShipmentStatus.CANCELLED)
+            .first()
+        )
+
         if not existing:
-            result.append({
-                "work_order_id": wo.id,
-                "work_order_number": wo.work_order_number,
-                "part_number": wo.part.part_number if wo.part else None,
-                "part_name": wo.part.name if wo.part else None,
-                "customer_name": wo.customer_name,
-                "quantity_complete": wo.quantity_complete,
-                "due_date": wo.due_date.isoformat() if wo.due_date else None
-            })
-    
+            result.append(
+                {
+                    "work_order_id": wo.id,
+                    "work_order_number": wo.work_order_number,
+                    "part_number": wo.part.part_number if wo.part else None,
+                    "part_name": wo.part.name if wo.part else None,
+                    "customer_name": wo.customer_name,
+                    "quantity_complete": wo.quantity_complete,
+                    "due_date": wo.due_date.isoformat() if wo.due_date else None,
+                }
+            )
+
     return result
 
 
@@ -190,15 +206,15 @@ def create_shipment(
     shipment_in: ShipmentCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new shipment"""
     wo = db.query(WorkOrder).filter(WorkOrder.id == shipment_in.work_order_id).first()
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
-    
+
     shipment_number = generate_shipment_number(db)
-    
+
     shipment = Shipment(
         shipment_number=shipment_number,
         work_order_id=shipment_in.work_order_id,
@@ -215,13 +231,13 @@ def create_shipment(
         packing_notes=shipment_in.packing_notes,
         cert_of_conformance=shipment_in.cert_of_conformance,
         packing_slip_number=shipment_number,
-        created_by=current_user.id
+        created_by=current_user.id,
     )
     shipment.company_id = company_id
     db.add(shipment)
     db.commit()
     db.refresh(shipment)
-    
+
     return ShipmentResponse(
         id=shipment.id,
         shipment_number=shipment.shipment_number,
@@ -235,7 +251,7 @@ def create_shipment(
         tracking_number=shipment.tracking_number,
         quantity_shipped=shipment.quantity_shipped,
         ship_date=shipment.ship_date,
-        created_at=shipment.created_at
+        created_at=shipment.created_at,
     )
 
 
@@ -245,26 +261,26 @@ def mark_shipped(
     tracking_number: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Mark shipment as shipped"""
     shipment = db.query(Shipment).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
-    
+
     shipment.status = ShipmentStatus.SHIPPED
     shipment.ship_date = date.today()
     shipment.shipped_by = current_user.id
     if tracking_number:
         shipment.tracking_number = tracking_number
-    
+
     # Close work order
     wo = shipment.work_order
     if wo:
         wo.status = WorkOrderStatus.CLOSED
-    
+
     db.commit()
-    
+
     return {"message": "Shipment marked as shipped", "shipment_number": shipment.shipment_number}
 
 
@@ -274,25 +290,28 @@ def update_shipment(
     shipment_in: ShipmentUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
-    shipment = db.query(Shipment).options(
-        joinedload(Shipment.work_order)
-    ).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
-    
+    shipment = (
+        db.query(Shipment)
+        .options(joinedload(Shipment.work_order))
+        .filter(Shipment.id == shipment_id, Shipment.company_id == company_id)
+        .first()
+    )
+
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
-    
+
     update_data = shipment_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         if field == "status":
             setattr(shipment, field, ShipmentStatus(value))
         else:
             setattr(shipment, field, value)
-    
+
     db.commit()
     db.refresh(shipment)
-    
+
     wo = shipment.work_order
     return ShipmentResponse(
         id=shipment.id,
@@ -307,5 +326,5 @@ def update_shipment(
         tracking_number=shipment.tracking_number,
         quantity_shipped=shipment.quantity_shipped,
         ship_date=shipment.ship_date,
-        created_at=shipment.created_at
+        created_at=shipment.created_at,
     )

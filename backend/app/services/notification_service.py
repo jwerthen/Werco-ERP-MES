@@ -1,16 +1,19 @@
-from sqlalchemy.orm import Session
-from typing import Dict, List, Optional
-from app.models.notification import NotificationPreference, NotificationLog, DigestQueue
-from app.models.user import User
-from app.core.queue import enqueue_job
-from datetime import datetime, timedelta
 import logging
+from datetime import datetime
+from typing import Dict, List
+
+from sqlalchemy.orm import Session
+
+from app.core.queue import enqueue_job
+from app.models.notification import DigestQueue, NotificationLog, NotificationPreference
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
 
 class NotificationEvent:
     """Notification event types"""
+
     WO_RELEASED = "WO_RELEASED"
     WO_LATE = "WO_LATE"
     WO_COMPLETED = "WO_COMPLETED"
@@ -51,7 +54,7 @@ class NotificationService:
         context: Dict,
         template: str = None,
         related_type: str = None,
-        related_id: int = None
+        related_id: int = None,
     ):
         """
         Send notification to users
@@ -95,7 +98,7 @@ class NotificationService:
                     context=context,
                     template=template,
                     related_type=related_type,
-                    related_id=related_id
+                    related_id=related_id,
                 )
 
     async def _send_immediate_email(
@@ -106,7 +109,7 @@ class NotificationService:
         context: Dict,
         template: str,
         related_type: str,
-        related_id: int
+        related_id: int,
     ):
         """Send immediate email notification"""
         try:
@@ -117,7 +120,7 @@ class NotificationService:
                 subject=subject,
                 body=None,
                 template=template or event_type.lower(),
-                context=context
+                context=context,
             )
 
             # Log notification
@@ -128,7 +131,7 @@ class NotificationService:
                 subject=subject,
                 sent=True,
                 related_type=related_type,
-                related_id=related_id
+                related_id=related_id,
             )
             self.db.add(log)
             self.db.commit()
@@ -145,7 +148,7 @@ class NotificationService:
                 sent=False,
                 error=str(e),
                 related_type=related_type,
-                related_id=related_id
+                related_id=related_id,
             )
             self.db.add(log)
             self.db.commit()
@@ -153,25 +156,17 @@ class NotificationService:
     def _queue_for_digest(self, user_id: int, event_type: str, event_data: Dict):
         """Queue notification for digest"""
         digest_item = DigestQueue(
-            user_id=user_id,
-            event_type=event_type,
-            event_data=event_data,
-            digest_date=datetime.utcnow().date()
+            user_id=user_id, event_type=event_type, event_data=event_data, digest_date=datetime.utcnow().date()
         )
         self.db.add(digest_item)
         self.db.commit()
 
     def _get_user_preference(self, user_id: int) -> NotificationPreference:
         """Get or create user notification preference"""
-        pref = self.db.query(NotificationPreference).filter(
-            NotificationPreference.user_id == user_id
-        ).first()
+        pref = self.db.query(NotificationPreference).filter(NotificationPreference.user_id == user_id).first()
 
         if not pref:
-            pref = NotificationPreference(
-                user_id=user_id,
-                preferences=self.DEFAULT_PREFERENCES
-            )
+            pref = NotificationPreference(user_id=user_id, preferences=self.DEFAULT_PREFERENCES)
             self.db.add(pref)
             self.db.commit()
             self.db.refresh(pref)
@@ -180,10 +175,7 @@ class NotificationService:
 
     def get_digest_items(self, user_id: int, since: datetime = None) -> List[DigestQueue]:
         """Get digest items for user"""
-        query = self.db.query(DigestQueue).filter(
-            DigestQueue.user_id == user_id,
-            DigestQueue.processed == False
-        )
+        query = self.db.query(DigestQueue).filter(DigestQueue.user_id == user_id, DigestQueue.processed == False)
 
         if since:
             query = query.filter(DigestQueue.created_at >= since)

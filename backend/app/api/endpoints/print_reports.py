@@ -1,17 +1,18 @@
 """Print-friendly report endpoints that return all data needed for printing."""
-from typing import Optional, List
-from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
-from pydantic import BaseModel
 
+from datetime import datetime
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
+from app.models.purchasing import PurchaseOrder, PurchaseOrderLine
+from app.models.quote import Quote, QuoteLine
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderOperation
-from app.models.quote import Quote, QuoteLine
-from app.models.purchasing import PurchaseOrder, PurchaseOrderLine
-from app.models.part import Part
 
 router = APIRouter()
 
@@ -87,42 +88,49 @@ def get_work_order_print_data(
     work_order_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get all data needed to print a work order."""
-    wo = db.query(WorkOrder).options(
-        joinedload(WorkOrder.part),
-        joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.work_center),
-        joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.component_part)
-    ).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
-    
+    wo = (
+        db.query(WorkOrder)
+        .options(
+            joinedload(WorkOrder.part),
+            joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.work_center),
+            joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.component_part),
+        )
+        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .first()
+    )
+
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
-    
+
     operations = []
     total_setup = 0.0
     total_run = 0.0
-    
+
     for op in sorted(wo.operations, key=lambda x: x.sequence):
         setup = float(op.setup_time_hours or 0)
         run = float(op.run_time_hours or 0)
         total_setup += setup
         total_run += run
-        
-        operations.append(OperationPrintData(
-            sequence=op.sequence,
-            operation_number=op.operation_number,
-            name=op.name,
-            description=op.description,
-            work_center_name=op.work_center.name if op.work_center else None,
-            operation_group=op.operation_group,
-            setup_time_hours=setup,
-            run_time_hours=run,
-            status=op.status.value if hasattr(op.status, 'value') else op.status,
-            component_part_number=op.component_part.part_number if op.component_part else None,
-            component_quantity=float(op.component_quantity) if op.component_quantity else None
-        ))
-    
+
+        operations.append(
+            OperationPrintData(
+                sequence=op.sequence,
+                operation_number=op.operation_number,
+                name=op.name,
+                description=op.description,
+                work_center_name=op.work_center.name if op.work_center else None,
+                operation_group=op.operation_group,
+                setup_time_hours=setup,
+                run_time_hours=run,
+                status=op.status.value if hasattr(op.status, 'value') else op.status,
+                component_part_number=op.component_part.part_number if op.component_part else None,
+                component_quantity=float(op.component_quantity) if op.component_quantity else None,
+            )
+        )
+
     return WorkOrderPrintData(
         work_order_number=wo.work_order_number,
         part_number=wo.part.part_number if wo.part else "",
@@ -149,7 +157,7 @@ def get_work_order_print_data(
         total_setup_hours=format_number(total_setup),
         total_run_hours=format_number(total_run),
         created_at=format_date(wo.created_at),
-        printed_at=format_date(datetime.now())
+        printed_at=format_date(datetime.now()),
     )
 
 
@@ -188,27 +196,32 @@ def get_quote_print_data(
     quote_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get all data needed to print a quote."""
-    quote = db.query(Quote).options(
-        joinedload(Quote.lines).joinedload(QuoteLine.part)
-    ).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
-    
+    quote = (
+        db.query(Quote)
+        .options(joinedload(Quote.lines).joinedload(QuoteLine.part))
+        .filter(Quote.id == quote_id, Quote.company_id == company_id)
+        .first()
+    )
+
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
-    
+
     lines = []
     for line in sorted(quote.lines, key=lambda x: x.line_number):
-        lines.append(QuoteLinePrintData(
-            line_number=line.line_number,
-            part_number=line.part.part_number if line.part else None,
-            description=line.description,
-            quantity=format_number(line.quantity, 0),
-            unit_price=format_currency(line.unit_price),
-            line_total=format_currency(line.line_total)
-        ))
-    
+        lines.append(
+            QuoteLinePrintData(
+                line_number=line.line_number,
+                part_number=line.part.part_number if line.part else None,
+                description=line.description,
+                quantity=format_number(line.quantity, 0),
+                unit_price=format_currency(line.unit_price),
+                line_total=format_currency(line.line_total),
+            )
+        )
+
     return QuotePrintData(
         quote_number=quote.quote_number,
         revision=quote.revision or "A",
@@ -227,7 +240,7 @@ def get_quote_print_data(
         total=format_currency(quote.total),
         notes=quote.notes,
         lines=lines,
-        printed_at=format_date(datetime.now())
+        printed_at=format_date(datetime.now()),
     )
 
 
@@ -272,17 +285,19 @@ def get_purchase_order_print_data(
     po_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get all data needed to print a purchase order."""
-    po = db.query(PurchaseOrder).options(
-        joinedload(PurchaseOrder.vendor),
-        joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part)
-    ).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
-    
+    po = (
+        db.query(PurchaseOrder)
+        .options(joinedload(PurchaseOrder.vendor), joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part))
+        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
+        .first()
+    )
+
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
-    
+
     vendor_address_parts = []
     if po.vendor:
         if po.vendor.address_line1:
@@ -298,20 +313,22 @@ def get_purchase_order_print_data(
             city_state_zip.append(po.vendor.postal_code)
         if city_state_zip:
             vendor_address_parts.append(", ".join(city_state_zip))
-    
+
     lines = []
     for line in sorted(po.lines, key=lambda x: x.line_number):
-        lines.append(POLinePrintData(
-            line_number=line.line_number,
-            part_number=line.part.part_number if line.part else "",
-            part_name=line.part.name if line.part else "",
-            quantity_ordered=format_number(line.quantity_ordered, 0),
-            quantity_received=format_number(line.quantity_received, 0),
-            unit_price=format_currency(line.unit_price),
-            line_total=format_currency(line.line_total),
-            required_date=format_date(line.required_date)
-        ))
-    
+        lines.append(
+            POLinePrintData(
+                line_number=line.line_number,
+                part_number=line.part.part_number if line.part else "",
+                part_name=line.part.name if line.part else "",
+                quantity_ordered=format_number(line.quantity_ordered, 0),
+                quantity_received=format_number(line.quantity_received, 0),
+                unit_price=format_currency(line.unit_price),
+                line_total=format_currency(line.line_total),
+                required_date=format_date(line.required_date),
+            )
+        )
+
     buyer = None
     if po.created_by:
         buyer = db.query(User).filter(User.id == po.created_by).first()
@@ -338,5 +355,5 @@ def get_purchase_order_print_data(
         total=format_currency(po.total),
         notes=po.notes,
         lines=lines,
-        printed_at=format_date(datetime.now())
+        printed_at=format_date(datetime.now()),
     )

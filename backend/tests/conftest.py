@@ -22,9 +22,9 @@ os.environ["REFRESH_TOKEN_SECRET_KEY"] = "test-refresh-secret-key-abcdefghijklmn
 os.environ["ENVIRONMENT"] = "test"
 os.environ["SENTRY_DSN"] = ""
 
-from app.main import app
 from app.core.security import create_access_token, get_password_hash
 from app.db.database import Base, get_db
+from app.main import app
 from app.models.company import Company
 from app.models.part import Part
 from app.models.user import User, UserRole
@@ -82,6 +82,7 @@ def test_company(db_session: Session) -> Company:
 @pytest.fixture(scope="function")
 def client(db_session: Session) -> TestClient:
     """Create a test client with database override."""
+
     def override_get_db():
         try:
             yield db_session
@@ -122,10 +123,7 @@ def test_user(db_session: Session) -> User:
 @pytest.fixture
 def test_user_credentials() -> dict:
     """Return test user credentials for login."""
-    return {
-        "email": "testuser@werco.com",
-        "password": TEST_PASSWORD
-    }
+    return {"email": "testuser@werco.com", "password": TEST_PASSWORD}
 
 
 @pytest.fixture
@@ -188,10 +186,7 @@ def inactive_user(db_session: Session) -> User:
 @pytest.fixture
 def inactive_user_credentials() -> dict:
     """Return inactive user credentials."""
-    return {
-        "email": "inactive@werco.com",
-        "password": TEST_PASSWORD
-    }
+    return {"email": "inactive@werco.com", "password": TEST_PASSWORD}
 
 
 @pytest.fixture
@@ -238,11 +233,7 @@ def created_user(db_session: Session) -> dict:
     db_session.add(user)
     db_session.commit()
     db_session.refresh(user)
-    return {
-        "id": user.id,
-        "email": user.email,
-        "version": getattr(user, 'version', 0)
-    }
+    return {"id": user.id, "email": user.email, "version": getattr(user, 'version', 0)}
 
 
 @pytest.fixture
@@ -350,7 +341,7 @@ def sample_work_center_data():
 def test_vendor(db_session: Session):
     """Create a test vendor."""
     from app.models.purchasing import Vendor
-    
+
     vendor = Vendor(
         name=fake.company(),
         code=f"V-{fake.pyint(min_value=100, max_value=999)}",
@@ -408,5 +399,5 @@ def part_factory(db_session: Session):
         db_session.commit()
         db_session.refresh(part)
         return part
-    
+
     return create_part

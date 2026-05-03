@@ -1,21 +1,21 @@
 # Werco ERP Main Application - v1.0.1
-from fastapi import FastAPI, Request, HTTPException
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from contextlib import asynccontextmanager
-from datetime import datetime
 from sqlalchemy import text
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core.config import settings
 from app.api.router import api_router
-from app.db.database import engine, Base
+from app.core.cache import cache, init_cache
+from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
-from app.core.cache import init_cache, cache
+from app.db.database import Base, engine
 from app.middleware.logging_middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
 
 # Configure structured logging with correlation IDs
@@ -27,7 +27,7 @@ if settings.SENTRY_DSN:
     try:
         import sentry_sdk
         from sentry_sdk.integrations.fastapi import FastApiIntegration
-        
+
         sentry_sdk.init(
             dsn=settings.SENTRY_DSN,
             integrations=[FastApiIntegration()],
@@ -42,21 +42,41 @@ if settings.SENTRY_DSN:
 def seed_quote_config_if_needed():
     """Seed quote configuration data if it doesn't exist"""
     from app.db.database import SessionLocal
-    from app.models.quote_config import QuoteMaterial, QuoteMachine, QuoteFinish, QuoteSettings, MaterialCategory, MachineType
-    
+    from app.models.quote_config import (
+        MachineType,
+        MaterialCategory,
+        QuoteFinish,
+        QuoteMachine,
+        QuoteMaterial,
+        QuoteSettings,
+    )
+
     db = SessionLocal()
     try:
         # Check if materials exist
         if db.query(QuoteMaterial).count() == 0:
             logger.info("Seeding quote materials...")
-            
+
             def calc_sheet_pricing(price_per_lb, density):
                 thicknesses = {
-                    '24ga': 0.0239, '22ga': 0.0299, '20ga': 0.0359, '18ga': 0.0478,
-                    '16ga': 0.0598, '14ga': 0.0747, '12ga': 0.1046, '11ga': 0.1196,
-                    '10ga': 0.1345, '7ga': 0.1793,
-                    '0.125': 0.125, '0.1875': 0.1875, '0.250': 0.250, '0.375': 0.375,
-                    '0.500': 0.500, '0.625': 0.625, '0.750': 0.750, '1.000': 1.000,
+                    '24ga': 0.0239,
+                    '22ga': 0.0299,
+                    '20ga': 0.0359,
+                    '18ga': 0.0478,
+                    '16ga': 0.0598,
+                    '14ga': 0.0747,
+                    '12ga': 0.1046,
+                    '11ga': 0.1196,
+                    '10ga': 0.1345,
+                    '7ga': 0.1793,
+                    '0.125': 0.125,
+                    '0.1875': 0.1875,
+                    '0.250': 0.250,
+                    '0.375': 0.375,
+                    '0.500': 0.500,
+                    '0.625': 0.625,
+                    '0.750': 0.750,
+                    '1.000': 1.000,
                 }
                 pricing = {}
                 for gauge, thick in thicknesses.items():
@@ -64,56 +84,212 @@ def seed_quote_config_if_needed():
                     price = weight_per_sqft * price_per_lb * 1.15
                     pricing[gauge] = round(price, 2)
                 return pricing
-            
+
             materials = [
-                {'name': 'Mild Steel A36', 'category': MaterialCategory.STEEL, 'stock_price_per_pound': 0.55, 'density_lb_per_cubic_inch': 0.284, 'machinability_factor': 0.6, 'sheet_pricing': calc_sheet_pricing(0.55, 0.284)},
-                {'name': 'Galvanized Steel G90', 'category': MaterialCategory.STEEL, 'stock_price_per_pound': 0.70, 'density_lb_per_cubic_inch': 0.284, 'machinability_factor': 0.55, 'sheet_pricing': calc_sheet_pricing(0.70, 0.284)},
-                {'name': 'Aluminum 5052-H32', 'category': MaterialCategory.ALUMINUM, 'stock_price_per_pound': 2.38, 'density_lb_per_cubic_inch': 0.097, 'machinability_factor': 1.0, 'sheet_pricing': calc_sheet_pricing(2.38, 0.097)},
-                {'name': 'Aluminum 6061-T6', 'category': MaterialCategory.ALUMINUM, 'stock_price_per_pound': 2.58, 'density_lb_per_cubic_inch': 0.098, 'machinability_factor': 1.0, 'sheet_pricing': calc_sheet_pricing(2.58, 0.098)},
-                {'name': 'Stainless Steel 304', 'category': MaterialCategory.STAINLESS, 'stock_price_per_pound': 2.13, 'density_lb_per_cubic_inch': 0.289, 'machinability_factor': 0.4, 'sheet_pricing': calc_sheet_pricing(2.13, 0.289)},
-                {'name': 'Stainless Steel 316', 'category': MaterialCategory.STAINLESS, 'stock_price_per_pound': 3.08, 'density_lb_per_cubic_inch': 0.290, 'machinability_factor': 0.35, 'sheet_pricing': calc_sheet_pricing(3.08, 0.290)},
+                {
+                    'name': 'Mild Steel A36',
+                    'category': MaterialCategory.STEEL,
+                    'stock_price_per_pound': 0.55,
+                    'density_lb_per_cubic_inch': 0.284,
+                    'machinability_factor': 0.6,
+                    'sheet_pricing': calc_sheet_pricing(0.55, 0.284),
+                },
+                {
+                    'name': 'Galvanized Steel G90',
+                    'category': MaterialCategory.STEEL,
+                    'stock_price_per_pound': 0.70,
+                    'density_lb_per_cubic_inch': 0.284,
+                    'machinability_factor': 0.55,
+                    'sheet_pricing': calc_sheet_pricing(0.70, 0.284),
+                },
+                {
+                    'name': 'Aluminum 5052-H32',
+                    'category': MaterialCategory.ALUMINUM,
+                    'stock_price_per_pound': 2.38,
+                    'density_lb_per_cubic_inch': 0.097,
+                    'machinability_factor': 1.0,
+                    'sheet_pricing': calc_sheet_pricing(2.38, 0.097),
+                },
+                {
+                    'name': 'Aluminum 6061-T6',
+                    'category': MaterialCategory.ALUMINUM,
+                    'stock_price_per_pound': 2.58,
+                    'density_lb_per_cubic_inch': 0.098,
+                    'machinability_factor': 1.0,
+                    'sheet_pricing': calc_sheet_pricing(2.58, 0.098),
+                },
+                {
+                    'name': 'Stainless Steel 304',
+                    'category': MaterialCategory.STAINLESS,
+                    'stock_price_per_pound': 2.13,
+                    'density_lb_per_cubic_inch': 0.289,
+                    'machinability_factor': 0.4,
+                    'sheet_pricing': calc_sheet_pricing(2.13, 0.289),
+                },
+                {
+                    'name': 'Stainless Steel 316',
+                    'category': MaterialCategory.STAINLESS,
+                    'stock_price_per_pound': 3.08,
+                    'density_lb_per_cubic_inch': 0.290,
+                    'machinability_factor': 0.35,
+                    'sheet_pricing': calc_sheet_pricing(3.08, 0.290),
+                },
             ]
             for m in materials:
                 db.add(QuoteMaterial(**m))
             db.commit()
             logger.info(f"Seeded {len(materials)} materials")
-        
+
         # Check if machines exist
         if db.query(QuoteMachine).count() == 0:
             logger.info("Seeding quote machines...")
             laser_speeds = {
-                "steel": {"24ga": 1200, "22ga": 1000, "20ga": 850, "18ga": 650, "16ga": 500, "14ga": 380, "12ga": 280, "10ga": 200, "7ga": 120, "0.250": 150, "0.375": 100, "0.500": 70, "0.750": 40, "1.000": 25},
-                "stainless": {"24ga": 900, "22ga": 750, "20ga": 600, "18ga": 450, "16ga": 350, "14ga": 260, "12ga": 180, "10ga": 130, "7ga": 80, "0.250": 100, "0.375": 65, "0.500": 45, "0.750": 25, "1.000": 15},
-                "aluminum": {"24ga": 1500, "22ga": 1300, "20ga": 1100, "18ga": 900, "16ga": 700, "14ga": 550, "12ga": 400, "10ga": 300, "7ga": 200, "0.250": 220, "0.375": 150, "0.500": 100, "0.750": 60, "1.000": 35}
+                "steel": {
+                    "24ga": 1200,
+                    "22ga": 1000,
+                    "20ga": 850,
+                    "18ga": 650,
+                    "16ga": 500,
+                    "14ga": 380,
+                    "12ga": 280,
+                    "10ga": 200,
+                    "7ga": 120,
+                    "0.250": 150,
+                    "0.375": 100,
+                    "0.500": 70,
+                    "0.750": 40,
+                    "1.000": 25,
+                },
+                "stainless": {
+                    "24ga": 900,
+                    "22ga": 750,
+                    "20ga": 600,
+                    "18ga": 450,
+                    "16ga": 350,
+                    "14ga": 260,
+                    "12ga": 180,
+                    "10ga": 130,
+                    "7ga": 80,
+                    "0.250": 100,
+                    "0.375": 65,
+                    "0.500": 45,
+                    "0.750": 25,
+                    "1.000": 15,
+                },
+                "aluminum": {
+                    "24ga": 1500,
+                    "22ga": 1300,
+                    "20ga": 1100,
+                    "18ga": 900,
+                    "16ga": 700,
+                    "14ga": 550,
+                    "12ga": 400,
+                    "10ga": 300,
+                    "7ga": 200,
+                    "0.250": 220,
+                    "0.375": 150,
+                    "0.500": 100,
+                    "0.750": 60,
+                    "1.000": 35,
+                },
             }
             machines = [
-                {'name': 'Fiber Laser 6kW', 'machine_type': MachineType.LASER_FIBER, 'rate_per_hour': 150.00, 'setup_rate_per_hour': 75.00, 'cutting_speeds': laser_speeds, 'typical_setup_hours': 0.25},
-                {'name': 'Press Brake 150T', 'machine_type': MachineType.PRESS_BRAKE, 'rate_per_hour': 85.00, 'setup_rate_per_hour': 65.00, 'bend_time_seconds': 12.0, 'setup_time_per_bend_type': 300.0, 'typical_setup_hours': 0.5},
-                {'name': 'CNC Mill 3-Axis', 'machine_type': MachineType.CNC_MILL_3AXIS, 'rate_per_hour': 125.00, 'setup_rate_per_hour': 85.00, 'typical_setup_hours': 1.0},
-                {'name': 'CNC Mill 4-Axis', 'machine_type': MachineType.CNC_MILL_4AXIS, 'rate_per_hour': 145.00, 'setup_rate_per_hour': 95.00, 'typical_setup_hours': 1.5},
-                {'name': 'CNC Lathe', 'machine_type': MachineType.CNC_LATHE, 'rate_per_hour': 110.00, 'setup_rate_per_hour': 75.00, 'typical_setup_hours': 0.75},
+                {
+                    'name': 'Fiber Laser 6kW',
+                    'machine_type': MachineType.LASER_FIBER,
+                    'rate_per_hour': 150.00,
+                    'setup_rate_per_hour': 75.00,
+                    'cutting_speeds': laser_speeds,
+                    'typical_setup_hours': 0.25,
+                },
+                {
+                    'name': 'Press Brake 150T',
+                    'machine_type': MachineType.PRESS_BRAKE,
+                    'rate_per_hour': 85.00,
+                    'setup_rate_per_hour': 65.00,
+                    'bend_time_seconds': 12.0,
+                    'setup_time_per_bend_type': 300.0,
+                    'typical_setup_hours': 0.5,
+                },
+                {
+                    'name': 'CNC Mill 3-Axis',
+                    'machine_type': MachineType.CNC_MILL_3AXIS,
+                    'rate_per_hour': 125.00,
+                    'setup_rate_per_hour': 85.00,
+                    'typical_setup_hours': 1.0,
+                },
+                {
+                    'name': 'CNC Mill 4-Axis',
+                    'machine_type': MachineType.CNC_MILL_4AXIS,
+                    'rate_per_hour': 145.00,
+                    'setup_rate_per_hour': 95.00,
+                    'typical_setup_hours': 1.5,
+                },
+                {
+                    'name': 'CNC Lathe',
+                    'machine_type': MachineType.CNC_LATHE,
+                    'rate_per_hour': 110.00,
+                    'setup_rate_per_hour': 75.00,
+                    'typical_setup_hours': 0.75,
+                },
             ]
             for m in machines:
                 db.add(QuoteMachine(**m))
             db.commit()
             logger.info(f"Seeded {len(machines)} machines")
-        
+
         # Check if finishes exist
         if db.query(QuoteFinish).count() == 0:
             logger.info("Seeding quote finishes...")
             finishes = [
-                {'name': 'Powder Coat - Standard Colors', 'category': 'coating', 'price_per_sqft': 2.50, 'minimum_charge': 35.00, 'additional_days': 3},
-                {'name': 'Powder Coat - Custom Color', 'category': 'coating', 'price_per_sqft': 3.50, 'minimum_charge': 75.00, 'additional_days': 5},
-                {'name': 'Zinc Plating - Clear', 'category': 'plating', 'price_per_lb': 1.25, 'minimum_charge': 45.00, 'additional_days': 5},
-                {'name': 'Anodize Type II - Clear', 'category': 'plating', 'price_per_sqft': 4.00, 'minimum_charge': 50.00, 'additional_days': 5},
-                {'name': 'Passivation', 'category': 'treatment', 'price_per_part': 5.00, 'minimum_charge': 35.00, 'additional_days': 2},
-                {'name': 'Deburr - Hand', 'category': 'finishing', 'price_per_part': 2.50, 'minimum_charge': 0.00, 'additional_days': 0},
+                {
+                    'name': 'Powder Coat - Standard Colors',
+                    'category': 'coating',
+                    'price_per_sqft': 2.50,
+                    'minimum_charge': 35.00,
+                    'additional_days': 3,
+                },
+                {
+                    'name': 'Powder Coat - Custom Color',
+                    'category': 'coating',
+                    'price_per_sqft': 3.50,
+                    'minimum_charge': 75.00,
+                    'additional_days': 5,
+                },
+                {
+                    'name': 'Zinc Plating - Clear',
+                    'category': 'plating',
+                    'price_per_lb': 1.25,
+                    'minimum_charge': 45.00,
+                    'additional_days': 5,
+                },
+                {
+                    'name': 'Anodize Type II - Clear',
+                    'category': 'plating',
+                    'price_per_sqft': 4.00,
+                    'minimum_charge': 50.00,
+                    'additional_days': 5,
+                },
+                {
+                    'name': 'Passivation',
+                    'category': 'treatment',
+                    'price_per_part': 5.00,
+                    'minimum_charge': 35.00,
+                    'additional_days': 2,
+                },
+                {
+                    'name': 'Deburr - Hand',
+                    'category': 'finishing',
+                    'price_per_part': 2.50,
+                    'minimum_charge': 0.00,
+                    'additional_days': 0,
+                },
             ]
             for f in finishes:
                 db.add(QuoteFinish(**f))
             db.commit()
             logger.info(f"Seeded {len(finishes)} finishes")
-        
+
         # Check if settings exist
         if db.query(QuoteSettings).count() == 0:
             logger.info("Seeding quote settings...")
@@ -122,7 +298,11 @@ def seed_quote_config_if_needed():
                 {'setting_key': 'minimum_order_charge', 'setting_value': '150', 'setting_type': 'number'},
                 {'setting_key': 'rush_multiplier', 'setting_value': '1.5', 'setting_type': 'number'},
                 {'setting_key': 'standard_lead_days', 'setting_value': '10', 'setting_type': 'number'},
-                {'setting_key': 'quantity_breaks', 'setting_value': '{"10": 0.95, "25": 0.90, "50": 0.85, "100": 0.80}', 'setting_type': 'json'},
+                {
+                    'setting_key': 'quantity_breaks',
+                    'setting_value': '{"10": 0.95, "25": 0.90, "50": 0.85, "100": 0.80}',
+                    'setting_type': 'json',
+                },
             ]
             for s in settings_data:
                 db.add(QuoteSettings(**s))
@@ -198,7 +378,10 @@ tags_metadata = [
     {"name": "Operator Certifications", "description": "Operator certifications, training records, and skill matrix"},
     {"name": "Engineering Change Orders", "description": "ECO/ECN workflow with approval and implementation tracking"},
     {"name": "Statistical Process Control", "description": "SPC charts, measurements, and process capability studies"},
-    {"name": "Customer Complaints & RMA", "description": "Customer complaint tracking and return material authorization"},
+    {
+        "name": "Customer Complaints & RMA",
+        "description": "Customer complaint tracking and return material authorization",
+    },
     {"name": "Supplier Scorecards", "description": "Supplier performance scoring, audits, and approved supplier list"},
     {"name": "Error Logging", "description": "Client-side error logging"},
 ]
@@ -270,6 +453,7 @@ app.add_middleware(
     allow_headers=settings.CORS_ALLOW_HEADERS.split(","),
 )
 
+
 # Helper to add CORS headers to error responses
 def add_cors_headers(response: JSONResponse, origin: str = None):
     """Add CORS headers to a response for cross-origin error handling"""
@@ -285,7 +469,7 @@ def add_cors_headers(response: JSONResponse, origin: str = None):
 @app.middleware("http")
 async def csrf_protection(request: Request, call_next):
     origin = request.headers.get("origin")
-    
+
     # Only check state-changing methods
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
         # Skip CSRF check for certain endpoints
@@ -298,7 +482,7 @@ async def csrf_protection(request: Request, call_next):
         )
         if request.url.path in exempt_paths:
             return await call_next(request)
-        
+
         # Defense 1: Check for X-Requested-With header (cannot be set cross-origin without CORS)
         x_requested_with = request.headers.get("x-requested-with")
         # Only enforce X-Requested-With for browser-originated requests
@@ -308,31 +492,26 @@ async def csrf_protection(request: Request, call_next):
                 auth_header = request.headers.get("authorization")
                 if not auth_header or not auth_header.startswith("Bearer "):
                     logger.warning(f"CSRF: Missing X-Requested-With header for {request.url.path}")
-                    response = JSONResponse(
-                        status_code=403,
-                        content={"detail": "Missing required security header"}
-                    )
+                    response = JSONResponse(status_code=403, content={"detail": "Missing required security header"})
                     return add_cors_headers(response, origin)
-        
+
         # Defense 2: Validate Origin/Referer header
         referer = request.headers.get("referer")
         check_origin = origin or referer
-        
+
         if check_origin:
             # Parse origin to get host
             from urllib.parse import urlparse
+
             parsed = urlparse(check_origin)
             origin_host = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else None
-            
+
             # Check if origin is in allowed list
             if origin_host and origin_host not in settings.cors_origins_list:
                 logger.warning(f"CSRF: Blocked request from untrusted origin: {origin_host}")
-                response = JSONResponse(
-                    status_code=403,
-                    content={"detail": "Request origin not allowed"}
-                )
+                response = JSONResponse(status_code=403, content={"detail": "Request origin not allowed"})
                 return add_cors_headers(response, origin)
-    
+
     return await call_next(request)
 
 
@@ -340,14 +519,17 @@ async def csrf_protection(request: Request, call_next):
 @app.middleware("http")
 async def sanitize_input(request: Request, call_next):
     # Only process JSON requests with body
-    if request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-type", "").startswith("application/json"):
+    if request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-type", "").startswith(
+        "application/json"
+    ):
         try:
             from app.core.sanitization import sanitize_dict
-            
+
             # Read and sanitize body
             body = await request.body()
             if body:
                 import json
+
                 try:
                     data = json.loads(body)
                     if isinstance(data, dict):
@@ -358,7 +540,7 @@ async def sanitize_input(request: Request, call_next):
                     pass  # Let validation handle invalid JSON
         except Exception as e:
             logger.warning(f"Input sanitization warning: {e}")
-    
+
     return await call_next(request)
 
 
@@ -376,23 +558,24 @@ async def add_security_headers(request: Request, call_next):
         response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
     return response
 
+
 # Rate limiting middleware (if enabled)
 if settings.RATE_LIMIT_ENABLED:
     try:
         from slowapi import Limiter
-        from slowapi.util import get_remote_address
         from slowapi.errors import RateLimitExceeded
         from slowapi.middleware import SlowAPIMiddleware
-        
+        from slowapi.util import get_remote_address
+
         # Define rate limits per endpoint type
         # Stricter limits for sensitive auth endpoints
         AUTH_RATE_LIMITS = {
-            "/api/v1/auth/login": "5/minute",      # Prevent brute force
-            "/api/v1/auth/register": "3/minute",   # Prevent mass registration
-            "/api/v1/auth/refresh": "30/minute",   # Allow reasonable token refreshes
+            "/api/v1/auth/login": "5/minute",  # Prevent brute force
+            "/api/v1/auth/register": "3/minute",  # Prevent mass registration
+            "/api/v1/auth/refresh": "30/minute",  # Allow reasonable token refreshes
             "/api/v1/auth/employee-login": "3/minute",  # Employee ID kiosk login
         }
-        
+
         def get_rate_limit_for_path(request):
             """Get rate limit based on request path"""
             path = request.url.path
@@ -400,45 +583,44 @@ if settings.RATE_LIMIT_ENABLED:
                 if path.startswith(auth_path):
                     return limit
             return f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"
-        
+
         limiter = Limiter(
             key_func=get_remote_address,
             default_limits=[f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"],
-            storage_uri=settings.REDIS_URL if settings.REDIS_URL else "memory://"
+            storage_uri=settings.REDIS_URL if settings.REDIS_URL else "memory://",
         )
         app.state.limiter = limiter
         app.add_middleware(SlowAPIMiddleware)
-        
+
         # Custom rate limit handler with CORS headers
         async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
             detail = getattr(exc, "detail", str(exc))
-            response = JSONResponse(
-                status_code=429,
-                content={"detail": f"Rate limit exceeded: {detail}"}
-            )
+            response = JSONResponse(status_code=429, content={"detail": f"Rate limit exceeded: {detail}"})
             origin = request.headers.get("origin")
             return add_cors_headers(response, origin)
-        
+
         # Ensure SlowAPI uses our safe handler as well
         limiter._rate_limit_exceeded_handler = rate_limit_exceeded_handler
         app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
-        
+
         # Add middleware for path-specific rate limiting
         @app.middleware("http")
         async def rate_limit_by_path(request: Request, call_next):
             """Apply stricter rate limits to sensitive endpoints"""
             path = request.url.path
-            
+
             # Check if this is a sensitive auth endpoint
             if path in AUTH_RATE_LIMITS:
                 # The limiter will handle this with its default limits
                 # For now, we just log that it's a sensitive endpoint
                 logger.debug(f"Rate limiting auth endpoint: {path}")
-            
+
             return await call_next(request)
-        
-        logger.info(f"Rate limiting enabled: {settings.RATE_LIMIT_TIMES} requests/{settings.RATE_LIMIT_SECONDS}s (default)")
-        logger.info(f"Auth rate limits: login=5/min, register=3/min, refresh=30/min")
+
+        logger.info(
+            f"Rate limiting enabled: {settings.RATE_LIMIT_TIMES} requests/{settings.RATE_LIMIT_SECONDS}s (default)"
+        )
+        logger.info("Auth rate limits: login=5/min, register=3/min, refresh=30/min")
     except ImportError:
         logger.warning("Rate limiting requested but slowapi not installed")
 
@@ -449,11 +631,9 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     if settings.SENTRY_DSN:
         import sentry_sdk
+
         sentry_sdk.capture_exception(exc)
-    response = JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error"}
-    )
+    response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
     # Add CORS headers so browser doesn't mask the error as CORS failure
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
@@ -462,10 +642,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # HTTP exception handler - ensures CORS headers on HTTP errors (401, 403, 404, etc.)
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    response = JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail}
-    )
+    response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
 
@@ -473,10 +650,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 # Validation error handler - ensures CORS headers on validation errors (422)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    response = JSONResponse(
-        status_code=422,
-        content={"detail": jsonable_encoder(exc.errors())}
-    )
+    response = JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
 
@@ -485,12 +659,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.get("/health")
 async def health_check():
     """Basic health check - used by load balancers and Railway."""
-    return {
-        "status": "healthy",
-        "app": settings.APP_NAME,
-        "environment": settings.ENVIRONMENT,
-        "version": "1.0.0"
-    }
+    return {"status": "healthy", "app": settings.APP_NAME, "environment": settings.ENVIRONMENT, "version": "1.0.0"}
 
 
 @app.get("/health/live")
@@ -506,15 +675,16 @@ async def readiness_check():
     """Readiness probe - indicates if the application is ready to accept traffic.
     Checks database connectivity and critical dependencies.
     """
-    from app.db.database import SessionLocal
     import time
-    
+
+    from app.db.database import SessionLocal
+
     checks = {
         "database": {"status": "unknown", "latency_ms": None},
         "app": {"status": "healthy"},
     }
     overall_status = "healthy"
-    
+
     # Database connectivity check
     db_start = time.time()
     try:
@@ -531,32 +701,26 @@ async def readiness_check():
         checks["database"]["error"] = str(e)[:100]  # Truncate error message
         overall_status = "unhealthy"
         logger.error(f"Health check - Database unhealthy: {e}")
-    
+
     # Redis check (if configured)
     if settings.REDIS_URL:
         try:
             import redis
+
             redis_start = time.time()
             r = redis.from_url(settings.REDIS_URL, socket_timeout=2)
             r.ping()
-            checks["redis"] = {
-                "status": "healthy",
-                "latency_ms": round((time.time() - redis_start) * 1000, 2)
-            }
+            checks["redis"] = {"status": "healthy", "latency_ms": round((time.time() - redis_start) * 1000, 2)}
         except Exception as e:
             checks["redis"] = {"status": "unhealthy", "error": str(e)[:100]}
             # Redis is optional, don't fail health check
             logger.warning(f"Health check - Redis unhealthy: {e}")
-    
+
     status_code = 200 if overall_status == "healthy" else 503
-    
+
     return JSONResponse(
         status_code=status_code,
-        content={
-            "status": overall_status,
-            "timestamp": datetime.utcnow().isoformat(),
-            "checks": checks
-        }
+        content={"status": overall_status, "timestamp": datetime.utcnow().isoformat(), "checks": checks},
     )
 
 
@@ -567,13 +731,15 @@ async def detailed_health_check():
     """
     import platform
     import sys
-    from app.db.database import SessionLocal
     import time
-    
+
+    from app.db.database import SessionLocal
+
     checks = {}
-    
+
     # Database check with connection pool info
     from app.db.database import get_pool_status
+
     db_start = time.time()
     try:
         db = SessionLocal()
@@ -585,20 +751,20 @@ async def detailed_health_check():
                 "status": "healthy",
                 "latency_ms": round((time.time() - db_start) * 1000, 2),
                 "version": db_version[:50],  # Truncate version string
-                "pool": pool_status
+                "pool": pool_status,
             }
         finally:
             db.close()
     except Exception as e:
         checks["database"] = {"status": "unhealthy", "error": str(e)[:100]}
-    
+
     # System info
     checks["system"] = {
         "python_version": sys.version.split()[0],
         "platform": platform.system(),
         "platform_release": platform.release(),
     }
-    
+
     # Application info
     checks["application"] = {
         "name": settings.APP_NAME,
@@ -606,7 +772,7 @@ async def detailed_health_check():
         "version": "1.0.0",
         "debug": settings.DEBUG,
     }
-    
+
     # Feature flags
     checks["features"] = {
         "rate_limiting": settings.RATE_LIMIT_ENABLED,
@@ -614,21 +780,17 @@ async def detailed_health_check():
         "redis": bool(settings.REDIS_URL),
         "caching": cache.enabled,
     }
-    
+
     # Cache stats (if enabled)
     if cache.enabled:
         checks["cache"] = {
             "status": "healthy",
             "stats": cache.stats,
         }
-    
+
     overall_status = "healthy" if checks.get("database", {}).get("status") == "healthy" else "degraded"
-    
-    return {
-        "status": overall_status,
-        "timestamp": datetime.utcnow().isoformat(),
-        "checks": checks
-    }
+
+    return {"status": overall_status, "timestamp": datetime.utcnow().isoformat(), "checks": checks}
 
 
 # Include API routes
@@ -636,15 +798,11 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 # Include WebSocket routes
 from app.api.websocket import router as websocket_router
+
 app.include_router(websocket_router, prefix=settings.API_V1_PREFIX, tags=["WebSocket"])
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower()
-    )
+
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=settings.DEBUG, log_level=settings.LOG_LEVEL.lower())

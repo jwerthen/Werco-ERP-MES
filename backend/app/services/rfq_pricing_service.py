@@ -4,14 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Protocol, Tuple
 
-from sqlalchemy.orm import Session
 from sqlalchemy import desc
+from sqlalchemy.orm import Session
 
 from app.models.part import Part, PartType
 from app.models.quote_config import MaterialCategory, QuoteMaterial, QuoteSettings
 from app.models.rfq_quote import PriceSnapshot, RfqPackage
 from app.services.sheet_metal_costing_service import normalize_material
-
 
 DEFAULT_MATERIAL_PRICE_PER_LB = {
     "carbon_steel": 1.10,
@@ -36,13 +35,9 @@ class MaterialPriceProvider(Protocol):
 
     def get_material_price(
         self, db: Session, material: str, thickness: Optional[str] = None
-    ) -> Optional[PriceResult]:
-        ...
+    ) -> Optional[PriceResult]: ...
 
-    def get_hardware_price(
-        self, db: Session, item_code: Optional[str], description: str
-    ) -> Optional[PriceResult]:
-        ...
+    def get_hardware_price(self, db: Session, item_code: Optional[str], description: str) -> Optional[PriceResult]: ...
 
 
 def _get_quote_setting(db: Session, key: str, default):
@@ -68,9 +63,7 @@ class InternalPriceListProvider:
             return MaterialCategory.ALUMINUM
         return MaterialCategory.STEEL
 
-    def _pick_sheet_price(
-        self, sheet_pricing: Dict[str, float], thickness: Optional[str]
-    ) -> Optional[float]:
+    def _pick_sheet_price(self, sheet_pricing: Dict[str, float], thickness: Optional[str]) -> Optional[float]:
         if not sheet_pricing:
             return None
         if thickness and thickness in sheet_pricing:
@@ -94,9 +87,7 @@ class InternalPriceListProvider:
         first_value = next(iter(sheet_pricing.values()), None)
         return float(first_value) if first_value is not None else None
 
-    def get_material_price(
-        self, db: Session, material: str, thickness: Optional[str] = None
-    ) -> Optional[PriceResult]:
+    def get_material_price(self, db: Session, material: str, thickness: Optional[str] = None) -> Optional[PriceResult]:
         category = self._category_for_material(material)
         mat = (
             db.query(QuoteMaterial)
@@ -131,9 +122,7 @@ class InternalPriceListProvider:
             source_url=None,
         )
 
-    def get_hardware_price(
-        self, db: Session, item_code: Optional[str], description: str
-    ) -> Optional[PriceResult]:
+    def get_hardware_price(self, db: Session, item_code: Optional[str], description: str) -> Optional[PriceResult]:
         query = db.query(Part).filter(
             Part.part_type.in_([PartType.HARDWARE, PartType.CONSUMABLE]),
             Part.is_active.is_(True),

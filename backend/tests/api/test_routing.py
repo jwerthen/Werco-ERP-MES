@@ -12,9 +12,7 @@ from app.models.work_center import WorkCenter
 @pytest.mark.api
 @pytest.mark.requires_db
 class TestRoutingAPI:
-    def test_get_routing_by_part_is_company_scoped(
-        self, client: TestClient, auth_headers: dict, db_session: Session
-    ):
+    def test_get_routing_by_part_is_company_scoped(self, client: TestClient, auth_headers: dict, db_session: Session):
         """Routing by part should not crash when tenant-scoped filters are applied."""
         part = Part(
             part_number="ROUTE-PART-001",

@@ -1,6 +1,8 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Any
 from datetime import datetime
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
 from app.models.bom import BOMItemType, BOMLineType
 
 
@@ -23,7 +25,7 @@ class BOMItemBase(BaseModel):
     is_optional: bool = False
     is_alternate: bool = False
     alternate_group: Optional[str] = None
-    
+
     class Config:
         use_enum_values = True
 
@@ -54,13 +56,14 @@ class BOMItemUpdate(BaseModel):
 
 class ComponentPartInfo(BaseModel):
     """Embedded part info for BOM item responses"""
+
     id: int
     part_number: str
     name: str
     revision: str
     part_type: str
     has_bom: bool = False
-    
+
     class Config:
         from_attributes = True
 
@@ -71,17 +74,18 @@ class BOMItemResponse(BOMItemBase):
     component_part: Optional[ComponentPartInfo] = None
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 class BOMItemWithChildren(BOMItemResponse):
     """BOM item with nested children for multi-level explosion"""
+
     children: List["BOMItemWithChildren"] = Field(default_factory=list)
     level: int = 0
     extended_quantity: float = 0.0  # quantity * parent quantities
-    
+
     class Config:
         from_attributes = True
 
@@ -107,12 +111,13 @@ class BOMUpdate(BaseModel):
 
 class PartInfo(BaseModel):
     """Embedded part info for BOM responses"""
+
     id: int
     part_number: str
     name: str
     revision: str
     part_type: str
-    
+
     class Config:
         from_attributes = True
 
@@ -126,13 +131,14 @@ class BOMResponse(BOMBase):
     updated_at: datetime
     part: Optional[PartInfo] = None
     items: List[BOMItemResponse] = Field(default_factory=list)
-    
+
     class Config:
         from_attributes = True
 
 
 class BOMExploded(BaseModel):
     """Fully exploded multi-level BOM"""
+
     bom_id: int
     part_id: int
     part_number: str
@@ -140,13 +146,14 @@ class BOMExploded(BaseModel):
     revision: str
     total_levels: int
     items: List[BOMItemWithChildren]
-    
+
     class Config:
         from_attributes = True
 
 
 class BOMFlatItem(BaseModel):
     """Flattened BOM item for reports/MRP"""
+
     level: int
     item_number: int
     find_number: Optional[str]
@@ -170,6 +177,7 @@ class BOMFlatItem(BaseModel):
 
 class BOMFlattened(BaseModel):
     """Flattened BOM for tabular display"""
+
     bom_id: int
     part_number: str
     part_name: str

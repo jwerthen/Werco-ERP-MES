@@ -2,27 +2,30 @@
 MRP Auto-Processing Service
 Handles automatic creation of POs and WOs from MRP actions
 """
-from datetime import datetime, date
-from typing import List, Dict
-from sqlalchemy.orm import Session
+
+import logging
+from datetime import date, datetime
+from typing import Dict, List
+
 from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from app.models.mrp import MRPAction, PlanningAction
-from app.models.part import Part, PartType
-from app.models.work_order import WorkOrder, WorkOrderStatus
-from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine, POStatus
-from app.models.vendor import Vendor
-from app.models.user import User
+from app.models.part import Part
+from app.models.purchase_order import POStatus, PurchaseOrder, PurchaseOrderLine
 from app.models.supplier_part import SupplierPartMapping
+from app.models.user import User
+from app.models.vendor import Vendor
+from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
-from app.services.notification_service import NotificationService, NotificationEvent
-import logging
+from app.services.notification_service import NotificationEvent, NotificationService
 
 logger = logging.getLogger(__name__)
 
 
 class MRPAutoMode:
     """MRP Auto-processing modes"""
+
     REVIEW = "REVIEW"  # Generate actions, require manual approval
     AUTO_DRAFT = "AUTO_DRAFT"  # Auto-create POs/WOs in draft status
     AUTO_SUBMIT = "AUTO_SUBMIT"  # Auto-create and release POs/WOs (requires admin)
@@ -35,10 +38,7 @@ class MRPAutoService:
         self.db = db
 
     def process_actions(
-        self,
-        actions: List[MRPAction],
-        mode: str = MRPAutoMode.REVIEW,
-        user_id: int = None
+        self, actions: List[MRPAction], mode: str = MRPAutoMode.REVIEW, user_id: int = None
     ) -> Dict[str, int]:
         """
         Process MRP actions based on mode
@@ -51,12 +51,7 @@ class MRPAutoService:
         Returns:
             Dict with counts of processed actions
         """
-        results = {
-            "pos_created": 0,
-            "wos_created": 0,
-            "actions_processed": 0,
-            "errors": 0
-        }
+        results = {"pos_created": 0, "wos_created": 0, "actions_processed": 0, "errors": 0}
 
         if mode == MRPAutoMode.REVIEW:
             # No auto-processing in review mode
@@ -96,12 +91,7 @@ class MRPAutoService:
         self.db.commit()
         return results
 
-    def _create_po_from_action(
-        self,
-        action: MRPAction,
-        mode: str,
-        user_id: int = None
-    ) -> PurchaseOrder:
+    def _create_po_from_action(self, action: MRPAction, mode: str, user_id: int = None) -> PurchaseOrder:
         """Create purchase order from MRP action"""
 
         part = self.db.query(Part).filter(Part.id == action.part_id).first()
@@ -130,7 +120,7 @@ class MRPAutoService:
             order_date=date.today(),
             expected_date=action.required_date,
             created_by=user_id,
-            notes=f"Auto-created by MRP run {action.mrp_run_id}"
+            notes=f"Auto-created by MRP run {action.mrp_run_id}",
         )
         self.db.add(po)
         self.db.flush()
@@ -138,11 +128,7 @@ class MRPAutoService:
         # Create PO line
         unit_cost = self._get_part_cost(action.part_id, vendor.id)
         po_line = PurchaseOrderLine(
-            po_id=po.id,
-            part_id=action.part_id,
-            quantity=action.quantity,
-            unit_cost=unit_cost,
-            line_number=1
+            po_id=po.id, part_id=action.part_id, quantity=action.quantity, unit_cost=unit_cost, line_number=1
         )
         self.db.add(po_line)
 
@@ -151,23 +137,14 @@ class MRPAutoService:
             action="CREATE_PO",
             entity_type="PurchaseOrder",
             entity_id=po.id,
-            details={
-                "mrp_action_id": action.id,
-                "mode": mode,
-                "auto_created": True
-            },
-            user_id=user_id
+            details={"mrp_action_id": action.id, "mode": mode, "auto_created": True},
+            user_id=user_id,
         )
 
         logger.info(f"Created PO {po_number} from MRP action {action.id}")
         return po
 
-    def _create_wo_from_action(
-        self,
-        action: MRPAction,
-        mode: str,
-        user_id: int = None
-    ) -> WorkOrder:
+    def _create_wo_from_action(self, action: MRPAction, mode: str, user_id: int = None) -> WorkOrder:
         """Create work order from MRP action"""
 
         part = self.db.query(Part).filter(Part.id == action.part_id).first()
@@ -192,7 +169,7 @@ class MRPAutoService:
             status=status,
             priority=action.priority,
             created_by=user_id,
-            notes=f"Auto-created by MRP run {action.mrp_run_id}"
+            notes=f"Auto-created by MRP run {action.mrp_run_id}",
         )
         self.db.add(wo)
         self.db.flush()
@@ -202,12 +179,8 @@ class MRPAutoService:
             action="CREATE_WO",
             entity_type="WorkOrder",
             entity_id=wo.id,
-            details={
-                "mrp_action_id": action.id,
-                "mode": mode,
-                "auto_created": True
-            },
-            user_id=user_id
+            details={"mrp_action_id": action.id, "mode": mode, "auto_created": True},
+            user_id=user_id,
         )
 
         logger.info(f"Created WO {wo_number} from MRP action {action.id}")
@@ -224,23 +197,21 @@ class MRPAutoService:
         notification_service = NotificationService(self.db)
 
         from app.services.notification_service import get_notification_recipients
+
         recipients = get_notification_recipients(self.db, department="Purchasing")
 
         # Use enqueue_job to avoid blocking
-        from app.core.queue import enqueue_job
         import asyncio
 
-        asyncio.create_task(notification_service.send_notification(
-            event_type=NotificationEvent.CAPACITY_OVERLOAD,
-            users=recipients,
-            subject=f"EXPEDITE REQUIRED: {part.part_number}",
-            context={
-                "part": part,
-                "quantity": action.quantity,
-                "required_date": action.required_date
-            },
-            template="expedite_required"
-        ))
+        asyncio.create_task(
+            notification_service.send_notification(
+                event_type=NotificationEvent.CAPACITY_OVERLOAD,
+                users=recipients,
+                subject=f"EXPEDITE REQUIRED: {part.part_number}",
+                context={"part": part, "quantity": action.quantity, "required_date": action.required_date},
+                template="expedite_required",
+            )
+        )
 
         action.processed = True
         action.processed_at = datetime.utcnow()
@@ -248,48 +219,51 @@ class MRPAutoService:
     def _get_preferred_vendor(self, part_id: int) -> Vendor:
         """
         Get preferred vendor for a part.
-        
+
         Lookup priority:
         1. Check SupplierPartMapping for vendor associations
         2. Check recent purchase order history for most-used vendor
         3. Fall back to first active vendor
-        
+
         Args:
             part_id: The part ID to find a vendor for
-            
+
         Returns:
             Vendor object or None if no active vendors exist
         """
         # Priority 1: Check supplier part mappings for this part
-        mapping = self.db.query(SupplierPartMapping).filter(
-            SupplierPartMapping.part_id == part_id,
-            SupplierPartMapping.is_active == True,
-            SupplierPartMapping.vendor_id.isnot(None)
-        ).join(Vendor).filter(Vendor.is_active == True).first()
-        
+        mapping = (
+            self.db.query(SupplierPartMapping)
+            .filter(
+                SupplierPartMapping.part_id == part_id,
+                SupplierPartMapping.is_active == True,
+                SupplierPartMapping.vendor_id.isnot(None),
+            )
+            .join(Vendor)
+            .filter(Vendor.is_active == True)
+            .first()
+        )
+
         if mapping and mapping.vendor:
             logger.debug(f"Found preferred vendor {mapping.vendor.name} from supplier mapping for part {part_id}")
             return mapping.vendor
-        
+
         # Priority 2: Check recent PO history to find most-used vendor for this part
         recent_vendor_query = (
             self.db.query(Vendor, func.count(PurchaseOrderLine.id).label('order_count'))
             .join(PurchaseOrder, PurchaseOrder.vendor_id == Vendor.id)
             .join(PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
-            .filter(
-                PurchaseOrderLine.part_id == part_id,
-                Vendor.is_active == True
-            )
+            .filter(PurchaseOrderLine.part_id == part_id, Vendor.is_active == True)
             .group_by(Vendor.id)
             .order_by(func.count(PurchaseOrderLine.id).desc())
             .first()
         )
-        
+
         if recent_vendor_query:
             vendor = recent_vendor_query[0]
             logger.debug(f"Found vendor {vendor.name} from PO history for part {part_id}")
             return vendor
-        
+
         # Priority 3: Fall back to first active vendor
         logger.debug(f"No specific vendor found for part {part_id}, using first active vendor")
         vendor = self.db.query(Vendor).filter(Vendor.is_active == True).first()
@@ -298,15 +272,15 @@ class MRPAutoService:
     def _get_part_cost(self, part_id: int, vendor_id: int) -> float:
         """
         Get part cost from vendor.
-        
+
         Lookup priority:
         1. Check recent purchase orders from this vendor for actual pricing
         2. Fall back to part's standard cost
-        
+
         Args:
             part_id: The part ID to get cost for
             vendor_id: The vendor ID (if known) to check pricing for
-            
+
         Returns:
             Float representing unit cost for the part
         """
@@ -318,22 +292,22 @@ class MRPAutoService:
                 .filter(
                     PurchaseOrderLine.part_id == part_id,
                     PurchaseOrder.vendor_id == vendor_id,
-                    PurchaseOrder.status != POStatus.CANCELLED
+                    PurchaseOrder.status != POStatus.CANCELLED,
                 )
                 .order_by(PurchaseOrder.created_at.desc())
                 .first()
             )
-            
+
             if recent_price and recent_price[0]:
                 logger.debug(f"Using recent PO price ${recent_price[0]} for part {part_id} from vendor {vendor_id}")
                 return recent_price[0]
-        
+
         # Priority 2: Fall back to part standard cost
         part = self.db.query(Part).filter(Part.id == part_id).first()
         if part and part.standard_cost:
             logger.debug(f"Using standard cost ${part.standard_cost} for part {part_id}")
             return part.standard_cost
-        
+
         logger.warning(f"No cost information found for part {part_id}, returning 0.0")
         return 0.0
 
@@ -342,9 +316,12 @@ class MRPAutoService:
         today = datetime.now().strftime("%Y%m%d")
         prefix = f"PO-{today}-"
 
-        last_po = self.db.query(PurchaseOrder).filter(
-            PurchaseOrder.po_number.like(f"{prefix}%")
-        ).order_by(PurchaseOrder.po_number.desc()).first()
+        last_po = (
+            self.db.query(PurchaseOrder)
+            .filter(PurchaseOrder.po_number.like(f"{prefix}%"))
+            .order_by(PurchaseOrder.po_number.desc())
+            .first()
+        )
 
         if last_po:
             last_num = int(last_po.po_number.split("-")[-1])
@@ -359,9 +336,12 @@ class MRPAutoService:
         today = datetime.now().strftime("%Y%m%d")
         prefix = f"WO-{today}-"
 
-        last_wo = self.db.query(WorkOrder).filter(
-            WorkOrder.wo_number.like(f"{prefix}%")
-        ).order_by(WorkOrder.wo_number.desc()).first()
+        last_wo = (
+            self.db.query(WorkOrder)
+            .filter(WorkOrder.wo_number.like(f"{prefix}%"))
+            .order_by(WorkOrder.wo_number.desc())
+            .first()
+        )
 
         if last_wo:
             last_num = int(last_wo.wo_number.split("-")[-1])
@@ -371,14 +351,7 @@ class MRPAutoService:
 
         return f"{prefix}{new_num:03d}"
 
-    def _create_audit_log(
-        self,
-        action: str,
-        entity_type: str,
-        entity_id: int,
-        details: Dict,
-        user_id: int = None
-    ):
+    def _create_audit_log(self, action: str, entity_type: str, entity_id: int, details: Dict, user_id: int = None):
         """Create audit log entry"""
         user = None
         if user_id is not None:
@@ -396,5 +369,5 @@ class MRPAutoService:
             resource_type=resource_type,
             resource_id=entity_id,
             description=description,
-            extra_data=details
+            extra_data=details,
         )

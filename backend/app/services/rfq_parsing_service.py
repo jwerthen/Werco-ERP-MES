@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.models.rfq_quote import RfqPackageFile
 from app.services.pdf_service import extract_text_from_pdf
 
-
 GAUGE_TO_INCHES: Dict[str, float] = {
     "24ga": 0.0239,
     "22ga": 0.0299,
@@ -250,9 +249,7 @@ def parse_bom_xlsx(file_path: str, file_name: str) -> Dict[str, Any]:
                 "source": source_ref,
             }
 
-            combined = " ".join(
-                [str(part_number or ""), str(description or ""), item_type, notes_blob]
-            ).lower()
+            combined = " ".join([str(part_number or ""), str(description or ""), item_type, notes_blob]).lower()
             part_number_value = str(part_number or "").upper()
             is_hardware = (
                 "hardware" in item_type
@@ -630,7 +627,9 @@ def build_normalized_part_specs(
             part["hole_count"] = payload["hole_count"]
         if payload.get("bend_count") is not None:
             part["bend_count"] = payload["bend_count"]
-        part["confidence"]["geometry"] = max(part["confidence"]["geometry"], payload.get("confidence", {}).get("geometry", 0.0))
+        part["confidence"]["geometry"] = max(
+            part["confidence"]["geometry"], payload.get("confidence", {}).get("geometry", 0.0)
+        )
         part["sources"].setdefault("geometry", []).extend(payload.get("sources", {}).get("geometry", []))
         warning = payload.get("warning")
         if warning:
@@ -761,5 +760,3 @@ def parse_rfq_package_files(files: List[RfqPackageFile]) -> Dict[str, Any]:
         "warnings": warnings,
         "file_results": file_results,
     }
-
-

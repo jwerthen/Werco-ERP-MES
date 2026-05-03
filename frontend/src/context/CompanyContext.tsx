@@ -34,7 +34,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     try {
       const data = await api.getPlatformCompanies();
       setCompanies(data);
-    } catch (e) {
+    } catch {
       console.warn('Failed to load companies list');
     }
   }, [isPlatformAdmin]);
@@ -53,7 +53,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
       try {
         const company = await api.getCurrentCompany();
         setCurrentCompany(company);
-      } catch (e) {
+      } catch {
         console.warn('Failed to load current company');
       }
     };

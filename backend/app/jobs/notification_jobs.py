@@ -1,7 +1,8 @@
-from app.db.session import SessionLocal
-from app.services.notification_service import NotificationService, NotificationEvent, get_notification_recipients
-from datetime import datetime, timedelta
 import logging
+from datetime import datetime, timedelta
+
+from app.db.session import SessionLocal
+from app.services.notification_service import NotificationEvent, NotificationService, get_notification_recipients
 
 logger = logging.getLogger(__name__)
 
@@ -16,19 +17,27 @@ async def check_calibrations_task():
 
         # Check calibrations due in 7 days
         due_soon = datetime.utcnow() + timedelta(days=7)
-        calibrations_7day = db.query(Calibration).filter(
-            Calibration.next_calibration_date <= due_soon,
-            Calibration.next_calibration_date > datetime.utcnow(),
-            Calibration.status == "ACTIVE"
-        ).all()
+        calibrations_7day = (
+            db.query(Calibration)
+            .filter(
+                Calibration.next_calibration_date <= due_soon,
+                Calibration.next_calibration_date > datetime.utcnow(),
+                Calibration.status == "ACTIVE",
+            )
+            .all()
+        )
 
         # Check calibrations due in 1 day
         due_tomorrow = datetime.utcnow() + timedelta(days=1)
-        calibrations_1day = db.query(Calibration).filter(
-            Calibration.next_calibration_date <= due_tomorrow,
-            Calibration.next_calibration_date > datetime.utcnow(),
-            Calibration.status == "ACTIVE"
-        ).all()
+        calibrations_1day = (
+            db.query(Calibration)
+            .filter(
+                Calibration.next_calibration_date <= due_tomorrow,
+                Calibration.next_calibration_date > datetime.utcnow(),
+                Calibration.status == "ACTIVE",
+            )
+            .all()
+        )
 
         # Get quality team
         quality_users = get_notification_recipients(db, department="Quality")
@@ -41,11 +50,11 @@ async def check_calibrations_task():
                 subject=f"Calibration Due Soon: {cal.equipment_name}",
                 context={
                     "calibration": cal,
-                    "days_until_due": (cal.next_calibration_date - datetime.utcnow().date()).days
+                    "days_until_due": (cal.next_calibration_date - datetime.utcnow().date()).days,
                 },
                 template="calibration_due",
                 related_type="Calibration",
-                related_id=cal.id
+                related_id=cal.id,
             )
 
         # Send urgent notifications for 1-day warnings
@@ -54,17 +63,15 @@ async def check_calibrations_task():
                 event_type=NotificationEvent.CALIBRATION_DUE,
                 users=quality_users,
                 subject=f"URGENT: Calibration Due Tomorrow: {cal.equipment_name}",
-                context={
-                    "calibration": cal,
-                    "days_until_due": 1,
-                    "urgent": True
-                },
+                context={"calibration": cal, "days_until_due": 1, "urgent": True},
                 template="calibration_due",
                 related_type="Calibration",
-                related_id=cal.id
+                related_id=cal.id,
             )
 
-        logger.info(f"Checked calibrations: {len(calibrations_7day)} due in 7 days, {len(calibrations_1day)} due tomorrow")
+        logger.info(
+            f"Checked calibrations: {len(calibrations_7day)} due in 7 days, {len(calibrations_1day)} due tomorrow"
+        )
         return {"calibrations_7day": len(calibrations_7day), "calibrations_1day": len(calibrations_1day)}
 
     except Exception as e:
@@ -84,10 +91,11 @@ async def check_late_work_orders_task():
 
         # Find late work orders
         today = datetime.utcnow().date()
-        late_wos = db.query(WorkOrder).filter(
-            WorkOrder.due_date < today,
-            WorkOrder.status.in_(["RELEASED", "IN_PROGRESS"])
-        ).all()
+        late_wos = (
+            db.query(WorkOrder)
+            .filter(WorkOrder.due_date < today, WorkOrder.status.in_(["RELEASED", "IN_PROGRESS"]))
+            .all()
+        )
 
         if not late_wos:
             return {"late_work_orders": 0}
@@ -105,14 +113,10 @@ async def check_late_work_orders_task():
                 event_type=NotificationEvent.WO_LATE,
                 users=supervisors + managers,
                 subject=f"{'CRITICAL: ' if is_critical else ''}Work Order {wo.wo_number} is {days_late} days late",
-                context={
-                    "work_order": wo,
-                    "days_late": days_late,
-                    "critical": is_critical
-                },
+                context={"work_order": wo, "days_late": days_late, "critical": is_critical},
                 template="work_order_late",
                 related_type="WorkOrder",
-                related_id=wo.id
+                related_id=wo.id,
             )
 
         logger.info(f"Checked late work orders: {len(late_wos)} late")
@@ -134,9 +138,7 @@ async def check_low_stock_task():
         notification_service = NotificationService(db)
 
         # Find low stock items
-        low_stock = db.query(InventoryItem).filter(
-            InventoryItem.quantity_on_hand <= InventoryItem.reorder_point
-        ).all()
+        low_stock = db.query(InventoryItem).filter(InventoryItem.quantity_on_hand <= InventoryItem.reorder_point).all()
 
         if not low_stock:
             return {"low_stock_items": 0}
@@ -150,11 +152,8 @@ async def check_low_stock_task():
             event_type=NotificationEvent.LOW_STOCK,
             users=purchasing_users + inventory_users,
             subject=f"Low Stock Alert: {len(low_stock)} items below reorder point",
-            context={
-                "items": low_stock,
-                "count": len(low_stock)
-            },
-            template="low_stock"
+            context={"items": low_stock, "count": len(low_stock)},
+            template="low_stock",
         )
 
         logger.info(f"Low stock check: {len(low_stock)} items")
@@ -177,11 +176,11 @@ async def check_quote_expiring_task():
 
         # Find quotes expiring in 7 days
         expiring_soon = datetime.utcnow() + timedelta(days=7)
-        expiring_quotes = db.query(Quote).filter(
-            Quote.valid_until <= expiring_soon,
-            Quote.valid_until > datetime.utcnow(),
-            Quote.status == "SENT"
-        ).all()
+        expiring_quotes = (
+            db.query(Quote)
+            .filter(Quote.valid_until <= expiring_soon, Quote.valid_until > datetime.utcnow(), Quote.status == "SENT")
+            .all()
+        )
 
         if not expiring_quotes:
             return {"expiring_quotes": 0}
@@ -197,13 +196,10 @@ async def check_quote_expiring_task():
                 event_type=NotificationEvent.QUOTE_EXPIRING,
                 users=sales_users,
                 subject=f"Quote {quote.quote_number} expires in {days_until_expiry} days",
-                context={
-                    "quote": quote,
-                    "days_until_expiry": days_until_expiry
-                },
+                context={"quote": quote, "days_until_expiry": days_until_expiry},
                 template="quote_expiring",
                 related_type="Quote",
-                related_id=quote.id
+                related_id=quote.id,
             )
 
         logger.info(f"Quote expiry check: {len(expiring_quotes)} expiring soon")

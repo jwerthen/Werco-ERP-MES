@@ -1,10 +1,12 @@
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
 from datetime import datetime
-from app.models.quote_config import MaterialCategory, MachineType, ProcessType, CostUnit
+from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel
+
+from app.models.quote_config import CostUnit, MachineType, MaterialCategory, ProcessType
 
 # ============ MATERIALS ============
+
 
 class MaterialBase(BaseModel):
     name: str
@@ -40,12 +42,13 @@ class MaterialResponse(MaterialBase):
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 # ============ MACHINES ============
+
 
 class MachineBase(BaseModel):
     name: str
@@ -81,12 +84,13 @@ class MachineResponse(MachineBase):
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 # ============ FINISHES ============
+
 
 class FinishBase(BaseModel):
     name: str
@@ -119,12 +123,13 @@ class FinishResponse(FinishBase):
     id: int
     is_active: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 # ============ LABOR RATES ============
+
 
 class LaborRateBase(BaseModel):
     name: str
@@ -148,12 +153,13 @@ class LaborRateResponse(LaborRateBase):
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 # ============ WORK CENTER RATES ============
+
 
 class WorkCenterRateUpdate(BaseModel):
     hourly_rate: float
@@ -166,12 +172,13 @@ class WorkCenterRateResponse(BaseModel):
     work_center_type: str
     hourly_rate: float
     is_active: bool
-    
+
     class Config:
         from_attributes = True
 
 
 # ============ WORK CENTER TYPES ============
+
 
 class WorkCenterTypesUpdate(BaseModel):
     types: List[str]
@@ -183,6 +190,7 @@ class WorkCenterTypesResponse(BaseModel):
 
 
 # ============ OUTSIDE SERVICES ============
+
 
 class OutsideServiceBase(BaseModel):
     name: str
@@ -216,12 +224,13 @@ class OutsideServiceResponse(OutsideServiceBase):
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 # ============ SETTINGS ============
+
 
 class SettingUpdate(BaseModel):
     value: str
@@ -235,12 +244,13 @@ class SettingResponse(BaseModel):
     setting_type: str
     description: Optional[str] = None
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 # ============ AUDIT LOG ============
+
 
 class AuditLogResponse(BaseModel):
     id: int
@@ -253,7 +263,7 @@ class AuditLogResponse(BaseModel):
     new_value: Optional[str] = None
     changed_by: Optional[int] = None
     changed_at: datetime
-    
+
     class Config:
         from_attributes = True
 

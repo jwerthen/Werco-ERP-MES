@@ -1,19 +1,16 @@
-from typing import Generator, Optional
-from fastapi import Depends, HTTPException, status, Request
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
-from app.db.database import SessionLocal, get_db
+
 from app.core.security import verify_token
+from app.db.database import get_db
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
-def get_current_user(
-    db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme)
-) -> User:
+def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -33,10 +30,7 @@ def get_current_user(
         raise credentials_exception
 
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is disabled"
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled")
 
     # Attach active company context from JWT (may differ from user.company_id
     # when a platform admin switches to view another company)
@@ -46,17 +40,13 @@ def get_current_user(
     return user
 
 
-def get_current_active_user(
-    current_user: User = Depends(get_current_user)
-) -> User:
+def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
     if not current_user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
     return current_user
 
 
-def get_current_company_id(
-    current_user: User = Depends(get_current_user)
-) -> int:
+def get_current_company_id(current_user: User = Depends(get_current_user)) -> int:
     """Get the active company_id for the current request.
     For normal users this is their own company.
     For platform admins who switched context, this is the viewed company."""
@@ -65,45 +55,34 @@ def get_current_company_id(
 
 def require_role(allowed_roles: list[UserRole]):
     """Dependency to require specific roles"""
+
     def role_checker(current_user: User = Depends(get_current_user)) -> User:
         if current_user.is_superuser:
             return current_user
         if current_user.role == UserRole.PLATFORM_ADMIN:
             return current_user
         if current_user.role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions"
-            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
         return current_user
+
     return role_checker
 
 
-def require_platform_admin(
-    current_user: User = Depends(get_current_user)
-) -> User:
+def require_platform_admin(current_user: User = Depends(get_current_user)) -> User:
     """Require PLATFORM_ADMIN role or superuser status."""
     if current_user.role == UserRole.PLATFORM_ADMIN or current_user.is_superuser:
         return current_user
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Platform admin access required"
-    )
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Platform admin access required")
 
 
 def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
     if not current_user.is_superuser and current_user.role not in (UserRole.ADMIN, UserRole.PLATFORM_ADMIN):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required"
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
 
 
 def get_audit_service(
-    request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ) -> AuditService:
     """Dependency to get an AuditService instance with user and request context."""
     return AuditService(db, current_user, request)

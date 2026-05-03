@@ -2,6 +2,7 @@
 Integration tests for user management endpoints.
 Tests user CRUD operations and role-based access.
 """
+
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
@@ -46,16 +47,8 @@ class TestUsersAPI:
 
     def test_update_user_as_admin(self, client: TestClient, admin_headers, created_user):
         """Test admin can update users."""
-        update_data = {
-            "first_name": "Updated",
-            "department": "Quality",
-            "version": created_user.get("version", 0)
-        }
-        response = client.put(
-            f"/api/v1/users/{created_user['id']}",
-            headers=admin_headers,
-            json=update_data
-        )
+        update_data = {"first_name": "Updated", "department": "Quality", "version": created_user.get("version", 0)}
+        response = client.put(f"/api/v1/users/{created_user['id']}", headers=admin_headers, json=update_data)
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["first_name"] == "Updated"
@@ -66,16 +59,9 @@ class TestUsersAPI:
         me_response = client.get("/api/v1/users/me", headers=auth_headers)
         user_id = me_response.json()["id"]
         version = me_response.json().get("version", 0)
-        
-        update_data = {
-            "department": "Engineering",
-            "version": version
-        }
-        response = client.put(
-            f"/api/v1/users/{user_id}",
-            headers=auth_headers,
-            json=update_data
-        )
+
+        update_data = {"department": "Engineering", "version": version}
+        response = client.put(f"/api/v1/users/{user_id}", headers=auth_headers, json=update_data)
         # User may or may not be able to update themselves depending on implementation
         assert response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
 
@@ -136,10 +122,7 @@ class TestUsersAPI:
 
     def test_import_users_csv_operator_without_password_allowed(self, client: TestClient, admin_headers):
         """Operators can be imported without a password for employee-ID login."""
-        csv_content = (
-            "employee_id,first_name,last_name,role\n"
-            "EMP-CSV-777,Floor,Operator,operator\n"
-        )
+        csv_content = "employee_id,first_name,last_name,role\n" "EMP-CSV-777,Floor,Operator,operator\n"
         response = client.post(
             "/api/v1/users/import-csv",
             headers=admin_headers,
@@ -186,7 +169,7 @@ class TestUserRoles:
         assert "role" in data
 
 
-@pytest.mark.api  
+@pytest.mark.api
 class TestUserValidation:
     """Test user input validation."""
 
@@ -198,7 +181,7 @@ class TestUserValidation:
             "first_name": "Test",
             "last_name": "User",
             "password": "SecureP@ss123!",
-            "role": "operator"
+            "role": "operator",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
@@ -211,7 +194,7 @@ class TestUserValidation:
             "first_name": "Test",
             "last_name": "User",
             "password": "weak",  # Too short, no complexity
-            "role": "operator"
+            "role": "operator",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
@@ -224,7 +207,7 @@ class TestUserValidation:
             "first_name": "Test",
             "last_name": "User",
             "password": "SecureP@ss123!",
-            "role": "invalid_role"
+            "role": "invalid_role",
         }
         response = client.post("/api/v1/auth/register", headers=admin_headers, json=user_data)
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY

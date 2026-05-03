@@ -1,6 +1,8 @@
+from datetime import date, datetime
+from typing import List, Optional
+
 from pydantic import BaseModel, Field
-from typing import Optional, List
-from datetime import datetime, date
+
 from app.models.mrp import MRPRunStatus, PlanningAction
 
 
@@ -24,7 +26,7 @@ class MRPRunResponse(BaseModel):
     total_requirements: int
     total_actions: int
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -34,7 +36,7 @@ class PartSummary(BaseModel):
     part_number: str
     name: str
     part_type: str
-    
+
     class Config:
         from_attributes = True
 
@@ -54,7 +56,7 @@ class MRPRequirementResponse(BaseModel):
     source_type: Optional[str]
     source_number: Optional[str]
     bom_level: int
-    
+
     class Config:
         from_attributes = True
 
@@ -76,7 +78,7 @@ class MRPActionResponse(BaseModel):
     processed_at: Optional[datetime]
     result_reference: Optional[str]
     notes: Optional[str]
-    
+
     class Config:
         from_attributes = True
 
@@ -88,6 +90,7 @@ class MRPRunDetail(MRPRunResponse):
 
 class MRPPartAnalysis(BaseModel):
     """Analysis for a single part"""
+
     part_id: int
     part_number: str
     part_name: str
@@ -95,26 +98,27 @@ class MRPPartAnalysis(BaseModel):
     lead_time_days: int
     safety_stock: float
     reorder_point: float
-    
+
     # Current inventory status
     on_hand: float
     allocated: float
     available: float
     on_order: float
-    
+
     # Requirements summary
     total_required: float
     total_shortage: float
-    
+
     # Time-phased requirements (by week)
     weekly_requirements: List[dict]
-    
+
     # Recommended actions
     actions: List[MRPActionResponse]
 
 
 class ProcessActionRequest(BaseModel):
     """Request to process an MRP action"""
+
     action_id: int
     notes: Optional[str] = None
 

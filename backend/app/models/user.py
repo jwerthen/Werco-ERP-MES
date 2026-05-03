@@ -1,8 +1,12 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Text, ForeignKey, UniqueConstraint
-from sqlalchemy.orm import relationship
-from datetime import datetime
 import enum
+from datetime import datetime
 from typing import Optional
+
+from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 
 
@@ -35,17 +39,17 @@ class User(Base):
     department = Column(String(100))
     is_active = Column(Boolean, default=True)
     is_superuser = Column(Boolean, default=False)
-    
+
     # CMMC Level 2 - Track last password change
     password_changed_at = Column(DateTime, default=datetime.utcnow)
     failed_login_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
-    
+
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_by = Column(Integer, nullable=True)
-    
+
     # Relationships
     company = relationship("Company", back_populates="users")
     time_entries = relationship("TimeEntry", back_populates="user")

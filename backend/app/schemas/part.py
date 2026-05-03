@@ -1,17 +1,17 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional
 from datetime import datetime
 from decimal import Decimal
-from app.models.part import PartType, UnitOfMeasure
+from typing import Optional
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
 from app.core.validation import (
+    Money,
+    MoneySmall,
+    NonNegativeInteger,
     PartNumber,
     Revision,
-    DescriptionShort,
-    NonNegativeInteger,
-    Money,
-    OptionalMoney,
-    MoneySmall
 )
+from app.models.part import PartType, UnitOfMeasure
 
 
 class PartBase(BaseModel):
@@ -21,26 +21,26 @@ class PartBase(BaseModel):
     description: Optional[str] = Field(None, max_length=2000)
     part_type: PartType = Field(..., description="Type of part")
     unit_of_measure: UnitOfMeasure = UnitOfMeasure.EACH
-    
+
     # Costing (all optional and non-negative)
     standard_cost: Money = Field(default=Decimal("0.0"))
     material_cost: Money = Field(default=Decimal("0.0"))
     labor_cost: Money = Field(default=Decimal("0.0"))
     overhead_cost: Money = Field(default=Decimal("0.0"))
-    
+
     # Lead time
     lead_time_days: NonNegativeInteger = Field(default=0)
-    
+
     # Inventory (all optional and non-negative)
     safety_stock: MoneySmall = Field(default=Decimal("0.0"))
     reorder_point: MoneySmall = Field(default=Decimal("0.0"))
     reorder_quantity: MoneySmall = Field(default=Decimal("0.0"))
-    
+
     # Classification
     is_critical: bool = False
     requires_inspection: bool = True
     inspection_requirements: Optional[str] = Field(None, max_length=2000)
-    
+
     # Customer info
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_part_number: Optional[str] = Field(None, max_length=100)
@@ -91,7 +91,9 @@ class PartUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=255)
     revision: Optional[str] = Field(None, min_length=1, max_length=20, pattern=r'^[A-Z0-9]+$')
     description: Optional[str] = Field(None, max_length=2000)
-    part_type: Optional[PartType] = Field(None, description="Type of part (manufactured, purchased, assembly, raw_material)")
+    part_type: Optional[PartType] = Field(
+        None, description="Type of part (manufactured, purchased, assembly, raw_material)"
+    )
     unit_of_measure: Optional[UnitOfMeasure] = None
     standard_cost: Optional[Decimal] = Field(None, ge=0)
     material_cost: Optional[Decimal] = Field(None, ge=0)
@@ -124,7 +126,7 @@ class PartResponse(PartBase):
     status: str
     created_at: datetime
     updated_at: datetime
-    
+
     class Config:
         from_attributes = True
         use_enum_values = True

@@ -1,8 +1,8 @@
-from arq import create_pool
-from arq.connections import RedisSettings, ArqRedis
-from typing import Optional
 import os
+from typing import Optional
 
+from arq import create_pool
+from arq.connections import ArqRedis, RedisSettings
 
 # Redis configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -31,13 +31,7 @@ async def get_redis_pool() -> ArqRedis:
     return _redis_pool
 
 
-async def enqueue_job(
-    job_function: str,
-    *args,
-    queue: str = "default",
-    _job_id: Optional[str] = None,
-    **kwargs
-):
+async def enqueue_job(job_function: str, *args, queue: str = "default", _job_id: Optional[str] = None, **kwargs):
     """
     Enqueue a background job
 
@@ -53,13 +47,6 @@ async def enqueue_job(
     """
     pool = await get_redis_pool()
 
-    job = await pool.enqueue_job(
-        job_function,
-        *args,
-        _job_id=_job_id,
-        **kwargs
-    )
+    job = await pool.enqueue_job(job_function, *args, _job_id=_job_id, **kwargs)
 
     return job
-
-

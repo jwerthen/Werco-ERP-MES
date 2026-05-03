@@ -2,6 +2,7 @@
 Integration tests for authentication endpoints.
 Tests login, logout, token refresh, and account security features.
 """
+
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
@@ -18,10 +19,7 @@ class TestAuthLogin:
         """Test successful login with valid credentials."""
         response = client.post(
             "/api/v1/auth/login",
-            data={
-                "username": test_user_credentials["email"],
-                "password": test_user_credentials["password"]
-            }
+            data={"username": test_user_credentials["email"], "password": test_user_credentials["password"]},
         )
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
@@ -34,11 +32,7 @@ class TestAuthLogin:
     def test_login_invalid_email(self, client: TestClient):
         """Test login with non-existent email."""
         response = client.post(
-            "/api/v1/auth/login",
-            data={
-                "username": "nonexistent@example.com",
-                "password": "anypassword123"
-            }
+            "/api/v1/auth/login", data={"username": "nonexistent@example.com", "password": "anypassword123"}
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
         assert "Invalid email or password" in response.json()["detail"]
@@ -46,11 +40,7 @@ class TestAuthLogin:
     def test_login_invalid_password(self, client: TestClient, test_user, test_user_credentials):
         """Test login with wrong password."""
         response = client.post(
-            "/api/v1/auth/login",
-            data={
-                "username": test_user_credentials["email"],
-                "password": "wrongpassword123"
-            }
+            "/api/v1/auth/login", data={"username": test_user_credentials["email"], "password": "wrongpassword123"}
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
         assert "Invalid email or password" in response.json()["detail"]
@@ -59,10 +49,7 @@ class TestAuthLogin:
         """Test login with inactive user account."""
         response = client.post(
             "/api/v1/auth/login",
-            data={
-                "username": inactive_user_credentials["email"],
-                "password": inactive_user_credentials["password"]
-            }
+            data={"username": inactive_user_credentials["email"], "password": inactive_user_credentials["password"]},
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert "disabled" in response.json()["detail"].lower()
@@ -71,10 +58,7 @@ class TestAuthLogin:
         """Test that login response includes user information."""
         response = client.post(
             "/api/v1/auth/login",
-            data={
-                "username": test_user_credentials["email"],
-                "password": test_user_credentials["password"]
-            }
+            data={"username": test_user_credentials["email"], "password": test_user_credentials["password"]},
         )
         assert response.status_code == status.HTTP_200_OK
         user_data = response.json()["user"]
@@ -86,11 +70,7 @@ class TestAuthLogin:
     def test_login_is_case_insensitive_for_email(self, client: TestClient, test_user, test_user_credentials):
         """Email login should accept mixed-case addresses."""
         response = client.post(
-            "/api/v1/auth/login",
-            data={
-                "username": "TestUser@Werco.com",
-                "password": test_user_credentials["password"]
-            }
+            "/api/v1/auth/login", data={"username": "TestUser@Werco.com", "password": test_user_credentials["password"]}
         )
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["user"]["email"] == test_user_credentials["email"]
@@ -116,7 +96,7 @@ class TestAuthLogin:
             data={
                 "username": "emp-339@users.werco.com",
                 "password": "SecureP@ss123!",
-            }
+            },
         )
 
         assert response.status_code == status.HTTP_200_OK
@@ -134,18 +114,12 @@ class TestAuthTokenRefresh:
         # First login to get tokens
         login_response = client.post(
             "/api/v1/auth/login",
-            data={
-                "username": test_user_credentials["email"],
-                "password": test_user_credentials["password"]
-            }
+            data={"username": test_user_credentials["email"], "password": test_user_credentials["password"]},
         )
         refresh_token = login_response.json()["refresh_token"]
-        
+
         # Use refresh token to get new access token
-        response = client.post(
-            "/api/v1/auth/refresh",
-            json={"refresh_token": refresh_token}
-        )
+        response = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert "access_token" in data
@@ -153,10 +127,7 @@ class TestAuthTokenRefresh:
 
     def test_refresh_with_invalid_token(self, client: TestClient):
         """Test refresh with invalid token."""
-        response = client.post(
-            "/api/v1/auth/refresh",
-            json={"refresh_token": "invalid-token-here"}
-        )
+        response = client.post("/api/v1/auth/refresh", json={"refresh_token": "invalid-token-here"})
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_refresh_with_expired_token(self, client: TestClient):
@@ -164,8 +135,7 @@ class TestAuthTokenRefresh:
         # This would require creating an expired token
         # For now, just test with malformed token
         response = client.post(
-            "/api/v1/auth/refresh",
-            json={"refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.expired"}
+            "/api/v1/auth/refresh", json={"refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.expired"}
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
@@ -198,13 +168,9 @@ class TestAuthRegister:
             "first_name": fake_data.first_name(),
             "last_name": fake_data.last_name(),
             "password": "SecureP@ss123!",
-            "role": "operator"
+            "role": "operator",
         }
-        response = client.post(
-            "/api/v1/auth/register",
-            headers=admin_headers,
-            json=new_user_data
-        )
+        response = client.post("/api/v1/auth/register", headers=admin_headers, json=new_user_data)
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["email"] == new_user_data["email"]
@@ -218,7 +184,7 @@ class TestAuthRegister:
             "first_name": fake_data.first_name(),
             "last_name": fake_data.last_name(),
             "password": "SecureP@ss123!",
-            "role": "operator"
+            "role": "operator",
         }
         response = client.post("/api/v1/auth/register", json=new_user_data)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
@@ -231,16 +197,14 @@ class TestAuthRegister:
             "first_name": fake_data.first_name(),
             "last_name": fake_data.last_name(),
             "password": "SecureP@ss123!",
-            "role": "operator"
+            "role": "operator",
         }
-        response = client.post(
-            "/api/v1/auth/register",
-            headers=auth_headers,
-            json=new_user_data
-        )
+        response = client.post("/api/v1/auth/register", headers=auth_headers, json=new_user_data)
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    def test_register_duplicate_email(self, client: TestClient, admin_headers, test_user, test_user_credentials, fake_data):
+    def test_register_duplicate_email(
+        self, client: TestClient, admin_headers, test_user, test_user_credentials, fake_data
+    ):
         """Test registration with existing email fails."""
         new_user_data = {
             "email": test_user_credentials["email"],
@@ -248,13 +212,9 @@ class TestAuthRegister:
             "first_name": fake_data.first_name(),
             "last_name": fake_data.last_name(),
             "password": "SecureP@ss123!",
-            "role": "operator"
+            "role": "operator",
         }
-        response = client.post(
-            "/api/v1/auth/register",
-            headers=admin_headers,
-            json=new_user_data
-        )
+        response = client.post("/api/v1/auth/register", headers=admin_headers, json=new_user_data)
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
 

@@ -1,10 +1,12 @@
 """
 Schemas for Analytics & Business Intelligence Module
 """
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+
 from datetime import date, datetime
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class DateGranularity(str, Enum):
@@ -23,6 +25,7 @@ class TrendDirection(str, Enum):
 
 # ============ KPI SCHEMAS ============
 
+
 class KPIValue(BaseModel):
     value: float
     target: Optional[float] = None
@@ -30,7 +33,7 @@ class KPIValue(BaseModel):
     change_pct: Optional[float] = None
     trend: TrendDirection = TrendDirection.FLAT
     sparkline: List[float] = Field(default_factory=list)
-    
+
     class Config:
         from_attributes = True
 
@@ -50,6 +53,7 @@ class KPIDashboard(BaseModel):
 
 
 # ============ OEE SCHEMAS ============
+
 
 class OEEComponents(BaseModel):
     availability: float
@@ -84,6 +88,7 @@ class OEEResponse(BaseModel):
 
 # ============ PRODUCTION TRENDS ============
 
+
 class ProductionDataPoint(BaseModel):
     date: date
     group_key: Optional[str] = None
@@ -102,6 +107,7 @@ class ProductionTrendsResponse(BaseModel):
 
 
 # ============ COST ANALYSIS ============
+
 
 class CostBreakdown(BaseModel):
     material_cost: float
@@ -134,6 +140,7 @@ class CostAnalysisResponse(BaseModel):
 
 
 # ============ QUALITY METRICS ============
+
 
 class DefectPareto(BaseModel):
     defect_type: str
@@ -172,6 +179,7 @@ class QualityMetricsResponse(BaseModel):
 
 # ============ INVENTORY ANALYTICS ============
 
+
 class InventoryTurnover(BaseModel):
     category: Optional[str] = None
     part_id: Optional[int] = None
@@ -199,6 +207,7 @@ class InventoryAnalyticsResponse(BaseModel):
 
 
 # ============ CUSTOM REPORT BUILDER ============
+
 
 class ReportDataSource(str, Enum):
     WORK_ORDERS = "work_orders"
@@ -273,12 +282,13 @@ class ReportTemplateResponse(BaseModel):
     is_shared: bool
     created_by: int
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
 
 # ============ PREDICTIVE ANALYTICS ============
+
 
 class WorkCenterForecast(BaseModel):
     work_center_id: int

@@ -1,19 +1,14 @@
-from app.services.email_service import email_service
-from app.db.session import SessionLocal
-from app.services.notification_service import NotificationService
-from datetime import datetime, timedelta
 import logging
+from datetime import datetime, timedelta
+
+from app.db.session import SessionLocal
+from app.services.email_service import email_service
+from app.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
 
-async def send_email_task(
-    to: str,
-    subject: str,
-    body: str = None,
-    template: str = None,
-    context: dict = None
-):
+async def send_email_task(to: str, subject: str, body: str = None, template: str = None, context: dict = None):
     """
     Background job to send email
 
@@ -26,11 +21,7 @@ async def send_email_task(
     """
     try:
         result = await email_service.send_email(
-            to=to,
-            subject=subject,
-            body=body,
-            template=template,
-            context=context or {}
+            to=to, subject=subject, body=body, template=template, context=context or {}
         )
 
         return {"sent": result, "to": to}
@@ -54,10 +45,11 @@ async def send_daily_digest_task():
         from app.models.notification import NotificationPreference
         from app.models.user import User
 
-        prefs = db.query(NotificationPreference).filter(
-            NotificationPreference.digest_enabled == True,
-            NotificationPreference.digest_frequency == "DAILY"
-        ).all()
+        prefs = (
+            db.query(NotificationPreference)
+            .filter(NotificationPreference.digest_enabled == True, NotificationPreference.digest_frequency == "DAILY")
+            .all()
+        )
 
         digest_count = 0
 
@@ -82,17 +74,13 @@ async def send_daily_digest_task():
                 grouped_events[event_type].append(item.event_data)
 
             # Send digest email
-            context = {
-                "user": user,
-                "events": grouped_events,
-                "date": datetime.utcnow().strftime("%Y-%m-%d")
-            }
+            context = {"user": user, "events": grouped_events, "date": datetime.utcnow().strftime("%Y-%m-%d")}
 
             await email_service.send_email(
                 to=user.email,
                 subject=f"Werco ERP Daily Digest - {datetime.utcnow().strftime('%B %d, %Y')}",
                 template="daily_digest",
-                context=context
+                context=context,
             )
 
             # Mark items as processed

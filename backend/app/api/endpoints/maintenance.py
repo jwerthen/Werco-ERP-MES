@@ -1,23 +1,31 @@
-from typing import List, Optional
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from pydantic import BaseModel
 from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
+from app.models.maintenance import (
+    FREQUENCY_DAYS_MAP,
+    MaintenanceFrequency,
+    MaintenanceLog,
+    MaintenancePriority,
+    MaintenanceSchedule,
+    MaintenanceStatus,
+    MaintenanceType,
+    MaintenanceWorkOrder,
+)
 from app.models.user import User
 from app.models.work_center import WorkCenter
-from app.models.maintenance import (
-    MaintenanceSchedule, MaintenanceWorkOrder, MaintenanceLog,
-    MaintenanceType, MaintenancePriority, MaintenanceStatus, MaintenanceFrequency,
-    FREQUENCY_DAYS_MAP,
-)
-from pydantic import BaseModel
 
 router = APIRouter()
 
 
 # ── Pydantic Schemas ──────────────────────────────────────────────────────
+
 
 class ScheduleCreate(BaseModel):
     work_center_id: int
@@ -97,6 +105,7 @@ class LogCreate(BaseModel):
 
 
 # ── Helper ────────────────────────────────────────────────────────────────
+
 
 def _generate_wo_number(db: Session) -> str:
     year = datetime.utcnow().year
@@ -195,6 +204,7 @@ def _serialize_log(log: MaintenanceLog) -> dict:
 
 # ── Schedule Endpoints ────────────────────────────────────────────────────
 
+
 @router.get("/schedules")
 def list_schedules(
     work_center_id: Optional[int] = None,
@@ -221,7 +231,11 @@ def get_schedule(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get schedule detail"""
-    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id).first()
+    schedule = (
+        db.query(MaintenanceSchedule)
+        .filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id)
+        .first()
+    )
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
     return _serialize_schedule(schedule)
@@ -269,7 +283,11 @@ def update_schedule(
     company_id: int = Depends(get_current_company_id),
 ):
     """Update a PM schedule"""
-    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id).first()
+    schedule = (
+        db.query(MaintenanceSchedule)
+        .filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id)
+        .first()
+    )
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
 
@@ -297,7 +315,11 @@ def deactivate_schedule(
     company_id: int = Depends(get_current_company_id),
 ):
     """Deactivate a PM schedule (soft delete)"""
-    schedule = db.query(MaintenanceSchedule).filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id).first()
+    schedule = (
+        db.query(MaintenanceSchedule)
+        .filter(MaintenanceSchedule.id == schedule_id, MaintenanceSchedule.company_id == company_id)
+        .first()
+    )
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
     schedule.is_active = False
@@ -306,6 +328,7 @@ def deactivate_schedule(
 
 
 # ── Work Order Endpoints ──────────────────────────────────────────────────
+
 
 @router.get("/work-orders")
 def list_work_orders(
@@ -349,10 +372,15 @@ def get_overdue_work_orders(
 ):
     """Get all overdue maintenance work orders"""
     today = date.today()
-    wos = db.query(MaintenanceWorkOrder).filter(
-        MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
-        MaintenanceWorkOrder.due_date < today,
-    ).order_by(MaintenanceWorkOrder.due_date).all()
+    wos = (
+        db.query(MaintenanceWorkOrder)
+        .filter(
+            MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
+            MaintenanceWorkOrder.due_date < today,
+        )
+        .order_by(MaintenanceWorkOrder.due_date)
+        .all()
+    )
 
     for wo in wos:
         if wo.status == MaintenanceStatus.SCHEDULED:
@@ -370,7 +398,11 @@ def get_work_order(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get maintenance work order detail"""
-    wo = db.query(MaintenanceWorkOrder).filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id).first()
+    wo = (
+        db.query(MaintenanceWorkOrder)
+        .filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id)
+        .first()
+    )
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
     return _serialize_wo(wo)
@@ -421,7 +453,11 @@ def update_work_order(
     company_id: int = Depends(get_current_company_id),
 ):
     """Update a maintenance work order"""
-    wo = db.query(MaintenanceWorkOrder).filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id).first()
+    wo = (
+        db.query(MaintenanceWorkOrder)
+        .filter(MaintenanceWorkOrder.id == wo_id, MaintenanceWorkOrder.company_id == company_id)
+        .first()
+    )
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
 
@@ -534,6 +570,7 @@ def complete_work_order(
 
 # ── Calendar ──────────────────────────────────────────────────────────────
 
+
 @router.get("/calendar")
 def get_calendar(
     start_date: date,
@@ -542,15 +579,21 @@ def get_calendar(
     current_user: User = Depends(get_current_user),
 ):
     """Get calendar view data for scheduled maintenance within date range"""
-    wos = db.query(MaintenanceWorkOrder).filter(
-        MaintenanceWorkOrder.scheduled_date >= start_date,
-        MaintenanceWorkOrder.scheduled_date <= end_date,
-    ).order_by(MaintenanceWorkOrder.scheduled_date).all()
+    wos = (
+        db.query(MaintenanceWorkOrder)
+        .filter(
+            MaintenanceWorkOrder.scheduled_date >= start_date,
+            MaintenanceWorkOrder.scheduled_date <= end_date,
+        )
+        .order_by(MaintenanceWorkOrder.scheduled_date)
+        .all()
+    )
 
     return [_serialize_wo(wo) for wo in wos]
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────
+
 
 @router.get("/dashboard")
 def get_dashboard(
@@ -563,53 +606,88 @@ def get_dashboard(
     month_start = today.replace(day=1)
 
     # Overdue count
-    overdue_count = db.query(func.count(MaintenanceWorkOrder.id)).filter(
-        MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
-        MaintenanceWorkOrder.due_date < today,
-    ).scalar() or 0
+    overdue_count = (
+        db.query(func.count(MaintenanceWorkOrder.id))
+        .filter(
+            MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
+            MaintenanceWorkOrder.due_date < today,
+        )
+        .scalar()
+        or 0
+    )
 
     # Due this week
-    due_this_week = db.query(func.count(MaintenanceWorkOrder.id)).filter(
-        MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
-        MaintenanceWorkOrder.due_date >= today,
-        MaintenanceWorkOrder.due_date <= week_end,
-    ).scalar() or 0
+    due_this_week = (
+        db.query(func.count(MaintenanceWorkOrder.id))
+        .filter(
+            MaintenanceWorkOrder.status.in_([MaintenanceStatus.SCHEDULED, MaintenanceStatus.OVERDUE]),
+            MaintenanceWorkOrder.due_date >= today,
+            MaintenanceWorkOrder.due_date <= week_end,
+        )
+        .scalar()
+        or 0
+    )
 
     # Completed this month
-    completed_this_month = db.query(func.count(MaintenanceWorkOrder.id)).filter(
-        MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
-        MaintenanceWorkOrder.completed_at >= month_start,
-    ).scalar() or 0
+    completed_this_month = (
+        db.query(func.count(MaintenanceWorkOrder.id))
+        .filter(
+            MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
+            MaintenanceWorkOrder.completed_at >= month_start,
+        )
+        .scalar()
+        or 0
+    )
 
     # Total this month (completed + in-progress + scheduled for this month)
-    total_this_month = db.query(func.count(MaintenanceWorkOrder.id)).filter(
-        MaintenanceWorkOrder.scheduled_date >= month_start,
-        MaintenanceWorkOrder.scheduled_date <= today,
-    ).scalar() or 0
+    total_this_month = (
+        db.query(func.count(MaintenanceWorkOrder.id))
+        .filter(
+            MaintenanceWorkOrder.scheduled_date >= month_start,
+            MaintenanceWorkOrder.scheduled_date <= today,
+        )
+        .scalar()
+        or 0
+    )
 
     completion_rate = round((completed_this_month / total_this_month * 100), 1) if total_this_month > 0 else 0
 
     # Total cost this month
-    total_cost_month = db.query(func.sum(MaintenanceWorkOrder.total_cost)).filter(
-        MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
-        MaintenanceWorkOrder.completed_at >= month_start,
-    ).scalar() or 0
+    total_cost_month = (
+        db.query(func.sum(MaintenanceWorkOrder.total_cost))
+        .filter(
+            MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
+            MaintenanceWorkOrder.completed_at >= month_start,
+        )
+        .scalar()
+        or 0
+    )
 
     # In-progress
-    in_progress = db.query(func.count(MaintenanceWorkOrder.id)).filter(
-        MaintenanceWorkOrder.status == MaintenanceStatus.IN_PROGRESS,
-    ).scalar() or 0
+    in_progress = (
+        db.query(func.count(MaintenanceWorkOrder.id))
+        .filter(
+            MaintenanceWorkOrder.status == MaintenanceStatus.IN_PROGRESS,
+        )
+        .scalar()
+        or 0
+    )
 
     # MTBF / MTTR per work center (last 90 days)
     ninety_days_ago = today - timedelta(days=90)
     work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
     wc_metrics = []
     for wc in work_centers:
-        completed_wos = db.query(MaintenanceWorkOrder).filter(
-            MaintenanceWorkOrder.work_center_id == wc.id,
-            MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
-            MaintenanceWorkOrder.completed_at >= ninety_days_ago,
-        ).order_by(MaintenanceWorkOrder.completed_at).all()
+        completed_wos = (
+            db.query(MaintenanceWorkOrder)
+            .filter(
+                MaintenanceWorkOrder.work_center_id == wc.id,
+                MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
+                MaintenanceWorkOrder.completed_at >= ninety_days_ago,
+            )
+            .order_by(MaintenanceWorkOrder.completed_at)
+            .all()
+        )
 
         wo_count = len(completed_wos)
         if wo_count == 0:
@@ -620,23 +698,27 @@ def get_dashboard(
         mttr = round(sum(durations) / len(durations), 2) if durations else 0
 
         # MTBF = total operating hours / number of failures (corrective/emergency only)
-        failure_count = sum(1 for w in completed_wos if w.maintenance_type in (MaintenanceType.CORRECTIVE, MaintenanceType.EMERGENCY))
+        failure_count = sum(
+            1 for w in completed_wos if w.maintenance_type in (MaintenanceType.CORRECTIVE, MaintenanceType.EMERGENCY)
+        )
         operating_hours = 90 * (wc.capacity_hours_per_day or 8)
         mtbf = round(operating_hours / failure_count, 1) if failure_count > 0 else operating_hours
 
         total_downtime = sum(w.downtime_minutes or 0 for w in completed_wos)
         total_wc_cost = sum(w.total_cost or 0 for w in completed_wos)
 
-        wc_metrics.append({
-            "work_center_id": wc.id,
-            "work_center_name": wc.name,
-            "work_center_code": wc.code,
-            "wo_count": wo_count,
-            "mtbf_hours": mtbf,
-            "mttr_hours": mttr,
-            "total_downtime_minutes": total_downtime,
-            "total_cost": round(total_wc_cost, 2),
-        })
+        wc_metrics.append(
+            {
+                "work_center_id": wc.id,
+                "work_center_name": wc.name,
+                "work_center_code": wc.code,
+                "wo_count": wo_count,
+                "mtbf_hours": mtbf,
+                "mttr_hours": mttr,
+                "total_downtime_minutes": total_downtime,
+                "total_cost": round(total_wc_cost, 2),
+            }
+        )
 
     return {
         "overdue_count": overdue_count,
@@ -651,6 +733,7 @@ def get_dashboard(
 
 # ── History ───────────────────────────────────────────────────────────────
 
+
 @router.get("/history/{work_center_id}")
 def get_history(
     work_center_id: int,
@@ -663,9 +746,15 @@ def get_history(
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
-    logs = db.query(MaintenanceLog).filter(
-        MaintenanceLog.work_center_id == work_center_id,
-    ).order_by(MaintenanceLog.event_date.desc()).limit(limit).all()
+    logs = (
+        db.query(MaintenanceLog)
+        .filter(
+            MaintenanceLog.work_center_id == work_center_id,
+        )
+        .order_by(MaintenanceLog.event_date.desc())
+        .limit(limit)
+        .all()
+    )
 
     return {
         "work_center_id": wc.id,
@@ -675,6 +764,7 @@ def get_history(
 
 
 # ── Log ───────────────────────────────────────────────────────────────────
+
 
 @router.post("/log")
 def create_log(

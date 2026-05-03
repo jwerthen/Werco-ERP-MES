@@ -1,8 +1,9 @@
-from app.db.session import SessionLocal
-from app.services.mrp_service import MRPService
-from app.services.mrp_auto_service import MRPAutoService, MRPAutoMode
-from app.services.notification_service import NotificationService, NotificationEvent, get_notification_recipients
 import logging
+
+from app.db.session import SessionLocal
+from app.services.mrp_auto_service import MRPAutoMode, MRPAutoService
+from app.services.mrp_service import MRPService
+from app.services.notification_service import NotificationEvent, NotificationService, get_notification_recipients
 
 logger = logging.getLogger(__name__)
 
@@ -27,25 +28,25 @@ async def run_mrp_task(mode: str = MRPAutoMode.REVIEW, planning_horizon_days: in
             user_id=None,  # System user
             planning_horizon_days=planning_horizon_days,
             include_safety_stock=True,
-            include_allocated=True
+            include_allocated=True,
         )
 
-        logger.info(f"MRP run {mrp_run.run_number} completed: "
-                   f"{mrp_run.total_actions} actions, "
-                   f"{mrp_run.total_requirements} requirements")
+        logger.info(
+            f"MRP run {mrp_run.run_number} completed: "
+            f"{mrp_run.total_actions} actions, "
+            f"{mrp_run.total_requirements} requirements"
+        )
 
         # Auto-process actions based on mode
         if mode != MRPAutoMode.REVIEW and mrp_run.actions:
-            results = auto_service.process_actions(
-                actions=mrp_run.actions,
-                mode=mode,
-                user_id=None  # System user
-            )
+            results = auto_service.process_actions(actions=mrp_run.actions, mode=mode, user_id=None)  # System user
 
-            logger.info(f"Auto-processed MRP actions: "
-                       f"{results['pos_created']} POs, "
-                       f"{results['wos_created']} WOs, "
-                       f"{results['errors']} errors")
+            logger.info(
+                f"Auto-processed MRP actions: "
+                f"{results['pos_created']} POs, "
+                f"{results['wos_created']} WOs, "
+                f"{results['errors']} errors"
+            )
 
             # Send notification to planners
             notification_service = NotificationService(db)
@@ -56,19 +57,15 @@ async def run_mrp_task(mode: str = MRPAutoMode.REVIEW, planning_horizon_days: in
                     event_type=NotificationEvent.CAPACITY_OVERLOAD,  # Reusing event
                     users=planners,
                     subject=f"MRP Run {mrp_run.run_number} Completed",
-                    context={
-                        "mrp_run": mrp_run,
-                        "results": results,
-                        "mode": mode
-                    },
-                    template="mrp_complete"
+                    context={"mrp_run": mrp_run, "results": results, "mode": mode},
+                    template="mrp_complete",
                 )
 
             return {
                 "mrp_run_id": mrp_run.id,
                 "mrp_run_number": mrp_run.run_number,
                 "total_actions": mrp_run.total_actions,
-                "auto_processing": results
+                "auto_processing": results,
             }
 
         else:
@@ -82,17 +79,15 @@ async def run_mrp_task(mode: str = MRPAutoMode.REVIEW, planning_horizon_days: in
                         event_type=NotificationEvent.CAPACITY_OVERLOAD,
                         users=planners,
                         subject=f"MRP Run {mrp_run.run_number}: {mrp_run.total_actions} Actions Need Review",
-                        context={
-                            "mrp_run": mrp_run
-                        },
-                        template="mrp_review_needed"
+                        context={"mrp_run": mrp_run},
+                        template="mrp_review_needed",
                     )
 
             return {
                 "mrp_run_id": mrp_run.id,
                 "mrp_run_number": mrp_run.run_number,
                 "total_actions": mrp_run.total_actions,
-                "mode": "REVIEW"
+                "mode": "REVIEW",
             }
 
     except Exception as e:

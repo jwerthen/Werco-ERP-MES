@@ -1,16 +1,22 @@
-from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
-from typing import Optional, List
-from datetime import datetime, date
+from datetime import date, datetime
 from decimal import Decimal
-from app.models.work_order import WorkOrderStatus, OperationStatus
+from typing import List, Optional
+
+from pydantic import BaseModel, Field, field_serializer, model_validator
+
 from app.core.time_utils import to_central_iso
 from app.core.validation import (
-    PositiveInteger,
-    NonNegativeInteger,
-    MoneySmall,
-    Money,
     DescriptionLong,
+    Money,
+    MoneySmall,
 )
+from app.models.work_order import OperationStatus, WorkOrderStatus
+
+
+def _serialize_decimal_as_number(value: Optional[Decimal]) -> Optional[float]:
+    if value is None:
+        return None
+    return float(value)
 
 
 class WorkOrderOperationBase(BaseModel):
@@ -33,7 +39,7 @@ class WorkOrderOperationBase(BaseModel):
     requires_inspection: bool = False
     inspection_type: Optional[str] = Field(None, max_length=100)
     component_part_id: Optional[int] = Field(None, gt=0)
-    component_quantity: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    component_quantity: Optional[float] = Field(None, ge=0)
     operation_group: Optional[str] = Field(None, max_length=50)
 
 
@@ -88,6 +94,19 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     completed_by: Optional[int] = None
 
     @field_serializer(
+        "setup_time_hours",
+        "run_time_hours",
+        "run_time_per_piece",
+        "quantity_complete",
+        "quantity_scrapped",
+        "actual_setup_hours",
+        "actual_run_hours",
+        when_used="json",
+    )
+    def serialize_decimal_number(self, value: Optional[Decimal]) -> Optional[float]:
+        return _serialize_decimal_as_number(value)
+
+    @field_serializer(
         "scheduled_start",
         "scheduled_end",
         "actual_start",
@@ -105,17 +124,11 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
 
 class WorkOrderBase(BaseModel):
     part_id: int = Field(..., gt=0, description="Part ID")
-    quantity_ordered: MoneySmall = Field(
-        ..., gt=Decimal("0"), description="Quantity ordered"
-    )
-    priority: int = Field(
-        default=5, ge=1, le=10, description="Priority (1=highest, 10=lowest)"
-    )
+    quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), description="Quantity ordered")
+    priority: int = Field(default=5, ge=1, le=10, description="Priority (1=highest, 10=lowest)")
     due_date: Optional[date] = Field(None, description="Due date")
     customer_name: Optional[str] = Field(None, max_length=255)
-    customer_po: Optional[str] = Field(
-        None, max_length=50, description="Customer PO number"
-    )
+    customer_po: Optional[str] = Field(None, max_length=50, description="Customer PO number")
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
 
@@ -171,6 +184,19 @@ class WorkOrderResponse(WorkOrderBase):
     operations: List[WorkOrderOperationResponse] = Field(default_factory=list)
 
     @field_serializer(
+        "quantity_ordered",
+        "quantity_complete",
+        "quantity_scrapped",
+        "estimated_hours",
+        "actual_hours",
+        "estimated_cost",
+        "actual_cost",
+        when_used="json",
+    )
+    def serialize_decimal_number(self, value: Optional[Decimal]) -> Optional[float]:
+        return _serialize_decimal_as_number(value)
+
+    @field_serializer(
         "scheduled_start",
         "scheduled_end",
         "actual_start",
@@ -205,6 +231,14 @@ class WorkOrderSummary(BaseModel):
     due_date: Optional[date]
     customer_name: Optional[str]
     current_operation: Optional[str] = None
+
+    @field_serializer(
+        "quantity_ordered",
+        "quantity_complete",
+        when_used="json",
+    )
+    def serialize_decimal_number(self, value: Optional[Decimal]) -> Optional[float]:
+        return _serialize_decimal_as_number(value)
 
     class Config:
         from_attributes = True

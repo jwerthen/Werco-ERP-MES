@@ -161,7 +161,7 @@ export default function RFQQuoting() {
       const blob = await api.exportInternalEstimate(packageData.id);
       const fileName = `${packageData.rfq_number || 'rfq'}_internal_estimate.json`;
       downloadBlob(blob, fileName);
-    } catch (err) {
+    } catch {
       setError('Failed to export internal estimate.');
     }
   };
@@ -171,7 +171,7 @@ export default function RFQQuoting() {
     try {
       const blob = await api.generateCustomerQuotePdf(estimate.quote_id);
       downloadBlob(blob, `${estimate.quote_number}.pdf`);
-    } catch (err) {
+    } catch {
       setError('Failed to generate customer quote PDF.');
     }
   };

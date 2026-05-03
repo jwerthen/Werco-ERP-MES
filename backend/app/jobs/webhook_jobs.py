@@ -1,12 +1,14 @@
-import httpx
-import hmac
 import hashlib
+import hmac
 import json
-from datetime import datetime
-from app.db.session import SessionLocal
-from app.services.webhook_service import WebhookService
-from app.models.webhook import Webhook
 import logging
+from datetime import datetime
+
+import httpx
+
+from app.db.session import SessionLocal
+from app.models.webhook import Webhook
+from app.services.webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
 
@@ -38,20 +40,12 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
         if not await _check_rate_limit(webhook_id):
             logger.warning(f"Rate limit exceeded for webhook {webhook_id}")
             webhook_service.record_delivery(
-                webhook_id=webhook_id,
-                event=event,
-                payload=payload,
-                error="Rate limit exceeded",
-                delivered=False
+                webhook_id=webhook_id, event=event, payload=payload, error="Rate limit exceeded", delivered=False
             )
             return {"delivered": False, "error": "Rate limit exceeded"}
 
         # Prepare payload
-        full_payload = {
-            "event": event,
-            "timestamp": datetime.utcnow().isoformat(),
-            "data": payload
-        }
+        full_payload = {"event": event, "timestamp": datetime.utcnow().isoformat(), "data": payload}
 
         # Get secret and sign payload
         secret = webhook_service.get_secret(webhook)
@@ -62,16 +56,12 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
             "Content-Type": "application/json",
             "X-Webhook-Event": event,
             "X-Webhook-Signature": signature,
-            "User-Agent": "Werco-ERP-Webhook/1.0"
+            "User-Agent": "Werco-ERP-Webhook/1.0",
         }
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
-                response = await client.post(
-                    webhook.url,
-                    json=full_payload,
-                    headers=headers
-                )
+                response = await client.post(webhook.url, json=full_payload, headers=headers)
 
                 # Record successful delivery
                 if response.status_code in [200, 201, 202, 204]:
@@ -81,7 +71,7 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
                         payload=full_payload,
                         status_code=response.status_code,
                         response_body=response.text[:1000],  # First 1000 chars
-                        delivered=True
+                        delivered=True,
                     )
 
                     # Reset failure count on success
@@ -100,7 +90,7 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
                         status_code=response.status_code,
                         response_body=response.text[:1000],
                         error=f"HTTP {response.status_code}",
-                        delivered=False
+                        delivered=False,
                     )
 
                     logger.warning(f"Webhook {webhook_id} failed: HTTP {response.status_code}")
@@ -108,22 +98,14 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
 
             except httpx.TimeoutException as e:
                 webhook_service.record_delivery(
-                    webhook_id=webhook_id,
-                    event=event,
-                    payload=full_payload,
-                    error="Request timeout",
-                    delivered=False
+                    webhook_id=webhook_id, event=event, payload=full_payload, error="Request timeout", delivered=False
                 )
                 logger.error(f"Webhook {webhook_id} timeout: {e}")
                 return {"delivered": False, "error": "timeout"}
 
             except httpx.RequestError as e:
                 webhook_service.record_delivery(
-                    webhook_id=webhook_id,
-                    event=event,
-                    payload=full_payload,
-                    error=str(e)[:500],
-                    delivered=False
+                    webhook_id=webhook_id, event=event, payload=full_payload, error=str(e)[:500], delivered=False
                 )
                 logger.error(f"Webhook {webhook_id} request error: {e}")
                 return {"delivered": False, "error": str(e)}
@@ -138,11 +120,7 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
 def _sign_payload(payload: dict, secret: str) -> str:
     """Sign webhook payload with HMAC-SHA256"""
     payload_str = json.dumps(payload, sort_keys=True)
-    signature = hmac.new(
-        secret.encode(),
-        payload_str.encode(),
-        hashlib.sha256
-    ).hexdigest()
+    signature = hmac.new(secret.encode(), payload_str.encode(), hashlib.sha256).hexdigest()
     return f"sha256={signature}"
 
 

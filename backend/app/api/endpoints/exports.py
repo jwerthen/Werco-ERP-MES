@@ -1,20 +1,22 @@
 """Data export endpoints for CSV and Excel downloads."""
-from typing import Optional, List
-from datetime import datetime, date
+
+import io
+from datetime import date, datetime
 from enum import Enum
+from typing import List, Optional
+
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
-import io
 
+from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
+from app.models.inventory import InventoryItem, InventoryTransaction
+from app.models.part import Part, PartType
+from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
+from app.models.quote import Quote, QuoteStatus
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
-from app.models.part import Part, PartType
-from app.models.inventory import InventoryItem, InventoryTransaction
-from app.models.purchasing import PurchaseOrder, PurchaseOrderLine, POStatus
-from app.models.quote import Quote, QuoteStatus
 from app.services.export_service import generate_csv, generate_excel
 
 router = APIRouter()
@@ -45,31 +47,41 @@ def export_work_orders(
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Export work orders to CSV or Excel."""
     query = db.query(WorkOrder).filter(WorkOrder.company_id == company_id).options(joinedload(WorkOrder.part))
     query = query.filter(WorkOrder.is_deleted == False)
-    
+
     if start_date:
         query = query.filter(WorkOrder.created_at >= datetime.combine(start_date, datetime.min.time()))
     if end_date:
         query = query.filter(WorkOrder.created_at <= datetime.combine(end_date, datetime.max.time()))
     if status:
         query = query.filter(WorkOrder.status == status)
-    
+
     work_orders = query.order_by(WorkOrder.created_at.desc()).all()
-    
+
     default_columns = [
-        "work_order_number", "part_number", "part_name", "status", "priority",
-        "quantity_ordered", "quantity_complete", "quantity_scrapped",
-        "customer_name", "customer_po",
-        "due_date", "scheduled_start", "actual_start", "actual_end",
-        "created_at"
+        "work_order_number",
+        "part_number",
+        "part_name",
+        "status",
+        "priority",
+        "quantity_ordered",
+        "quantity_complete",
+        "quantity_scrapped",
+        "customer_name",
+        "customer_po",
+        "due_date",
+        "scheduled_start",
+        "actual_start",
+        "actual_end",
+        "created_at",
     ]
-    
+
     export_columns = columns if columns else default_columns
-    
+
     data = []
     for wo in work_orders:
         row = {
@@ -87,25 +99,25 @@ def export_work_orders(
             "scheduled_start": wo.scheduled_start,
             "actual_start": wo.actual_start,
             "actual_end": wo.actual_end,
-            "created_at": wo.created_at
+            "created_at": wo.created_at,
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
-    
+
     filename = f"work_orders_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
-    
+
     if format == ExportFormat.CSV:
         content = generate_csv(data, export_columns)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
         content = generate_excel(data, export_columns, "Work Orders")
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
 
@@ -118,27 +130,37 @@ def export_parts(
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Export parts to CSV or Excel."""
     query = db.query(Part).filter(Part.company_id == company_id, Part.is_deleted == False)
-    
+
     if part_type:
         query = query.filter(Part.part_type == part_type)
     if active_only:
         query = query.filter(Part.is_active == True)
-    
+
     parts = query.order_by(Part.part_number).all()
-    
+
     default_columns = [
-        "part_number", "name", "description", "part_type", "revision",
-        "status", "unit_of_measure", "standard_cost", "lead_time_days",
-        "reorder_point", "reorder_quantity", "safety_stock",
-        "customer_part_number", "created_at"
+        "part_number",
+        "name",
+        "description",
+        "part_type",
+        "revision",
+        "status",
+        "unit_of_measure",
+        "standard_cost",
+        "lead_time_days",
+        "reorder_point",
+        "reorder_quantity",
+        "safety_stock",
+        "customer_part_number",
+        "created_at",
     ]
-    
+
     export_columns = columns if columns else default_columns
-    
+
     data = []
     for p in parts:
         row = {
@@ -148,32 +170,34 @@ def export_parts(
             "part_type": p.part_type.value if hasattr(p.part_type, 'value') else p.part_type,
             "revision": p.revision or "",
             "status": p.status or "",
-            "unit_of_measure": p.unit_of_measure.value if hasattr(p.unit_of_measure, 'value') else str(p.unit_of_measure),
+            "unit_of_measure": (
+                p.unit_of_measure.value if hasattr(p.unit_of_measure, 'value') else str(p.unit_of_measure)
+            ),
             "standard_cost": float(p.standard_cost or 0),
             "lead_time_days": p.lead_time_days,
             "reorder_point": float(p.reorder_point or 0),
             "reorder_quantity": float(p.reorder_quantity or 0),
             "safety_stock": float(p.safety_stock or 0),
             "customer_part_number": p.customer_part_number or "",
-            "created_at": p.created_at
+            "created_at": p.created_at,
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
-    
+
     filename = f"parts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
-    
+
     if format == ExportFormat.CSV:
         content = generate_csv(data, export_columns)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
         content = generate_excel(data, export_columns, "Parts")
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
 
@@ -186,28 +210,38 @@ def export_inventory(
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Export inventory to CSV or Excel."""
-    query = db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
+    query = (
+        db.query(InventoryItem).filter(InventoryItem.company_id == company_id).options(joinedload(InventoryItem.part))
+    )
     query = query.filter(InventoryItem.is_active == True)
-    
+
     if warehouse:
         query = query.filter(InventoryItem.warehouse == warehouse)
     if has_quantity:
         query = query.filter(InventoryItem.quantity_on_hand > 0)
-    
+
     items = query.order_by(InventoryItem.part_id, InventoryItem.location).all()
-    
+
     default_columns = [
-        "part_number", "part_name", "location", "warehouse",
-        "quantity_on_hand", "quantity_allocated", "quantity_available",
-        "lot_number", "serial_number", "unit_cost", "total_value",
-        "received_date"
+        "part_number",
+        "part_name",
+        "location",
+        "warehouse",
+        "quantity_on_hand",
+        "quantity_allocated",
+        "quantity_available",
+        "lot_number",
+        "serial_number",
+        "unit_cost",
+        "total_value",
+        "received_date",
     ]
-    
+
     export_columns = columns if columns else default_columns
-    
+
     data = []
     for item in items:
         qty = float(item.quantity_on_hand or 0)
@@ -224,25 +258,25 @@ def export_inventory(
             "serial_number": item.serial_number or "",
             "unit_cost": cost,
             "total_value": qty * cost,
-            "received_date": item.received_date
+            "received_date": item.received_date,
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
-    
+
     filename = f"inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
-    
+
     if format == ExportFormat.CSV:
         content = generate_csv(data, export_columns)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
         content = generate_excel(data, export_columns, "Inventory")
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
 
@@ -257,14 +291,15 @@ def export_purchase_orders(
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Export purchase orders to CSV or Excel."""
-    query = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == company_id).options(
-        joinedload(PurchaseOrder.vendor),
-        joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part)
+    query = (
+        db.query(PurchaseOrder)
+        .filter(PurchaseOrder.company_id == company_id)
+        .options(joinedload(PurchaseOrder.vendor), joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part))
     )
-    
+
     if start_date:
         query = query.filter(PurchaseOrder.order_date >= start_date)
     if end_date:
@@ -273,18 +308,27 @@ def export_purchase_orders(
         query = query.filter(PurchaseOrder.status == status)
     if vendor_id:
         query = query.filter(PurchaseOrder.vendor_id == vendor_id)
-    
+
     pos = query.order_by(PurchaseOrder.created_at.desc()).all()
-    
+
     default_columns = [
-        "po_number", "vendor_name", "vendor_code", "status",
-        "order_date", "required_date", "expected_date",
-        "subtotal", "tax", "shipping", "total",
-        "line_count", "created_at"
+        "po_number",
+        "vendor_name",
+        "vendor_code",
+        "status",
+        "order_date",
+        "required_date",
+        "expected_date",
+        "subtotal",
+        "tax",
+        "shipping",
+        "total",
+        "line_count",
+        "created_at",
     ]
-    
+
     export_columns = columns if columns else default_columns
-    
+
     data = []
     for po in pos:
         row = {
@@ -300,25 +344,25 @@ def export_purchase_orders(
             "shipping": float(po.shipping or 0),
             "total": float(po.total or 0),
             "line_count": len(po.lines),
-            "created_at": po.created_at
+            "created_at": po.created_at,
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
-    
+
     filename = f"purchase_orders_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
-    
+
     if format == ExportFormat.CSV:
         content = generate_csv(data, export_columns)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
         content = generate_excel(data, export_columns, "Purchase Orders")
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
 
@@ -332,14 +376,14 @@ def export_purchase_order_lines(
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Export purchase order lines (detailed) to CSV or Excel."""
     query = db.query(PurchaseOrderLine).options(
         joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
-        joinedload(PurchaseOrderLine.part)
+        joinedload(PurchaseOrderLine.part),
     )
-    
+
     if start_date or end_date or status:
         query = query.join(PurchaseOrder)
         if start_date:
@@ -348,23 +392,33 @@ def export_purchase_order_lines(
             query = query.filter(PurchaseOrder.order_date <= end_date)
         if status:
             query = query.filter(PurchaseOrder.status == status)
-    
+
     lines = query.all()
-    
+
     default_columns = [
-        "po_number", "line_number", "vendor_name", "part_number", "part_name",
-        "quantity_ordered", "quantity_received", "unit_price", "line_total",
-        "required_date", "is_closed"
+        "po_number",
+        "line_number",
+        "vendor_name",
+        "part_number",
+        "part_name",
+        "quantity_ordered",
+        "quantity_received",
+        "unit_price",
+        "line_total",
+        "required_date",
+        "is_closed",
     ]
-    
+
     export_columns = columns if columns else default_columns
-    
+
     data = []
     for line in lines:
         row = {
             "po_number": line.purchase_order.po_number if line.purchase_order else "",
             "line_number": line.line_number,
-            "vendor_name": line.purchase_order.vendor.name if line.purchase_order and line.purchase_order.vendor else "",
+            "vendor_name": (
+                line.purchase_order.vendor.name if line.purchase_order and line.purchase_order.vendor else ""
+            ),
             "part_number": line.part.part_number if line.part else "",
             "part_name": line.part.name if line.part else "",
             "quantity_ordered": float(line.quantity_ordered or 0),
@@ -372,25 +426,25 @@ def export_purchase_order_lines(
             "unit_price": float(line.unit_price or 0),
             "line_total": float(line.line_total or 0),
             "required_date": line.required_date,
-            "is_closed": line.is_closed
+            "is_closed": line.is_closed,
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
-    
+
     filename = f"po_lines_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
-    
+
     if format == ExportFormat.CSV:
         content = generate_csv(data, export_columns)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
         content = generate_excel(data, export_columns, "PO Lines")
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
 
@@ -405,11 +459,11 @@ def export_quotes(
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Export quotes to CSV or Excel."""
     query = db.query(Quote).filter(Quote.company_id == company_id).options(joinedload(Quote.lines))
-    
+
     if start_date:
         query = query.filter(Quote.quote_date >= start_date)
     if end_date:
@@ -418,17 +472,27 @@ def export_quotes(
         query = query.filter(Quote.status == status)
     if customer:
         query = query.filter(Quote.customer_name.ilike(f"%{customer}%"))
-    
+
     quotes = query.order_by(Quote.created_at.desc()).all()
-    
+
     default_columns = [
-        "quote_number", "revision", "customer_name", "customer_contact",
-        "customer_email", "status", "quote_date", "valid_until",
-        "subtotal", "total", "lead_time_days", "line_count", "created_at"
+        "quote_number",
+        "revision",
+        "customer_name",
+        "customer_contact",
+        "customer_email",
+        "status",
+        "quote_date",
+        "valid_until",
+        "subtotal",
+        "total",
+        "lead_time_days",
+        "line_count",
+        "created_at",
     ]
-    
+
     export_columns = columns if columns else default_columns
-    
+
     data = []
     for q in quotes:
         row = {
@@ -444,25 +508,25 @@ def export_quotes(
             "total": float(q.total or 0),
             "lead_time_days": q.lead_time_days,
             "line_count": len(q.lines),
-            "created_at": q.created_at
+            "created_at": q.created_at,
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
-    
+
     filename = f"quotes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
-    
+
     if format == ExportFormat.CSV:
         content = generate_csv(data, export_columns)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
         content = generate_excel(data, export_columns, "Quotes")
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
 
@@ -477,11 +541,15 @@ def export_inventory_transactions(
     columns: Optional[List[str]] = Query(None, description="Columns to include"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Export inventory transactions to CSV or Excel."""
-    query = db.query(InventoryTransaction).filter(InventoryTransaction.company_id == company_id).options(joinedload(InventoryTransaction.part))
-    
+    query = (
+        db.query(InventoryTransaction)
+        .filter(InventoryTransaction.company_id == company_id)
+        .options(joinedload(InventoryTransaction.part))
+    )
+
     if start_date:
         query = query.filter(InventoryTransaction.created_at >= datetime.combine(start_date, datetime.min.time()))
     if end_date:
@@ -490,24 +558,37 @@ def export_inventory_transactions(
         query = query.filter(InventoryTransaction.part_id == part_id)
     if transaction_type:
         query = query.filter(InventoryTransaction.transaction_type == transaction_type)
-    
+
     transactions = query.order_by(InventoryTransaction.created_at.desc()).limit(10000).all()
-    
+
     default_columns = [
-        "part_number", "part_name", "transaction_type", "quantity",
-        "from_location", "to_location", "lot_number", "serial_number",
-        "reference_type", "reference_number", "unit_cost", "total_cost",
-        "reason_code", "notes", "created_at"
+        "part_number",
+        "part_name",
+        "transaction_type",
+        "quantity",
+        "from_location",
+        "to_location",
+        "lot_number",
+        "serial_number",
+        "reference_type",
+        "reference_number",
+        "unit_cost",
+        "total_cost",
+        "reason_code",
+        "notes",
+        "created_at",
     ]
-    
+
     export_columns = columns if columns else default_columns
-    
+
     data = []
     for txn in transactions:
         row = {
             "part_number": txn.part.part_number if txn.part else "",
             "part_name": txn.part.name if txn.part else "",
-            "transaction_type": txn.transaction_type.value if hasattr(txn.transaction_type, 'value') else txn.transaction_type,
+            "transaction_type": (
+                txn.transaction_type.value if hasattr(txn.transaction_type, 'value') else txn.transaction_type
+            ),
             "quantity": float(txn.quantity or 0),
             "from_location": txn.from_location or "",
             "to_location": txn.to_location or "",
@@ -519,23 +600,23 @@ def export_inventory_transactions(
             "total_cost": float(txn.total_cost or 0),
             "reason_code": txn.reason_code or "",
             "notes": txn.notes or "",
-            "created_at": txn.created_at
+            "created_at": txn.created_at,
         }
         data.append({k: v for k, v in row.items() if k in export_columns})
-    
+
     filename = f"inventory_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{get_file_extension(format)}"
-    
+
     if format == ExportFormat.CSV:
         content = generate_csv(data, export_columns)
         return StreamingResponse(
             io.StringIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     else:
         content = generate_excel(data, export_columns, "Transactions")
         return StreamingResponse(
             io.BytesIO(content),
             media_type=get_content_type(format),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )

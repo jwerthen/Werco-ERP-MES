@@ -7,13 +7,14 @@ Features:
 - Request/response logging with timing
 - Context propagation for background jobs
 """
+
+import json
 import logging
 import sys
-import json
 import uuid
-from datetime import datetime
-from typing import Optional, Any, Dict
 from contextvars import ContextVar
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 from app.core.config import settings
 
@@ -52,7 +53,7 @@ class StructuredLogFormatter(logging.Formatter):
     JSON formatter for structured logging.
     Includes correlation ID and request context in every log entry.
     """
-    
+
     def format(self, record: logging.LogRecord) -> str:
         # Base log entry
         log_entry = {
@@ -61,25 +62,25 @@ class StructuredLogFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        
+
         # Add correlation ID if present
         correlation_id = get_correlation_id()
         if correlation_id:
             log_entry["correlation_id"] = correlation_id
-        
+
         # Add request context if present
         request_context = get_request_context()
         if request_context:
             log_entry["request"] = request_context
-        
+
         # Add exception info if present
         if record.exc_info:
             log_entry["exception"] = self.formatException(record.exc_info)
-        
+
         # Add extra fields from record
         if hasattr(record, 'extra_data'):
             log_entry["data"] = record.extra_data
-        
+
         # Add source location for errors
         if record.levelno >= logging.ERROR:
             log_entry["source"] = {
@@ -87,10 +88,10 @@ class StructuredLogFormatter(logging.Formatter):
                 "line": record.lineno,
                 "function": record.funcName,
             }
-        
+
         # Add environment
         log_entry["environment"] = settings.ENVIRONMENT
-        
+
         return json.dumps(log_entry)
 
 
@@ -99,11 +100,11 @@ class SimpleLogFormatter(logging.Formatter):
     Human-readable formatter for development.
     Includes correlation ID prefix for easy tracing.
     """
-    
+
     def format(self, record: logging.LogRecord) -> str:
         correlation_id = get_correlation_id()
         prefix = f"[{correlation_id}] " if correlation_id else ""
-        
+
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         return f"{timestamp} - {prefix}{record.levelname} - {record.name} - {record.getMessage()}"
 
@@ -112,19 +113,19 @@ class CorrelatedLogger(logging.LoggerAdapter):
     """
     Logger adapter that automatically includes correlation ID and extra context.
     """
-    
+
     def process(self, msg: str, kwargs: Dict[str, Any]) -> tuple:
         # Add correlation ID to extra
         extra = kwargs.get('extra', {})
-        
+
         correlation_id = get_correlation_id()
         if correlation_id:
             extra['correlation_id'] = correlation_id
-        
+
         # Handle extra_data for structured logging
         if 'data' in kwargs:
             extra['extra_data'] = kwargs.pop('data')
-        
+
         kwargs['extra'] = extra
         return msg, kwargs
 
@@ -132,7 +133,7 @@ class CorrelatedLogger(logging.LoggerAdapter):
 def get_logger(name: str) -> CorrelatedLogger:
     """
     Get a logger with correlation ID support.
-    
+
     Usage:
         logger = get_logger(__name__)
         logger.info("Processing order", data={"order_id": 123})
@@ -144,33 +145,31 @@ def get_logger(name: str) -> CorrelatedLogger:
 def configure_logging() -> None:
     """
     Configure application logging based on environment.
-    
+
     - Production: JSON structured logging
     - Development: Human-readable format
     """
     root_logger = logging.getLogger()
     root_logger.setLevel(getattr(logging, settings.LOG_LEVEL))
-    
+
     # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    
+
     # Create handler
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(getattr(logging, settings.LOG_LEVEL))
-    
+
     # Choose formatter based on environment
     if settings.ENVIRONMENT == "production":
         handler.setFormatter(StructuredLogFormatter())
     else:
         handler.setFormatter(SimpleLogFormatter())
-    
+
     root_logger.addHandler(handler)
-    
+
     # Reduce noise from third-party libraries
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-

@@ -1,30 +1,53 @@
+import json
+from datetime import datetime, timedelta
+from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
-from typing import List, Optional
-from datetime import datetime, timedelta
-import json
 
+from app.api.deps import get_current_company_id, require_role
 from app.db.database import get_db
+from app.models.quote_config import (
+    CostUnit,
+    LaborRate,
+    OutsideService,
+    ProcessType,
+    QuoteFinish,
+    QuoteMachine,
+    QuoteMaterial,
+    QuoteSettings,
+    SettingsAuditLog,
+)
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.models.quote_config import (
-    QuoteMaterial, QuoteMachine, QuoteFinish, QuoteSettings,
-    LaborRate, OutsideService, SettingsAuditLog,
-    MaterialCategory, MachineType, ProcessType, CostUnit
-)
-from app.api.deps import get_current_user, get_current_company_id, require_role
 from app.schemas.admin_settings import (
-    MaterialCreate, MaterialUpdate, MaterialResponse,
-    MachineCreate, MachineUpdate, MachineResponse,
-    FinishCreate, FinishUpdate, FinishResponse,
-    LaborRateCreate, LaborRateUpdate, LaborRateResponse,
-    WorkCenterRateUpdate, WorkCenterRateResponse,
-    WorkCenterTypesUpdate, WorkCenterTypesResponse,
-    OutsideServiceCreate, OutsideServiceUpdate, OutsideServiceResponse,
-    SettingUpdate, SettingResponse,
-    AuditLogResponse, AuditLogWithUser
+    AuditLogWithUser,
+    FinishCreate,
+    FinishResponse,
+    FinishUpdate,
+    LaborRateCreate,
+    LaborRateResponse,
+    LaborRateUpdate,
+    MachineCreate,
+    MachineResponse,
+    MachineUpdate,
+    MaterialCreate,
+    MaterialResponse,
+    MaterialUpdate,
+    OutsideServiceCreate,
+    OutsideServiceResponse,
+    OutsideServiceUpdate,
+    SettingUpdate,
+    WorkCenterRateResponse,
+    WorkCenterRateUpdate,
+    WorkCenterTypesResponse,
+    WorkCenterTypesUpdate,
 )
-from app.services.work_center_type_service import get_work_center_types, set_work_center_types, get_in_use_work_center_types
+from app.services.work_center_type_service import (
+    get_in_use_work_center_types,
+    get_work_center_types,
+    set_work_center_types,
+)
 
 router = APIRouter()
 
@@ -75,13 +98,14 @@ def get_client_ip(request: Request) -> str:
 
 # ============ MATERIALS ============
 
+
 @router.get("/materials", response_model=List[MaterialResponse])
 def list_materials(
     include_inactive: bool = False,
     category: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all materials"""
     query = db.query(QuoteMaterial).filter(QuoteMaterial.company_id == company_id)
@@ -98,7 +122,7 @@ def create_material(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new material"""
     material = QuoteMaterial(**data.model_dump())
@@ -106,11 +130,10 @@ def create_material(
     db.add(material)
     db.commit()
     db.refresh(material)
-    
-    log_change(db, "material", material.id, material.name, "create",
-               current_user, ip_address=get_client_ip(request))
+
+    log_change(db, "material", material.id, material.name, "create", current_user, ip_address=get_client_ip(request))
     db.commit()
-    
+
     return material
 
 
@@ -121,21 +144,33 @@ def update_material(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a material"""
-    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == material_id, QuoteMaterial.company_id == company_id).first()
+    material = (
+        db.query(QuoteMaterial).filter(QuoteMaterial.id == material_id, QuoteMaterial.company_id == company_id).first()
+    )
     if not material:
         raise HTTPException(status_code=404, detail="Material not found")
-    
+
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         old_value = getattr(material, field)
         if old_value != value:
-            log_change(db, "material", material.id, material.name, "update",
-                      current_user, field, old_value, value, get_client_ip(request))
+            log_change(
+                db,
+                "material",
+                material.id,
+                material.name,
+                "update",
+                current_user,
+                field,
+                old_value,
+                value,
+                get_client_ip(request),
+            )
         setattr(material, field, value)
-    
+
     db.commit()
     db.refresh(material)
     return material
@@ -147,21 +182,23 @@ def delete_material(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Soft-delete a material"""
-    material = db.query(QuoteMaterial).filter(QuoteMaterial.id == material_id, QuoteMaterial.company_id == company_id).first()
+    material = (
+        db.query(QuoteMaterial).filter(QuoteMaterial.id == material_id, QuoteMaterial.company_id == company_id).first()
+    )
     if not material:
         raise HTTPException(status_code=404, detail="Material not found")
-    
+
     material.is_active = False
-    log_change(db, "material", material.id, material.name, "delete",
-               current_user, ip_address=get_client_ip(request))
+    log_change(db, "material", material.id, material.name, "delete", current_user, ip_address=get_client_ip(request))
     db.commit()
     return {"status": "ok", "message": f"Material '{material.name}' deactivated"}
 
 
 # ============ MACHINES ============
+
 
 @router.get("/machines", response_model=List[MachineResponse])
 def list_machines(
@@ -169,7 +206,7 @@ def list_machines(
     machine_type: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all machines"""
     query = db.query(QuoteMachine).filter(QuoteMachine.company_id == company_id)
@@ -186,7 +223,7 @@ def create_machine(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new machine"""
     machine = QuoteMachine(**data.model_dump())
@@ -194,11 +231,10 @@ def create_machine(
     db.add(machine)
     db.commit()
     db.refresh(machine)
-    
-    log_change(db, "machine", machine.id, machine.name, "create",
-               current_user, ip_address=get_client_ip(request))
+
+    log_change(db, "machine", machine.id, machine.name, "create", current_user, ip_address=get_client_ip(request))
     db.commit()
-    
+
     return machine
 
 
@@ -209,21 +245,33 @@ def update_machine(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a machine"""
-    machine = db.query(QuoteMachine).filter(QuoteMachine.id == machine_id, QuoteMachine.company_id == company_id).first()
+    machine = (
+        db.query(QuoteMachine).filter(QuoteMachine.id == machine_id, QuoteMachine.company_id == company_id).first()
+    )
     if not machine:
         raise HTTPException(status_code=404, detail="Machine not found")
-    
+
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         old_value = getattr(machine, field)
         if old_value != value:
-            log_change(db, "machine", machine.id, machine.name, "update",
-                      current_user, field, old_value, value, get_client_ip(request))
+            log_change(
+                db,
+                "machine",
+                machine.id,
+                machine.name,
+                "update",
+                current_user,
+                field,
+                old_value,
+                value,
+                get_client_ip(request),
+            )
         setattr(machine, field, value)
-    
+
     db.commit()
     db.refresh(machine)
     return machine
@@ -235,21 +283,23 @@ def delete_machine(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Soft-delete a machine"""
-    machine = db.query(QuoteMachine).filter(QuoteMachine.id == machine_id, QuoteMachine.company_id == company_id).first()
+    machine = (
+        db.query(QuoteMachine).filter(QuoteMachine.id == machine_id, QuoteMachine.company_id == company_id).first()
+    )
     if not machine:
         raise HTTPException(status_code=404, detail="Machine not found")
-    
+
     machine.is_active = False
-    log_change(db, "machine", machine.id, machine.name, "delete",
-               current_user, ip_address=get_client_ip(request))
+    log_change(db, "machine", machine.id, machine.name, "delete", current_user, ip_address=get_client_ip(request))
     db.commit()
     return {"status": "ok", "message": f"Machine '{machine.name}' deactivated"}
 
 
 # ============ FINISHES ============
+
 
 @router.get("/finishes", response_model=List[FinishResponse])
 def list_finishes(
@@ -257,7 +307,7 @@ def list_finishes(
     category: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all finishes"""
     query = db.query(QuoteFinish).filter(QuoteFinish.company_id == company_id)
@@ -274,7 +324,7 @@ def create_finish(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new finish"""
     finish = QuoteFinish(**data.model_dump())
@@ -282,11 +332,10 @@ def create_finish(
     db.add(finish)
     db.commit()
     db.refresh(finish)
-    
-    log_change(db, "finish", finish.id, finish.name, "create",
-               current_user, ip_address=get_client_ip(request))
+
+    log_change(db, "finish", finish.id, finish.name, "create", current_user, ip_address=get_client_ip(request))
     db.commit()
-    
+
     return finish
 
 
@@ -297,21 +346,31 @@ def update_finish(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a finish"""
     finish = db.query(QuoteFinish).filter(QuoteFinish.id == finish_id, QuoteFinish.company_id == company_id).first()
     if not finish:
         raise HTTPException(status_code=404, detail="Finish not found")
-    
+
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         old_value = getattr(finish, field)
         if old_value != value:
-            log_change(db, "finish", finish.id, finish.name, "update",
-                      current_user, field, old_value, value, get_client_ip(request))
+            log_change(
+                db,
+                "finish",
+                finish.id,
+                finish.name,
+                "update",
+                current_user,
+                field,
+                old_value,
+                value,
+                get_client_ip(request),
+            )
         setattr(finish, field, value)
-    
+
     db.commit()
     db.refresh(finish)
     return finish
@@ -323,28 +382,28 @@ def delete_finish(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Soft-delete a finish"""
     finish = db.query(QuoteFinish).filter(QuoteFinish.id == finish_id, QuoteFinish.company_id == company_id).first()
     if not finish:
         raise HTTPException(status_code=404, detail="Finish not found")
-    
+
     finish.is_active = False
-    log_change(db, "finish", finish.id, finish.name, "delete",
-               current_user, ip_address=get_client_ip(request))
+    log_change(db, "finish", finish.id, finish.name, "delete", current_user, ip_address=get_client_ip(request))
     db.commit()
     return {"status": "ok", "message": f"Finish '{finish.name}' deactivated"}
 
 
 # ============ LABOR RATES ============
 
+
 @router.get("/labor-rates", response_model=List[LaborRateResponse])
 def list_labor_rates(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all labor rates"""
     query = db.query(LaborRate).filter(LaborRate.company_id == company_id)
@@ -359,7 +418,7 @@ def create_labor_rate(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new labor rate"""
     labor_rate = LaborRate(**data.model_dump())
@@ -367,11 +426,12 @@ def create_labor_rate(
     db.add(labor_rate)
     db.commit()
     db.refresh(labor_rate)
-    
-    log_change(db, "labor_rate", labor_rate.id, labor_rate.name, "create",
-               current_user, ip_address=get_client_ip(request))
+
+    log_change(
+        db, "labor_rate", labor_rate.id, labor_rate.name, "create", current_user, ip_address=get_client_ip(request)
+    )
     db.commit()
-    
+
     return labor_rate
 
 
@@ -382,21 +442,31 @@ def update_labor_rate(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a labor rate"""
     labor_rate = db.query(LaborRate).filter(LaborRate.id == rate_id, LaborRate.company_id == company_id).first()
     if not labor_rate:
         raise HTTPException(status_code=404, detail="Labor rate not found")
-    
+
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         old_value = getattr(labor_rate, field)
         if old_value != value:
-            log_change(db, "labor_rate", labor_rate.id, labor_rate.name, "update",
-                      current_user, field, old_value, value, get_client_ip(request))
+            log_change(
+                db,
+                "labor_rate",
+                labor_rate.id,
+                labor_rate.name,
+                "update",
+                current_user,
+                field,
+                old_value,
+                value,
+                get_client_ip(request),
+            )
         setattr(labor_rate, field, value)
-    
+
     db.commit()
     db.refresh(labor_rate)
     return labor_rate
@@ -408,28 +478,30 @@ def delete_labor_rate(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Soft-delete a labor rate"""
     labor_rate = db.query(LaborRate).filter(LaborRate.id == rate_id, LaborRate.company_id == company_id).first()
     if not labor_rate:
         raise HTTPException(status_code=404, detail="Labor rate not found")
-    
+
     labor_rate.is_active = False
-    log_change(db, "labor_rate", labor_rate.id, labor_rate.name, "delete",
-               current_user, ip_address=get_client_ip(request))
+    log_change(
+        db, "labor_rate", labor_rate.id, labor_rate.name, "delete", current_user, ip_address=get_client_ip(request)
+    )
     db.commit()
     return {"status": "ok", "message": f"Labor rate '{labor_rate.name}' deactivated"}
 
 
 # ============ WORK CENTER RATES ============
 
+
 @router.get("/work-center-rates", response_model=List[WorkCenterRateResponse])
 def list_work_center_rates(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all work centers with their rates"""
     query = db.query(WorkCenter).filter(WorkCenter.company_id == company_id)
@@ -445,19 +517,29 @@ def update_work_center_rate(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update a work center's hourly rate"""
     wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
-    
+
     old_rate = wc.hourly_rate
     wc.hourly_rate = data.hourly_rate
-    
-    log_change(db, "work_center_rate", wc.id, wc.name, "update",
-               current_user, "hourly_rate", old_rate, data.hourly_rate, get_client_ip(request))
-    
+
+    log_change(
+        db,
+        "work_center_rate",
+        wc.id,
+        wc.name,
+        "update",
+        current_user,
+        "hourly_rate",
+        old_rate,
+        data.hourly_rate,
+        get_client_ip(request),
+    )
+
     db.commit()
     db.refresh(wc)
     return wc
@@ -465,11 +547,12 @@ def update_work_center_rate(
 
 # ============ WORK CENTER TYPES ============
 
+
 @router.get("/work-center-types", response_model=WorkCenterTypesResponse)
 def list_work_center_types_admin(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List allowed work center types"""
     # Include in-use types so the admin UI always shows the real types
@@ -488,17 +571,14 @@ def update_work_center_types_admin(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update allowed work center types"""
     old_types = get_work_center_types(db, include_in_use=False, company_id=company_id)
     in_use = get_in_use_work_center_types(db, company_id=company_id)
     missing_in_use = [t for t in in_use if t not in (data.types or [])]
     if missing_in_use:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot remove types in use: {', '.join(missing_in_use)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Cannot remove types in use: {', '.join(missing_in_use)}")
     types = set_work_center_types(db, data.types, company_id=company_id)
     log_change(
         db,
@@ -510,7 +590,7 @@ def update_work_center_types_admin(
         "types",
         old_types,
         types,
-        get_client_ip(request)
+        get_client_ip(request),
     )
     db.commit()
     return {"types": types, "in_use": in_use}
@@ -518,13 +598,14 @@ def update_work_center_types_admin(
 
 # ============ OUTSIDE SERVICES ============
 
+
 @router.get("/outside-services", response_model=List[OutsideServiceResponse])
 def list_outside_services(
     include_inactive: bool = False,
     process_type: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all outside services"""
     query = db.query(OutsideService).filter(OutsideService.company_id == company_id)
@@ -541,7 +622,7 @@ def create_outside_service(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new outside service"""
     service = OutsideService(**data.model_dump())
@@ -549,11 +630,12 @@ def create_outside_service(
     db.add(service)
     db.commit()
     db.refresh(service)
-    
-    log_change(db, "outside_service", service.id, service.name, "create",
-               current_user, ip_address=get_client_ip(request))
+
+    log_change(
+        db, "outside_service", service.id, service.name, "create", current_user, ip_address=get_client_ip(request)
+    )
     db.commit()
-    
+
     return service
 
 
@@ -564,21 +646,35 @@ def update_outside_service(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an outside service"""
-    service = db.query(OutsideService).filter(OutsideService.id == service_id, OutsideService.company_id == company_id).first()
+    service = (
+        db.query(OutsideService)
+        .filter(OutsideService.id == service_id, OutsideService.company_id == company_id)
+        .first()
+    )
     if not service:
         raise HTTPException(status_code=404, detail="Outside service not found")
-    
+
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         old_value = getattr(service, field)
         if old_value != value:
-            log_change(db, "outside_service", service.id, service.name, "update",
-                      current_user, field, old_value, value, get_client_ip(request))
+            log_change(
+                db,
+                "outside_service",
+                service.id,
+                service.name,
+                "update",
+                current_user,
+                field,
+                old_value,
+                value,
+                get_client_ip(request),
+            )
         setattr(service, field, value)
-    
+
     db.commit()
     db.refresh(service)
     return service
@@ -590,27 +686,33 @@ def delete_outside_service(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Soft-delete an outside service"""
-    service = db.query(OutsideService).filter(OutsideService.id == service_id, OutsideService.company_id == company_id).first()
+    service = (
+        db.query(OutsideService)
+        .filter(OutsideService.id == service_id, OutsideService.company_id == company_id)
+        .first()
+    )
     if not service:
         raise HTTPException(status_code=404, detail="Outside service not found")
-    
+
     service.is_active = False
-    log_change(db, "outside_service", service.id, service.name, "delete",
-               current_user, ip_address=get_client_ip(request))
+    log_change(
+        db, "outside_service", service.id, service.name, "delete", current_user, ip_address=get_client_ip(request)
+    )
     db.commit()
     return {"status": "ok", "message": f"Outside service '{service.name}' deactivated"}
 
 
 # ============ OVERHEAD/MARKUP SETTINGS ============
 
+
 @router.get("/overhead")
 def get_overhead_settings(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get all overhead/markup settings"""
     settings = db.query(QuoteSettings).filter(QuoteSettings.company_id == company_id).all()
@@ -620,7 +722,7 @@ def get_overhead_settings(
             "value": s.setting_value,
             "type": s.setting_type,
             "description": s.description,
-            "updated_at": s.updated_at.isoformat() if s.updated_at else None
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
         }
     return result
 
@@ -632,10 +734,12 @@ def update_overhead_setting(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an overhead/markup setting"""
-    setting = db.query(QuoteSettings).filter(QuoteSettings.setting_key == key, QuoteSettings.company_id == company_id).first()
+    setting = (
+        db.query(QuoteSettings).filter(QuoteSettings.setting_key == key, QuoteSettings.company_id == company_id).first()
+    )
 
     old_value = setting.setting_value if setting else None
 
@@ -650,18 +754,29 @@ def update_overhead_setting(
             setting_value=data.value,
             setting_type=data.setting_type,
             description=data.description,
-            company_id=company_id
+            company_id=company_id,
         )
         db.add(setting)
-    
-    log_change(db, "overhead", None, key, "update" if old_value else "create",
-               current_user, "setting_value", old_value, data.value, get_client_ip(request))
-    
+
+    log_change(
+        db,
+        "overhead",
+        None,
+        key,
+        "update" if old_value else "create",
+        current_user,
+        "setting_value",
+        old_value,
+        data.value,
+        get_client_ip(request),
+    )
+
     db.commit()
     return {"status": "ok", "key": key, "value": data.value}
 
 
 # ============ AUDIT LOG ============
+
 
 @router.get("/audit-log", response_model=List[AuditLogWithUser])
 def get_audit_log(
@@ -670,17 +785,15 @@ def get_audit_log(
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get audit log entries (up to 1 year history)"""
     cutoff_date = datetime.utcnow() - timedelta(days=min(days, 365))
-    
-    query = db.query(
-        SettingsAuditLog,
-        User.first_name,
-        User.last_name
-    ).outerjoin(User, SettingsAuditLog.changed_by == User.id)
-    
+
+    query = db.query(SettingsAuditLog, User.first_name, User.last_name).outerjoin(
+        User, SettingsAuditLog.changed_by == User.id
+    )
+
     query = query.filter(SettingsAuditLog.changed_at >= cutoff_date)
 
     if hasattr(SettingsAuditLog, 'company_id'):
@@ -688,9 +801,9 @@ def get_audit_log(
 
     if entity_type:
         query = query.filter(SettingsAuditLog.entity_type == entity_type)
-    
+
     results = query.order_by(SettingsAuditLog.changed_at.desc()).limit(limit).all()
-    
+
     response = []
     for audit, first_name, last_name in results:
         item = AuditLogWithUser(
@@ -704,20 +817,21 @@ def get_audit_log(
             new_value=audit.new_value,
             changed_by=audit.changed_by,
             changed_at=audit.changed_at,
-            user_name=f"{first_name} {last_name}" if first_name else None
+            user_name=f"{first_name} {last_name}" if first_name else None,
         )
         response.append(item)
-    
+
     return response
 
 
 # ============ SEED DEFAULT DATA ============
 
+
 @router.post("/seed-labor-rates")
 def seed_labor_rates(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Seed default labor rates"""
     defaults = [
@@ -729,31 +843,28 @@ def seed_labor_rates(
         ("Quality Inspector", 48.00, "QC inspection labor"),
         ("Engineer", 85.00, "Engineering support"),
     ]
-    
+
     created = 0
     for name, rate, desc in defaults:
         existing = db.query(LaborRate).filter(LaborRate.name == name, LaborRate.company_id == company_id).first()
         if not existing:
             db.add(LaborRate(name=name, rate_per_hour=rate, description=desc, company_id=company_id))
             created += 1
-    
+
     db.commit()
     return {"status": "ok", "created": created}
 
 
 @router.post("/seed-database")
-async def seed_database(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(admin_only)
-):
+async def seed_database(db: Session = Depends(get_db), current_user: User = Depends(admin_only)):
     """Seed database with initial data. Requires admin authentication."""
-    
+
     from app.core.security import get_password_hash
-    
+
     # Check if already seeded
     if db.query(User).first():
         return {"status": "already_seeded", "message": "Database already has users"}
-    
+
     # Create admin user
     admin = User(
         employee_id="EMP001",
@@ -763,10 +874,10 @@ async def seed_database(
         last_name="Administrator",
         role=UserRole.ADMIN,
         department="IT",
-        is_superuser=True
+        is_superuser=True,
     )
     db.add(admin)
-    
+
     # Create sample users
     users_data = [
         ("EMP002", "jsmith@werco.com", "John", "Smith", UserRole.MANAGER, "Production"),
@@ -774,7 +885,7 @@ async def seed_database(
         ("EMP004", "bwilliams@werco.com", "Bob", "Williams", UserRole.OPERATOR, "CNC"),
         ("EMP005", "sjones@werco.com", "Sarah", "Jones", UserRole.QUALITY, "Quality"),
     ]
-    
+
     for emp_id, email, first, last, role, dept in users_data:
         user = User(
             employee_id=emp_id,
@@ -783,18 +894,19 @@ async def seed_database(
             first_name=first,
             last_name=last,
             role=role,
-            department=dept
+            department=dept,
         )
         db.add(user)
-    
+
     db.commit()
     return {"status": "success", "message": "Database seeded with admin and sample users"}
+
 
 @router.post("/seed-outside-services")
 def seed_outside_services(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Seed default outside services"""
     defaults = [
@@ -809,38 +921,43 @@ def seed_outside_services(
         ("Chem Film", None, ProcessType.COATING, 3.00, CostUnit.PER_SQFT, 20.00, 2),
         ("Passivation", None, ProcessType.COATING, 2.00, CostUnit.PER_PART, 15.00, 2),
     ]
-    
+
     created = 0
     for name, vendor, ptype, cost, unit, minimum, days in defaults:
-        existing = db.query(OutsideService).filter(OutsideService.name == name, OutsideService.company_id == company_id).first()
+        existing = (
+            db.query(OutsideService)
+            .filter(OutsideService.name == name, OutsideService.company_id == company_id)
+            .first()
+        )
         if not existing:
-            db.add(OutsideService(
-                company_id=company_id,
-                name=name,
-                vendor_name=vendor,
-                process_type=ptype,
-                default_cost=cost,
-                cost_unit=unit,
-                minimum_charge=minimum,
-                typical_lead_days=days
-            ))
+            db.add(
+                OutsideService(
+                    company_id=company_id,
+                    name=name,
+                    vendor_name=vendor,
+                    process_type=ptype,
+                    default_cost=cost,
+                    cost_unit=unit,
+                    minimum_charge=minimum,
+                    typical_lead_days=days,
+                )
+            )
             created += 1
-    
+
     db.commit()
     return {"status": "ok", "created": created}
 
 
 # ============ ROLE PERMISSIONS ============
 
-from app.models.role_permission import (
-    RolePermission, DEFAULT_ROLE_PERMISSIONS, ALL_PERMISSIONS, PERMISSION_CATEGORIES
-)
+from app.models.role_permission import ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS, PERMISSION_CATEGORIES, RolePermission
+
 
 @router.get("/role-permissions")
 def get_all_role_permissions(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Get permissions for all roles.
@@ -848,19 +965,19 @@ def get_all_role_permissions(
     """
     stored = db.query(RolePermission).all()
     stored_map = {rp.role: rp.permissions for rp in stored}
-    
+
     result = {}
     for role in UserRole:
         if role in stored_map:
             result[role.value] = stored_map[role]
         else:
             result[role.value] = DEFAULT_ROLE_PERMISSIONS.get(role, [])
-    
+
     return {
         "role_permissions": result,
         "all_permissions": ALL_PERMISSIONS,
         "permission_categories": PERMISSION_CATEGORIES,
-        "roles": [{"value": r.value, "label": r.value.title()} for r in UserRole]
+        "roles": [{"value": r.value, "label": r.value.title()} for r in UserRole],
     }
 
 
@@ -869,24 +986,20 @@ def get_role_permissions(
     role: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get permissions for a specific role"""
     try:
         user_role = UserRole(role)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
-    
+
     stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
-    
+
     if stored:
         return {"role": role, "permissions": stored.permissions, "is_customized": True}
     else:
-        return {
-            "role": role,
-            "permissions": DEFAULT_ROLE_PERMISSIONS.get(user_role, []),
-            "is_customized": False
-        }
+        return {"role": role, "permissions": DEFAULT_ROLE_PERMISSIONS.get(user_role, []), "is_customized": False}
 
 
 @router.put("/role-permissions/{role}")
@@ -896,48 +1009,48 @@ def update_role_permissions(
     permissions: list[str],
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update permissions for a specific role"""
     try:
         user_role = UserRole(role)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
-    
+
     # Validate permissions
     invalid = [p for p in permissions if p not in ALL_PERMISSIONS]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Invalid permissions: {invalid}")
-    
+
     # Get or create role permission record
     stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
-    
+
     old_permissions = stored.permissions if stored else DEFAULT_ROLE_PERMISSIONS.get(user_role, [])
-    
+
     if stored:
         stored.permissions = permissions
         stored.updated_by = current_user.id
     else:
-        stored = RolePermission(
-            role=user_role,
-            permissions=permissions,
-            updated_by=current_user.id
-        )
+        stored = RolePermission(role=user_role, permissions=permissions, updated_by=current_user.id)
         db.add(stored)
-    
+
     # Log the change
     log_change(
-        db, "role_permission", stored.id if stored.id else 0, role,
-        "update", current_user,
+        db,
+        "role_permission",
+        stored.id if stored.id else 0,
+        role,
+        "update",
+        current_user,
         field_changed="permissions",
         old_value=old_permissions,
         new_value=permissions,
-        ip_address=get_client_ip(request)
+        ip_address=get_client_ip(request),
     )
-    
+
     db.commit()
     db.refresh(stored)
-    
+
     return {"role": role, "permissions": stored.permissions, "is_customized": True}
 
 
@@ -947,33 +1060,33 @@ def reset_role_permissions(
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Reset a role's permissions to defaults"""
     try:
         user_role = UserRole(role)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
-    
+
     stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
-    
+
     if stored:
         old_permissions = stored.permissions
         db.delete(stored)
-        
+
         log_change(
-            db, "role_permission", stored.id, role,
-            "reset", current_user,
+            db,
+            "role_permission",
+            stored.id,
+            role,
+            "reset",
+            current_user,
             field_changed="permissions",
             old_value=old_permissions,
             new_value=DEFAULT_ROLE_PERMISSIONS.get(user_role, []),
-            ip_address=get_client_ip(request)
+            ip_address=get_client_ip(request),
         )
-        
+
         db.commit()
-    
-    return {
-        "role": role,
-        "permissions": DEFAULT_ROLE_PERMISSIONS.get(user_role, []),
-        "is_customized": False
-    }
+
+    return {"role": role, "permissions": DEFAULT_ROLE_PERMISSIONS.get(user_role, []), "is_customized": False}

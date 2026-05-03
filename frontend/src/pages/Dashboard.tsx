@@ -28,9 +28,9 @@ import {
   UserGroupIcon,
   UsersIcon,
 } from '@heroicons/react/24/outline';
-import { 
+import {
   ExclamationTriangleIcon as ExclamationTriangleSolid,
-  CheckCircleIcon as CheckCircleSolid 
+  CheckCircleIcon as CheckCircleSolid
 } from '@heroicons/react/24/solid';
 
 const workCenterTypeColors: Record<string, string> = {
@@ -136,7 +136,7 @@ export default function Dashboard() {
   const [lowInventory, setLowInventory] = useState(0);
   const [equipmentDue, setEquipmentDue] = useState(0);
   const [capacityHeatmap, setCapacityHeatmap] = useState<CapacityHeatmapResponse | null>(null);
-  
+
   // Conditional request state
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -165,7 +165,7 @@ export default function Dashboard() {
     if (!isInitial) {
       setIsRefreshing(true);
     }
-    
+
     try {
       // Use cached request for dashboard (supports ETag/304). Widget data
       // is fetched in parallel; individual widget failures degrade to a
@@ -173,7 +173,7 @@ export default function Dashboard() {
       // the underlying error so failures are observable during triage
       // instead of silently disappearing.
       const logAndFallback = <T,>(widget: string, fallback: T) => (err: unknown): T => {
-        // eslint-disable-next-line no-console
+
         console.error(`Dashboard widget "${widget}" failed to load:`, err);
         return fallback;
       };
@@ -187,26 +187,26 @@ export default function Dashboard() {
         api.getLowStockAlerts().catch(logAndFallback('low stock alerts', [])),
         api.getCapacityHeatmap(capacityStart, capacityEnd).catch(logAndFallback('capacity heatmap', null))
       ]);
-      
+
       // Only update state if data actually changed (prevents unnecessary re-renders)
       if (dashboardResult.changed || isInitial) {
         setData(dashboardResult.data);
         setDataChanged(!isInitial && dashboardResult.changed);
       }
-      
+
       setOpenNCRs(qualitySummary.open_ncrs || 0);
       setEquipmentDue(equipmentDueData.length || 0);
       setLowInventory(lowStockData.length || 0);
       setCapacityHeatmap(capacityData);
-      
+
       // Update last refreshed timestamp
       if (!dashboardResult.fromCache) {
         setLastUpdated(new Date());
       }
-      
+
       const newAlerts: Alert[] = [];
       const dashboardData = dashboardResult.data;
-      
+
       if (dashboardData.summary.overdue > 0) {
         newAlerts.push({
           type: 'error',
@@ -227,7 +227,7 @@ export default function Dashboard() {
         const overdue = equipmentDueData.filter((e: any) => e.days_until_due < 0).length;
         newAlerts.push({
           type: overdue > 0 ? 'error' : 'warning',
-          message: overdue > 0 
+          message: overdue > 0
             ? `${overdue} equipment item(s) overdue for calibration`
             : `${equipmentDueData.length} equipment item(s) due for calibration within 30 days`,
           link: overdue > 0 ? '/calibration?filter=overdue' : '/calibration?filter=due',
@@ -238,7 +238,7 @@ export default function Dashboard() {
         const critical = lowStockData.filter((i: any) => i.is_critical).length;
         newAlerts.push({
           type: critical > 0 ? 'error' : 'warning',
-          message: critical > 0 
+          message: critical > 0
             ? `${critical} part(s) at critical inventory levels`
             : `${lowStockData.length} part(s) below reorder point`,
           link: '/warehouse?tab=inventory&filter=low_stock',
@@ -247,7 +247,7 @@ export default function Dashboard() {
       }
       setAlerts(newAlerts);
       setError('');
-    } catch (err) {
+    } catch {
       setError('Failed to load dashboard data');
     } finally {
       setLoading(false);
@@ -408,8 +408,8 @@ export default function Dashboard() {
                 to={alert.link || '#'}
                 className={`
                   group flex items-center gap-4 p-4 rounded-xl border transition-all duration-200
-                  ${alert.type === 'error' 
-                    ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/100/20' 
+                  ${alert.type === 'error'
+                    ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/100/20'
                     : alert.type === 'warning'
                     ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/100/20'
                     : 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/100/20'
@@ -670,15 +670,15 @@ export default function Dashboard() {
             View All
           </Link>
         </div>
-        
+
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {data?.work_centers.map((wc: WorkCenterStatus) => {
             const statusStyle = statusColors[wc.status] || statusColors.offline;
             const typeColor = workCenterTypeColors[wc.type] || 'bg-slate-800/500';
-            
+
             return (
-              <div 
-                key={wc.id} 
+              <div
+                key={wc.id}
                 className={`
                   rounded-xl border border-slate-700 p-4 transition-all duration-200
                   hover:shadow-card-hover hover:border-slate-700
@@ -694,12 +694,12 @@ export default function Dashboard() {
                   </div>
                   <div className={`w-2 h-8 rounded-full ${typeColor}`} />
                 </div>
-                
+
                 <h3 className="font-semibold text-white mb-1">{wc.name}</h3>
                 <p className="text-xs text-slate-400 capitalize mb-3">
                   {wc.type.replace('_', ' ')}
                 </p>
-                
+
                 <div className="grid grid-cols-3 gap-3 text-sm">
                   <div>
                     <p className="text-slate-400">Active</p>
@@ -783,12 +783,12 @@ export default function Dashboard() {
             View All
           </Link>
         </div>
-        
+
         {data?.recent_completions.length ? (
           <div className="divide-y divide-slate-700">
             {data.recent_completions.map((completion, index) => (
-              <div 
-                key={index} 
+              <div
+                key={index}
                 className="flex items-center justify-between py-4 first:pt-0 last:pb-0"
               >
                 <div className="flex items-center gap-4">

@@ -4,12 +4,12 @@ Analyzes uploaded drawings (PDF, DXF, STEP) and proposes draft manufacturing rou
 by extracting operations from drawing callouts and mapping them to work centers.
 """
 
-import os
 import json
 import logging
+import os
 import re
-from typing import Optional, Dict, Any, List
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ def build_routing_extraction_schema(work_center_types: List[str]) -> str:
   "extraction_confidence": "high, medium, or low - overall confidence in the proposed routing"
 }
 """.replace("WORK_CENTER_TYPES", types_str)
+
 
 ROUTING_SYSTEM_PROMPT = """You are a manufacturing process engineer assistant specialized in sheet metal fabrication, CNC machining, welding, and general manufacturing. Your task is to analyze engineering drawing content and propose a manufacturing routing (sequence of operations).
 
@@ -193,13 +194,9 @@ def extract_routing_data_with_llm(
             height = (bbox.get("max_y", 0) or 0) - (bbox.get("min_y", 0) or 0)
             parts.append(f"Bounding box: {width:.1f} x {height:.1f} inches")
         if parts:
-            geometry_context = f"\n\nGeometry data extracted from the drawing file:\n- " + "\n- ".join(parts)
+            geometry_context = "\n\nGeometry data extracted from the drawing file:\n- " + "\n- ".join(parts)
 
-    ocr_note = (
-        "\n\nNote: This text was extracted via OCR and may contain errors."
-        if is_ocr
-        else ""
-    )
+    ocr_note = "\n\nNote: This text was extracted via OCR and may contain errors." if is_ocr else ""
 
     user_prompt = f"""Analyze the following engineering drawing content and propose a manufacturing routing (sequence of operations).
 
@@ -255,9 +252,7 @@ Return ONLY the JSON object, no other text."""
             "model": model,
         }
 
-        logger.info(
-            f"LLM routing extraction successful: {len(result.get('operations', []))} operations proposed"
-        )
+        logger.info(f"LLM routing extraction successful: {len(result.get('operations', []))} operations proposed")
         return result
 
     except json.JSONDecodeError as e:
@@ -409,9 +404,7 @@ def generate_draft_routing(
     part_info = llm_result.get("part_info", {})
 
     # Step 2: Map to work centers
-    mapped_ops, wc_warnings = map_operations_to_work_centers(
-        proposed_ops, work_centers_by_type
-    )
+    mapped_ops, wc_warnings = map_operations_to_work_centers(proposed_ops, work_centers_by_type)
 
     # Step 3: Estimate times for each operation
     for op in mapped_ops:

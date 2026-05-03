@@ -1,23 +1,29 @@
-from typing import List, Optional
-from datetime import datetime, date
-from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, and_
 import json
+from datetime import date, datetime
+from typing import List, Optional
 
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, func
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
-from app.api.deps import get_current_user, get_current_company_id
-from app.models.user import User
 from app.models.engineering_change import (
-    EngineeringChangeOrder, ECOApproval, ECOImplementationTask,
-    ECOStatus, ECOPriority, ECOType,
+    ECOApproval,
+    ECOImplementationTask,
+    ECOPriority,
+    ECOStatus,
+    ECOType,
+    EngineeringChangeOrder,
 )
+from app.models.user import User
 
 router = APIRouter()
 
 
 # ============== Pydantic Schemas ==============
+
 
 class ECOCreate(BaseModel):
     title: str = Field(..., min_length=3, max_length=255)
@@ -179,12 +185,16 @@ class DashboardResponse(BaseModel):
 
 # ============== Helper Functions ==============
 
+
 def generate_eco_number(db: Session) -> str:
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"ECO-{today}-"
-    last = db.query(EngineeringChangeOrder).filter(
-        EngineeringChangeOrder.eco_number.like(f"{prefix}%")
-    ).order_by(EngineeringChangeOrder.eco_number.desc()).first()
+    last = (
+        db.query(EngineeringChangeOrder)
+        .filter(EngineeringChangeOrder.eco_number.like(f"{prefix}%"))
+        .order_by(EngineeringChangeOrder.eco_number.desc())
+        .first()
+    )
 
     if last:
         num = int(last.eco_number.split("-")[-1]) + 1
@@ -194,13 +204,18 @@ def generate_eco_number(db: Session) -> str:
 
 
 def get_eco_or_404(db: Session, eco_id: int) -> EngineeringChangeOrder:
-    eco = db.query(EngineeringChangeOrder).options(
-        joinedload(EngineeringChangeOrder.requester),
-        joinedload(EngineeringChangeOrder.assignee),
-        joinedload(EngineeringChangeOrder.approver),
-        joinedload(EngineeringChangeOrder.approvals).joinedload(ECOApproval.approver),
-        joinedload(EngineeringChangeOrder.implementation_tasks).joinedload(ECOImplementationTask.assignee),
-    ).filter(EngineeringChangeOrder.id == eco_id).first()
+    eco = (
+        db.query(EngineeringChangeOrder)
+        .options(
+            joinedload(EngineeringChangeOrder.requester),
+            joinedload(EngineeringChangeOrder.assignee),
+            joinedload(EngineeringChangeOrder.approver),
+            joinedload(EngineeringChangeOrder.approvals).joinedload(ECOApproval.approver),
+            joinedload(EngineeringChangeOrder.implementation_tasks).joinedload(ECOImplementationTask.assignee),
+        )
+        .filter(EngineeringChangeOrder.id == eco_id)
+        .first()
+    )
 
     if not eco:
         raise HTTPException(status_code=404, detail="ECO not found")
@@ -209,62 +224,84 @@ def get_eco_or_404(db: Session, eco_id: int) -> EngineeringChangeOrder:
 
 # ============== CRUD Endpoints ==============
 
+
 @router.get("/eco/dashboard", response_model=DashboardResponse)
 def get_eco_dashboard(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get ECO dashboard statistics"""
     now = datetime.utcnow()
     first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    pending_review = db.query(func.count(EngineeringChangeOrder.id)).filter(
-        EngineeringChangeOrder.company_id == company_id,
-        EngineeringChangeOrder.status.in_([ECOStatus.SUBMITTED, ECOStatus.UNDER_REVIEW])
-    ).scalar()
-
-    in_implementation = db.query(func.count(EngineeringChangeOrder.id)).filter(
-        EngineeringChangeOrder.company_id == company_id,
-        EngineeringChangeOrder.status == ECOStatus.IN_IMPLEMENTATION
-    ).scalar()
-
-    completed_this_month = db.query(func.count(EngineeringChangeOrder.id)).filter(
-        and_(
+    pending_review = (
+        db.query(func.count(EngineeringChangeOrder.id))
+        .filter(
             EngineeringChangeOrder.company_id == company_id,
-            EngineeringChangeOrder.status == ECOStatus.COMPLETED,
-            EngineeringChangeOrder.completed_date >= first_of_month.date()
+            EngineeringChangeOrder.status.in_([ECOStatus.SUBMITTED, ECOStatus.UNDER_REVIEW]),
         )
-    ).scalar()
+        .scalar()
+    )
 
-    total_active = db.query(func.count(EngineeringChangeOrder.id)).filter(
-        EngineeringChangeOrder.company_id == company_id,
-        EngineeringChangeOrder.status.notin_([ECOStatus.COMPLETED, ECOStatus.REJECTED, ECOStatus.CANCELLED])
-    ).scalar()
+    in_implementation = (
+        db.query(func.count(EngineeringChangeOrder.id))
+        .filter(
+            EngineeringChangeOrder.company_id == company_id,
+            EngineeringChangeOrder.status == ECOStatus.IN_IMPLEMENTATION,
+        )
+        .scalar()
+    )
+
+    completed_this_month = (
+        db.query(func.count(EngineeringChangeOrder.id))
+        .filter(
+            and_(
+                EngineeringChangeOrder.company_id == company_id,
+                EngineeringChangeOrder.status == ECOStatus.COMPLETED,
+                EngineeringChangeOrder.completed_date >= first_of_month.date(),
+            )
+        )
+        .scalar()
+    )
+
+    total_active = (
+        db.query(func.count(EngineeringChangeOrder.id))
+        .filter(
+            EngineeringChangeOrder.company_id == company_id,
+            EngineeringChangeOrder.status.notin_([ECOStatus.COMPLETED, ECOStatus.REJECTED, ECOStatus.CANCELLED]),
+        )
+        .scalar()
+    )
 
     # By type breakdown
-    type_counts = db.query(
-        EngineeringChangeOrder.eco_type, func.count(EngineeringChangeOrder.id)
-    ).filter(
-        EngineeringChangeOrder.status.notin_([ECOStatus.CANCELLED])
-    ).group_by(EngineeringChangeOrder.eco_type).all()
+    type_counts = (
+        db.query(EngineeringChangeOrder.eco_type, func.count(EngineeringChangeOrder.id))
+        .filter(EngineeringChangeOrder.status.notin_([ECOStatus.CANCELLED]))
+        .group_by(EngineeringChangeOrder.eco_type)
+        .all()
+    )
     by_type = {str(t.value) if hasattr(t, 'value') else str(t): c for t, c in type_counts}
 
     # By priority breakdown
-    priority_counts = db.query(
-        EngineeringChangeOrder.priority, func.count(EngineeringChangeOrder.id)
-    ).filter(
-        EngineeringChangeOrder.status.notin_([ECOStatus.COMPLETED, ECOStatus.CANCELLED])
-    ).group_by(EngineeringChangeOrder.priority).all()
+    priority_counts = (
+        db.query(EngineeringChangeOrder.priority, func.count(EngineeringChangeOrder.id))
+        .filter(EngineeringChangeOrder.status.notin_([ECOStatus.COMPLETED, ECOStatus.CANCELLED]))
+        .group_by(EngineeringChangeOrder.priority)
+        .all()
+    )
     by_priority = {str(p.value) if hasattr(p, 'value') else str(p): c for p, c in priority_counts}
 
     # Average cycle time for completed ECOs
-    completed_ecos = db.query(EngineeringChangeOrder).filter(
-        and_(
-            EngineeringChangeOrder.status == ECOStatus.COMPLETED,
-            EngineeringChangeOrder.completed_date.isnot(None)
+    completed_ecos = (
+        db.query(EngineeringChangeOrder)
+        .filter(
+            and_(
+                EngineeringChangeOrder.status == ECOStatus.COMPLETED, EngineeringChangeOrder.completed_date.isnot(None)
+            )
         )
-    ).all()
+        .all()
+    )
 
     avg_cycle_time = None
     if completed_ecos:
@@ -299,15 +336,19 @@ def list_ecos(
     search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all ECOs with optional filters"""
-    query = db.query(EngineeringChangeOrder).filter(EngineeringChangeOrder.company_id == company_id).options(
-        joinedload(EngineeringChangeOrder.requester),
-        joinedload(EngineeringChangeOrder.assignee),
-        joinedload(EngineeringChangeOrder.approver),
-        joinedload(EngineeringChangeOrder.approvals).joinedload(ECOApproval.approver),
-        joinedload(EngineeringChangeOrder.implementation_tasks).joinedload(ECOImplementationTask.assignee),
+    query = (
+        db.query(EngineeringChangeOrder)
+        .filter(EngineeringChangeOrder.company_id == company_id)
+        .options(
+            joinedload(EngineeringChangeOrder.requester),
+            joinedload(EngineeringChangeOrder.assignee),
+            joinedload(EngineeringChangeOrder.approver),
+            joinedload(EngineeringChangeOrder.approvals).joinedload(ECOApproval.approver),
+            joinedload(EngineeringChangeOrder.implementation_tasks).joinedload(ECOImplementationTask.assignee),
+        )
     )
 
     if status:
@@ -319,19 +360,14 @@ def list_ecos(
     if search:
         search_term = f"%{search}%"
         query = query.filter(
-            (EngineeringChangeOrder.eco_number.ilike(search_term)) |
-            (EngineeringChangeOrder.title.ilike(search_term))
+            (EngineeringChangeOrder.eco_number.ilike(search_term)) | (EngineeringChangeOrder.title.ilike(search_term))
         )
 
     return query.order_by(EngineeringChangeOrder.created_at.desc()).offset(skip).limit(limit).all()
 
 
 @router.get("/eco/{eco_id}", response_model=ECOResponse)
-def get_eco(
-    eco_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_eco(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get ECO details"""
     return get_eco_or_404(db, eco_id)
 
@@ -341,7 +377,7 @@ def create_eco(
     eco_in: ECOCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id)
+    company_id: int = Depends(get_current_company_id),
 ):
     """Create a new Engineering Change Order"""
     data = eco_in.model_dump(exclude={"affected_parts", "affected_work_orders", "affected_documents"})
@@ -363,10 +399,7 @@ def create_eco(
 
 @router.put("/eco/{eco_id}", response_model=ECOResponse)
 def update_eco(
-    eco_id: int,
-    eco_in: ECOUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    eco_id: int, eco_in: ECOUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Update an ECO"""
     eco = get_eco_or_404(db, eco_id)
@@ -374,7 +407,9 @@ def update_eco(
     if eco.status in [ECOStatus.COMPLETED, ECOStatus.REJECTED, ECOStatus.CANCELLED]:
         raise HTTPException(status_code=400, detail="Cannot update a completed, rejected, or cancelled ECO")
 
-    update_data = eco_in.model_dump(exclude_unset=True, exclude={"affected_parts", "affected_work_orders", "affected_documents"})
+    update_data = eco_in.model_dump(
+        exclude_unset=True, exclude={"affected_parts", "affected_work_orders", "affected_documents"}
+    )
 
     for field, value in update_data.items():
         setattr(eco, field, value)
@@ -394,12 +429,9 @@ def update_eco(
 
 # ============== Status Transition Endpoints ==============
 
+
 @router.post("/eco/{eco_id}/submit", response_model=ECOResponse)
-def submit_eco(
-    eco_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def submit_eco(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Submit ECO for review"""
     eco = get_eco_or_404(db, eco_id)
 
@@ -417,7 +449,7 @@ def approve_eco(
     eco_id: int,
     decision: ApprovalDecision,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Add an approval decision to an ECO"""
     eco = get_eco_or_404(db, eco_id)
@@ -426,13 +458,17 @@ def approve_eco(
         raise HTTPException(status_code=400, detail="ECO is not pending approval")
 
     # Find the user's pending approval record
-    approval = db.query(ECOApproval).filter(
-        and_(
-            ECOApproval.eco_id == eco_id,
-            ECOApproval.approver_id == current_user.id,
-            ECOApproval.status == "pending"
+    approval = (
+        db.query(ECOApproval)
+        .filter(
+            and_(
+                ECOApproval.eco_id == eco_id,
+                ECOApproval.approver_id == current_user.id,
+                ECOApproval.status == "pending",
+            )
         )
-    ).first()
+        .first()
+    )
 
     if not approval:
         raise HTTPException(status_code=400, detail="No pending approval found for this user")
@@ -467,7 +503,7 @@ def reject_eco(
     eco_id: int,
     decision: ApprovalDecision,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Reject an ECO"""
     eco = get_eco_or_404(db, eco_id)
@@ -492,11 +528,7 @@ def reject_eco(
 
 
 @router.post("/eco/{eco_id}/implement", response_model=ECOResponse)
-def start_implementation(
-    eco_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def start_implementation(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Start implementation of an approved ECO"""
     eco = get_eco_or_404(db, eco_id)
 
@@ -509,11 +541,7 @@ def start_implementation(
 
 
 @router.post("/eco/{eco_id}/complete", response_model=ECOResponse)
-def complete_eco(
-    eco_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def complete_eco(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Mark an ECO as completed"""
     eco = get_eco_or_404(db, eco_id)
 
@@ -521,18 +549,16 @@ def complete_eco(
         raise HTTPException(status_code=400, detail="Only in-implementation ECOs can be completed")
 
     # Check if all tasks are completed or skipped
-    incomplete_tasks = db.query(ECOImplementationTask).filter(
-        and_(
-            ECOImplementationTask.eco_id == eco_id,
-            ECOImplementationTask.status.in_(["pending", "in_progress"])
+    incomplete_tasks = (
+        db.query(ECOImplementationTask)
+        .filter(
+            and_(ECOImplementationTask.eco_id == eco_id, ECOImplementationTask.status.in_(["pending", "in_progress"]))
         )
-    ).count()
+        .count()
+    )
 
     if incomplete_tasks > 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{incomplete_tasks} implementation task(s) still incomplete"
-        )
+        raise HTTPException(status_code=400, detail=f"{incomplete_tasks} implementation task(s) still incomplete")
 
     eco.status = ECOStatus.COMPLETED
     eco.completed_date = date.today()
@@ -542,17 +568,12 @@ def complete_eco(
 
 # ============== Approval Endpoints ==============
 
+
 @router.get("/eco/{eco_id}/approvals", response_model=List[ApprovalResponse])
-def list_approvals(
-    eco_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def list_approvals(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """List all approvals for an ECO"""
-    eco = get_eco_or_404(db, eco_id)
-    return db.query(ECOApproval).options(
-        joinedload(ECOApproval.approver)
-    ).filter(ECOApproval.eco_id == eco_id).all()
+    get_eco_or_404(db, eco_id)
+    return db.query(ECOApproval).options(joinedload(ECOApproval.approver)).filter(ECOApproval.eco_id == eco_id).all()
 
 
 @router.post("/eco/{eco_id}/approvals", response_model=ApprovalResponse)
@@ -560,10 +581,10 @@ def add_approval(
     eco_id: int,
     approval_in: ApprovalCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Add an approval requirement to an ECO"""
-    eco = get_eco_or_404(db, eco_id)
+    get_eco_or_404(db, eco_id)
 
     # Check that approver user exists
     approver = db.query(User).filter(User.id == approval_in.approver_id).first()
@@ -579,27 +600,23 @@ def add_approval(
     db.add(approval)
     db.commit()
     db.refresh(approval)
-    return db.query(ECOApproval).options(
-        joinedload(ECOApproval.approver)
-    ).filter(ECOApproval.id == approval.id).first()
+    return db.query(ECOApproval).options(joinedload(ECOApproval.approver)).filter(ECOApproval.id == approval.id).first()
 
 
 # ============== Implementation Task Endpoints ==============
 
+
 @router.post("/eco/{eco_id}/tasks", response_model=TaskResponse)
 def add_task(
-    eco_id: int,
-    task_in: TaskCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    eco_id: int, task_in: TaskCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
 ):
     """Add an implementation task to an ECO"""
-    eco = get_eco_or_404(db, eco_id)
+    get_eco_or_404(db, eco_id)
 
     # Determine next task number
-    max_task = db.query(func.max(ECOImplementationTask.task_number)).filter(
-        ECOImplementationTask.eco_id == eco_id
-    ).scalar()
+    max_task = (
+        db.query(func.max(ECOImplementationTask.task_number)).filter(ECOImplementationTask.eco_id == eco_id).scalar()
+    )
     next_num = (max_task or 0) + 1
 
     task = ECOImplementationTask(
@@ -614,9 +631,12 @@ def add_task(
     db.add(task)
     db.commit()
     db.refresh(task)
-    return db.query(ECOImplementationTask).options(
-        joinedload(ECOImplementationTask.assignee)
-    ).filter(ECOImplementationTask.id == task.id).first()
+    return (
+        db.query(ECOImplementationTask)
+        .options(joinedload(ECOImplementationTask.assignee))
+        .filter(ECOImplementationTask.id == task.id)
+        .first()
+    )
 
 
 @router.put("/eco/{eco_id}/tasks/{task_id}", response_model=TaskResponse)
@@ -625,12 +645,14 @@ def update_task(
     task_id: int,
     task_in: TaskUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """Update an implementation task"""
-    task = db.query(ECOImplementationTask).filter(
-        and_(ECOImplementationTask.id == task_id, ECOImplementationTask.eco_id == eco_id)
-    ).first()
+    task = (
+        db.query(ECOImplementationTask)
+        .filter(and_(ECOImplementationTask.id == task_id, ECOImplementationTask.eco_id == eco_id))
+        .first()
+    )
 
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -648,19 +670,19 @@ def update_task(
 
     db.commit()
     db.refresh(task)
-    return db.query(ECOImplementationTask).options(
-        joinedload(ECOImplementationTask.assignee)
-    ).filter(ECOImplementationTask.id == task.id).first()
+    return (
+        db.query(ECOImplementationTask)
+        .options(joinedload(ECOImplementationTask.assignee))
+        .filter(ECOImplementationTask.id == task.id)
+        .first()
+    )
 
 
 # ============== Affected Items Endpoint ==============
 
+
 @router.get("/eco/affected-items/{eco_id}")
-def get_affected_items(
-    eco_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_affected_items(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get details of all affected parts, work orders, and documents for an ECO"""
     eco = get_eco_or_404(db, eco_id)
 
@@ -676,6 +698,7 @@ def get_affected_items(
             part_ids = json.loads(eco.affected_parts)
             if part_ids:
                 from app.models.part import Part
+
                 parts = db.query(Part).filter(Part.id.in_(part_ids)).all()
                 result["parts"] = [
                     {"id": p.id, "part_number": p.part_number, "name": p.name, "revision": getattr(p, 'revision', None)}
@@ -690,6 +713,7 @@ def get_affected_items(
             wo_ids = json.loads(eco.affected_work_orders)
             if wo_ids:
                 from app.models.work_order import WorkOrder
+
                 wos = db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()
                 result["work_orders"] = [
                     {"id": w.id, "wo_number": w.wo_number, "status": str(w.status.value) if w.status else None}
@@ -704,9 +728,14 @@ def get_affected_items(
             doc_ids = json.loads(eco.affected_documents)
             if doc_ids:
                 from app.models.document import Document
+
                 docs = db.query(Document).filter(Document.id.in_(doc_ids)).all()
                 result["documents"] = [
-                    {"id": d.id, "title": d.title, "document_type": str(d.document_type.value) if d.document_type else None}
+                    {
+                        "id": d.id,
+                        "title": d.title,
+                        "document_type": str(d.document_type.value) if d.document_type else None,
+                    }
                     for d in docs
                 ]
         except (json.JSONDecodeError, TypeError):

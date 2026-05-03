@@ -1,12 +1,15 @@
-from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, Date, DateTime, UniqueConstraint
-from sqlalchemy.orm import relationship
 from datetime import datetime
+
+from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
 
 class OEERecord(Base, TenantMixin):
     """Daily OEE snapshot per work center"""
+
     __tablename__ = "oee_records"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -57,6 +60,7 @@ class OEERecord(Base, TenantMixin):
 
 class OEETarget(Base, TenantMixin):
     """Target OEE per work center"""
+
     __tablename__ = "oee_targets"
 
     id = Column(Integer, primary_key=True, index=True)

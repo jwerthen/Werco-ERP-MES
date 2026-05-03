@@ -22,11 +22,7 @@ def operation_target_quantity(
     work_order: Optional[WorkOrder] = None,
 ) -> float:
     """Quantity required for an operation, including component operation targets."""
-    if (
-        operation
-        and operation.component_quantity
-        and float(operation.component_quantity) > 0
-    ):
+    if operation and operation.component_quantity and float(operation.component_quantity) > 0:
         return float(operation.component_quantity)
     if work_order and work_order.quantity_ordered:
         return float(work_order.quantity_ordered)
@@ -53,9 +49,7 @@ def has_incomplete_predecessors(
     if current_operation_id is not None:
         query = query.filter(WorkOrderOperation.id != current_operation_id)
     if allow_same_work_center and current_work_center_id is not None:
-        query = query.filter(
-            WorkOrderOperation.work_center_id != current_work_center_id
-        )
+        query = query.filter(WorkOrderOperation.work_center_id != current_work_center_id)
     return query.count() > 0
 
 
@@ -127,9 +121,7 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
         quantity_ordered = float(work_order.quantity_ordered or 0)
         quantity_complete = float(work_order.quantity_complete or 0)
         progress_percent = (
-            min(100.0, max(0.0, (quantity_complete / quantity_ordered) * 100.0))
-            if quantity_ordered > 0
-            else 0.0
+            min(100.0, max(0.0, (quantity_complete / quantity_ordered) * 100.0)) if quantity_ordered > 0 else 0.0
         )
         return {
             "operation_count": 0,
@@ -176,12 +168,8 @@ def _operation_progress_key(operation: WorkOrderOperation) -> tuple:
 
 
 def _operation_has_completion_evidence(operation: WorkOrderOperation) -> bool:
-    return (
-        operation.status == OperationStatus.COMPLETE
-        or (
-            operation.actual_end is not None
-            and operation.completed_by is not None
-        )
+    return operation.status == OperationStatus.COMPLETE or (
+        operation.actual_end is not None and operation.completed_by is not None
     )
 
 
@@ -193,6 +181,4 @@ def validate_operation_quantity(quantity_complete: float, target_qty: float) -> 
     if target_qty <= 0:
         raise WorkOrderStateError("Operation quantity ordered is missing or invalid")
     if quantity_complete > target_qty:
-        raise WorkOrderStateError(
-            f"Quantity ({quantity_complete}) cannot exceed quantity ordered ({target_qty})"
-        )
+        raise WorkOrderStateError(f"Quantity ({quantity_complete}) cannot exceed quantity ordered ({target_qty})")

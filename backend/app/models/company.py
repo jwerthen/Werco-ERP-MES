@@ -1,6 +1,8 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text
-from sqlalchemy.orm import relationship
 from datetime import datetime
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 
 
@@ -9,6 +11,7 @@ class Company(Base):
     Represents a company/organization using the ERP system.
     Supports parent-child hierarchy (e.g., Werco -> acquired subsidiaries).
     """
+
     __tablename__ = "companies"
 
     id = Column(Integer, primary_key=True, index=True)

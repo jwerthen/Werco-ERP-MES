@@ -1,12 +1,15 @@
 """Schemas for auto-generating draft routings from uploaded drawings."""
 
+from typing import List, Optional
+
 from pydantic import BaseModel, Field
-from typing import Optional, List
+
 from app.schemas.routing import RoutingOperationCreate
 
 
 class DrawingExtractionInfo(BaseModel):
     """Manufacturing-relevant info extracted from the drawing."""
+
     material: Optional[str] = None
     thickness: Optional[str] = None
     finish: Optional[str] = None
@@ -22,6 +25,7 @@ class DrawingExtractionInfo(BaseModel):
 
 class ProposedOperation(BaseModel):
     """A single proposed routing operation from the AI analysis."""
+
     sequence: int
     operation_name: str
     description: Optional[str] = None
@@ -40,6 +44,7 @@ class ProposedOperation(BaseModel):
 
 class RoutingGenerationResult(BaseModel):
     """Full result returned to the frontend for review."""
+
     part_id: int
     part_number: str
     part_name: str
@@ -53,6 +58,7 @@ class RoutingGenerationResult(BaseModel):
 
 class RoutingCreateFromGeneration(BaseModel):
     """Payload sent after user reviews and edits the proposed routing."""
+
     part_id: int
     revision: str = "A"
     description: Optional[str] = None

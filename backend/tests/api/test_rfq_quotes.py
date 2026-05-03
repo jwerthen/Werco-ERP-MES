@@ -36,7 +36,10 @@ def test_rfq_package_generate_estimate_flow(client, auth_headers, tmp_path):
         headers=auth_headers,
         data={"customer_name": "Acme Aerospace", "rfq_reference": "RFQ-DEMO-100"},
         files=[
-            ("files", ("demo_bom.xlsx", bom_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+            (
+                "files",
+                ("demo_bom.xlsx", bom_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            ),
             ("files", ("P-500.dxf", dxf_bytes, "application/dxf")),
         ],
     )
@@ -72,7 +75,10 @@ def test_rfq_generate_estimate_requires_geometry(client, auth_headers):
         headers=auth_headers,
         data={"customer_name": "No Geometry Test", "rfq_reference": "RFQ-NOGEO-1"},
         files=[
-            ("files", ("demo_bom.xlsx", bom_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+            (
+                "files",
+                ("demo_bom.xlsx", bom_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            ),
         ],
     )
     assert create_response.status_code == 200, create_response.text

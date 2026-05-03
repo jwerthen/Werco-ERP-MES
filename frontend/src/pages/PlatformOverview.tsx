@@ -34,7 +34,7 @@ export default function PlatformOverview() {
     try {
       const data = await api.getPlatformOverview();
       setOverview(data);
-    } catch (e) {
+    } catch {
       console.error('Failed to load platform overview');
     } finally {
       setLoading(false);
@@ -46,7 +46,7 @@ export default function PlatformOverview() {
       await switchCompany(companyId);
       navigate('/');
       window.location.reload();
-    } catch (e) {
+    } catch {
       console.error('Failed to switch to company');
     }
   };

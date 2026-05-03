@@ -1,10 +1,12 @@
+import logging
 from contextlib import contextmanager
+
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
+
 from app.core.config import settings
-import logging
 
 logger = logging.getLogger(__name__)
 

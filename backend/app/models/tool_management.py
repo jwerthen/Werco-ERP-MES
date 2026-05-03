@@ -1,7 +1,11 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SQLEnum, Float, Text, ForeignKey, Date
-from sqlalchemy.orm import relationship
-from datetime import datetime, date
 import enum
+from datetime import date, datetime
+
+from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
 from app.db.database import Base
 from app.db.mixins import TenantMixin
 
@@ -32,6 +36,7 @@ class ToolType(str, enum.Enum):
 
 class Tool(Base, TenantMixin):
     """Tool & fixture inventory"""
+
     __tablename__ = "tools"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -78,6 +83,7 @@ class Tool(Base, TenantMixin):
 
 class ToolCheckout(Base, TenantMixin):
     """Check-in / check-out history"""
+
     __tablename__ = "tool_checkouts"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -104,6 +110,7 @@ class ToolCheckout(Base, TenantMixin):
 
 class ToolUsageLog(Base, TenantMixin):
     """Track usage against work orders"""
+
     __tablename__ = "tool_usage_logs"
 
     id = Column(Integer, primary_key=True, index=True)
