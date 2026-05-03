@@ -71,6 +71,14 @@ const formatDateTimeCT = (value?: string) =>
   formatCentralDateTime(value, { timeZoneName: 'short' });
 
 const getDetailWorkOrderProgress = (workOrder: WorkOrder) => {
+  const operationCount = Number(workOrder.operation_count || 0);
+  if (operationCount > 0 && workOrder.operation_progress_percent !== undefined) {
+    return {
+      percent: Math.min(100, Math.max(0, Number(workOrder.operation_progress_percent || 0))),
+      label: `${Number(workOrder.operations_complete || 0)}/${operationCount} ops`,
+    };
+  }
+
   const operations = workOrder.operations || [];
   if (operations.length === 0) {
     const ordered = Number(workOrder.quantity_ordered || 0);

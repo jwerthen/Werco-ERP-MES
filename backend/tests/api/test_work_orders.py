@@ -109,6 +109,92 @@ class TestWorkOrdersAPI:
         assert item["operations_complete"] == 1
         assert item["operation_progress_percent"] == 50.0
 
+    def test_work_order_progress_uses_historical_matching_completion(
+        self, client: TestClient, auth_headers: dict, operator_user: User, db_session
+    ):
+        part = Part(
+            part_number="WO-PROG-HIST",
+            name="Historical Progress Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-PROG-HIST",
+            name="Historical Progress Work Center",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-PROG-HIST-001",
+            part_id=part.id,
+            quantity_ordered=1,
+            quantity_complete=0,
+            status=WorkOrderStatus.IN_PROGRESS,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+
+        db_session.add_all([
+            WorkOrderOperation(
+                work_order_id=work_order.id,
+                work_center_id=work_center.id,
+                component_part_id=part.id,
+                component_quantity=2,
+                sequence=10,
+                operation_number="Op 10",
+                name="05883 - Cut CNC 05883",
+                status=OperationStatus.COMPLETE,
+                quantity_complete=2,
+                actual_end=datetime.utcnow(),
+                completed_by=operator_user.id,
+                company_id=1,
+            ),
+            WorkOrderOperation(
+                work_order_id=work_order.id,
+                work_center_id=work_center.id,
+                component_part_id=part.id,
+                component_quantity=2,
+                sequence=10,
+                operation_number="Op 10",
+                name="05883 - Cut CNC 05883",
+                status=OperationStatus.PENDING,
+                quantity_complete=0,
+                company_id=1,
+            ),
+            WorkOrderOperation(
+                work_order_id=work_order.id,
+                work_center_id=work_center.id,
+                component_part_id=part.id,
+                component_quantity=1,
+                sequence=20,
+                operation_number="Op 20",
+                name="05884 - Cut CNC 05884",
+                status=OperationStatus.PENDING,
+                quantity_complete=0,
+                company_id=1,
+            ),
+        ])
+        db_session.commit()
+
+        response = client.get("/api/v1/work-orders/", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        item = next(
+            row for row in response.json()
+            if row["work_order_number"] == "WO-PROG-HIST-001"
+        )
+        assert item["operation_count"] == 2
+        assert item["operations_complete"] == 1
+        assert item["operation_progress_percent"] == 50.0
+
     def test_create_work_order(
         self, client: TestClient, auth_headers: dict, sample_work_order_data: dict
     ):

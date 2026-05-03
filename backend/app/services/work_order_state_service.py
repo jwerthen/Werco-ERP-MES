@@ -117,10 +117,13 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
     Component operations can complete before the parent assembly is finished.
     Those completions should move the progress bar, but they should not be
     counted as finished work-order quantity for shipping or closeout.
+
+    Operation rows can also be regenerated while preserving the same human job
+    identity. In that case, count one progress slot per natural operation and
+    let an older completed row satisfy the matching current row.
     """
     operations = list(work_order.operations or [])
-    total_operations = len(operations)
-    if total_operations == 0:
+    if not operations:
         quantity_ordered = float(work_order.quantity_ordered or 0)
         quantity_complete = float(work_order.quantity_complete or 0)
         progress_percent = (
@@ -134,23 +137,24 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
             "operation_progress_percent": round(progress_percent, 1),
         }
 
-    progress_total = 0.0
-    operations_complete = 0
+    progress_by_key: dict[tuple, float] = {}
     for operation in operations:
+        key = _operation_progress_key(operation)
         target_qty = operation_target_quantity(operation, work_order)
         complete_qty = float(operation.quantity_complete or 0)
 
-        if operation.status == OperationStatus.COMPLETE:
+        if _operation_has_completion_evidence(operation):
             ratio = 1.0
         elif target_qty > 0:
             ratio = min(1.0, max(0.0, complete_qty / target_qty))
         else:
             ratio = 0.0
 
-        if ratio >= 1.0:
-            operations_complete += 1
-        progress_total += ratio
+        progress_by_key[key] = max(progress_by_key.get(key, 0.0), ratio)
 
+    total_operations = len(progress_by_key)
+    operations_complete = sum(1 for ratio in progress_by_key.values() if ratio >= 1.0)
+    progress_total = sum(progress_by_key.values())
     return {
         "operation_count": total_operations,
         "operations_complete": operations_complete,
@@ -159,6 +163,26 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
             1,
         ),
     }
+
+
+def _operation_progress_key(operation: WorkOrderOperation) -> tuple:
+    name = " ".join((operation.name or "").strip().lower().split())
+    return (
+        operation.work_center_id,
+        operation.component_part_id,
+        operation.operation_group,
+        name or operation.operation_number or operation.sequence or operation.id,
+    )
+
+
+def _operation_has_completion_evidence(operation: WorkOrderOperation) -> bool:
+    return (
+        operation.status == OperationStatus.COMPLETE
+        or (
+            operation.actual_end is not None
+            and operation.completed_by is not None
+        )
+    )
 
 
 def validate_operation_quantity(quantity_complete: float, target_qty: float) -> None:
