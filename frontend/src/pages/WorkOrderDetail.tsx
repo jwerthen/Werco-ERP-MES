@@ -70,57 +70,80 @@ interface ActiveShopUser {
 const formatDateTimeCT = (value?: string) =>
   formatCentralDateTime(value, { timeZoneName: 'short' });
 
-const getDetailWorkOrderProgress = (workOrder: WorkOrder) => {
-  const operationCount = Number(workOrder.operation_count || 0);
-  if (operationCount > 0 && workOrder.operation_progress_percent !== undefined) {
-    return {
-      percent: Math.min(100, Math.max(0, Number(workOrder.operation_progress_percent || 0))),
-      label: `${Number(workOrder.operations_complete || 0)}/${operationCount} ops`,
-    };
-  }
+const operationProgressKey = (op: WorkOrderOperation) => {
+  const name = (op.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return [
+    op.work_center_id || '',
+    op.component_part_id || '',
+    op.operation_group || '',
+    name || op.operation_number || op.sequence || op.id,
+  ].join('|');
+};
 
+const getOperationProgressMetrics = (workOrder: WorkOrder) => {
   const operations = workOrder.operations || [];
   if (operations.length === 0) {
     const ordered = Number(workOrder.quantity_ordered || 0);
     const complete = Number(workOrder.quantity_complete || 0);
     return {
+      operation_count: 0,
+      operations_complete: 0,
       percent: ordered > 0 ? Math.min(100, Math.max(0, (complete / ordered) * 100)) : 0,
       label: `${complete}/${ordered}`,
     };
   }
 
-  let completeCount = 0;
-  const progressTotal = operations.reduce((sum, op) => {
+  const progressByKey = new Map<string, number>();
+  operations.forEach((op) => {
     const target = Number(op.component_quantity || workOrder.quantity_ordered || 0);
     const complete = Number(op.quantity_complete || 0);
-    const ratio = op.status === 'complete'
+    const ratio = op.status === 'complete' || (op.actual_end && op.completed_by)
       ? 1
       : target > 0
         ? Math.min(1, Math.max(0, complete / target))
         : 0;
-    if (ratio >= 1) completeCount += 1;
-    return sum + ratio;
-  }, 0);
+    const key = operationProgressKey(op);
+    progressByKey.set(key, Math.max(progressByKey.get(key) || 0, ratio));
+  });
+
+  const operationCount = progressByKey.size;
+  const operationsComplete = Array.from(progressByKey.values()).filter((ratio) => ratio >= 1).length;
+  const progressTotal = Array.from(progressByKey.values()).reduce((sum, ratio) => sum + ratio, 0);
+  const percent = operationCount > 0 ? Math.round((progressTotal / operationCount) * 1000) / 10 : 0;
 
   return {
-    percent: Math.round((progressTotal / operations.length) * 1000) / 10,
-    label: `${completeCount}/${operations.length} ops`,
+    operation_count: operationCount,
+    operations_complete: operationsComplete,
+    percent,
+    label: `${operationsComplete}/${operationCount} ops`,
   };
 };
 
+const syncOperationProgressSummary = (workOrder: WorkOrder): WorkOrder => {
+  const metrics = getOperationProgressMetrics(workOrder);
+  return {
+    ...workOrder,
+    operation_count: metrics.operation_count,
+    operations_complete: metrics.operations_complete,
+    operation_progress_percent: metrics.percent,
+  };
+};
+
+const getDetailWorkOrderProgress = (workOrder: WorkOrder) => getOperationProgressMetrics(workOrder);
+
 const hydrateOperationsFromShopFloor = async (workOrder: WorkOrder): Promise<WorkOrder> => {
   const firstOperationId = workOrder.operations?.[0]?.id;
-  if (!firstOperationId) return workOrder;
+  if (!firstOperationId) return syncOperationProgressSummary(workOrder);
 
   try {
     const details = await api.getOperationDetails(firstOperationId);
     const liveOperations = Array.isArray(details?.all_operations) ? details.all_operations : [];
-    if (liveOperations.length === 0) return workOrder;
+    if (liveOperations.length === 0) return syncOperationProgressSummary(workOrder);
 
     const liveById = new Map<number, Partial<WorkOrderOperation>>(
       liveOperations.map((op: Partial<WorkOrderOperation> & { id: number }) => [op.id, op])
     );
-    return {
+    return syncOperationProgressSummary({
       ...workOrder,
       operations: workOrder.operations.map((op) => {
         const liveOp = liveById.get(op.id);
@@ -139,9 +162,9 @@ const hydrateOperationsFromShopFloor = async (workOrder: WorkOrder): Promise<Wor
           completed_by: liveOp.completed_by ?? op.completed_by,
         };
       }),
-    };
+    });
   } catch {
-    return workOrder;
+    return syncOperationProgressSummary(workOrder);
   }
 };
 
