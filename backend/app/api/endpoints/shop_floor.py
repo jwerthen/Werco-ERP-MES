@@ -2,17 +2,17 @@ import hashlib
 import json
 import math
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import and_, case, func, or_
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import get_current_company_id, get_current_user
 from app.core.realtime import safe_broadcast
-from app.core.time_utils import to_utc_iso
+from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
 from app.core.websocket import (
     broadcast_dashboard_update,
     broadcast_shop_floor_update,
@@ -32,6 +32,7 @@ from app.services.work_order_state_service import (
     WorkOrderStateError,
     has_incomplete_predecessors,
     operation_target_quantity,
+    reconcile_work_orders_from_completion_evidence,
     release_next_ready_operation,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
@@ -494,6 +495,18 @@ def shop_floor_dashboard(
     """
     from datetime import date
 
+    work_orders_to_reconcile = (
+        db.query(WorkOrder)
+        .options(selectinload(WorkOrder.operations))
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]),
+        )
+        .all()
+    )
+    if reconcile_work_orders_from_completion_evidence(db, work_orders_to_reconcile):
+        db.commit()
+
     # Active work orders
     active_wos = (
         db.query(WorkOrder)
@@ -732,6 +745,20 @@ def shop_floor_dashboard(
         }
 
     checked_in_user_ids = {entry.user_id for entry in active_entries if entry.user_id}
+    central_now = datetime.now(CENTRAL_TIME_ZONE)
+    central_day_start = central_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    completed_today_start = central_day_start.astimezone(timezone.utc).replace(tzinfo=None)
+    completed_today_end = central_now.astimezone(timezone.utc).replace(tzinfo=None)
+    completed_today = (
+        db.query(WorkOrderOperation)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.status == OperationStatus.COMPLETE,
+            WorkOrderOperation.actual_end >= completed_today_start,
+            WorkOrderOperation.actual_end <= completed_today_end,
+        )
+        .count()
+    )
 
     data = {
         "summary": {
@@ -741,6 +768,7 @@ def shop_floor_dashboard(
             "signed_in_users": len(signed_in_users),
             "checked_in_users": len(checked_in_user_ids),
             "idle_signed_in_users": max(len(signed_in_users) - len(checked_in_user_ids), 0),
+            "completed_today": completed_today,
         },
         "work_centers": wc_status,
         "signed_in_users": signed_in_users,
@@ -886,6 +914,12 @@ def get_all_operations(
     # Apply pagination
     paginated_query, pagination_meta = paginate_query(query, page, page_size)
     operations = paginated_query.all()
+    work_orders_by_id = {op.work_order.id: op.work_order for op in operations if op.work_order}
+    work_orders = list(work_orders_by_id.values())
+    if reconcile_work_orders_from_completion_evidence(db, work_orders):
+        db.commit()
+    if not status:
+        operations = [op for op in operations if op.status != OperationStatus.COMPLETE]
 
     # Build response data
     result = []
@@ -1447,6 +1481,9 @@ def get_operation_details(
         .order_by(WorkOrderOperation.sequence)
         .all()
     )
+    wo.operations = all_ops
+    if reconcile_work_orders_from_completion_evidence(db, [wo]):
+        db.commit()
 
     # Get recent history (audit logs)
     history = (

@@ -192,6 +192,180 @@ class TestWorkOrdersAPI:
         assert item["operations_complete"] == 1
         assert item["operation_progress_percent"] == 50.0
 
+    def test_work_order_progress_matches_regenerated_slot_when_name_changes(
+        self, client: TestClient, auth_headers: dict, operator_user: User, db_session
+    ):
+        part = Part(
+            part_number="WO-PROG-SLOT",
+            name="Slot Progress Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-PROG-SLOT",
+            name="Slot Progress Work Center",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-PROG-SLOT-001",
+            part_id=part.id,
+            quantity_ordered=1,
+            quantity_complete=0,
+            status=WorkOrderStatus.IN_PROGRESS,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+
+        db_session.add_all(
+            [
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    component_part_id=part.id,
+                    component_quantity=1,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="05883 - Cut CNC 05883",
+                    status=OperationStatus.COMPLETE,
+                    quantity_complete=1,
+                    actual_end=datetime.utcnow(),
+                    completed_by=operator_user.id,
+                    company_id=1,
+                ),
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    component_part_id=part.id,
+                    component_quantity=1,
+                    sequence=10,
+                    operation_number="Op 10",
+                    name="Op 10 - 05883 - Cut CNC 05883",
+                    status=OperationStatus.PENDING,
+                    quantity_complete=0,
+                    company_id=1,
+                ),
+                WorkOrderOperation(
+                    work_order_id=work_order.id,
+                    work_center_id=work_center.id,
+                    component_part_id=part.id,
+                    component_quantity=1,
+                    sequence=20,
+                    operation_number="Op 20",
+                    name="05884 - Cut CNC 05884",
+                    status=OperationStatus.PENDING,
+                    quantity_complete=0,
+                    company_id=1,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        response = client.get("/api/v1/work-orders/", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        item = next(row for row in response.json() if row["work_order_number"] == "WO-PROG-SLOT-001")
+        assert item["operation_count"] == 2
+        assert item["operations_complete"] == 1
+        assert item["operation_progress_percent"] == 50.0
+
+    def test_work_order_progress_reconciles_time_entry_production(
+        self, client: TestClient, auth_headers: dict, operator_user: User, db_session
+    ):
+        part = Part(
+            part_number="WO-PROG-TIME",
+            name="Time Entry Progress Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-PROG-TIME",
+            name="Time Entry Progress Work Center",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        work_order = WorkOrder(
+            work_order_number="WO-PROG-TIME-001",
+            part_id=part.id,
+            quantity_ordered=1,
+            quantity_complete=0,
+            status=WorkOrderStatus.IN_PROGRESS,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.flush()
+
+        completed_operation = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=work_center.id,
+            sequence=10,
+            operation_number="Op 10",
+            name="Cut From Time Entry",
+            status=OperationStatus.PENDING,
+            quantity_complete=0,
+            company_id=1,
+        )
+        pending_operation = WorkOrderOperation(
+            work_order_id=work_order.id,
+            work_center_id=work_center.id,
+            sequence=20,
+            operation_number="Op 20",
+            name="Bend Later",
+            status=OperationStatus.PENDING,
+            quantity_complete=0,
+            company_id=1,
+        )
+        db_session.add_all([completed_operation, pending_operation])
+        db_session.flush()
+        db_session.add(
+            TimeEntry(
+                user_id=operator_user.id,
+                work_order_id=work_order.id,
+                operation_id=completed_operation.id,
+                work_center_id=work_center.id,
+                entry_type=TimeEntryType.RUN,
+                clock_in=datetime(2026, 5, 1, 13, 0, 0),
+                clock_out=datetime(2026, 5, 1, 13, 10, 0),
+                duration_hours=1 / 6,
+                quantity_produced=1,
+                company_id=1,
+            )
+        )
+        db_session.commit()
+
+        response = client.get("/api/v1/work-orders/", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        item = next(row for row in response.json() if row["work_order_number"] == "WO-PROG-TIME-001")
+        assert item["operation_count"] == 2
+        assert item["operations_complete"] == 1
+        assert item["operation_progress_percent"] == 50.0
+
+        db_session.refresh(completed_operation)
+        assert completed_operation.status == OperationStatus.COMPLETE
+        assert completed_operation.quantity_complete == 1
+
+        shop_floor_response = client.get("/api/v1/shop-floor/operations", headers=auth_headers)
+        assert shop_floor_response.status_code == status.HTTP_200_OK
+        returned_ids = {operation["id"] for operation in shop_floor_response.json()["operations"]}
+        assert completed_operation.id not in returned_ids
+        assert pending_operation.id in returned_ids
+
     def test_create_work_order(self, client: TestClient, auth_headers: dict, sample_work_order_data: dict):
         """Test creating a new work order."""
         response = client.post("/api/v1/work-orders/", headers=auth_headers, json=sample_work_order_data)

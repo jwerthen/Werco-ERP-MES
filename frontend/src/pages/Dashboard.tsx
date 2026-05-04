@@ -509,7 +509,7 @@ export default function Dashboard() {
           iconBg="bg-emerald-500/20"
           iconColor="text-emerald-600"
           label="Completed Today"
-          value={data?.recent_completions?.length || 0}
+          value={data?.summary.completed_today ?? data?.recent_completions?.length ?? 0}
           href="/work-orders"
         />
         <StatCard

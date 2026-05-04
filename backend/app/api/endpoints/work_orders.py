@@ -38,6 +38,7 @@ from app.services.work_order_state_service import (
     operation_target_quantity,
     release_first_ready_operation,
     release_next_ready_operation,
+    reconcile_work_orders_from_completion_evidence,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
     work_order_operation_progress,
@@ -285,6 +286,8 @@ def list_work_orders(
         )
 
     work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date).offset(skip).limit(limit).all()
+    if reconcile_work_orders_from_completion_evidence(db, work_orders):
+        db.commit()
 
     result = []
     for wo in work_orders:
@@ -591,6 +594,8 @@ def create_work_order(
     )
     if _reconcile_operation_component_quantities(db, work_order, company_id):
         db.commit()
+    if reconcile_work_orders_from_completion_evidence(db, [work_order]):
+        db.commit()
     _enrich_work_order_operations(work_order)
 
     # Audit log for work order creation
@@ -770,6 +775,8 @@ def get_work_order(
     work_order.actual_cost = work_order.actual_cost or 0
 
     if _reconcile_operation_component_quantities(db, work_order, company_id):
+        db.commit()
+    if reconcile_work_orders_from_completion_evidence(db, [work_order]):
         db.commit()
     _enrich_work_order_operations(work_order)
 

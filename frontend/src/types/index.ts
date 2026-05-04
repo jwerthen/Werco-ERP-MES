@@ -180,6 +180,7 @@ export interface DashboardData {
     signed_in_users: number;
     checked_in_users: number;
     idle_signed_in_users: number;
+    completed_today?: number;
   };
   work_centers: WorkCenterStatus[];
   signed_in_users: SignedInUserStatus[];

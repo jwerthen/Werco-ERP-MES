@@ -71,6 +71,13 @@ const formatDateTimeCT = (value?: string) =>
   formatCentralDateTime(value, { timeZoneName: 'short' });
 
 const operationProgressKey = (op: WorkOrderOperation) => {
+  if (op.sequence !== undefined && op.sequence !== null) {
+    return `sequence|${Number(op.sequence)}`;
+  }
+  const operationNumber = String(op.operation_number || '').replace(/\D/g, '');
+  if (operationNumber) {
+    return `operation_number|${operationNumber}`;
+  }
   const name = (op.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
   return [
     op.work_center_id || '',
