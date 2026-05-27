@@ -101,20 +101,23 @@ const getOperationProgressMetrics = (workOrder: WorkOrder) => {
   }
 
   const progressByKey = new Map<string, number>();
+  const completeByKey = new Map<string, boolean>();
   operations.forEach((op) => {
     const target = Number(op.component_quantity || workOrder.quantity_ordered || 0);
     const complete = Number(op.quantity_complete || 0);
-    const ratio = op.status === 'complete' || (op.actual_end && op.completed_by)
+    const hasCompletionEvidence = op.status === 'complete' || Boolean(op.actual_end && op.completed_by);
+    const ratio = hasCompletionEvidence
       ? 1
       : target > 0
         ? Math.min(1, Math.max(0, complete / target))
         : 0;
     const key = operationProgressKey(op);
     progressByKey.set(key, Math.max(progressByKey.get(key) || 0, ratio));
+    completeByKey.set(key, Boolean(completeByKey.get(key)) || hasCompletionEvidence);
   });
 
   const operationCount = progressByKey.size;
-  const operationsComplete = Array.from(progressByKey.values()).filter((ratio) => ratio >= 1).length;
+  const operationsComplete = Array.from(completeByKey.values()).filter(Boolean).length;
   const progressTotal = Array.from(progressByKey.values()).reduce((sum, ratio) => sum + ratio, 0);
   const percent = operationCount > 0 ? Math.round((progressTotal / operationCount) * 1000) / 10 : 0;
 

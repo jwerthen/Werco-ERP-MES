@@ -132,12 +132,14 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
         }
 
     progress_by_key: dict[tuple, float] = {}
+    completed_by_key: dict[tuple, bool] = {}
     for operation in operations:
         key = _operation_progress_key(operation)
         target_qty = operation_target_quantity(operation, work_order)
         complete_qty = float(operation.quantity_complete or 0)
+        has_completion_evidence = _operation_has_completion_evidence(operation)
 
-        if _operation_has_completion_evidence(operation):
+        if has_completion_evidence:
             ratio = 1.0
         elif target_qty > 0:
             ratio = min(1.0, max(0.0, complete_qty / target_qty))
@@ -145,9 +147,10 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
             ratio = 0.0
 
         progress_by_key[key] = max(progress_by_key.get(key, 0.0), ratio)
+        completed_by_key[key] = completed_by_key.get(key, False) or has_completion_evidence
 
     total_operations = len(progress_by_key)
-    operations_complete = sum(1 for ratio in progress_by_key.values() if ratio >= 1.0)
+    operations_complete = sum(1 for is_complete in completed_by_key.values() if is_complete)
     progress_total = sum(progress_by_key.values())
     return {
         "operation_count": total_operations,
@@ -184,6 +187,19 @@ def reconcile_work_orders_from_completion_evidence(db: Session, work_orders: lis
                 float(row.quantity_scrapped or 0),
             )
 
+    closed_produced_by_operation: dict[int, float] = {}
+    for row in (
+        db.query(
+            TimeEntry.operation_id,
+            func.coalesce(func.sum(TimeEntry.quantity_produced), 0).label("quantity_produced"),
+        )
+        .filter(TimeEntry.operation_id.in_(operation_ids), TimeEntry.clock_out.isnot(None))
+        .group_by(TimeEntry.operation_id)
+        .all()
+    ):
+        if row.operation_id is not None:
+            closed_produced_by_operation[row.operation_id] = float(row.quantity_produced or 0)
+
     latest_entry_by_operation: dict[int, TimeEntry] = {}
     latest_entries = (
         db.query(TimeEntry)
@@ -206,6 +222,7 @@ def reconcile_work_orders_from_completion_evidence(db: Session, work_orders: lis
         changed = _sync_operation_status_from_quantity(
             operation,
             latest_entry_by_operation.get(operation.id),
+            closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
         ) or changed
 
     for work_order in work_orders:
@@ -246,6 +263,7 @@ def _normalized_operation_number(operation_number: Optional[str]) -> Optional[st
 def _sync_operation_status_from_quantity(
     operation: WorkOrderOperation,
     latest_entry: Optional[TimeEntry] = None,
+    has_closed_completion_evidence: bool = False,
 ) -> bool:
     target_qty = operation_target_quantity(operation)
     if target_qty <= 0:
@@ -253,7 +271,20 @@ def _sync_operation_status_from_quantity(
 
     quantity_complete = float(operation.quantity_complete or 0)
     changed = False
-    if quantity_complete >= target_qty and operation.status != OperationStatus.COMPLETE:
+    if operation.status == OperationStatus.COMPLETE:
+        if not operation.actual_end and latest_entry:
+            operation.actual_end = latest_entry.clock_out
+            changed = True
+        if not operation.completed_by and latest_entry:
+            operation.completed_by = latest_entry.user_id
+            changed = True
+        if not operation.actual_start and latest_entry:
+            operation.actual_start = latest_entry.clock_in
+            changed = True
+        if not operation.started_by and latest_entry:
+            operation.started_by = latest_entry.user_id
+            changed = True
+    elif quantity_complete >= target_qty and has_closed_completion_evidence:
         operation.status = OperationStatus.COMPLETE
         operation.actual_end = operation.actual_end or (latest_entry.clock_out if latest_entry else None)
         operation.completed_by = operation.completed_by or (latest_entry.user_id if latest_entry else None)
@@ -276,18 +307,7 @@ def _copy_slot_completion_evidence(work_order: WorkOrder) -> bool:
         operations_by_key.setdefault(_operation_progress_key(operation), []).append(operation)
 
     for slot_operations in operations_by_key.values():
-        completed_source = next(
-            (
-                op
-                for op in slot_operations
-                if _operation_has_completion_evidence(op)
-                or (
-                    operation_target_quantity(op, work_order) > 0
-                    and float(op.quantity_complete or 0) >= operation_target_quantity(op, work_order)
-                )
-            ),
-            None,
-        )
+        completed_source = next((op for op in slot_operations if _operation_has_completion_evidence(op)), None)
         if not completed_source:
             continue
 

@@ -1561,6 +1561,34 @@ class TestWorkOrdersAPI:
         assert refreshed_entry.quantity_scrapped == 1
         assert refreshed_entry.clock_out is None
 
+        target_response = client.post(
+            f"/api/v1/shop-floor/operations/{operation.id}/production",
+            headers=operator_headers,
+            json={"quantity_complete_delta": 3, "quantity_scrapped_delta": 0},
+        )
+        assert target_response.status_code == status.HTTP_200_OK
+
+        db_session.expire_all()
+        refreshed_operation = db_session.get(WorkOrderOperation, operation.id)
+        refreshed_entry = db_session.get(TimeEntry, time_entry.id)
+        assert refreshed_operation.quantity_complete == 5
+        assert refreshed_operation.status == OperationStatus.IN_PROGRESS
+        assert refreshed_operation.actual_end is None
+        assert refreshed_entry.quantity_produced == 5
+        assert refreshed_entry.clock_out is None
+
+        list_response = client.get("/api/v1/work-orders/", headers=operator_headers)
+        assert list_response.status_code == status.HTTP_200_OK
+        summary = next(item for item in list_response.json() if item["work_order_number"] == "WO-PROD-001")
+        assert summary["operations_complete"] == 0
+        assert summary["operation_progress_percent"] == 100.0
+
+        shop_floor_response = client.get("/api/v1/shop-floor/operations", headers=operator_headers)
+        assert shop_floor_response.status_code == status.HTTP_200_OK
+        returned_operation = next(item for item in shop_floor_response.json()["operations"] if item["id"] == operation.id)
+        assert returned_operation["status"] == "in_progress"
+        assert returned_operation["quantity_complete"] == 5
+
         clock_out_response = client.post(
             f"/api/v1/shop-floor/clock-out/{time_entry.id}",
             headers=operator_headers,
@@ -1570,11 +1598,22 @@ class TestWorkOrdersAPI:
 
         db_session.expire_all()
         refreshed_operation = db_session.get(WorkOrderOperation, operation.id)
+        refreshed_work_order = db_session.get(WorkOrder, work_order.id)
         refreshed_entry = db_session.get(TimeEntry, time_entry.id)
-        assert refreshed_operation.quantity_complete == 2
-        assert refreshed_entry.quantity_produced == 2
+        assert refreshed_operation.quantity_complete == 5
+        assert refreshed_operation.status == OperationStatus.COMPLETE
+        assert refreshed_operation.actual_end is not None
+        assert refreshed_work_order.status == WorkOrderStatus.COMPLETE
+        assert refreshed_entry.quantity_produced == 5
         assert refreshed_entry.quantity_scrapped == 1
         assert refreshed_entry.clock_out is not None
+
+        dashboard_response = client.get("/api/v1/shop-floor/dashboard", headers=operator_headers)
+        assert dashboard_response.status_code == status.HTTP_200_OK
+        assert any(
+            item["work_order_number"] == "WO-PROD-001" and item["operation_name"] == "Track Production"
+            for item in dashboard_response.json()["recent_completions"]
+        )
 
 
 @pytest.mark.api
