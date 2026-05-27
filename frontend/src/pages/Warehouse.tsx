@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   ArchiveBoxIcon,
@@ -25,6 +25,15 @@ export default function Warehouse() {
     if (tab === 'receiving' || tab === 'shipping') return tab;
     return 'inventory';
   });
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab === 'receiving' || tab === 'shipping') {
+      setActiveTab(tab);
+    } else {
+      setActiveTab('inventory');
+    }
+  }, [searchParams]);
 
   const handleTabChange = (tab: WarehouseTab) => {
     setActiveTab(tab);

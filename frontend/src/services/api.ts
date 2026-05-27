@@ -22,6 +22,11 @@ interface CacheEntry {
   timestamp: number;
 }
 
+type RefreshSubscriber = {
+  resolve: (token: string) => void;
+  reject: (error: unknown) => void;
+};
+
 // Global cache for ETag-based conditional requests
 const etagCache = new Map<string, CacheEntry>();
 const ETAG_CACHE_MAX_SIZE = 500;
@@ -47,7 +52,7 @@ class ApiService {
   private token: string | null = null;
   private refreshToken: string | null = null;
   private isRefreshing = false;
-  private refreshSubscribers: ((token: string) => void)[] = [];
+  private refreshSubscribers: RefreshSubscriber[] = [];
   private tokenExpiresAt: number | null = null;
 
   constructor() {
@@ -104,11 +109,14 @@ class ApiService {
         if (error.response?.status === 401 && !originalRequest._retry && this.refreshToken) {
           if (this.isRefreshing) {
             // Wait for the ongoing refresh to complete
-            return new Promise((resolve) => {
-              this.refreshSubscribers.push((token: string) => {
-                originalRequest.headers = originalRequest.headers || {};
-                originalRequest.headers['Authorization'] = `Bearer ${token}`;
-                resolve(this.api(originalRequest));
+            return new Promise((resolve, reject) => {
+              this.refreshSubscribers.push({
+                resolve: (token: string) => {
+                  originalRequest.headers = originalRequest.headers || {};
+                  originalRequest.headers['Authorization'] = `Bearer ${token}`;
+                  resolve(this.api(originalRequest));
+                },
+                reject,
               });
             });
           }
@@ -159,8 +167,12 @@ class ApiService {
       this.setTokens(access_token, refresh_token, expires_in);
       
       // Notify all waiting requests
-      this.refreshSubscribers.forEach(callback => callback(access_token));
+      this.refreshSubscribers.forEach(subscriber => subscriber.resolve(access_token));
       this.refreshSubscribers = [];
+    } catch (error) {
+      this.refreshSubscribers.forEach(subscriber => subscriber.reject(error));
+      this.refreshSubscribers = [];
+      throw error;
     } finally {
       this.isRefreshing = false;
     }
@@ -436,8 +448,25 @@ class ApiService {
 
   // BOM (Bill of Materials)
   async getBOMs(params?: { status?: string; active_only?: boolean; skip?: number; limit?: number }) {
-    const response = await this.api.get('/bom/', { params });
-    return response.data;
+    if (params?.limit) {
+      const response = await this.api.get('/bom/', { params });
+      return response.data;
+    }
+
+    const pageSize = 500;
+    const allBOMs: any[] = [];
+    let skip = params?.skip ?? 0;
+
+    while (true) {
+      const response = await this.api.get('/bom/', {
+        params: { ...params, skip, limit: pageSize },
+      });
+      allBOMs.push(...response.data);
+      if (response.data.length < pageSize) break;
+      skip += pageSize;
+    }
+
+    return allBOMs;
   }
 
   async getBOM(id: number) {
@@ -788,9 +817,26 @@ class ApiService {
   }
 
   // Routing
-  async getRoutings(params?: { part_id?: number; status?: string; active_only?: boolean; include_bom_components?: boolean }) {
-    const response = await this.api.get('/routing/', { params });
-    return response.data;
+  async getRoutings(params?: { part_id?: number; status?: string; active_only?: boolean; include_bom_components?: boolean; skip?: number; limit?: number }) {
+    if (params?.limit) {
+      const response = await this.api.get('/routing/', { params });
+      return response.data;
+    }
+
+    const pageSize = 500;
+    const allRoutings: any[] = [];
+    let skip = params?.skip ?? 0;
+
+    while (true) {
+      const response = await this.api.get('/routing/', {
+        params: { ...params, skip, limit: pageSize },
+      });
+      allRoutings.push(...response.data);
+      if (response.data.length < pageSize) break;
+      skip += pageSize;
+    }
+
+    return allRoutings;
   }
 
   async getRouting(id: number) {
@@ -1134,9 +1180,26 @@ class ApiService {
   }
 
   // Documents
-  async getDocuments(params?: { part_id?: number; work_order_id?: number; vendor_id?: number; document_type?: string; search?: string }) {
-    const response = await this.api.get('/documents/', { params });
-    return response.data;
+  async getDocuments(params?: { part_id?: number; work_order_id?: number; vendor_id?: number; document_type?: string; search?: string; skip?: number; limit?: number }) {
+    if (params?.limit) {
+      const response = await this.api.get('/documents/', { params });
+      return response.data;
+    }
+
+    const pageSize = 500;
+    const allDocuments: any[] = [];
+    let skip = params?.skip ?? 0;
+
+    while (true) {
+      const response = await this.api.get('/documents/', {
+        params: { ...params, skip, limit: pageSize },
+      });
+      allDocuments.push(...response.data);
+      if (response.data.length < pageSize) break;
+      skip += pageSize;
+    }
+
+    return allDocuments;
   }
 
   async getDocumentTypes() {
@@ -1851,6 +1914,11 @@ class ApiService {
 
   getPOPdfUrl(path: string) {
     return `${this.api.defaults.baseURL}/po-upload/pdf/${path}`;
+  }
+
+  async downloadPOPdf(path: string): Promise<Blob> {
+    const response = await this.api.get(`/po-upload/pdf/${path}`, { responseType: 'blob' });
+    return response.data;
   }
 
   // Analytics & BI

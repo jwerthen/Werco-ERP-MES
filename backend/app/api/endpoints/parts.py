@@ -350,18 +350,32 @@ async def import_parts_csv(
     )
 
 
-@router.get("/{part_id}", response_model=PartResponse)
-def get_part(
-    part_id: int,
+@router.get("/generate-number", summary="Generate Werco part number for raw material or hardware")
+def generate_part_number(
+    description: str = Query(..., min_length=3, description="Part description"),
+    part_type: PartType = Query(..., description="Part type"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get a specific part"""
-    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
-    if not part:
-        raise HTTPException(status_code=404, detail="Part not found")
-    return part
+    if part_type not in [PartType.RAW_MATERIAL, PartType.HARDWARE, PartType.CONSUMABLE]:
+        return {"suggested_part_number": None, "existing": False}
+
+    normalized = " ".join(normalize_description(description).lower().split())
+    existing = (
+        db.query(Part)
+        .filter(
+            Part.company_id == company_id,
+            Part.part_type == part_type,
+            func.lower(func.trim(Part.description)) == normalized,
+        )
+        .first()
+    )
+    if existing:
+        return {"suggested_part_number": existing.part_number, "existing": True}
+
+    suggested = generate_werco_part_number(description, part_type.value)
+    return {"suggested_part_number": suggested, "existing": False}
 
 
 @router.get("/by-number/{part_number}", response_model=PartResponse)
@@ -373,6 +387,20 @@ def get_part_by_number(
 ):
     """Get a part by part number"""
     part = db.query(Part).filter(Part.part_number == part_number, Part.company_id == company_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+    return part
+
+
+@router.get("/{part_id}", response_model=PartResponse)
+def get_part(
+    part_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Get a specific part"""
+    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     return part
@@ -537,31 +565,3 @@ def restore_part(
     )
 
     return {"message": "Part restored successfully", "part_id": part.id}
-
-
-@router.get("/generate-number", summary="Generate Werco part number for raw material or hardware")
-def generate_part_number(
-    description: str = Query(..., min_length=3, description="Part description"),
-    part_type: PartType = Query(..., description="Part type"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    if part_type not in [PartType.RAW_MATERIAL, PartType.HARDWARE, PartType.CONSUMABLE]:
-        return {"suggested_part_number": None, "existing": False}
-
-    normalized = " ".join(normalize_description(description).lower().split())
-    existing = (
-        db.query(Part)
-        .filter(
-            Part.company_id == company_id,
-            Part.part_type == part_type,
-            func.lower(func.trim(Part.description)) == normalized,
-        )
-        .first()
-    )
-    if existing:
-        return {"suggested_part_number": existing.part_number, "existing": True}
-
-    suggested = generate_werco_part_number(description, part_type.value)
-    return {"suggested_part_number": suggested, "existing": False}

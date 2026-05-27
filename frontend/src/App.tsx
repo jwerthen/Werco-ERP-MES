@@ -4,6 +4,8 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { CompanyProvider } from './context/CompanyContext';
 import { TourProvider } from './context/TourContext';
 import { KeyboardShortcutsProvider } from './context/KeyboardShortcutsContext';
+import { usePermissions } from './hooks/usePermissions';
+import type { Permission } from './utils/permissions';
 import { ToastProvider } from './components/ui/Toast';
 import { TourHighlight } from './components/Tour';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -90,14 +92,92 @@ const NotFoundPage = () => (
   </div>
 );
 
+interface RouteAccessRequirement {
+  prefix: string;
+  permission?: Permission;
+  anyOf?: Permission[];
+  allOf?: Permission[];
+}
+
+const routeAccessRequirements: RouteAccessRequirement[] = [
+  { prefix: '/admin/settings', permission: 'admin:settings' },
+  { prefix: '/audit-log', permission: 'admin:audit_logs' },
+  { prefix: '/users', permission: 'users:view' },
+  { prefix: '/work-orders/new', permission: 'work_orders:create' },
+  { prefix: '/work-orders', permission: 'work_orders:view' },
+  { prefix: '/print/traveler', permission: 'work_orders:view' },
+  { prefix: '/print/purchase-order', permission: 'purchasing:view' },
+  { prefix: '/print/packing-slip', permission: 'shipping:view' },
+  { prefix: '/shop-floor', permission: 'work_orders:view' },
+  { prefix: '/parts', permission: 'parts:view' },
+  { prefix: '/bom', permission: 'boms:view' },
+  { prefix: '/routing', permission: 'routings:view' },
+  { prefix: '/engineering-changes', anyOf: ['parts:view', 'boms:view', 'routings:view'] },
+  { prefix: '/warehouse', anyOf: ['inventory:view', 'receiving:view', 'shipping:view'] },
+  { prefix: '/inventory', permission: 'inventory:view' },
+  { prefix: '/receiving', permission: 'receiving:view' },
+  { prefix: '/shipping', permission: 'shipping:view' },
+  { prefix: '/purchasing', permission: 'purchasing:view' },
+  { prefix: '/po-upload', permission: 'purchasing:create' },
+  { prefix: '/mrp', permission: 'purchasing:create' },
+  { prefix: '/quality', permission: 'quality:view' },
+  { prefix: '/calibration', permission: 'quality:calibration' },
+  { prefix: '/traceability', permission: 'quality:view' },
+  { prefix: '/spc', permission: 'quality:view' },
+  { prefix: '/customer-complaints', permission: 'quality:view' },
+  { prefix: '/qms-standards', permission: 'quality:view' },
+  { prefix: '/supplier-scorecards', permission: 'purchasing:view' },
+  { prefix: '/quotes', permission: 'purchasing:view' },
+  { prefix: '/quote-calculator', permission: 'purchasing:view' },
+  { prefix: '/rfq-packages', permission: 'purchasing:create' },
+  { prefix: '/customers', permission: 'purchasing:view' },
+  { prefix: '/scheduling', permission: 'work_orders:view' },
+  { prefix: '/documents', permission: 'work_orders:view' },
+  { prefix: '/downtime', permission: 'work_orders:view' },
+  { prefix: '/maintenance', permission: 'work_orders:view' },
+  { prefix: '/oee', permission: 'analytics:view' },
+  { prefix: '/tool-management', permission: 'inventory:view' },
+  { prefix: '/certifications', permission: 'users:view' },
+  { prefix: '/analytics', permission: 'analytics:view' },
+  { prefix: '/reports', permission: 'analytics:view' },
+  { prefix: '/job-costing', permission: 'analytics:view' },
+  { prefix: '/setup', permission: 'admin:settings' },
+  { prefix: '/import-center', permission: 'admin:settings' },
+  { prefix: '/work-centers', permission: 'admin:settings' },
+  { prefix: '/custom-fields', permission: 'admin:settings' },
+];
+
+function getRouteAccessRequirement(pathname: string): RouteAccessRequirement | undefined {
+  return routeAccessRequirements
+    .filter(requirement => pathname === requirement.prefix || pathname.startsWith(`${requirement.prefix}/`))
+    .sort((a, b) => b.prefix.length - a.prefix.length)[0];
+}
+
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
+  const location = useLocation();
+  const { can, canAny, canAll } = usePermissions();
   
   if (isLoading) {
     return <LoadingOverlay message="Authenticating..." />;
   }
-  
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" />;
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" />;
+  }
+
+  const requirement = getRouteAccessRequirement(location.pathname);
+  if (requirement?.permission && !can(requirement.permission)) {
+    return <Navigate to="/unauthorized" state={{ from: location }} replace />;
+  }
+  if (requirement?.anyOf && !canAny(requirement.anyOf)) {
+    return <Navigate to="/unauthorized" state={{ from: location }} replace />;
+  }
+  if (requirement?.allOf && !canAll(requirement.allOf)) {
+    return <Navigate to="/unauthorized" state={{ from: location }} replace />;
+  }
+
+  return <>{children}</>;
 }
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
@@ -115,6 +195,24 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/unauthorized" />;
   }
   
+  return <>{children}</>;
+}
+
+function PlatformAdminRoute({ children }: { children: React.ReactNode }) {
+  const { user, isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <LoadingOverlay message="Authenticating..." />;
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" />;
+  }
+
+  if (user?.role !== 'platform_admin' && !user?.is_superuser) {
+    return <Navigate to="/unauthorized" />;
+  }
+
   return <>{children}</>;
 }
 
@@ -166,11 +264,11 @@ function AppRoutes() {
 
       {/* Platform Administration (platform admin only) */}
       <Route path="/platform" element={
-        <AdminRoute>
+        <PlatformAdminRoute>
           <Layout>
             <LazyRoute><PlatformOverview /></LazyRoute>
           </Layout>
-        </AdminRoute>
+        </PlatformAdminRoute>
       } />
       
       {/* Dashboard - eagerly loaded */}

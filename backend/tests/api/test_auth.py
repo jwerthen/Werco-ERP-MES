@@ -7,7 +7,8 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
-from app.core.security import get_password_hash
+from app.core.security import create_access_token, create_refresh_token, get_password_hash, verify_token
+from app.models.company import Company
 from app.models.user import User, UserRole
 
 
@@ -139,6 +140,30 @@ class TestAuthTokenRefresh:
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
+    def test_refresh_preserves_read_only_company_context(self, client: TestClient, db_session):
+        """Read-only platform browsing should stay read-only after token rotation."""
+        user = User(
+            email="platform-refresh@werco.com",
+            employee_id="EMP-PLATFORM-REFRESH",
+            first_name="Platform",
+            last_name="Refresh",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.PLATFORM_ADMIN,
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(user)
+        db_session.commit()
+        db_session.refresh(user)
+
+        refresh_token, _, _ = create_refresh_token(subject=user.id, company_id=2, read_only=True)
+        response = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+
+        assert response.status_code == status.HTTP_200_OK
+        payload = verify_token(response.json()["access_token"])
+        assert payload["company_id"] == 2
+        assert payload["read_only"] is True
+
 
 @pytest.mark.api
 class TestAuthLogout:
@@ -237,6 +262,51 @@ class TestAuthSecurity:
         """Test accessing protected endpoint with valid token."""
         response = client.get("/api/v1/users/me", headers=auth_headers)
         assert response.status_code == status.HTTP_200_OK
+
+    def test_read_only_company_context_blocks_writes_but_allows_switch_home(self, client: TestClient, db_session):
+        """Platform admins viewing another company should not be able to mutate tenant data."""
+        other_company = Company(id=2, name="Other Co", slug="other-co", is_active=True)
+        db_session.add(other_company)
+        platform_user = User(
+            email="platform@werco.com",
+            employee_id="EMP-PLATFORM-001",
+            first_name="Platform",
+            last_name="Admin",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.PLATFORM_ADMIN,
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(platform_user)
+        db_session.commit()
+        db_session.refresh(platform_user)
+
+        access_token = create_access_token(subject=platform_user.id, company_id=2, read_only=True)
+        headers = {"Authorization": f"Bearer {access_token}", "X-Requested-With": "XMLHttpRequest"}
+
+        browse_response = client.get("/api/v1/users/me", headers=headers)
+        assert browse_response.status_code == status.HTTP_200_OK
+
+        write_response = client.post(
+            "/api/v1/auth/register",
+            headers=headers,
+            json={
+                "email": "blocked@werco.com",
+                "employee_id": "EMP-BLOCKED-001",
+                "first_name": "Blocked",
+                "last_name": "User",
+                "password": "SecureP@ss123!",
+                "role": "operator",
+            },
+        )
+        assert write_response.status_code == status.HTTP_403_FORBIDDEN
+        assert "Read-only company context" in write_response.json()["detail"]
+
+        switch_response = client.post("/api/v1/auth/switch-company/1", headers=headers)
+        assert switch_response.status_code == status.HTTP_200_OK
+        switched_payload = verify_token(switch_response.json()["access_token"])
+        assert switched_payload["company_id"] == 1
+        assert switched_payload["read_only"] is False
 
 
 @pytest.mark.api

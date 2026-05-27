@@ -83,6 +83,7 @@ export default function POUpload() {
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState('');
   const [extractionResult, setExtractionResult] = useState<ExtractionResult | null>(null);
+  const [pdfOpening, setPdfOpening] = useState(false);
 
   // Form state for review
   const [formData, setFormData] = useState({
@@ -155,6 +156,37 @@ export default function POUpload() {
       } else {
         setError('Only PDF and Word documents (.pdf, .doc, .docx) are supported');
       }
+    }
+  };
+
+  const handleOpenPdf = async () => {
+    if (!extractionResult?.pdf_path || pdfOpening) return;
+
+    setPdfOpening(true);
+    const pdfWindow = window.open('about:blank', '_blank');
+    if (pdfWindow) {
+      pdfWindow.opener = null;
+    }
+
+    try {
+      const pdfPath = extractionResult.pdf_path.replace('uploads/purchase_orders/', '');
+      const blob = await api.downloadPOPdf(pdfPath);
+      const url = window.URL.createObjectURL(blob);
+      if (pdfWindow) {
+        pdfWindow.location.href = url;
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.click();
+      }
+      window.setTimeout(() => window.URL.revokeObjectURL(url), 30000);
+    } catch (err: any) {
+      pdfWindow?.close();
+      setError(err.response?.data?.detail || 'Failed to open PDF');
+    } finally {
+      setPdfOpening(false);
     }
   };
 
@@ -561,14 +593,14 @@ export default function POUpload() {
                 {extractionResult?.pdf_page_count} page(s)
               </p>
               {extractionResult?.pdf_path && (
-                <a
-                  href={api.getPOPdfUrl(extractionResult.pdf_path.replace('uploads/purchase_orders/', ''))}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
+                  onClick={handleOpenPdf}
+                  disabled={pdfOpening}
                   className="btn-secondary text-sm mt-4 inline-block"
                 >
-                  Open PDF
-                </a>
+                  {pdfOpening ? 'Opening...' : 'Open PDF'}
+                </button>
               )}
             </div>
           </div>

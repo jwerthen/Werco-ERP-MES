@@ -345,13 +345,19 @@ def refresh_token(request: Request, token_request: RefreshTokenRequest, db: Sess
 
     # Preserve company context from the refresh token
     token_company_id = payload.get("company_id") or user.company_id
+    token_read_only = bool(payload.get("read_only", False))
 
     # Create new access token
-    new_access_token = create_access_token(subject=user.id, company_id=token_company_id)
+    new_access_token = create_access_token(subject=user.id, company_id=token_company_id, read_only=token_read_only)
 
     # Token rotation: create NEW refresh token (invalidates the old one implicitly)
     # Use same session_id to maintain session continuity
-    new_refresh_token, _, _ = create_refresh_token(subject=user.id, session_id=session_id, company_id=token_company_id)
+    new_refresh_token, _, _ = create_refresh_token(
+        subject=user.id,
+        session_id=session_id,
+        company_id=token_company_id,
+        read_only=token_read_only,
+    )
 
     log_auth_event(db, "TOKEN_REFRESHED", user=user, success=True, request=request)
 
@@ -520,8 +526,9 @@ def switch_company(
     if not company:
         raise HTTPException(status_code=404, detail="Company not found or inactive")
 
-    access_token = create_access_token(subject=current_user.id, company_id=company.id)
-    refresh_token, _, _ = create_refresh_token(subject=current_user.id, company_id=company.id)
+    read_only = company.id != current_user.company_id
+    access_token = create_access_token(subject=current_user.id, company_id=company.id, read_only=read_only)
+    refresh_token, _, _ = create_refresh_token(subject=current_user.id, company_id=company.id, read_only=read_only)
 
     log_auth_event(db, "COMPANY_SWITCH", user=current_user, success=True, request=request)
 

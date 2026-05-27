@@ -17,7 +17,10 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def create_access_token(
-    subject: str | Any, expires_delta: Optional[timedelta] = None, company_id: Optional[int] = None
+    subject: str | Any,
+    expires_delta: Optional[timedelta] = None,
+    company_id: Optional[int] = None,
+    read_only: bool = False,
 ) -> str:
     """Create a short-lived access token (default 15 minutes)."""
     if expires_delta:
@@ -30,6 +33,7 @@ def create_access_token(
         "sub": str(subject),
         "type": "access",
         "iat": datetime.utcnow(),
+        "ro": read_only,
     }
     if company_id is not None:
         to_encode["cid"] = company_id
@@ -38,7 +42,10 @@ def create_access_token(
 
 
 def create_refresh_token(
-    subject: str | Any, session_id: Optional[str] = None, company_id: Optional[int] = None
+    subject: str | Any,
+    session_id: Optional[str] = None,
+    company_id: Optional[int] = None,
+    read_only: bool = False,
 ) -> Tuple[str, str, datetime]:
     """
     Create a longer-lived refresh token (default 7 days).
@@ -59,6 +66,7 @@ def create_refresh_token(
         "session_id": session_id,
         "absolute_timeout": absolute_timeout.isoformat(),
         "iat": datetime.utcnow(),
+        "ro": read_only,
     }
     if company_id is not None:
         to_encode["cid"] = company_id
@@ -67,7 +75,7 @@ def create_refresh_token(
 
 
 def verify_token(token: str) -> Optional[dict]:
-    """Verify an access token and return user_id and company_id."""
+    """Verify an access token and return user context claims."""
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         if payload.get("type") != "access":
@@ -75,6 +83,7 @@ def verify_token(token: str) -> Optional[dict]:
         return {
             "user_id": payload.get("sub"),
             "company_id": payload.get("cid"),  # None for legacy tokens
+            "read_only": bool(payload.get("ro", False)),
         }
     except JWTError:
         return None
@@ -102,6 +111,7 @@ def verify_refresh_token(token: str) -> Optional[dict]:
             "session_id": payload.get("session_id"),
             "absolute_timeout": absolute_timeout_str,
             "company_id": payload.get("cid"),
+            "read_only": bool(payload.get("ro", False)),
         }
     except JWTError:
         return None
@@ -110,7 +120,11 @@ def verify_refresh_token(token: str) -> Optional[dict]:
 async def get_current_user_from_token(token: str, db: AsyncSession) -> User:
     """Get current user from JWT token (async version for WebSockets)."""
 
-    user_id = verify_token(token)
+    payload = verify_token(token)
+    if payload is None:
+        raise Exception("Could not validate credentials")
+
+    user_id = payload.get("user_id")
     if user_id is None:
         raise Exception("Could not validate credentials")
 

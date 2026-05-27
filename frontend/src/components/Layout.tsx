@@ -60,6 +60,7 @@ interface NavItem {
   children?: NavItem[];
   badge?: number;
   adminOnly?: boolean;
+  platformOnly?: boolean;
 }
 
 const navigation: NavItem[] = [
@@ -145,7 +146,7 @@ const navigation: NavItem[] = [
       { name: 'Supplier Scorecards', href: '/supplier-scorecards', icon: ChartBarIcon },
       { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
       { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
-      { name: 'Platform Overview', href: '/platform', icon: BuildingOfficeIcon, adminOnly: true },
+      { name: 'Platform Overview', href: '/platform', icon: BuildingOfficeIcon, platformOnly: true },
       { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },
     ],
   },
@@ -175,17 +176,22 @@ const NavGroup = React.memo(function NavGroup({
   onNavigate,
   collapsed,
   isAdmin,
+  isPlatformAdmin,
 }: {
   item: NavItem;
   location: any;
   onNavigate?: () => void;
   collapsed?: boolean;
   isAdmin?: boolean;
+  isPlatformAdmin?: boolean;
 }) {
   // Filter children based on admin status
   const visibleChildren = useMemo(
-    () => item.children?.filter(child => !child.adminOnly || isAdmin),
-    [item.children, isAdmin]
+    () => item.children?.filter(child =>
+      (!child.adminOnly || isAdmin) &&
+      (!child.platformOnly || isPlatformAdmin)
+    ),
+    [item.children, isAdmin, isPlatformAdmin]
   );
 
   const [isOpen, setIsOpen] = useState(() => {
@@ -366,6 +372,8 @@ export default function Layout({ children }: LayoutProps) {
   );
 
   const isOperator = user?.role === 'operator';
+  const isAdminUser = user?.role === 'admin' || user?.role === 'platform_admin' || user?.is_superuser === true;
+  const isPlatformAdmin = user?.role === 'platform_admin' || user?.is_superuser === true;
   const operatorDisplayName = useMemo(() => {
     const name = [user?.first_name, user?.last_name].filter(Boolean).join(' ').trim();
     return name || user?.email || 'Operator';
@@ -457,7 +465,8 @@ export default function Layout({ children }: LayoutProps) {
               item={item}
               location={location}
               onNavigate={() => setSidebarOpen(false)}
-              isAdmin={user?.role === 'admin'}
+              isAdmin={isAdminUser}
+              isPlatformAdmin={isPlatformAdmin}
             />
           ))}
         </nav>

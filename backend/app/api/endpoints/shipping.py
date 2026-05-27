@@ -115,6 +115,47 @@ def list_shipments(
     return result
 
 
+@router.get("/ready-to-ship")
+def get_ready_to_ship(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Get completed work orders ready to ship"""
+    work_orders = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.company_id == company_id)
+        .options(joinedload(WorkOrder.part))
+        .filter(WorkOrder.status == WorkOrderStatus.COMPLETE)
+        .order_by(WorkOrder.due_date)
+        .all()
+    )
+
+    result = []
+    for wo in work_orders:
+        # Check if already shipped
+        existing = (
+            db.query(Shipment)
+            .filter(Shipment.work_order_id == wo.id, Shipment.status != ShipmentStatus.CANCELLED)
+            .first()
+        )
+
+        if not existing:
+            result.append(
+                {
+                    "work_order_id": wo.id,
+                    "work_order_number": wo.work_order_number,
+                    "part_number": wo.part.part_number if wo.part else None,
+                    "part_name": wo.part.name if wo.part else None,
+                    "customer_name": wo.customer_name,
+                    "quantity_complete": wo.quantity_complete,
+                    "due_date": wo.due_date.isoformat() if wo.due_date else None,
+                }
+            )
+
+    return result
+
+
 @router.get("/{shipment_id}")
 def get_shipment(
     shipment_id: int,
@@ -158,47 +199,6 @@ def get_shipment(
         "packing_notes": shipment.packing_notes,
         "created_at": shipment.created_at.isoformat(),
     }
-
-
-@router.get("/ready-to-ship")
-def get_ready_to_ship(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Get completed work orders ready to ship"""
-    work_orders = (
-        db.query(WorkOrder)
-        .filter(WorkOrder.company_id == company_id)
-        .options(joinedload(WorkOrder.part))
-        .filter(WorkOrder.status == WorkOrderStatus.COMPLETE)
-        .order_by(WorkOrder.due_date)
-        .all()
-    )
-
-    result = []
-    for wo in work_orders:
-        # Check if already shipped
-        existing = (
-            db.query(Shipment)
-            .filter(Shipment.work_order_id == wo.id, Shipment.status != ShipmentStatus.CANCELLED)
-            .first()
-        )
-
-        if not existing:
-            result.append(
-                {
-                    "work_order_id": wo.id,
-                    "work_order_number": wo.work_order_number,
-                    "part_number": wo.part.part_number if wo.part else None,
-                    "part_name": wo.part.name if wo.part else None,
-                    "customer_name": wo.customer_name,
-                    "quantity_complete": wo.quantity_complete,
-                    "due_date": wo.due_date.isoformat() if wo.due_date else None,
-                }
-            )
-
-    return result
 
 
 @router.post("/", response_model=ShipmentResponse)

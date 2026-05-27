@@ -62,6 +62,23 @@ def create_mrp_run(
         raise HTTPException(status_code=500, detail=f"MRP run failed: {str(e)}")
 
 
+@router.get("/runs/latest", response_model=Optional[MRPRunResponse])
+def get_latest_mrp_run(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Get the most recent completed MRP run"""
+    run = (
+        db.query(MRPRun)
+        .filter(MRPRun.company_id == company_id, MRPRun.status == MRPRunStatus.COMPLETE)
+        .order_by(MRPRun.completed_at.desc())
+        .first()
+    )
+
+    return run
+
+
 @router.get("/runs/{run_id}", response_model=MRPRunDetail)
 def get_mrp_run(
     run_id: int,
@@ -215,24 +232,6 @@ def get_mrp_actions(
         )
 
     return result
-
-
-@router.get("/runs/latest", response_model=Optional[MRPRunResponse])
-def get_latest_mrp_run(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Get the most recent completed MRP run"""
-    run = (
-        db.query(MRPRun)
-        .filter(MRPRun.company_id == company_id, MRPRun.status == MRPRunStatus.COMPLETE)
-        .order_by(MRPRun.completed_at.desc())
-        .first()
-    )
-
-    return run
-
 
 @router.get("/shortages")
 def get_current_shortages(

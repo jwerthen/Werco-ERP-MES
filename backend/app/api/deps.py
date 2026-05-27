@@ -8,9 +8,19 @@ from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+SAFE_READ_ONLY_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
-def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)) -> User:
+def _is_read_only_exempt_path(path: str) -> bool:
+    """Allow session-management requests needed to leave read-only mode."""
+    return path.endswith("/auth/logout") or "/auth/switch-company/" in path
+
+
+def get_current_user(
+    request: Request,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -35,7 +45,18 @@ def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_
     # Attach active company context from JWT (may differ from user.company_id
     # when a platform admin switches to view another company)
     token_company_id = payload.get("company_id")
-    user._active_company_id = token_company_id if token_company_id else user.company_id
+    user._active_company_id = token_company_id if token_company_id is not None else user.company_id
+    user._read_only_company_context = bool(payload.get("read_only", False))
+
+    if (
+        user._read_only_company_context
+        and request.method.upper() not in SAFE_READ_ONLY_METHODS
+        and not _is_read_only_exempt_path(request.url.path)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Read-only company context cannot modify data",
+        )
 
     return user
 

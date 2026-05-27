@@ -79,6 +79,8 @@ def list_documents(
     vendor_id: Optional[int] = None,
     document_type: Optional[str] = None,
     search: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -102,7 +104,7 @@ def list_documents(
             )
         )
 
-    return query.order_by(Document.created_at.desc()).limit(100).all()
+    return query.order_by(Document.created_at.desc()).offset(skip).limit(limit).all()
 
 
 @router.post("/upload", response_model=DocumentResponse)
@@ -156,6 +158,11 @@ async def upload_document(
     return document
 
 
+@router.get("/types/list")
+def list_document_types(current_user: User = Depends(get_current_user)):
+    return [{"value": t.value, "label": t.value.replace("_", " ").title()} for t in DocumentType]
+
+
 @router.get("/{document_id}", response_model=DocumentResponse)
 def get_document(document_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     document = db.query(Document).filter(Document.id == document_id).first()
@@ -196,8 +203,3 @@ def delete_document(
     db.commit()
 
     return {"message": "Document deleted"}
-
-
-@router.get("/types/list")
-def list_document_types(current_user: User = Depends(get_current_user)):
-    return [{"value": t.value, "label": t.value.replace("_", " ").title()} for t in DocumentType]

@@ -12,6 +12,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _user_id_from_token(token: str) -> Optional[str]:
+    from app.core.security import verify_token
+
+    payload = verify_token(token)
+    if not payload or not payload.get("user_id"):
+        return None
+    return str(payload["user_id"])
+
+
 @router.websocket("/ws/updates")
 async def websocket_updates(websocket: WebSocket, token: Optional[str] = Query(None)):
     """
@@ -25,11 +34,7 @@ async def websocket_updates(websocket: WebSocket, token: Optional[str] = Query(N
     # Verify token if provided
     if token:
         try:
-            from app.core.security import verify_token
-
-            user_id = verify_token(token)
-            if user_id:
-                user_id = user_id
+            user_id = _user_id_from_token(token)
         except Exception as e:
             logger.warning(f"Invalid token in WebSocket connection: {e}")
 
@@ -62,14 +67,11 @@ async def websocket_shop_floor(websocket: WebSocket, work_center_id: int, token:
     Requires authentication.
     """
     # Verify authentication
-    from app.core.security import verify_token
-
-    user_id = verify_token(token)
+    user_id = _user_id_from_token(token)
     if not user_id:
         await websocket.close(code=1008)
         return
 
-    user_id = str(user_id)
     await manager.connect(websocket, user_id)
 
     try:
@@ -105,14 +107,11 @@ async def websocket_work_order(websocket: WebSocket, work_order_id: int, token: 
     WebSocket endpoint for real-time work order status updates.
     Requires authentication.
     """
-    from app.core.security import verify_token
-
-    user_id = verify_token(token)
+    user_id = _user_id_from_token(token)
     if not user_id:
         await websocket.close(code=1008)
         return
 
-    user_id = str(user_id)
     await manager.connect(websocket, user_id)
 
     try:

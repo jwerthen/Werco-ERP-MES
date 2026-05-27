@@ -416,19 +416,6 @@ def vendor_scorecard_history(
     return [scorecard_to_response(sc) for sc in scorecards]
 
 
-@router.get("/supplier-scorecards/{scorecard_id}", response_model=ScorecardResponse)
-def get_scorecard(scorecard_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    sc = (
-        db.query(SupplierScorecard)
-        .options(joinedload(SupplierScorecard.vendor))
-        .filter(SupplierScorecard.id == scorecard_id)
-        .first()
-    )
-    if not sc:
-        raise HTTPException(status_code=404, detail="Scorecard not found")
-    return scorecard_to_response(sc)
-
-
 @router.get("/supplier-scorecards/", response_model=List[ScorecardResponse])
 def list_scorecards(
     vendor_id: Optional[int] = None,
@@ -455,6 +442,19 @@ def list_scorecards(
 
     scorecards = query.order_by(SupplierScorecard.period_end.desc()).offset(skip).limit(limit).all()
     return [scorecard_to_response(sc) for sc in scorecards]
+
+
+@router.get("/supplier-scorecards/{scorecard_id}", response_model=ScorecardResponse)
+def get_scorecard(scorecard_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    sc = (
+        db.query(SupplierScorecard)
+        .options(joinedload(SupplierScorecard.vendor))
+        .filter(SupplierScorecard.id == scorecard_id)
+        .first()
+    )
+    if not sc:
+        raise HTTPException(status_code=404, detail="Scorecard not found")
+    return scorecard_to_response(sc)
 
 
 @router.post("/supplier-scorecards/", response_model=ScorecardResponse)

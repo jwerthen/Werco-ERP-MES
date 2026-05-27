@@ -240,8 +240,8 @@ export default function CustomerComplaints() {
       const params: Record<string, string> = {};
       if (statusFilter) params.status = statusFilter;
       if (severityFilter) params.severity = severityFilter;
-      const response = await api.get<Complaint[]>('/complaints/', { params });
-      setComplaints(response.data);
+      const response = await api.getComplaints(params);
+      setComplaints(response);
     } catch (err: any) {
       console.error('Failed to load complaints:', err);
       setError(err?.response?.data?.detail || 'Failed to load complaints');
@@ -252,8 +252,8 @@ export default function CustomerComplaints() {
 
   const loadDashboard = useCallback(async () => {
     try {
-      const response = await api.get<Dashboard>('/complaints/dashboard');
-      setDashboard(response.data);
+      const response = await api.getComplaintsDashboard();
+      setDashboard(response);
     } catch (err) {
       console.error('Failed to load dashboard:', err);
     }
@@ -342,7 +342,7 @@ export default function CustomerComplaints() {
         if (createForm.date_received) payload.date_received = createForm.date_received;
         if (createForm.date_of_occurrence) payload.date_of_occurrence = createForm.date_of_occurrence;
 
-        await api.post('/complaints/', payload);
+        await api.createComplaint(payload);
         setShowCreateModal(false);
         loadComplaints();
         loadDashboard();
@@ -390,7 +390,7 @@ export default function CustomerComplaints() {
         if (rmaForm.lot_number) payload.lot_number = rmaForm.lot_number;
         if (rmaForm.notes) payload.notes = rmaForm.notes;
 
-        await api.post('/rma/', payload);
+        await api.createRMA(payload);
         setShowRMAModal(false);
         loadComplaints();
         loadDashboard();
@@ -798,7 +798,7 @@ export default function CustomerComplaints() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                window.open(`/complaints/${c.id}`, '_self');
+                                toggleExpand(c.id);
                               }}
                               className="du-btn du-btn-sm du-btn-ghost gap-1"
                             >
