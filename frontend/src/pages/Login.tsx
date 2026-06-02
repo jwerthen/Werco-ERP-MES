@@ -63,7 +63,7 @@ export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [employeeId, setEmployeeId] = useState('');
-  const [loginMode, setLoginMode] = useState<'employee' | 'email'>('employee');
+  const [loginMode, setLoginMode] = useState<'employee' | 'email'>('email');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);

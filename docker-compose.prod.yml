@@ -5,41 +5,11 @@ version: '3.8'
 #
 # Prerequisites:
 # 1. Create .env.prod file with all required secrets (see .env.prod.example)
-# 2. Set up SSL certificates in ./nginx/certs/ directory
-# 3. Configure your domain DNS to point to this server
+# 2. Configure DATABASE_URL with the Supabase Postgres connection string
+# 3. Set up SSL certificates in ./nginx/certs/ directory
+# 4. Configure your domain DNS to point to this server
 
 services:
-  # PostgreSQL Database
-  db:
-    image: postgres:15-alpine
-    container_name: werco-db-prod
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-werco_erp}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./backups:/backups
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-werco_erp}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    restart: always
-    networks:
-      - werco-internal
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
-    # Security: No port exposure - only accessible within Docker network
-    # For backups, use: docker exec werco-db-prod pg_dump -U $POSTGRES_USER $POSTGRES_DB > backup.sql
-
   # Redis (for caching and job queue)
   redis:
     image: redis:7-alpine
@@ -80,7 +50,11 @@ services:
     container_name: werco-backend-prod
     environment:
       # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-werco_erp}
+      DATABASE_URL: ${DATABASE_URL:?Supabase DATABASE_URL required}
+      DATABASE_PROVIDER: supabase
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_PROJECT_REF: ${SUPABASE_PROJECT_REF:-}
+      SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD:-}
       
       # Security
       SECRET_KEY: ${SECRET_KEY}
@@ -122,8 +96,6 @@ services:
       # Webhooks
       WEBHOOK_ENCRYPTION_KEY: ${WEBHOOK_ENCRYPTION_KEY:-}
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
@@ -138,6 +110,7 @@ services:
     restart: always
     networks:
       - werco-internal
+      - werco-external
     deploy:
       resources:
         limits:
@@ -156,7 +129,11 @@ services:
     image: werco-backend:${VERSION:-latest}
     container_name: werco-worker-prod
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-werco_erp}
+      DATABASE_URL: ${DATABASE_URL:?Supabase DATABASE_URL required}
+      DATABASE_PROVIDER: supabase
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_PROJECT_REF: ${SUPABASE_PROJECT_REF:-}
+      SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD:-}
       SECRET_KEY: ${SECRET_KEY}
       REFRESH_TOKEN_SECRET_KEY: ${REFRESH_TOKEN_SECRET_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -174,8 +151,6 @@ services:
       LOG_LEVEL: WARNING
       ENVIRONMENT: production
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
@@ -185,6 +160,7 @@ services:
     restart: always
     networks:
       - werco-internal
+      - werco-external
     deploy:
       resources:
         limits:
@@ -249,8 +225,6 @@ services:
           memory: 64M
 
 volumes:
-  postgres_data:
-    driver: local
   redis_data:
     driver: local
   backend_logs:

@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Create engine with connection pooling
 engine = create_engine(
-    settings.DATABASE_URL,
+    settings.SQLALCHEMY_DATABASE_URL,
     poolclass=QueuePool,
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_MAX_OVERFLOW,
@@ -67,11 +67,13 @@ def get_pool_status() -> dict:
     """
     pool = engine.pool
     return {
+        "provider": settings.database_provider,
+        "host": settings.safe_database_host,
         "pool_size": pool.size(),
         "checked_out": pool.checkedout(),
         "overflow": pool.overflow(),
         "checked_in": pool.checkedin(),
-        "invalid": pool.invalidatedcount() if hasattr(pool, 'invalidatedcount') else 0,
+        "invalid": pool.invalidatedcount() if hasattr(pool, "invalidatedcount") else 0,
     }
 
 

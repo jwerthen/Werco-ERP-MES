@@ -34,8 +34,11 @@ checks.append({'name': 'DEBUG mode disabled', 'pass': os.getenv('DEBUG') != 'tru
 checks.append({'name': 'Sentry configured', 'pass': 'sentry.io' in os.getenv('SENTRY_DSN', ''), 'critical': True})
 
 # Check 4: Database URL
+database_configured = bool(os.getenv('DATABASE_URL')) or bool(
+    os.getenv('SUPABASE_PROJECT_REF') and os.getenv('SUPABASE_DB_PASSWORD')
+)
 checks.append(
-    {'name': 'Database configured', 'pass': 'postgresql://' in os.getenv('DATABASE_URL', ''), 'critical': True}
+    {'name': 'Supabase database configured', 'pass': database_configured, 'critical': True}
 )
 
 # Check 5: Environment set

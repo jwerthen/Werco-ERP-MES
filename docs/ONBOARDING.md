@@ -108,19 +108,17 @@ cp .env.example .env
 npm start
 ```
 
-### 3. Database Setup (Manual)
+### 3. Database Setup
 
+Create or open the shared Supabase project, then update `backend/.env` with the Supabase Postgres URL from Project Settings > Database:
+```
+DATABASE_URL=postgresql://postgres.meatfdvteugbeksckgqg:<your-supabase-db-pass>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
+```
+
+Run migrations against Supabase before starting the backend:
 ```bash
-# Create PostgreSQL database
-createdb werco_erp
-
-# Or using psql
-psql -c "CREATE DATABASE werco_erp;"
-```
-
-Update `backend/.env` with your database URL:
-```
-DATABASE_URL=postgresql://your_user:your_password@localhost:5432/werco_erp
+cd backend
+alembic upgrade head
 ```
 
 ## Project Structure

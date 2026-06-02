@@ -18,7 +18,7 @@
 
 .EXAMPLE
     .\db-backup.ps1
-    .\db-backup.ps1 -DatabaseUrl "postgresql://user:pass@localhost:5432/werco_erp"
+    .\db-backup.ps1 -DatabaseUrl "postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres"
     .\db-backup.ps1 -RetentionDays 7
 #>
 

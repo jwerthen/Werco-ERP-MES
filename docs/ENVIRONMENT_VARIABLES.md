@@ -15,7 +15,15 @@ This document describes all environment variables used by Werco ERP. Use this as
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DATABASE_URL` | Yes* | - | PostgreSQL connection string. Format: `postgresql://user:password@host:port/database` |
+| `DATABASE_URL` | Yes* | - | Supabase Postgres connection string from Project Settings > Database. Format: `postgresql://user:password@host:port/database` |
+| `DATABASE_PROVIDER` | No | `supabase` | Database provider label used by health checks and deployment validation |
+| `SUPABASE_URL` | No | - | Supabase project URL, used to derive the project ref when `DATABASE_URL` is omitted |
+| `SUPABASE_PROJECT_REF` | No | - | Supabase project ref, used with `SUPABASE_DB_PASSWORD` to build a direct Postgres URL |
+| `SUPABASE_DB_PASSWORD` | No | - | Supabase database password, used when `DATABASE_URL` is omitted |
+| `SUPABASE_DB_HOST` | No | `aws-1-us-west-2.pooler.supabase.com` | Supabase database host override |
+| `SUPABASE_DB_PORT` | No | `5432` | Supabase database port |
+| `SUPABASE_DB_NAME` | No | `postgres` | Supabase database name |
+| `SUPABASE_DB_USER` | No | `postgres` | Supabase database user |
 
 ### Connection Pool
 
@@ -36,14 +44,15 @@ This document describes all environment variables used by Werco ERP. Use this as
 
 **Examples:**
 ```bash
-# Local development
-DATABASE_URL=postgresql://werco_user:<your-db-pass>@localhost:5432/werco_erp
+# Supabase direct connection
+DATABASE_URL=postgresql://postgres.meatfdvteugbeksckgqg:<your-supabase-db-pass>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
 
-# Railway (automatically provided)
-DATABASE_URL=postgresql://postgres:<auto>@<auto>.railway.internal:5432/railway
+# Supabase pooler/session connection, if provided by your project
+DATABASE_URL=postgresql://postgres.<project-ref>:<your-supabase-db-pass>@<pooler-host>.pooler.supabase.com:5432/postgres
 
-# Docker Compose
-DATABASE_URL=postgresql://werco_user:<your-db-pass>@db:5432/werco_erp
+# Build from project settings instead of DATABASE_URL
+SUPABASE_PROJECT_REF=meatfdvteugbeksckgqg
+SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 ```
 
 ### Security

@@ -86,7 +86,8 @@ python -m venv venv
 venv\Scripts\activate  # Windows
 pip install -r requirements.txt
 
-# Set up PostgreSQL and update DATABASE_URL in .env
+# Set DATABASE_URL to your Supabase Postgres connection string in .env
+alembic upgrade head
 python -m scripts.seed_data
 uvicorn app.main:app --reload
 ```

@@ -3,6 +3,7 @@
 Werco ERP Startup Verification Script
 Checks all critical systems before allowing startup.
 """
+
 import os
 import sys
 import subprocess
@@ -10,21 +11,23 @@ import requests
 from datetime import datetime
 
 # ANSI color codes
-GREEN = '\033[0;32m'
-RED = '\033[0;31m'
-YELLOW = '\033[1;33m'
-BLUE = '\033[0;34m'
-NC = '\033[0m'  # No Color
+GREEN = "\033[0;32m"
+RED = "\033[0;31m"
+YELLOW = "\033[1;33m"
+BLUE = "\033[0;34m"
+NC = "\033[0m"  # No Color
 
 # Configuration checks
 CRITICAL_CHECKS = []
 WARNING_CHECKS = []
 OPTIMAl_CHECKS = []
 
+
 def print_header(text):
     print(f"\n{BLUE}{'='*60}{NC}")
     print(f"{BLUE}{text}{NC}")
     print(f"{BLUE}{'='*60}{NC}\n")
+
 
 def check(name, condition, critical=True):
     """Check a condition and print result."""
@@ -42,6 +45,7 @@ def check(name, condition, critical=True):
             WARNING_CHECKS.append((name, False))
         return False
 
+
 print_header("Werco ERP Startup Verification")
 print(f"Started at: {datetime.now()}")
 
@@ -49,46 +53,57 @@ print(f"Started at: {datetime.now()}")
 print_header("1. Environment Variables")
 
 critical_env_vars = [
-    'SECRET_KEY',
-    'DATABASE_URL',
-    'SENTRY_DSN',
+    "SECRET_KEY",
+    "SENTRY_DSN",
 ]
 
 print(f"Checking critical environment variables...")
 for var in critical_env_vars:
     value = os.getenv(var)
-    if var == 'SECRET_KEY':
-        check(f"{var} configured", value and len(value) > 32 and value != 'CHANGE_THIS'[:32])
-    elif var == 'DATABASE_URL':
-        check(f"{var} configured", value is not None and 'localhost' in value)
+    if var == "SECRET_KEY":
+        check(
+            f"{var} configured",
+            value and len(value) > 32 and value != "CHANGE_THIS"[:32],
+        )
     else:
         check(f"{var} configured", value is not None)
+
+database_configured = bool(os.getenv("DATABASE_URL")) or bool(
+    os.getenv("SUPABASE_PROJECT_REF") and os.getenv("SUPABASE_DB_PASSWORD")
+)
+check("Supabase database configured", database_configured)
 
 # 2. Application Settings
 print_header("2. Application Settings")
 
-check("DEBUG mode disabled", os.getenv('DEBUG') != 'true', critical=False)
-check("ENVIRONMENT set", os.getenv('ENVIRONMENT') in ['development', 'staging', 'production'], critical=False)
-check("Rate limiting enabled", os.getenv('RATE_LIMIT_ENABLED') == 'true', critical=False)
+check("DEBUG mode disabled", os.getenv("DEBUG") != "true", critical=False)
+check(
+    "ENVIRONMENT set",
+    os.getenv("ENVIRONMENT") in ["development", "staging", "production"],
+    critical=False,
+)
+check(
+    "Rate limiting enabled", os.getenv("RATE_LIMIT_ENABLED") == "true", critical=False
+)
 
 # 3. API Health Check
 print_header("3. API Health Check")
 
 try:
-    backend_url = os.getenv('BACKEND_URL', 'http://localhost:8000')
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
     response = requests.get(f"{backend_url}/health", timeout=5)
     check("Backend health endpoint", response.status_code == 200)
 
     if response.status_code == 200:
         health_data = response.json()
-        check("App name in health response", 'app' in health_data)
-        check("Status healthy", health_data.get('status') == 'healthy')
+        check("App name in health response", "app" in health_data)
+        check("Status healthy", health_data.get("status") == "healthy")
 
     # Try API docs (should be disabled in production)
     try:
         docs_response = requests.get(f"{backend_url}/api/docs", timeout=5)
         docs_available = docs_response.status_code == 200
-        if os.getenv('ENVIRONMENT') == 'production':
+        if os.getenv("ENVIRONMENT") == "production":
             check("API docs disabled (production)", not docs_available, critical=False)
         else:
             check("API docs available (dev/staging)", docs_available, critical=False)
@@ -104,7 +119,13 @@ print_header("4. Database Connection")
 
 try:
     import psycopg2
-    db_url = os.getenv('DATABASE_URL')
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+    from app.core.config import settings
+
+    db_url = settings.SQLALCHEMY_DATABASE_URL.replace(
+        "postgresql+psycopg2://", "postgresql://", 1
+    )
     if db_url:
         conn = psycopg2.connect(db_url)
         check("Database connection successful", True)
@@ -126,10 +147,11 @@ except Exception as e:
 # 5. Redis Check (Optional)
 print_header("5. Redis Cache (Optional)")
 
-redis_url = os.getenv('REDIS_URL')
+redis_url = os.getenv("REDIS_URL")
 if redis_url:
     try:
         import redis
+
         r = redis.from_url(redis_url)
         r.ping()
         check("Redis connection", True)
@@ -146,18 +168,18 @@ else:
 # 6. Sentry Configuration
 print_header("6. Sentry Monitoring")
 
-sentry_dsn = os.getenv('SENTRY_DSN')
+sentry_dsn = os.getenv("SENTRY_DSN")
 if sentry_dsn:
-    check("Sentry DSN configured", 'ingest.sentry.io' in sentry_dsn)
+    check("Sentry DSN configured", "ingest.sentry.io" in sentry_dsn)
 else:
     check("Sentry DSN configured", False)
 
 # 7. File Storage Check (Optional)
 print_header("7. File Storage (S3)")
 
-aws_key = os.getenv('AWS_ACCESS_KEY_ID')
-aws_secret = os.getenv('AWS_SECRET_ACCESS_KEY')
-s3_bucket = os.getenv('S3_BUCKET_NAME')
+aws_key = os.getenv("AWS_ACCESS_KEY_ID")
+aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
+s3_bucket = os.getenv("S3_BUCKET_NAME")
 
 if all([aws_key, aws_secret, s3_bucket]):
     check("AWS credentials configured", True)
@@ -172,19 +194,21 @@ print_header("8. Security Headers")
 try:
     response = requests.get(f"{backend_url}/health", timeout=5)
     headers = response.headers
-    check("X-Frame-Options header", 'X-Frame-Options' in headers)
-    check("X-Content-Type-Options", 'X-Content-Type-Options' in headers)
-    check("X-XSS-Protection", 'X-XSS-Protection' in headers)
+    check("X-Frame-Options header", "X-Frame-Options" in headers)
+    check("X-Content-Type-Options", "X-Content-Type-Options" in headers)
+    check("X-XSS-Protection", "X-XSS-Protection" in headers)
 except:
     pass
 
 # 9. Rate Limiting Check
 print_header("9. Rate Limiting")
 
-if os.getenv('RATE_LIMIT_ENABLED') == 'true':
+if os.getenv("RATE_LIMIT_ENABLED") == "true":
     check("Rate limiting enabled in config", True)
     # Would need to make multiple requests to actually verify
-    print(f"{YELLOW}ℹ{NC} Rate limiting: Configured but requires load testing to verify")
+    print(
+        f"{YELLOW}ℹ{NC} Rate limiting: Configured but requires load testing to verify"
+    )
 else:
     check("Rate limiting enabled", False, critical=False)
 
@@ -193,6 +217,7 @@ print_header("10. WebSocket Support")
 
 try:
     import websockets
+
     check("websockets library installed", True)
     check("WebSocket infrastructure", True)
 except ImportError:

@@ -89,7 +89,9 @@ class TestRefreshTokenSecretKeyValidation:
 
                 Settings()
 
-            assert "REFRESH_TOKEN_SECRET_KEY is set to an insecure value" in str(exc_info.value)
+            assert "REFRESH_TOKEN_SECRET_KEY is set to an insecure value" in str(
+                exc_info.value
+            )
 
     def test_short_refresh_key_rejected(self):
         """Test that a REFRESH_TOKEN_SECRET_KEY less than 32 characters is rejected."""
@@ -158,3 +160,93 @@ class TestInsecureKeyPatterns:
                 from app.core.config import Settings
 
                 Settings()
+
+
+class TestSupabaseDatabaseConfiguration:
+    """Test Supabase database URL normalization and production enforcement."""
+
+    def test_supabase_database_url_is_normalized_for_sqlalchemy(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://postgres:secret@db.example.supabase.co:5432/postgres",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+            },
+            clear=False,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+
+            assert settings.SQLALCHEMY_DATABASE_URL.startswith("postgresql+psycopg2://")
+            assert "sslmode=require" in settings.SQLALCHEMY_DATABASE_URL
+            assert (
+                "application_name=werco_erp_supabase"
+                in settings.SQLALCHEMY_DATABASE_URL
+            )
+            assert settings.database_provider == "supabase"
+
+    def test_supabase_database_url_can_be_built_from_project_ref(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "",
+                "SUPABASE_PROJECT_REF": "abc123",
+                "SUPABASE_DB_PASSWORD": "db-password",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+            },
+            clear=False,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+
+            assert (
+                "db.abc123.supabase.co:5432/postgres"
+                in settings.SQLALCHEMY_DATABASE_URL
+            )
+            assert settings.safe_database_host == "db.abc123.supabase.co"
+
+    def test_supabase_pooler_url_uses_project_qualified_user(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "",
+                "SUPABASE_PROJECT_REF": "abc123",
+                "SUPABASE_DB_HOST": "aws-1-us-west-2.pooler.supabase.com",
+                "SUPABASE_DB_PASSWORD": "db-password",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+            },
+            clear=False,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+
+            assert "postgres.abc123" in settings.SQLALCHEMY_DATABASE_URL
+            assert settings.safe_database_host == "aws-1-us-west-2.pooler.supabase.com"
+
+    def test_production_rejects_non_supabase_database_by_default(self):
+        from pydantic import ValidationError
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://postgres:secret@localhost:5432/werco_erp",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "ENVIRONMENT": "production",
+                "DEBUG": "false",
+                "CORS_ORIGINS": "https://erp.example.com",
+            },
+            clear=False,
+        ):
+            with pytest.raises(ValidationError) as exc_info:
+                from app.core.config import Settings
+
+                Settings()
+
+            assert "Production must use Supabase" in str(exc_info.value)

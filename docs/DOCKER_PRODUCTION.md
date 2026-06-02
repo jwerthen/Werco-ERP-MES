@@ -19,7 +19,6 @@ cp .env.prod.example .env.prod
 # 2. Generate secure secrets
 python -c "import secrets; print(secrets.token_urlsafe(64))"  # For SECRET_KEY
 python -c "import secrets; print(secrets.token_urlsafe(64))"  # For REFRESH_TOKEN_SECRET_KEY
-python -c "import secrets; print(secrets.token_urlsafe(32))"  # For POSTGRES_PASSWORD
 python -c "import secrets; print(secrets.token_urlsafe(32))"  # For REDIS_PASSWORD
 
 # 3. Set up SSL certificates
@@ -55,13 +54,9 @@ docker-compose -f docker-compose.prod.yml logs -f
 │  (React/nginx)  │ │   (FastAPI)     │ │  (ARQ Jobs)    │
 └─────────────────┘ └────────┬────────┘ └───────┬────────┘
                              │                   │
-                    ┌────────┴───────────────────┴────────┐
-                    │              Internal Network        │
-                    └────────┬───────────────────┬────────┘
-                             │                   │
-                    ┌────────▼────────┐ ┌───────▼────────┐
-                    │   PostgreSQL    │ │     Redis      │
-                    │   (Database)    │ │   (Cache/Queue)│
+                    ┌────────┴────────┐ ┌───────▼────────┐
+                    │    Supabase     │ │     Redis      │
+                    │    Postgres     │ │   (Cache/Queue)│
                     └─────────────────┘ └────────────────┘
 ```
 
@@ -73,7 +68,7 @@ docker-compose -f docker-compose.prod.yml logs -f
 | frontend | React static files | 3000 | - |
 | backend | FastAPI application | 8000 | - |
 | worker | Background job processor | - | - |
-| db | PostgreSQL database | 5432 | - |
+| Supabase | Managed Postgres database | 5432 or pooler port | external managed service |
 | redis | Cache and job queue | 6379 | - |
 
 ## Security Features
@@ -154,11 +149,11 @@ docker-compose -f docker-compose.prod.yml logs --tail=100 backend
 ### Database Backup
 
 ```bash
-# Create backup
-docker exec werco-db-prod pg_dump -U $POSTGRES_USER $POSTGRES_DB > backup_$(date +%Y%m%d_%H%M%S).sql
+# Create backup from the configured Supabase DATABASE_URL
+DATABASE_URL="$DATABASE_URL" python scripts/backup_database.py
 
-# Restore backup
-docker exec -i werco-db-prod psql -U $POSTGRES_USER $POSTGRES_DB < backup.sql
+# Restore backup with psql using the Supabase connection string
+psql "$DATABASE_URL" < backup.sql
 ```
 
 ### Update Deployment
@@ -194,7 +189,7 @@ docker-compose -f docker-compose.prod.yml ps
 curl -k https://localhost/health/ready
 
 # Database connectivity
-docker exec werco-db-prod pg_isready -U $POSTGRES_USER
+docker exec werco-backend-prod python -c "from app.db.database import engine; engine.connect().close(); print('database ok')"
 
 # Redis connectivity
 docker exec werco-redis-prod redis-cli -a $REDIS_PASSWORD ping
@@ -221,8 +216,7 @@ docker-compose -f docker-compose.prod.yml config
 # Test database connectivity
 docker exec werco-backend-prod python -c "from app.db.database import engine; engine.connect()"
 
-# Check database logs
-docker-compose -f docker-compose.prod.yml logs db
+# Check Supabase logs and connection pooling in the Supabase dashboard
 ```
 
 ### SSL Certificate Issues
@@ -252,9 +246,8 @@ deploy:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `POSTGRES_USER` | Yes | Database username |
-| `POSTGRES_PASSWORD` | Yes | Database password |
-| `POSTGRES_DB` | No | Database name (default: werco_erp) |
+| `DATABASE_URL` | Yes | Supabase Postgres connection string |
+| `DATABASE_PROVIDER` | No | Set to `supabase` |
 | `SECRET_KEY` | Yes | JWT signing key (64+ chars) |
 | `REFRESH_TOKEN_SECRET_KEY` | Yes | Refresh token key (64+ chars) |
 | `REDIS_PASSWORD` | Yes | Redis password |

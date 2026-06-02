@@ -3,6 +3,7 @@
 Automated database backup script for Werco ERP.
 Supports local backups and S3 uploads.
 """
+
 import os
 import sys
 import subprocess
@@ -10,15 +11,15 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 import logging
+from urllib.parse import unquote, urlparse
 
 # Add backend to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
 from app.core.config import settings
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -27,32 +28,25 @@ class DatabaseBackup:
     """Handle database backups with compression and S3 upload."""
 
     def __init__(self):
-        self.backup_dir = Path(os.path.join(os.path.dirname(__file__), '..', 'backups', 'database'))
+        self.backup_dir = Path(
+            os.path.join(os.path.dirname(__file__), "..", "backups", "database")
+        )
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.retention_days = 30
 
     def parse_db_url(self):
         """Parse database URL to get connection details."""
-        db_url = settings.DATABASE_URL
-        if db_url.startswith('postgresql://'):
-            # Parse: postgresql://user:password@host:port/dbname
-            url_parts = db_url.replace('postgresql://', '').split('@')
-            credentials = url_parts[0].split(':')
-            host_port_db = url_parts[1].split('/')
-            host_port = host_port_db[0].split(':')
-
-            user = credentials[0]
-            password = credentials[1]
-            host = host_port[0]
-            port = host_port[1] if len(host_port) > 1 else '5432'
-            dbname = host_port_db[1]
-
+        db_url = settings.SQLALCHEMY_DATABASE_URL.replace(
+            "postgresql+psycopg2://", "postgresql://", 1
+        )
+        parsed = urlparse(db_url)
+        if parsed.scheme == "postgresql":
             return {
-                'user': user,
-                'password': password,
-                'host': host,
-                'port': port,
-                'dbname': dbname
+                "user": unquote(parsed.username or ""),
+                "password": unquote(parsed.password or ""),
+                "host": parsed.hostname or "",
+                "port": str(parsed.port or 5432),
+                "dbname": unquote(parsed.path.lstrip("/")),
             }
         return None
 
@@ -67,7 +61,7 @@ class DatabaseBackup:
             return False
 
         # Create backup filename
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = self.backup_dir / f"werco_erp_backup_{timestamp}.sql"
         compressed_file = self.backup_dir / f"werco_erp_backup_{timestamp}.sql.gz"
 
@@ -77,24 +71,30 @@ class DatabaseBackup:
 
             # Create temporary .pgpass file (more secure than PGPASSWORD env var)
             import tempfile, stat
-            pgpass_file = Path(tempfile.mktemp(prefix='.pgpass_'))
+
+            pgpass_file = Path(tempfile.mktemp(prefix=".pgpass_"))
             try:
                 pgpass_line = f"{db_config['host']}:{db_config['port']}:{db_config['dbname']}:{db_config['user']}:{db_config['password']}"
-                pgpass_file.write_text(pgpass_line + '\n')
+                pgpass_file.write_text(pgpass_line + "\n")
                 pgpass_file.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
 
                 env = os.environ.copy()
-                env['PGPASSFILE'] = str(pgpass_file)
+                env["PGPASSFILE"] = str(pgpass_file)
 
                 cmd = [
-                    'pg_dump',
-                    '-h', db_config['host'],
-                    '-p', db_config['port'],
-                    '-U', db_config['user'],
-                    '-d', db_config['dbname'],
-                    '--no-owner',
-                    '--no-acl',
-                    '-f', str(backup_file)
+                    "pg_dump",
+                    "-h",
+                    db_config["host"],
+                    "-p",
+                    db_config["port"],
+                    "-U",
+                    db_config["user"],
+                    "-d",
+                    db_config["dbname"],
+                    "--no-owner",
+                    "--no-acl",
+                    "-f",
+                    str(backup_file),
                 ]
 
                 result = subprocess.run(cmd, env=env, capture_output=True, text=True)
@@ -109,8 +109,8 @@ class DatabaseBackup:
 
             # Compress backup
             logger.info("Compressing backup...")
-            with open(backup_file, 'rb') as f_in:
-                with open(compressed_file, 'wb') as f_out:
+            with open(backup_file, "rb") as f_in:
+                with open(compressed_file, "wb") as f_out:
                     shutil.copyfileobj(f_in, f_out)
 
             # Remove uncompressed file
@@ -146,16 +146,18 @@ class DatabaseBackup:
             logger.info(f"Uploading backup to S3: {file_path.name}")
 
             s3 = boto3.client(
-                's3',
+                "s3",
                 aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
                 aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                region_name=settings.AWS_REGION
+                region_name=settings.AWS_REGION,
             )
 
             s3_path = f"database-backups/{file_path.name}"
             s3.upload_file(str(file_path), settings.S3_BUCKET_NAME, s3_path)
 
-            logger.info(f"Successfully uploaded to S3: s3://{settings.S3_BUCKET_NAME}/{s3_path}")
+            logger.info(
+                f"Successfully uploaded to S3: s3://{settings.S3_BUCKET_NAME}/{s3_path}"
+            )
 
         except ImportError:
             logger.error("boto3 not installed, cannot upload to S3")
@@ -171,7 +173,7 @@ class DatabaseBackup:
         cutoff_date = datetime.now().timestamp() - (self.retention_days * 24 * 60 * 60)
         deleted_count = 0
 
-        for backup_file in self.backup_dir.glob('werco_erp_backup_*.sql.gz'):
+        for backup_file in self.backup_dir.glob("werco_erp_backup_*.sql.gz"):
             if backup_file.stat().st_mtime < cutoff_date:
                 backup_file.unlink()
                 deleted_count += 1

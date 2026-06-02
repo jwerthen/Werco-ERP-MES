@@ -109,7 +109,7 @@ Complete all items below before launching to production.
 ## ☁️ INFRASTRUCTURE & DEPLOYMENT
 
 - [ ] **Set up production server**
-  - Choose hosting (AWS, GCP, Azure, or on-premise)
+  - Choose hosting for the current Supabase-backed deployment
   - Install Docker, Docker Compose
   - Configure DNS records
 
@@ -195,7 +195,7 @@ Complete all items below before launching to production.
   LOG_LEVEL=WARN
   SENTRY_DSN=https://...
   REDIS_URL=redis://:password@localhost:6379/0
-  DATABASE_URL=postgresql://user:pass@localhost:5432/werco_prod
+  DATABASE_URL=postgresql://postgres.meatfdvteugbeksckgqg:<password>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
   ```
 
 - [ ] **Disable API docs in production**

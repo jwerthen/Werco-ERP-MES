@@ -16,7 +16,10 @@ from app.core.cache import cache, init_cache
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.db.database import Base, engine
-from app.middleware.logging_middleware import CorrelationIdMiddleware, RequestLoggingMiddleware
+from app.middleware.logging_middleware import (
+    CorrelationIdMiddleware,
+    RequestLoggingMiddleware,
+)
 
 # Configure structured logging with correlation IDs
 configure_logging()
@@ -59,24 +62,24 @@ def seed_quote_config_if_needed():
 
             def calc_sheet_pricing(price_per_lb, density):
                 thicknesses = {
-                    '24ga': 0.0239,
-                    '22ga': 0.0299,
-                    '20ga': 0.0359,
-                    '18ga': 0.0478,
-                    '16ga': 0.0598,
-                    '14ga': 0.0747,
-                    '12ga': 0.1046,
-                    '11ga': 0.1196,
-                    '10ga': 0.1345,
-                    '7ga': 0.1793,
-                    '0.125': 0.125,
-                    '0.1875': 0.1875,
-                    '0.250': 0.250,
-                    '0.375': 0.375,
-                    '0.500': 0.500,
-                    '0.625': 0.625,
-                    '0.750': 0.750,
-                    '1.000': 1.000,
+                    "24ga": 0.0239,
+                    "22ga": 0.0299,
+                    "20ga": 0.0359,
+                    "18ga": 0.0478,
+                    "16ga": 0.0598,
+                    "14ga": 0.0747,
+                    "12ga": 0.1046,
+                    "11ga": 0.1196,
+                    "10ga": 0.1345,
+                    "7ga": 0.1793,
+                    "0.125": 0.125,
+                    "0.1875": 0.1875,
+                    "0.250": 0.250,
+                    "0.375": 0.375,
+                    "0.500": 0.500,
+                    "0.625": 0.625,
+                    "0.750": 0.750,
+                    "1.000": 1.000,
                 }
                 pricing = {}
                 for gauge, thick in thicknesses.items():
@@ -87,52 +90,52 @@ def seed_quote_config_if_needed():
 
             materials = [
                 {
-                    'name': 'Mild Steel A36',
-                    'category': MaterialCategory.STEEL,
-                    'stock_price_per_pound': 0.55,
-                    'density_lb_per_cubic_inch': 0.284,
-                    'machinability_factor': 0.6,
-                    'sheet_pricing': calc_sheet_pricing(0.55, 0.284),
+                    "name": "Mild Steel A36",
+                    "category": MaterialCategory.STEEL,
+                    "stock_price_per_pound": 0.55,
+                    "density_lb_per_cubic_inch": 0.284,
+                    "machinability_factor": 0.6,
+                    "sheet_pricing": calc_sheet_pricing(0.55, 0.284),
                 },
                 {
-                    'name': 'Galvanized Steel G90',
-                    'category': MaterialCategory.STEEL,
-                    'stock_price_per_pound': 0.70,
-                    'density_lb_per_cubic_inch': 0.284,
-                    'machinability_factor': 0.55,
-                    'sheet_pricing': calc_sheet_pricing(0.70, 0.284),
+                    "name": "Galvanized Steel G90",
+                    "category": MaterialCategory.STEEL,
+                    "stock_price_per_pound": 0.70,
+                    "density_lb_per_cubic_inch": 0.284,
+                    "machinability_factor": 0.55,
+                    "sheet_pricing": calc_sheet_pricing(0.70, 0.284),
                 },
                 {
-                    'name': 'Aluminum 5052-H32',
-                    'category': MaterialCategory.ALUMINUM,
-                    'stock_price_per_pound': 2.38,
-                    'density_lb_per_cubic_inch': 0.097,
-                    'machinability_factor': 1.0,
-                    'sheet_pricing': calc_sheet_pricing(2.38, 0.097),
+                    "name": "Aluminum 5052-H32",
+                    "category": MaterialCategory.ALUMINUM,
+                    "stock_price_per_pound": 2.38,
+                    "density_lb_per_cubic_inch": 0.097,
+                    "machinability_factor": 1.0,
+                    "sheet_pricing": calc_sheet_pricing(2.38, 0.097),
                 },
                 {
-                    'name': 'Aluminum 6061-T6',
-                    'category': MaterialCategory.ALUMINUM,
-                    'stock_price_per_pound': 2.58,
-                    'density_lb_per_cubic_inch': 0.098,
-                    'machinability_factor': 1.0,
-                    'sheet_pricing': calc_sheet_pricing(2.58, 0.098),
+                    "name": "Aluminum 6061-T6",
+                    "category": MaterialCategory.ALUMINUM,
+                    "stock_price_per_pound": 2.58,
+                    "density_lb_per_cubic_inch": 0.098,
+                    "machinability_factor": 1.0,
+                    "sheet_pricing": calc_sheet_pricing(2.58, 0.098),
                 },
                 {
-                    'name': 'Stainless Steel 304',
-                    'category': MaterialCategory.STAINLESS,
-                    'stock_price_per_pound': 2.13,
-                    'density_lb_per_cubic_inch': 0.289,
-                    'machinability_factor': 0.4,
-                    'sheet_pricing': calc_sheet_pricing(2.13, 0.289),
+                    "name": "Stainless Steel 304",
+                    "category": MaterialCategory.STAINLESS,
+                    "stock_price_per_pound": 2.13,
+                    "density_lb_per_cubic_inch": 0.289,
+                    "machinability_factor": 0.4,
+                    "sheet_pricing": calc_sheet_pricing(2.13, 0.289),
                 },
                 {
-                    'name': 'Stainless Steel 316',
-                    'category': MaterialCategory.STAINLESS,
-                    'stock_price_per_pound': 3.08,
-                    'density_lb_per_cubic_inch': 0.290,
-                    'machinability_factor': 0.35,
-                    'sheet_pricing': calc_sheet_pricing(3.08, 0.290),
+                    "name": "Stainless Steel 316",
+                    "category": MaterialCategory.STAINLESS,
+                    "stock_price_per_pound": 3.08,
+                    "density_lb_per_cubic_inch": 0.290,
+                    "machinability_factor": 0.35,
+                    "sheet_pricing": calc_sheet_pricing(3.08, 0.290),
                 },
             ]
             for m in materials:
@@ -195,42 +198,42 @@ def seed_quote_config_if_needed():
             }
             machines = [
                 {
-                    'name': 'Fiber Laser 6kW',
-                    'machine_type': MachineType.LASER_FIBER,
-                    'rate_per_hour': 150.00,
-                    'setup_rate_per_hour': 75.00,
-                    'cutting_speeds': laser_speeds,
-                    'typical_setup_hours': 0.25,
+                    "name": "Fiber Laser 6kW",
+                    "machine_type": MachineType.LASER_FIBER,
+                    "rate_per_hour": 150.00,
+                    "setup_rate_per_hour": 75.00,
+                    "cutting_speeds": laser_speeds,
+                    "typical_setup_hours": 0.25,
                 },
                 {
-                    'name': 'Press Brake 150T',
-                    'machine_type': MachineType.PRESS_BRAKE,
-                    'rate_per_hour': 85.00,
-                    'setup_rate_per_hour': 65.00,
-                    'bend_time_seconds': 12.0,
-                    'setup_time_per_bend_type': 300.0,
-                    'typical_setup_hours': 0.5,
+                    "name": "Press Brake 150T",
+                    "machine_type": MachineType.PRESS_BRAKE,
+                    "rate_per_hour": 85.00,
+                    "setup_rate_per_hour": 65.00,
+                    "bend_time_seconds": 12.0,
+                    "setup_time_per_bend_type": 300.0,
+                    "typical_setup_hours": 0.5,
                 },
                 {
-                    'name': 'CNC Mill 3-Axis',
-                    'machine_type': MachineType.CNC_MILL_3AXIS,
-                    'rate_per_hour': 125.00,
-                    'setup_rate_per_hour': 85.00,
-                    'typical_setup_hours': 1.0,
+                    "name": "CNC Mill 3-Axis",
+                    "machine_type": MachineType.CNC_MILL_3AXIS,
+                    "rate_per_hour": 125.00,
+                    "setup_rate_per_hour": 85.00,
+                    "typical_setup_hours": 1.0,
                 },
                 {
-                    'name': 'CNC Mill 4-Axis',
-                    'machine_type': MachineType.CNC_MILL_4AXIS,
-                    'rate_per_hour': 145.00,
-                    'setup_rate_per_hour': 95.00,
-                    'typical_setup_hours': 1.5,
+                    "name": "CNC Mill 4-Axis",
+                    "machine_type": MachineType.CNC_MILL_4AXIS,
+                    "rate_per_hour": 145.00,
+                    "setup_rate_per_hour": 95.00,
+                    "typical_setup_hours": 1.5,
                 },
                 {
-                    'name': 'CNC Lathe',
-                    'machine_type': MachineType.CNC_LATHE,
-                    'rate_per_hour': 110.00,
-                    'setup_rate_per_hour': 75.00,
-                    'typical_setup_hours': 0.75,
+                    "name": "CNC Lathe",
+                    "machine_type": MachineType.CNC_LATHE,
+                    "rate_per_hour": 110.00,
+                    "setup_rate_per_hour": 75.00,
+                    "typical_setup_hours": 0.75,
                 },
             ]
             for m in machines:
@@ -243,46 +246,46 @@ def seed_quote_config_if_needed():
             logger.info("Seeding quote finishes...")
             finishes = [
                 {
-                    'name': 'Powder Coat - Standard Colors',
-                    'category': 'coating',
-                    'price_per_sqft': 2.50,
-                    'minimum_charge': 35.00,
-                    'additional_days': 3,
+                    "name": "Powder Coat - Standard Colors",
+                    "category": "coating",
+                    "price_per_sqft": 2.50,
+                    "minimum_charge": 35.00,
+                    "additional_days": 3,
                 },
                 {
-                    'name': 'Powder Coat - Custom Color',
-                    'category': 'coating',
-                    'price_per_sqft': 3.50,
-                    'minimum_charge': 75.00,
-                    'additional_days': 5,
+                    "name": "Powder Coat - Custom Color",
+                    "category": "coating",
+                    "price_per_sqft": 3.50,
+                    "minimum_charge": 75.00,
+                    "additional_days": 5,
                 },
                 {
-                    'name': 'Zinc Plating - Clear',
-                    'category': 'plating',
-                    'price_per_lb': 1.25,
-                    'minimum_charge': 45.00,
-                    'additional_days': 5,
+                    "name": "Zinc Plating - Clear",
+                    "category": "plating",
+                    "price_per_lb": 1.25,
+                    "minimum_charge": 45.00,
+                    "additional_days": 5,
                 },
                 {
-                    'name': 'Anodize Type II - Clear',
-                    'category': 'plating',
-                    'price_per_sqft': 4.00,
-                    'minimum_charge': 50.00,
-                    'additional_days': 5,
+                    "name": "Anodize Type II - Clear",
+                    "category": "plating",
+                    "price_per_sqft": 4.00,
+                    "minimum_charge": 50.00,
+                    "additional_days": 5,
                 },
                 {
-                    'name': 'Passivation',
-                    'category': 'treatment',
-                    'price_per_part': 5.00,
-                    'minimum_charge': 35.00,
-                    'additional_days': 2,
+                    "name": "Passivation",
+                    "category": "treatment",
+                    "price_per_part": 5.00,
+                    "minimum_charge": 35.00,
+                    "additional_days": 2,
                 },
                 {
-                    'name': 'Deburr - Hand',
-                    'category': 'finishing',
-                    'price_per_part': 2.50,
-                    'minimum_charge': 0.00,
-                    'additional_days': 0,
+                    "name": "Deburr - Hand",
+                    "category": "finishing",
+                    "price_per_part": 2.50,
+                    "minimum_charge": 0.00,
+                    "additional_days": 0,
                 },
             ]
             for f in finishes:
@@ -294,14 +297,30 @@ def seed_quote_config_if_needed():
         if db.query(QuoteSettings).count() == 0:
             logger.info("Seeding quote settings...")
             settings_data = [
-                {'setting_key': 'default_markup_pct', 'setting_value': '35', 'setting_type': 'number'},
-                {'setting_key': 'minimum_order_charge', 'setting_value': '150', 'setting_type': 'number'},
-                {'setting_key': 'rush_multiplier', 'setting_value': '1.5', 'setting_type': 'number'},
-                {'setting_key': 'standard_lead_days', 'setting_value': '10', 'setting_type': 'number'},
                 {
-                    'setting_key': 'quantity_breaks',
-                    'setting_value': '{"10": 0.95, "25": 0.90, "50": 0.85, "100": 0.80}',
-                    'setting_type': 'json',
+                    "setting_key": "default_markup_pct",
+                    "setting_value": "35",
+                    "setting_type": "number",
+                },
+                {
+                    "setting_key": "minimum_order_charge",
+                    "setting_value": "150",
+                    "setting_type": "number",
+                },
+                {
+                    "setting_key": "rush_multiplier",
+                    "setting_value": "1.5",
+                    "setting_type": "number",
+                },
+                {
+                    "setting_key": "standard_lead_days",
+                    "setting_value": "10",
+                    "setting_type": "number",
+                },
+                {
+                    "setting_key": "quantity_breaks",
+                    "setting_value": '{"10": 0.95, "25": 0.90, "50": 0.85, "100": 0.80}',
+                    "setting_type": "json",
                 },
             ]
             for s in settings_data:
@@ -339,50 +358,125 @@ async def lifespan(app: FastAPI):
 
 # OpenAPI Tags metadata for documentation grouping
 tags_metadata = [
-    {"name": "Authentication", "description": "User authentication, login, logout, and token management"},
+    {
+        "name": "Authentication",
+        "description": "User authentication, login, logout, and token management",
+    },
     {"name": "Users", "description": "User management and profile operations"},
-    {"name": "Parts", "description": "Part master data management - components, assemblies, and raw materials"},
-    {"name": "Bill of Materials", "description": "BOM structure and component relationships"},
+    {
+        "name": "Parts",
+        "description": "Part master data management - components, assemblies, and raw materials",
+    },
+    {
+        "name": "Bill of Materials",
+        "description": "BOM structure and component relationships",
+    },
     {"name": "Routing", "description": "Manufacturing routing and operation sequences"},
-    {"name": "Work Orders", "description": "Production work order management and tracking"},
-    {"name": "Work Centers", "description": "Work center configuration and capacity management"},
-    {"name": "Shop Floor", "description": "Real-time shop floor control and operation tracking"},
-    {"name": "Inventory", "description": "Inventory management, stock levels, and transactions"},
-    {"name": "Material Requirements Planning", "description": "MRP calculations and material planning"},
-    {"name": "Quality Management", "description": "Quality control, inspections, and NCRs"},
+    {
+        "name": "Work Orders",
+        "description": "Production work order management and tracking",
+    },
+    {
+        "name": "Work Centers",
+        "description": "Work center configuration and capacity management",
+    },
+    {
+        "name": "Shop Floor",
+        "description": "Real-time shop floor control and operation tracking",
+    },
+    {
+        "name": "Inventory",
+        "description": "Inventory management, stock levels, and transactions",
+    },
+    {
+        "name": "Material Requirements Planning",
+        "description": "MRP calculations and material planning",
+    },
+    {
+        "name": "Quality Management",
+        "description": "Quality control, inspections, and NCRs",
+    },
     {"name": "Purchasing", "description": "Purchase orders and vendor management"},
-    {"name": "Receiving & Inspection", "description": "Material receiving and incoming inspection"},
+    {
+        "name": "Receiving & Inspection",
+        "description": "Material receiving and incoming inspection",
+    },
     {"name": "Shipping", "description": "Shipping and delivery management"},
-    {"name": "Scheduling", "description": "Production scheduling and capacity planning"},
+    {
+        "name": "Scheduling",
+        "description": "Production scheduling and capacity planning",
+    },
     {"name": "Quotes", "description": "Customer quote management"},
-    {"name": "Quote Calculator", "description": "Quote cost estimation and calculation"},
+    {
+        "name": "Quote Calculator",
+        "description": "Quote cost estimation and calculation",
+    },
     {"name": "Customers", "description": "Customer master data management"},
-    {"name": "Calibration", "description": "Equipment calibration tracking and management"},
+    {
+        "name": "Calibration",
+        "description": "Equipment calibration tracking and management",
+    },
     {"name": "Documents", "description": "Document management and attachments"},
     {"name": "Reports", "description": "Report generation and export"},
-    {"name": "Analytics & BI", "description": "Business intelligence and analytics dashboards"},
+    {
+        "name": "Analytics & BI",
+        "description": "Business intelligence and analytics dashboards",
+    },
     {"name": "Traceability", "description": "Lot and serial number traceability"},
     {"name": "Audit", "description": "Audit trail and change history"},
     {"name": "Scanner", "description": "Barcode and QR code scanning operations"},
     {"name": "Global Search", "description": "Cross-entity search functionality"},
     {"name": "Custom Fields", "description": "User-defined custom field management"},
-    {"name": "Admin Settings", "description": "System administration and configuration"},
+    {
+        "name": "Admin Settings",
+        "description": "System administration and configuration",
+    },
     {"name": "DXF Parser", "description": "DXF file parsing for part dimensions"},
     {"name": "PO Upload", "description": "Purchase order file upload and parsing"},
-    {"name": "AI RFQ Quotes", "description": "AI-assisted RFQ package parsing and sheet-metal quote estimating"},
-    {"name": "OEE Tracking", "description": "Overall Equipment Effectiveness monitoring and reporting"},
-    {"name": "Downtime Tracking", "description": "Machine downtime events and reason code tracking"},
-    {"name": "Job Costing", "description": "Job cost tracking with estimated vs actual variance analysis"},
-    {"name": "Tool & Fixture Management", "description": "Tool inventory, checkout, and life tracking"},
-    {"name": "Preventive Maintenance", "description": "Preventive maintenance scheduling and work orders"},
-    {"name": "Operator Certifications", "description": "Operator certifications, training records, and skill matrix"},
-    {"name": "Engineering Change Orders", "description": "ECO/ECN workflow with approval and implementation tracking"},
-    {"name": "Statistical Process Control", "description": "SPC charts, measurements, and process capability studies"},
+    {
+        "name": "AI RFQ Quotes",
+        "description": "AI-assisted RFQ package parsing and sheet-metal quote estimating",
+    },
+    {
+        "name": "OEE Tracking",
+        "description": "Overall Equipment Effectiveness monitoring and reporting",
+    },
+    {
+        "name": "Downtime Tracking",
+        "description": "Machine downtime events and reason code tracking",
+    },
+    {
+        "name": "Job Costing",
+        "description": "Job cost tracking with estimated vs actual variance analysis",
+    },
+    {
+        "name": "Tool & Fixture Management",
+        "description": "Tool inventory, checkout, and life tracking",
+    },
+    {
+        "name": "Preventive Maintenance",
+        "description": "Preventive maintenance scheduling and work orders",
+    },
+    {
+        "name": "Operator Certifications",
+        "description": "Operator certifications, training records, and skill matrix",
+    },
+    {
+        "name": "Engineering Change Orders",
+        "description": "ECO/ECN workflow with approval and implementation tracking",
+    },
+    {
+        "name": "Statistical Process Control",
+        "description": "SPC charts, measurements, and process capability studies",
+    },
     {
         "name": "Customer Complaints & RMA",
         "description": "Customer complaint tracking and return material authorization",
     },
-    {"name": "Supplier Scorecards", "description": "Supplier performance scoring, audits, and approved supplier list"},
+    {
+        "name": "Supplier Scorecards",
+        "description": "Supplier performance scoring, audits, and approved supplier list",
+    },
     {"name": "Error Logging", "description": "Client-side error logging"},
 ]
 
@@ -491,8 +585,13 @@ async def csrf_protection(request: Request, call_next):
                 # Allow if request has valid Authorization header (API clients)
                 auth_header = request.headers.get("authorization")
                 if not auth_header or not auth_header.startswith("Bearer "):
-                    logger.warning(f"CSRF: Missing X-Requested-With header for {request.url.path}")
-                    response = JSONResponse(status_code=403, content={"detail": "Missing required security header"})
+                    logger.warning(
+                        f"CSRF: Missing X-Requested-With header for {request.url.path}"
+                    )
+                    response = JSONResponse(
+                        status_code=403,
+                        content={"detail": "Missing required security header"},
+                    )
                     return add_cors_headers(response, origin)
 
         # Defense 2: Validate Origin/Referer header
@@ -504,12 +603,18 @@ async def csrf_protection(request: Request, call_next):
             from urllib.parse import urlparse
 
             parsed = urlparse(check_origin)
-            origin_host = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else None
+            origin_host = (
+                f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else None
+            )
 
             # Check if origin is in allowed list
             if origin_host and origin_host not in settings.cors_origins_list:
-                logger.warning(f"CSRF: Blocked request from untrusted origin: {origin_host}")
-                response = JSONResponse(status_code=403, content={"detail": "Request origin not allowed"})
+                logger.warning(
+                    f"CSRF: Blocked request from untrusted origin: {origin_host}"
+                )
+                response = JSONResponse(
+                    status_code=403, content={"detail": "Request origin not allowed"}
+                )
                 return add_cors_headers(response, origin)
 
     return await call_next(request)
@@ -519,9 +624,9 @@ async def csrf_protection(request: Request, call_next):
 @app.middleware("http")
 async def sanitize_input(request: Request, call_next):
     # Only process JSON requests with body
-    if request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-type", "").startswith(
-        "application/json"
-    ):
+    if request.method in ("POST", "PUT", "PATCH") and request.headers.get(
+        "content-type", ""
+    ).startswith("application/json"):
         try:
             from app.core.sanitization import sanitize_dict
 
@@ -552,10 +657,14 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=63072000; includeSubDomains; preload"
+    )
     # Content Security Policy - restrict resource loading (skip for API docs)
     if request.url.path not in ("/api/docs", "/api/redoc", "/api/openapi.json"):
-        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; frame-ancestors 'none'"
+        )
     return response
 
 
@@ -586,7 +695,9 @@ if settings.RATE_LIMIT_ENABLED:
 
         limiter = Limiter(
             key_func=get_remote_address,
-            default_limits=[f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"],
+            default_limits=[
+                f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"
+            ],
             storage_uri=settings.REDIS_URL if settings.REDIS_URL else "memory://",
         )
         app.state.limiter = limiter
@@ -595,7 +706,9 @@ if settings.RATE_LIMIT_ENABLED:
         # Custom rate limit handler with CORS headers
         async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
             detail = getattr(exc, "detail", str(exc))
-            response = JSONResponse(status_code=429, content={"detail": f"Rate limit exceeded: {detail}"})
+            response = JSONResponse(
+                status_code=429, content={"detail": f"Rate limit exceeded: {detail}"}
+            )
             origin = request.headers.get("origin")
             return add_cors_headers(response, origin)
 
@@ -633,7 +746,9 @@ async def global_exception_handler(request: Request, exc: Exception):
         import sentry_sdk
 
         sentry_sdk.capture_exception(exc)
-    response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    response = JSONResponse(
+        status_code=500, content={"detail": "Internal server error"}
+    )
     # Add CORS headers so browser doesn't mask the error as CORS failure
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
@@ -650,7 +765,9 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 # Validation error handler - ensures CORS headers on validation errors (422)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    response = JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
+    response = JSONResponse(
+        status_code=422, content={"detail": jsonable_encoder(exc.errors())}
+    )
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
 
@@ -659,7 +776,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.get("/health")
 async def health_check():
     """Basic health check - used by load balancers and Railway."""
-    return {"status": "healthy", "app": settings.APP_NAME, "environment": settings.ENVIRONMENT, "version": "1.0.0"}
+    return {
+        "status": "healthy",
+        "app": settings.APP_NAME,
+        "environment": settings.ENVIRONMENT,
+        "version": "1.0.0",
+    }
 
 
 @app.get("/health/live")
@@ -680,7 +802,12 @@ async def readiness_check():
     from app.db.database import SessionLocal
 
     checks = {
-        "database": {"status": "unknown", "latency_ms": None},
+        "database": {
+            "status": "unknown",
+            "latency_ms": None,
+            "provider": settings.database_provider,
+            "host": settings.safe_database_host,
+        },
         "app": {"status": "healthy"},
     }
     overall_status = "healthy"
@@ -710,7 +837,10 @@ async def readiness_check():
             redis_start = time.time()
             r = redis.from_url(settings.REDIS_URL, socket_timeout=2)
             r.ping()
-            checks["redis"] = {"status": "healthy", "latency_ms": round((time.time() - redis_start) * 1000, 2)}
+            checks["redis"] = {
+                "status": "healthy",
+                "latency_ms": round((time.time() - redis_start) * 1000, 2),
+            }
         except Exception as e:
             checks["redis"] = {"status": "unhealthy", "error": str(e)[:100]}
             # Redis is optional, don't fail health check
@@ -720,7 +850,11 @@ async def readiness_check():
 
     return JSONResponse(
         status_code=status_code,
-        content={"status": overall_status, "timestamp": datetime.utcnow().isoformat(), "checks": checks},
+        content={
+            "status": overall_status,
+            "timestamp": datetime.utcnow().isoformat(),
+            "checks": checks,
+        },
     )
 
 
@@ -750,6 +884,8 @@ async def detailed_health_check():
             checks["database"] = {
                 "status": "healthy",
                 "latency_ms": round((time.time() - db_start) * 1000, 2),
+                "provider": settings.database_provider,
+                "host": settings.safe_database_host,
                 "version": db_version[:50],  # Truncate version string
                 "pool": pool_status,
             }
@@ -788,9 +924,17 @@ async def detailed_health_check():
             "stats": cache.stats,
         }
 
-    overall_status = "healthy" if checks.get("database", {}).get("status") == "healthy" else "degraded"
+    overall_status = (
+        "healthy"
+        if checks.get("database", {}).get("status") == "healthy"
+        else "degraded"
+    )
 
-    return {"status": overall_status, "timestamp": datetime.utcnow().isoformat(), "checks": checks}
+    return {
+        "status": overall_status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": checks,
+    }
 
 
 # Include API routes
@@ -805,4 +949,10 @@ app.include_router(websocket_router, prefix=settings.API_V1_PREFIX, tags=["WebSo
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=settings.DEBUG, log_level=settings.LOG_LEVEL.lower())
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=settings.DEBUG,
+        log_level=settings.LOG_LEVEL.lower(),
+    )

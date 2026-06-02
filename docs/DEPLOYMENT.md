@@ -7,7 +7,7 @@ This guide covers deploying Werco ERP to production environments.
 - Production server with:
   - Python 3.11+
   - Node.js 18+
-  - PostgreSQL 15+
+  - Supabase project with Postgres database access
   - Redis (recommended for caching)
   - Nginx or similar reverse proxy
 - Domain name with SSL certificate
@@ -21,7 +21,8 @@ Create a secure `.env` file in the backend directory:
 
 ```env
 # Database
-DATABASE_URL=postgresql://user:STRONG_PASSWORD@localhost:5432/werco_erp
+DATABASE_URL=postgresql://postgres.meatfdvteugbeksckgqg:<SUPABASE_DB_PASSWORD>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
+DATABASE_PROVIDER=supabase
 
 # Security - MUST be random and strong
 SECRET_KEY=generate-with-openssl-rand-base64-32
@@ -78,21 +79,9 @@ openssl rand -base64 32
 
 ### Option 1: Docker Compose (Simpler)
 
-1. **Update docker-compose.yml** for production:
+1. **Use the production compose file with Supabase configured:**
    ```yaml
-   version: '3.8'
-
    services:
-     db:
-       image: postgres:15-alpine
-       environment:
-         POSTGRES_USER: werco_prod_user
-         POSTGRES_PASSWORD: ${DB_PASSWORD}
-         POSTGRES_DB: werco_erp
-       volumes:
-         - postgres_data:/var/lib/postgresql/data
-       restart: always
-
      redis:
        image: redis:7-alpine
        restart: always
@@ -102,10 +91,10 @@ openssl rand -base64 32
        ports:
          - "8000:8000"
        environment:
-         - DATABASE_URL=postgresql+psycopg2://werco_prod_user:${DB_PASSWORD}@db:5432/werco_erp
+         - DATABASE_URL=${DATABASE_URL}
+         - DATABASE_PROVIDER=supabase
          - REDIS_URL=redis://redis:6379/0
        depends_on:
-         - db
          - redis
        restart: always
 
@@ -115,22 +104,16 @@ openssl rand -base64 32
          - "3000:80"
        restart: always
 
-   volumes:
-     postgres_data:
-
-   networks:
-     default:
-       name: werco-prod
    ```
 
 2. **Start services:**
    ```bash
-   docker-compose up -d
+   docker-compose -f docker-compose.prod.yml up -d
    ```
 
 3. **Run database migrations:**
    ```bash
-   docker-compose exec backend alembic upgrade head
+   docker-compose -f docker-compose.prod.yml exec backend alembic upgrade head
    ```
 
 ### Option 2: Systemd Services (Recommended for Production)
