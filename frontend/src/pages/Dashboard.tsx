@@ -8,6 +8,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import {
   formatCentralDate,
+  formatInCentralTime,
   formatCentralTime,
   getCentralDateStamp,
   getCentralTodayDate,
@@ -100,6 +101,7 @@ interface MachineCapacityOverview extends CapacityHeatmapRow {
   capacity_hours: number;
   utilization_pct: number;
   overloaded_days: number;
+  available_hours: number;
 }
 
 const formatElapsed = (clockIn: string, nowMs: number) => {
@@ -329,6 +331,7 @@ export default function Dashboard() {
           capacity_hours: capacityHours,
           utilization_pct: utilizationPct,
           overloaded_days: row.days.filter((day) => day.overloaded).length,
+          available_hours: Math.max(0, capacityHours - scheduledHours),
         };
       })
       .sort((a, b) => b.utilization_pct - a.utilization_pct);
@@ -336,6 +339,22 @@ export default function Dashboard() {
   const totalCapacityHours = machineCapacityOverview.reduce((sum, machine) => sum + machine.capacity_hours, 0);
   const totalScheduledHours = machineCapacityOverview.reduce((sum, machine) => sum + machine.scheduled_hours, 0);
   const totalCapacityUtilization = totalCapacityHours > 0 ? (totalScheduledHours / totalCapacityHours) * 100 : 0;
+
+  const capacityDayClass = (day: CapacityHeatmapDay) => {
+    if (day.utilization_pct > 100) return 'bg-red-500 text-white border-red-400';
+    if (day.utilization_pct >= 90) return 'bg-amber-500 text-slate-950 border-amber-300';
+    if (day.utilization_pct >= 70) return 'bg-yellow-400 text-slate-950 border-yellow-200';
+    if (day.scheduled_hours > 0) return 'bg-emerald-500 text-slate-950 border-emerald-300';
+    return 'bg-slate-700 text-slate-300 border-slate-600';
+  };
+
+  const capacityStatusLabel = (day: CapacityHeatmapDay) => {
+    if (day.utilization_pct > 100) return 'Over capacity';
+    if (day.utilization_pct >= 90) return 'Near full';
+    if (day.utilization_pct >= 70) return 'Busy';
+    if (day.scheduled_hours > 0) return 'Scheduled';
+    return 'Open';
+  };
 
   if (loading) {
     return <SkeletonDashboard />;
@@ -525,14 +544,30 @@ export default function Dashboard() {
 
       {/* Capacity Overview */}
       <div className="card">
-        <div className="card-header">
+        <div className="card-header items-start gap-3">
           <div>
             <h2 className="card-title">Capacity Overview</h2>
-            <p className="card-subtitle">All machine load for the next 7 days</p>
+            <p className="card-subtitle">Weekly total above; daily load chips below</p>
           </div>
-          <Link to="/scheduling" className="btn-ghost btn-sm">
-            Open Schedule
-          </Link>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <div className="flex flex-wrap items-center justify-end gap-2 text-[11px] text-slate-400">
+              {[
+                { label: 'Open', className: 'bg-slate-700' },
+                { label: 'Scheduled', className: 'bg-emerald-500' },
+                { label: '70%+', className: 'bg-yellow-400' },
+                { label: '90%+', className: 'bg-amber-500' },
+                { label: 'Over', className: 'bg-red-500' },
+              ].map((item) => (
+                <span key={item.label} className="flex items-center gap-1 whitespace-nowrap">
+                  <span className={`h-2.5 w-2.5 rounded-sm ${item.className}`} />
+                  {item.label}
+                </span>
+              ))}
+            </div>
+            <Link to="/scheduling" className="btn-ghost btn-sm whitespace-nowrap">
+              Open Schedule
+            </Link>
+          </div>
         </div>
         <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
           <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4">
@@ -576,19 +611,31 @@ export default function Dashboard() {
                   <span>{machine.scheduled_hours.toFixed(1)}h scheduled</span>
                   <span>{machine.capacity_hours.toFixed(1)}h cap</span>
                 </div>
-                <div className="mt-3 grid grid-cols-7 gap-1">
+                <div className="mt-3 flex items-center justify-between text-[11px] font-medium uppercase text-slate-500">
+                  <span>Daily load</span>
+                  <span>{machine.overloaded_days > 0 ? `${machine.overloaded_days} over` : `${machine.available_hours.toFixed(1)}h open`}</span>
+                </div>
+                <div className="mt-1.5 grid grid-cols-7 gap-1">
                   {machine.days.map((day) => {
-                    const dayClass =
-                      day.utilization_pct > 100 ? 'bg-red-500/100' :
-                      day.utilization_pct >= 90 ? 'bg-amber-500/100' :
-                      day.utilization_pct >= 70 ? 'bg-yellow-400' :
-                      day.scheduled_hours > 0 ? 'bg-emerald-500/100' : 'bg-slate-700';
+                    const statusLabel = capacityStatusLabel(day);
                     return (
-                      <div
+                      <Link
+                        to="/scheduling"
                         key={`${machine.work_center_id}-${day.date}`}
-                        className={`h-7 rounded ${dayClass}`}
-                        title={`${formatCentralDate(day.date, { year: undefined })}: ${day.scheduled_hours.toFixed(1)}h / ${day.capacity_hours.toFixed(1)}h`}
-                      />
+                        className={`h-12 rounded border px-1 text-center transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-cyan-400 ${capacityDayClass(day)}`}
+                        title={`${formatCentralDate(day.date, { year: undefined })} - ${statusLabel}: ${day.scheduled_hours.toFixed(1)}h scheduled of ${day.capacity_hours.toFixed(1)}h capacity (${Math.round(day.utilization_pct)}%)`}
+                        aria-label={`${machine.work_center_code} ${formatCentralDate(day.date, { year: undefined })}: ${statusLabel}, ${day.scheduled_hours.toFixed(1)} scheduled hours of ${day.capacity_hours.toFixed(1)} capacity hours`}
+                      >
+                        <span className="block text-[10px] font-semibold leading-4">
+                          {formatInCentralTime(day.date, { weekday: 'short' })}
+                        </span>
+                        <span className="block text-[11px] font-bold leading-4 tabular-nums">
+                          {Math.round(day.utilization_pct)}%
+                        </span>
+                        <span className="block truncate text-[9px] leading-3 opacity-80">
+                          {day.scheduled_hours > 0 ? `${day.scheduled_hours.toFixed(1)}h` : 'open'}
+                        </span>
+                      </Link>
                     );
                   })}
                 </div>
