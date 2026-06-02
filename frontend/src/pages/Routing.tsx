@@ -103,6 +103,7 @@ interface ProposedOperation {
 }
 
 interface GenerationResult {
+  generation_session_id?: number;
   part_id: number;
   part_number: string;
   part_name: string;
@@ -394,11 +395,15 @@ export default function RoutingPage() {
     if (!generationResult || editedOperations.length === 0) return;
     setCreatingFromGeneration(true);
     try {
+      const invalidOperation = editedOperations.find((op) => !op.work_center_id || !op.operation_name.trim());
+      if (invalidOperation) {
+        alert('Every proposed operation needs a name and work center before creating the routing.');
+        return;
+      }
       const operations = editedOperations
-        .filter((op) => op.work_center_id)
         .map((op) => ({
           sequence: op.sequence,
-          name: op.operation_name,
+          name: op.operation_name.trim(),
           description: op.description || '',
           work_center_id: op.work_center_id!,
           setup_hours: op.setup_hours,
@@ -416,6 +421,7 @@ export default function RoutingPage() {
       }
       const created = await api.createRoutingFromGeneration({
         part_id: generationResult.part_id,
+        generation_session_id: generationResult.generation_session_id,
         revision: 'A',
         description: `Auto-generated from ${generationResult.file_type.toUpperCase()} drawing`,
         operations,
@@ -440,8 +446,41 @@ export default function RoutingPage() {
     });
   };
 
+  const updateEditedOpFields = (index: number, updates: Partial<ProposedOperation>) => {
+    setEditedOperations((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], ...updates };
+      return next;
+    });
+  };
+
   const removeEditedOp = (index: number) => {
     setEditedOperations((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const addEditedOperation = () => {
+    const nextSeq = editedOperations.length
+      ? Math.max(...editedOperations.map((op) => op.sequence || 0)) + 10
+      : 10;
+    const defaultWorkCenter = workCenters[0];
+    setEditedOperations((prev) => ([
+      ...prev,
+      {
+        sequence: nextSeq,
+        operation_name: 'New Operation',
+        description: '',
+        work_center_type: defaultWorkCenter?.work_center_type || 'fabrication',
+        work_center_id: defaultWorkCenter?.id,
+        work_center_name: defaultWorkCenter?.name,
+        setup_hours: 0,
+        run_hours_per_unit: 0,
+        is_inspection_point: false,
+        is_outside_operation: false,
+        tooling_requirements: '',
+        work_instructions: '',
+        confidence: 'manual',
+      },
+    ]));
   };
 
   const filteredGenerateParts = useMemo(() => {
@@ -1010,7 +1049,13 @@ export default function RoutingPage() {
 
                 {/* Editable operations table */}
                 <div>
-                  <h4 className="font-semibold text-sm mb-2">Proposed Operations ({editedOperations.length})</h4>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="font-semibold text-sm">Proposed Operations ({editedOperations.length})</h4>
+                    <button type="button" onClick={addEditedOperation} className="btn-secondary btn-sm flex items-center">
+                      <PlusIcon className="h-4 w-4 mr-1" />
+                      Add Operation
+                    </button>
+                  </div>
                   <div className="overflow-x-auto">
                     <table className="min-w-full divide-y divide-slate-700 text-sm">
                       <thead className="bg-slate-800/50">
@@ -1026,78 +1071,137 @@ export default function RoutingPage() {
                       </thead>
                       <tbody className="bg-[#151b28] divide-y divide-slate-700">
                         {editedOperations.map((op, idx) => (
-                          <tr key={idx} className="hover:bg-slate-800/50">
-                            <td className="px-3 py-2 font-medium">{op.sequence}</td>
-                            <td className="px-3 py-2">
-                              <input
-                                type="text"
-                                value={op.operation_name}
-                                onChange={(e) => updateEditedOp(idx, 'operation_name', e.target.value)}
-                                className="input py-1 text-sm w-full"
-                              />
-                              {op.description && (
-                                <div className="text-xs text-slate-500 mt-0.5">{op.description}</div>
-                              )}
-                            </td>
-                            <td className="px-3 py-2">
-                              <select
-                                value={op.work_center_id || 0}
-                                onChange={(e) => {
-                                  const wcId = parseInt(e.target.value);
-                                  const wc = workCenters.find((w) => w.id === wcId);
-                                  updateEditedOp(idx, 'work_center_id', wcId || undefined);
-                                  updateEditedOp(idx, 'work_center_name', wc?.name || undefined);
-                                }}
-                                className={`input py-1 text-sm w-full ${!op.work_center_id ? 'border-red-300' : ''}`}
-                              >
-                                <option value={0}>Select...</option>
-                                {workCenters.map((wc) => (
-                                  <option key={wc.id} value={wc.id}>
-                                    {wc.code} - {wc.name}
-                                  </option>
-                                ))}
-                              </select>
-                              {!op.work_center_id && (
-                                <div className="text-xs text-red-500 mt-0.5">Required</div>
-                              )}
-                            </td>
-                            <td className="px-3 py-2 text-right">
-                              <input
-                                type="number"
-                                value={Math.round(op.setup_hours * 60 * 100) / 100}
-                                onChange={(e) => updateEditedOp(idx, 'setup_hours', (parseFloat(e.target.value) || 0) / 60)}
-                                className="input py-1 text-sm w-20 text-right"
-                                step={1}
-                                min={0}
-                              />
-                              <span className="text-xs text-slate-500 ml-1">min</span>
-                            </td>
-                            <td className="px-3 py-2 text-right">
-                              <input
-                                type="number"
-                                value={Math.round(op.run_hours_per_unit * 60 * 100) / 100}
-                                onChange={(e) => updateEditedOp(idx, 'run_hours_per_unit', (parseFloat(e.target.value) || 0) / 60)}
-                                className="input py-1 text-sm w-20 text-right"
-                                step={0.1}
-                                min={0}
-                              />
-                              <span className="text-xs text-slate-500 ml-1">min</span>
-                            </td>
-                            <td className="px-3 py-2 text-center">
-                              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${confidenceBadge[op.confidence] || 'bg-slate-800 text-slate-400'}`}>
-                                {op.confidence}
-                              </span>
-                            </td>
-                            <td className="px-3 py-2 text-center">
-                              <button
-                                onClick={() => removeEditedOp(idx)}
-                                className="text-slate-500 hover:text-red-500"
-                                title="Remove operation"
-                              >
-                                <TrashIcon className="h-4 w-4" />
-                              </button>
-                            </td>
-                          </tr>
+                          <React.Fragment key={idx}>
+                            <tr className="hover:bg-slate-800/50">
+                              <td className="px-3 py-2 font-medium">
+                                <input
+                                  type="number"
+                                  value={op.sequence}
+                                  onChange={(e) => updateEditedOp(idx, 'sequence', parseInt(e.target.value) || 0)}
+                                  className="input py-1 text-sm w-20 text-center"
+                                  step={10}
+                                  min={10}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  type="text"
+                                  value={op.operation_name}
+                                  onChange={(e) => updateEditedOp(idx, 'operation_name', e.target.value)}
+                                  className={`input py-1 text-sm w-full ${!op.operation_name.trim() ? 'border-red-300' : ''}`}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <select
+                                  value={op.work_center_id || 0}
+                                  onChange={(e) => {
+                                    const wcId = parseInt(e.target.value);
+                                    const wc = workCenters.find((w) => w.id === wcId);
+                                    updateEditedOpFields(idx, {
+                                      work_center_id: wcId || undefined,
+                                      work_center_name: wc?.name || undefined,
+                                      work_center_type: wc?.work_center_type || op.work_center_type,
+                                    });
+                                  }}
+                                  className={`input py-1 text-sm w-full ${!op.work_center_id ? 'border-red-300' : ''}`}
+                                >
+                                  <option value={0}>Select...</option>
+                                  {workCenters.map((wc) => (
+                                    <option key={wc.id} value={wc.id}>
+                                      {wc.code} - {wc.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                {!op.work_center_id && (
+                                  <div className="text-xs text-red-500 mt-0.5">Required</div>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <input
+                                  type="number"
+                                  value={Math.round(op.setup_hours * 60 * 100) / 100}
+                                  onChange={(e) => updateEditedOp(idx, 'setup_hours', (parseFloat(e.target.value) || 0) / 60)}
+                                  className="input py-1 text-sm w-20 text-right"
+                                  step={1}
+                                  min={0}
+                                />
+                                <span className="text-xs text-slate-500 ml-1">min</span>
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <input
+                                  type="number"
+                                  value={Math.round(op.run_hours_per_unit * 60 * 100) / 100}
+                                  onChange={(e) => updateEditedOp(idx, 'run_hours_per_unit', (parseFloat(e.target.value) || 0) / 60)}
+                                  className="input py-1 text-sm w-20 text-right"
+                                  step={0.1}
+                                  min={0}
+                                />
+                                <span className="text-xs text-slate-500 ml-1">min</span>
+                              </td>
+                              <td className="px-3 py-2 text-center">
+                                <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${confidenceBadge[op.confidence] || 'bg-slate-800 text-slate-400'}`}>
+                                  {op.confidence}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-center">
+                                <button
+                                  onClick={() => removeEditedOp(idx)}
+                                  className="text-slate-500 hover:text-red-500"
+                                  title="Remove operation"
+                                >
+                                  <TrashIcon className="h-4 w-4" />
+                                </button>
+                              </td>
+                            </tr>
+                            <tr className="bg-slate-900/30">
+                              <td className="px-3 pb-3"></td>
+                              <td className="px-3 pb-3" colSpan={6}>
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                                  <div>
+                                    <label className="label text-xs">Description</label>
+                                    <textarea
+                                      value={op.description || ''}
+                                      onChange={(e) => updateEditedOp(idx, 'description', e.target.value)}
+                                      className="input py-2 text-sm w-full"
+                                      rows={2}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="label text-xs">Work Instructions</label>
+                                    <textarea
+                                      value={op.work_instructions || ''}
+                                      onChange={(e) => updateEditedOp(idx, 'work_instructions', e.target.value)}
+                                      className="input py-2 text-sm w-full"
+                                      rows={2}
+                                    />
+                                  </div>
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-300">
+                                  <label className="inline-flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={op.is_inspection_point}
+                                      onChange={(e) => updateEditedOp(idx, 'is_inspection_point', e.target.checked)}
+                                      className="rounded border-slate-600 bg-slate-800"
+                                    />
+                                    Inspection point
+                                  </label>
+                                  <label className="inline-flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={op.is_outside_operation}
+                                      onChange={(e) => updateEditedOp(idx, 'is_outside_operation', e.target.checked)}
+                                      className="rounded border-slate-600 bg-slate-800"
+                                    />
+                                    Outside operation
+                                  </label>
+                                  {op.work_center_type && (
+                                    <span className="text-slate-500">Type: {op.work_center_type.replace(/_/g, ' ')}</span>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          </React.Fragment>
                         ))}
                       </tbody>
                     </table>
@@ -1125,7 +1229,7 @@ export default function RoutingPage() {
                     </button>
                     <button
                       onClick={handleCreateFromGeneration}
-                      disabled={creatingFromGeneration || editedOperations.length === 0 || editedOperations.some((op) => !op.work_center_id)}
+                      disabled={creatingFromGeneration || editedOperations.length === 0 || editedOperations.some((op) => !op.work_center_id || !op.operation_name.trim())}
                       className="btn-primary flex items-center"
                     >
                       {creatingFromGeneration ? (

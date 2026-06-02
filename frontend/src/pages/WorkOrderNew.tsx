@@ -80,6 +80,8 @@ interface RoutingOperation {
   setup_hours: number;
   run_hours_per_unit: number;
   work_instructions?: string;
+  setup_instructions?: string;
+  is_inspection_point?: boolean;
 }
 
 interface Routing {
@@ -103,6 +105,9 @@ interface OperationPreview {
   component_quantity?: number;
   quantity_per_assembly?: number;
   operation_group?: string;
+  setup_instructions?: string;
+  run_instructions?: string;
+  requires_inspection?: boolean;
   fromRouting: boolean;
 }
 
@@ -475,6 +480,9 @@ export default function WorkOrderNew() {
             setup_time_hours: op.setup_hours || 0,
             run_time_hours: (op.run_hours_per_unit || 0) * (op.component_quantity || form.quantity_ordered),
             run_time_per_unit: op.run_hours_per_unit || 0,
+            setup_instructions: op.setup_instructions || '',
+            run_instructions: op.run_instructions || '',
+            requires_inspection: Boolean(op.requires_inspection),
             fromRouting: true,
             component_part_id: op.component_part_id,
             component_quantity: op.component_quantity
@@ -503,6 +511,9 @@ export default function WorkOrderNew() {
               setup_time_hours: op.setup_hours,
               run_time_hours: op.run_hours_per_unit * form.quantity_ordered,
               run_time_per_unit: op.run_hours_per_unit,
+              setup_instructions: op.setup_instructions || '',
+              run_instructions: op.work_instructions || '',
+              requires_inspection: Boolean(op.is_inspection_point),
               fromRouting: true
             }));
           setOperations(ops);
@@ -611,6 +622,9 @@ export default function WorkOrderNew() {
       work_center_name: workCenters[0]?.name || '',
       setup_time_hours: 0,
       run_time_hours: 0,
+      setup_instructions: '',
+      run_instructions: '',
+      requires_inspection: false,
       fromRouting: false
     }]);
   };
@@ -681,6 +695,9 @@ export default function WorkOrderNew() {
           setup_time_hours: op.setup_time_hours,
           run_time_hours: op.run_time_hours,
           run_time_per_piece: op.run_time_per_unit || 0,
+          setup_instructions: op.setup_instructions || undefined,
+          run_instructions: op.run_instructions || undefined,
+          requires_inspection: Boolean(op.requires_inspection),
           component_part_id: op.component_part_id,
           component_quantity: op.component_quantity,
           operation_group: op.operation_group,
@@ -1062,7 +1079,7 @@ export default function WorkOrderNew() {
                   }
                 </span>
               </div>
-              
+
               <div className="overflow-x-auto">
                 <table className="table">
                   <thead>
@@ -1077,113 +1094,8 @@ export default function WorkOrderNew() {
                   </thead>
                   <tbody>
                     {operations.map((op, index) => (
-                      <tr key={index} className={!op.fromRouting ? 'bg-amber-500/10' : ''}>
-                        <td>
-                          <input
-                            type="number"
-                            value={op.sequence}
-                            onChange={(e) => updateOperation(index, 'sequence', parseInt(e.target.value) || 0)}
-                            className="input input-sm w-16 text-center"
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="text"
-                            value={op.name}
-                            onChange={(e) => updateOperation(index, 'name', e.target.value)}
-                            className="input input-sm"
-                            placeholder="Operation name"
-                          />
-                        </td>
-                        <td>
-                          <SelectField
-                            value={op.work_center_id}
-                            onChange={(workCenterId) => updateOperation(index, 'work_center_id', workCenterId)}
-                            options={workCenterOptions}
-                            searchable
-                            placeholder="Select work center"
-                            buttonClassName="input-sm"
-                            menuClassName="min-w-72"
-                            ariaLabel="Work center"
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            step="0.1"
-                            min={0}
-                            value={hoursToMinutes(op.setup_time_hours)}
-                            onChange={(e) => updateOperation(index, 'setup_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
-                            className="input input-sm text-right"
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            step="0.1"
-                            min={0}
-                            value={hoursToMinutes(op.run_time_hours)}
-                            onChange={(e) => updateOperation(index, 'run_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
-                            className="input input-sm text-right"
-                          />
-                        </td>
-                        <td>
-                          <button
-                            type="button"
-                            onClick={() => removeOperation(index)}
-                            className="p-1.5 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-500/100/10"
-                          >
-                            <TrashIcon className="h-4 w-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              
-              {operations.some(op => !op.fromRouting) && (
-                <p className="text-xs text-amber-600 mt-2">
-                  * Yellow rows have been modified from the original routing
-                </p>
-              )}
-            </>
-          )}
-
-          {!loadingRouting && form.part_id > 0 && !routing && (
-            <>
-              <div className="flex items-center gap-2 mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400">
-                <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0" />
-                <span className="text-sm">
-                  No released routing found for this part. Add operations manually.
-                </span>
-              </div>
-
-              {operations.length === 0 ? (
-                <button
-                  type="button"
-                  onClick={addManualOperation}
-                  className="w-full py-8 border-2 border-dashed border-slate-700 rounded-xl text-slate-400 hover:border-werco-400 hover:text-werco-600 transition-colors"
-                >
-                  <PlusIcon className="h-6 w-6 mx-auto mb-2" />
-                  Add First Operation
-                </button>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th className="w-20">Seq</th>
-                        <th>Operation</th>
-                        <th>Work Center</th>
-                        <th className="w-28">Setup (min)</th>
-                        <th className="w-28">Run (min)</th>
-                        <th className="w-16"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {operations.map((op, index) => (
-                        <tr key={index}>
+                      <React.Fragment key={index}>
+                        <tr className={!op.fromRouting ? 'bg-amber-500/10' : ''}>
                           <td>
                             <input
                               type="number"
@@ -1199,7 +1111,6 @@ export default function WorkOrderNew() {
                               onChange={(e) => updateOperation(index, 'name', e.target.value)}
                               className="input input-sm"
                               placeholder="Operation name"
-                              required
                             />
                           </td>
                           <td>
@@ -1244,6 +1155,180 @@ export default function WorkOrderNew() {
                             </button>
                           </td>
                         </tr>
+                        <tr className={!op.fromRouting ? 'bg-amber-500/10' : ''}>
+                          <td></td>
+                          <td colSpan={5} className="pb-3">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                              <div>
+                                <label className="label text-xs">Setup Instructions</label>
+                                <textarea
+                                  value={op.setup_instructions || ''}
+                                  onChange={(e) => updateOperation(index, 'setup_instructions', e.target.value)}
+                                  className="input input-sm min-h-16"
+                                />
+                              </div>
+                              <div>
+                                <label className="label text-xs">Run Instructions</label>
+                                <textarea
+                                  value={op.run_instructions || ''}
+                                  onChange={(e) => updateOperation(index, 'run_instructions', e.target.value)}
+                                  className="input input-sm min-h-16"
+                                />
+                              </div>
+                            </div>
+                            <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-300">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(op.requires_inspection)}
+                                onChange={(e) => updateOperation(index, 'requires_inspection', e.target.checked)}
+                                className="rounded border-slate-600 bg-slate-800"
+                              />
+                              Requires inspection
+                            </label>
+                          </td>
+                        </tr>
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {operations.some(op => !op.fromRouting) && (
+                <p className="text-xs text-amber-600 mt-2">
+                  * Yellow rows have been modified from the original routing
+                </p>
+              )}
+            </>
+          )}
+
+          {!loadingRouting && form.part_id > 0 && !routing && (
+            <>
+              <div className="flex items-center gap-2 mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400">
+                <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0" />
+                <span className="text-sm">
+                  No released routing found for this part. Add operations manually.
+                </span>
+              </div>
+
+              {operations.length === 0 ? (
+                <button
+                  type="button"
+                  onClick={addManualOperation}
+                  className="w-full py-8 border-2 border-dashed border-slate-700 rounded-xl text-slate-400 hover:border-werco-400 hover:text-werco-600 transition-colors"
+                >
+                  <PlusIcon className="h-6 w-6 mx-auto mb-2" />
+                  Add First Operation
+                </button>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th className="w-20">Seq</th>
+                        <th>Operation</th>
+                        <th>Work Center</th>
+                        <th className="w-28">Setup (min)</th>
+                        <th className="w-28">Run (min)</th>
+                        <th className="w-16"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {operations.map((op, index) => (
+                        <React.Fragment key={index}>
+                          <tr>
+                            <td>
+                              <input
+                                type="number"
+                                value={op.sequence}
+                                onChange={(e) => updateOperation(index, 'sequence', parseInt(e.target.value) || 0)}
+                                className="input input-sm w-16 text-center"
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="text"
+                                value={op.name}
+                                onChange={(e) => updateOperation(index, 'name', e.target.value)}
+                                className="input input-sm"
+                                placeholder="Operation name"
+                                required
+                              />
+                            </td>
+                            <td>
+                              <SelectField
+                                value={op.work_center_id}
+                                onChange={(workCenterId) => updateOperation(index, 'work_center_id', workCenterId)}
+                                options={workCenterOptions}
+                                searchable
+                                placeholder="Select work center"
+                                buttonClassName="input-sm"
+                                menuClassName="min-w-72"
+                                ariaLabel="Work center"
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                step="0.1"
+                                min={0}
+                                value={hoursToMinutes(op.setup_time_hours)}
+                                onChange={(e) => updateOperation(index, 'setup_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
+                                className="input input-sm text-right"
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                step="0.1"
+                                min={0}
+                                value={hoursToMinutes(op.run_time_hours)}
+                                onChange={(e) => updateOperation(index, 'run_time_hours', minutesToHours(parseFloat(e.target.value) || 0))}
+                                className="input input-sm text-right"
+                              />
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                onClick={() => removeOperation(index)}
+                                className="p-1.5 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-500/100/10"
+                              >
+                                <TrashIcon className="h-4 w-4" />
+                              </button>
+                            </td>
+                          </tr>
+                          <tr>
+                            <td></td>
+                            <td colSpan={5} className="pb-3">
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div>
+                                  <label className="label text-xs">Setup Instructions</label>
+                                  <textarea
+                                    value={op.setup_instructions || ''}
+                                    onChange={(e) => updateOperation(index, 'setup_instructions', e.target.value)}
+                                    className="input input-sm min-h-16"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="label text-xs">Run Instructions</label>
+                                  <textarea
+                                    value={op.run_instructions || ''}
+                                    onChange={(e) => updateOperation(index, 'run_instructions', e.target.value)}
+                                    className="input input-sm min-h-16"
+                                  />
+                                </div>
+                              </div>
+                              <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-300">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(op.requires_inspection)}
+                                  onChange={(e) => updateOperation(index, 'requires_inspection', e.target.checked)}
+                                  className="rounded border-slate-600 bg-slate-800"
+                                />
+                                Requires inspection
+                              </label>
+                            </td>
+                          </tr>
+                        </React.Fragment>
                       ))}
                     </tbody>
                   </table>

@@ -904,6 +904,7 @@ class ApiService {
 
   async createRoutingFromGeneration(data: {
     part_id: number;
+    generation_session_id?: number;
     revision?: string;
     description?: string;
     operations: any[];

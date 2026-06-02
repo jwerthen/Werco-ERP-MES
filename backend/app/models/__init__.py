@@ -64,6 +64,12 @@ from .part import Part, PartType, UnitOfMeasure
 from .qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from .rfq_quote import PriceSnapshot, QuoteEstimate, QuoteLineSummary, RfqPackage, RfqPackageFile
 from .routing import Routing, RoutingOperation
+from .routing_learning import (
+    RoutingGenerationSession,
+    RoutingLearnedAlias,
+    RoutingOperationPattern,
+    RoutingWorkCenterPreference,
+)
 from .spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
 from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from .time_entry import TimeEntry
@@ -86,6 +92,10 @@ __all__ = [
     "BOMItemType",
     "Routing",
     "RoutingOperation",
+    "RoutingGenerationSession",
+    "RoutingLearnedAlias",
+    "RoutingOperationPattern",
+    "RoutingWorkCenterPreference",
     "WorkOrder",
     "WorkOrderStatus",
     "WorkOrderOperation",

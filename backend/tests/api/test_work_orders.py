@@ -375,6 +375,61 @@ class TestWorkOrdersAPI:
         assert data["customer_name"] == sample_work_order_data["customer_name"]
         assert float(data["quantity_ordered"]) == sample_work_order_data["quantity_ordered"]
 
+    def test_auto_routing_copies_routing_instructions_to_work_order(
+        self, client: TestClient, auth_headers: dict, db_session
+    ):
+        part = Part(
+            part_number="WO-INSTR-001",
+            name="Instruction Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        work_center = WorkCenter(
+            code="WC-INSTR-001",
+            name="Instruction Center",
+            work_center_type="assembly",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, work_center])
+        db_session.flush()
+
+        routing = Routing(part_id=part.id, revision="A", status="released", is_active=True, company_id=1)
+        db_session.add(routing)
+        db_session.flush()
+        db_session.add(
+            RoutingOperation(
+                routing_id=routing.id,
+                sequence=10,
+                operation_number="Op 10",
+                name="Assemble",
+                description="Build the assembly",
+                work_center_id=work_center.id,
+                setup_hours=0.25,
+                run_hours_per_unit=0.5,
+                setup_instructions="Stage fixtures and verify revision.",
+                work_instructions="Assemble parts per drawing notes.",
+                is_inspection_point=True,
+                is_active=True,
+                company_id=1,
+            )
+        )
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/work-orders/",
+            headers=auth_headers,
+            json={"part_id": part.id, "quantity_ordered": 2, "priority": 5},
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        operation = response.json()["operations"][0]
+        assert operation["setup_instructions"] == "Stage fixtures and verify revision."
+        assert operation["run_instructions"] == "Assemble parts per drawing notes."
+        assert operation["requires_inspection"] is True
+
     def test_create_work_order_unauthorized(self, client: TestClient, sample_work_order_data: dict):
         """Test creating a work order without authentication."""
         response = client.post("/api/v1/work-orders/", json=sample_work_order_data)

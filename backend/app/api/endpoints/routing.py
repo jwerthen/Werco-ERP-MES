@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem
-from app.models.part import Part
+from app.models.part import Part, PartType
 from app.models.routing import Routing, RoutingOperation
+from app.models.routing_learning import RoutingGenerationSession
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.schemas.routing import (
@@ -30,6 +31,11 @@ from app.schemas.routing_generation import (
     RoutingGenerationResult,
 )
 from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
+from app.services.routing_learning_service import (
+    create_generation_session,
+    get_learned_routing_context,
+    learn_from_approved_generation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +138,7 @@ async def generate_routing_from_drawing(
         )
 
     # Build work_centers_by_type lookup from this company's active work centers.
-    allowed_work_center_types = get_work_center_types(db, include_in_use=True, company_id=company_id)
+    configured_work_center_types = get_work_center_types(db, include_in_use=True, company_id=company_id)
     active_wcs = (
         db.query(WorkCenter)
         .filter(
@@ -149,6 +155,10 @@ async def generate_routing_from_drawing(
         if wc_type not in work_centers_by_type:
             work_centers_by_type[wc_type] = []
         work_centers_by_type[wc_type].append({"id": wc.id, "name": wc.name, "code": wc.code})
+    active_work_center_types = list(work_centers_by_type.keys())
+    allowed_work_center_types = active_work_center_types or configured_work_center_types
+    if not active_work_center_types:
+        warnings.append("No active work centers were found. Proposed operations will require manual work center assignment.")
 
     # Parse file based on type
     drawing_text = ""
@@ -196,12 +206,29 @@ async def generate_routing_from_drawing(
     # Generate the draft routing
     from app.services.routing_generation_service import generate_draft_routing
 
+    learned_context = get_learned_routing_context(
+        db,
+        company_id=company_id,
+        part=part,
+        drawing_text=drawing_text,
+        geometry=geometry,
+    )
+
     gen_result = generate_draft_routing(
         drawing_text=drawing_text,
         geometry=geometry,
         work_centers_by_type=work_centers_by_type,
         is_ocr=is_ocr,
         work_center_types=allowed_work_center_types,
+        part_context=(
+            f"Part {part.part_number}: {part.name}. "
+            f"ERP part type: {part.part_type.value if hasattr(part.part_type, 'value') else part.part_type}."
+        ),
+        is_assembly=part.part_type == PartType.ASSEMBLY,
+        learned_aliases=learned_context.get("aliases"),
+        learned_patterns=learned_context.get("patterns"),
+        preferred_work_center_ids=learned_context.get("preferred_work_center_ids"),
+        learned_examples_context=learned_context.get("examples_prompt"),
     )
 
     if gen_result.get("_error"):
@@ -251,8 +278,31 @@ async def generate_routing_from_drawing(
     ]
 
     all_warnings = warnings + gen_result.get("warnings", [])
+    drawing_info_payload = drawing_info.model_dump()
+    proposed_operations_payload = [operation.model_dump() for operation in proposed_operations]
+    generation_session = create_generation_session(
+        db,
+        company_id=company_id,
+        part_id=part.id,
+        created_by=current_user.id,
+        file_name=file.filename or safe_name,
+        file_type=ext.lstrip("."),
+        file_size=len(file_content),
+        file_path=str(file_path),
+        drawing_text=drawing_text,
+        geometry=geometry,
+        drawing_info=drawing_info_payload,
+        proposed_operations=proposed_operations_payload,
+        warnings=all_warnings,
+        extraction_confidence=gen_result.get("extraction_confidence", "medium"),
+        source_was_ocr=is_ocr,
+        learned_context=learned_context,
+    )
+    db.commit()
+    db.refresh(generation_session)
 
     return RoutingGenerationResult(
+        generation_session_id=generation_session.id,
         part_id=part.id,
         part_number=part.part_number,
         part_name=part.name,
@@ -280,6 +330,20 @@ def create_routing_from_generation(
     part = db.query(Part).filter(Part.id == data.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
+
+    generation_session = None
+    if data.generation_session_id:
+        generation_session = (
+            db.query(RoutingGenerationSession)
+            .filter(
+                RoutingGenerationSession.id == data.generation_session_id,
+                RoutingGenerationSession.part_id == data.part_id,
+                RoutingGenerationSession.company_id == company_id,
+            )
+            .first()
+        )
+        if not generation_session:
+            raise HTTPException(status_code=404, detail="Routing generation session not found")
 
     # Check for existing active routing
     existing = (
@@ -326,8 +390,10 @@ def create_routing_from_generation(
     db.flush()
 
     # Create operations
+    approved_operations = []
     for op_data in data.operations:
         op_dict = op_data.model_dump()
+        approved_operations.append(op_dict.copy())
         if not op_dict.get("operation_number"):
             op_dict["operation_number"] = f"Op {op_dict['sequence']}"
         operation = RoutingOperation(routing_id=routing.id, company_id=company_id, **op_dict)
@@ -336,6 +402,16 @@ def create_routing_from_generation(
     db.flush()
     db.refresh(routing)
     calculate_routing_totals(routing, db)
+    if generation_session:
+        learn_from_approved_generation(
+            db,
+            generation_session=generation_session,
+            approved_operations=approved_operations,
+            part=part,
+            routing_id=routing.id,
+            approved_by=current_user.id,
+            company_id=company_id,
+        )
     db.commit()
 
     # Reload with relationships for response

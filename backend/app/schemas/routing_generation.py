@@ -45,6 +45,7 @@ class ProposedOperation(BaseModel):
 class RoutingGenerationResult(BaseModel):
     """Full result returned to the frontend for review."""
 
+    generation_session_id: Optional[int] = None
     part_id: int
     part_number: str
     part_name: str
@@ -60,6 +61,7 @@ class RoutingCreateFromGeneration(BaseModel):
     """Payload sent after user reviews and edits the proposed routing."""
 
     part_id: int
+    generation_session_id: Optional[int] = None
     revision: str = "A"
     description: Optional[str] = None
     operations: List[RoutingOperationCreate]
