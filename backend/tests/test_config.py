@@ -22,7 +22,7 @@ class TestSecretKeyValidation:
                 "SECRET_KEY": "CHANGE-THIS-IN-PRODUCTION",
                 "REFRESH_TOKEN_SECRET_KEY": "a" * 64,  # Valid refresh key
             },
-            clear=False,
+            clear=True,
         ):
             # Need to re-import to trigger validation
             with pytest.raises(ValidationError) as exc_info:
@@ -42,7 +42,7 @@ class TestSecretKeyValidation:
                 "SECRET_KEY": "tooshort",  # Less than 32 characters
                 "REFRESH_TOKEN_SECRET_KEY": "a" * 64,  # Valid refresh key
             },
-            clear=False,
+            clear=True,
         ):
             with pytest.raises(ValidationError) as exc_info:
                 from app.core.config import Settings
@@ -61,7 +61,7 @@ class TestSecretKeyValidation:
                 "SECRET_KEY": valid_key,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
             },
-            clear=False,
+            clear=True,
         ):
             from app.core.config import Settings
 
@@ -82,7 +82,7 @@ class TestRefreshTokenSecretKeyValidation:
                 "SECRET_KEY": "a" * 64,  # Valid secret key
                 "REFRESH_TOKEN_SECRET_KEY": "CHANGE-THIS-REFRESH-SECRET",
             },
-            clear=False,
+            clear=True,
         ):
             with pytest.raises(ValidationError) as exc_info:
                 from app.core.config import Settings
@@ -103,7 +103,7 @@ class TestRefreshTokenSecretKeyValidation:
                 "SECRET_KEY": "a" * 64,  # Valid secret key
                 "REFRESH_TOKEN_SECRET_KEY": "short",  # Less than 32 characters
             },
-            clear=False,
+            clear=True,
         ):
             with pytest.raises(ValidationError) as exc_info:
                 from app.core.config import Settings
@@ -122,7 +122,7 @@ class TestRefreshTokenSecretKeyValidation:
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": valid_key,
             },
-            clear=False,
+            clear=True,
         ):
             from app.core.config import Settings
 
@@ -154,7 +154,7 @@ class TestInsecureKeyPatterns:
                 "SECRET_KEY": insecure_key,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
             },
-            clear=False,
+            clear=True,
         ):
             with pytest.raises(ValidationError):
                 from app.core.config import Settings
@@ -173,7 +173,7 @@ class TestSupabaseDatabaseConfiguration:
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
             },
-            clear=False,
+            clear=True,
         ):
             from app.core.config import Settings
 
@@ -197,7 +197,7 @@ class TestSupabaseDatabaseConfiguration:
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
             },
-            clear=False,
+            clear=True,
         ):
             from app.core.config import Settings
 
@@ -220,7 +220,7 @@ class TestSupabaseDatabaseConfiguration:
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
             },
-            clear=False,
+            clear=True,
         ):
             from app.core.config import Settings
 
@@ -229,6 +229,49 @@ class TestSupabaseDatabaseConfiguration:
             assert "postgres.abc123" in settings.SQLALCHEMY_DATABASE_URL
             assert settings.safe_database_host == "aws-1-us-west-2.pooler.supabase.com"
 
+    def test_supabase_settings_override_injected_non_supabase_database_url(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://postgres:secret@localhost:5432/werco_erp",
+                "SUPABASE_PROJECT_REF": "abc123",
+                "SUPABASE_DB_HOST": "aws-1-us-west-2.pooler.supabase.com",
+                "SUPABASE_DB_PASSWORD": "db-password",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "ENVIRONMENT": "production",
+                "DEBUG": "false",
+                "CORS_ORIGINS": "https://erp.example.com",
+            },
+            clear=True,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+
+            assert settings.safe_database_host == "aws-1-us-west-2.pooler.supabase.com"
+            assert settings.database_provider == "supabase"
+
+    def test_sqlite_database_url_is_not_overridden_by_supabase_settings(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "sqlite:///./test.db",
+                "SUPABASE_PROJECT_REF": "abc123",
+                "SUPABASE_DB_PASSWORD": "db-password",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "ENVIRONMENT": "test",
+            },
+            clear=True,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+
+            assert settings.SQLALCHEMY_DATABASE_URL == "sqlite:///./test.db"
+            assert settings.database_provider == "sqlite"
+
     def test_production_rejects_non_supabase_database_by_default(self):
         from pydantic import ValidationError
 
@@ -236,13 +279,18 @@ class TestSupabaseDatabaseConfiguration:
             os.environ,
             {
                 "DATABASE_URL": "postgresql://postgres:secret@localhost:5432/werco_erp",
+                "SUPABASE_URL": "",
+                "SUPABASE_PROJECT_REF": "",
+                "SUPABASE_DB_HOST": "",
+                "SUPABASE_DB_PASSWORD": "",
+                "DB_PASSWORD": "",
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
                 "ENVIRONMENT": "production",
                 "DEBUG": "false",
                 "CORS_ORIGINS": "https://erp.example.com",
             },
-            clear=False,
+            clear=True,
         ):
             with pytest.raises(ValidationError) as exc_info:
                 from app.core.config import Settings

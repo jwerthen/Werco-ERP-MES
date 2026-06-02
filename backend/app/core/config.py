@@ -28,8 +28,9 @@ class Settings(BaseSettings):
     PORT: int = 8000
 
     # Database - Supabase Postgres is the canonical backend data store.
-    # Prefer DATABASE_URL for the exact Supabase connection string. If it is not
-    # set, the app can build one from the SUPABASE_DB_* values below.
+    # Use DATABASE_URL when it is already a Supabase connection string. If a
+    # platform injects its own non-Supabase DATABASE_URL, explicit SUPABASE_DB_*
+    # settings take precedence.
     DATABASE_URL: Optional[str] = None
     DB_PASSWORD: Optional[str] = None
     DATABASE_PROVIDER: str = "supabase"
@@ -118,7 +119,7 @@ class Settings(BaseSettings):
     @property
     def SQLALCHEMY_DATABASE_URL(self) -> str:
         """Return the normalized SQLAlchemy URL used by the API, worker, and Alembic."""
-        url = self.DATABASE_URL or self._build_supabase_database_url()
+        url = self._select_database_url()
         return self._normalize_database_url(url)
 
     @property
@@ -169,6 +170,25 @@ class Settings(BaseSettings):
             f"{quote(self.SUPABASE_DB_NAME, safe='')}"
         )
 
+    def _select_database_url(self) -> str:
+        if self.DATABASE_URL and self._url_is_sqlite(self.DATABASE_URL):
+            return self.DATABASE_URL
+        if self.DATABASE_URL and self._url_is_supabase(self.DATABASE_URL):
+            return self.DATABASE_URL
+        if self._can_build_supabase_database_url():
+            return self._build_supabase_database_url()
+        if self.DATABASE_URL:
+            return self.DATABASE_URL
+        return self._build_supabase_database_url()
+
+    def _can_build_supabase_database_url(self) -> bool:
+        project_ref = self.SUPABASE_PROJECT_REF or self._project_ref_from_supabase_url()
+        host = self.SUPABASE_DB_HOST or (
+            f"db.{project_ref}.supabase.co" if project_ref else None
+        )
+        password = self.SUPABASE_DB_PASSWORD or self.DB_PASSWORD
+        return bool(host and password)
+
     def _default_supabase_db_user(self, host: str, project_ref: Optional[str]) -> str:
         if host.endswith(".pooler.supabase.com") and project_ref:
             return f"postgres.{project_ref}"
@@ -199,6 +219,13 @@ class Settings(BaseSettings):
                 query.setdefault("application_name", "werco_erp_supabase")
             normalized = urlunparse(parsed._replace(query=urlencode(query)))
         return normalized
+
+    def _url_is_supabase(self, url: str) -> bool:
+        parsed = urlparse(url)
+        return self._host_is_supabase(parsed.hostname or "")
+
+    def _url_is_sqlite(self, url: str) -> bool:
+        return url.startswith("sqlite")
 
     def _host_requires_ssl(self, host: str) -> bool:
         return self._host_is_supabase(host) or self.ENVIRONMENT == "production"
