@@ -252,6 +252,53 @@ class TestSupabaseDatabaseConfiguration:
             assert settings.safe_database_host == "aws-1-us-west-2.pooler.supabase.com"
             assert settings.database_provider == "supabase"
 
+    def test_supabase_url_alias_overrides_injected_non_supabase_database_url(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://postgres:secret@localhost:5432/werco_erp",
+                "POSTGRES_URL": "postgresql://postgres.abc123:db-password@aws-1-us-west-2.pooler.supabase.com:5432/postgres",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "ENVIRONMENT": "production",
+                "DEBUG": "false",
+                "CORS_ORIGINS": "https://erp.example.com",
+            },
+            clear=True,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+
+            assert settings.safe_database_host == "aws-1-us-west-2.pooler.supabase.com"
+            assert "postgres.abc123" in settings.SQLALCHEMY_DATABASE_URL
+            assert settings.database_provider == "supabase"
+
+    def test_supabase_postgres_components_override_injected_database_url(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://postgres:secret@localhost:5432/werco_erp",
+                "POSTGRES_HOST": "db.abc123.supabase.co",
+                "POSTGRES_USER": "postgres",
+                "POSTGRES_PASSWORD": "db-password",
+                "POSTGRES_DATABASE": "postgres",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "ENVIRONMENT": "production",
+                "DEBUG": "false",
+                "CORS_ORIGINS": "https://erp.example.com",
+            },
+            clear=True,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+
+            assert settings.safe_database_host == "db.abc123.supabase.co"
+            assert "postgres:db-password@db.abc123.supabase.co" in settings.SQLALCHEMY_DATABASE_URL
+            assert settings.database_provider == "supabase"
+
     def test_sqlite_database_url_is_not_overridden_by_supabase_settings(self):
         with mock.patch.dict(
             os.environ,

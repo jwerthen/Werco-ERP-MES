@@ -17,6 +17,11 @@ This document describes all environment variables used by Werco ERP. Use this as
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | Yes* | - | Supabase Postgres connection string from Project Settings > Database. Format: `postgresql://user:password@host:port/database` |
 | `DATABASE_PROVIDER` | No | `supabase` | Database provider label used by health checks and deployment validation |
+| `SUPABASE_DATABASE_URL` | No | - | Supabase Postgres URL alias; overrides a non-Supabase `DATABASE_URL` if injected by the platform |
+| `SUPABASE_POSTGRES_URL` | No | - | Supabase Postgres URL alias; overrides a non-Supabase `DATABASE_URL` if injected by the platform |
+| `POSTGRES_URL` | No | - | Common Supabase/Vercel Postgres URL alias; overrides a non-Supabase `DATABASE_URL` when it points to Supabase |
+| `POSTGRES_PRISMA_URL` | No | - | Common pooled Postgres URL alias; used when it points to Supabase |
+| `POSTGRES_URL_NON_POOLING` | No | - | Common direct Postgres URL alias; used when it points to Supabase |
 | `SUPABASE_URL` | No | - | Supabase project URL, used to derive the project ref when `DATABASE_URL` is omitted |
 | `SUPABASE_PROJECT_REF` | No | - | Supabase project ref, used with `SUPABASE_DB_PASSWORD` to build a direct Postgres URL |
 | `SUPABASE_DB_PASSWORD` | No | - | Supabase database password, used when `DATABASE_URL` is omitted |

@@ -29,8 +29,8 @@ class Settings(BaseSettings):
 
     # Database - Supabase Postgres is the canonical backend data store.
     # Use DATABASE_URL when it is already a Supabase connection string. If a
-    # platform injects its own non-Supabase DATABASE_URL, explicit SUPABASE_DB_*
-    # settings take precedence.
+    # platform injects its own non-Supabase DATABASE_URL, explicit Supabase URL
+    # aliases or SUPABASE_DB_* settings take precedence.
     DATABASE_URL: Optional[str] = None
     DB_PASSWORD: Optional[str] = None
     DATABASE_PROVIDER: str = "supabase"
@@ -38,6 +38,8 @@ class Settings(BaseSettings):
 
     # Supabase Postgres connection settings
     SUPABASE_URL: Optional[str] = None
+    SUPABASE_DATABASE_URL: Optional[str] = None
+    SUPABASE_POSTGRES_URL: Optional[str] = None
     SUPABASE_PROJECT_REF: Optional[str] = None
     SUPABASE_DB_HOST: Optional[str] = None
     SUPABASE_DB_PORT: int = 5432
@@ -45,6 +47,17 @@ class Settings(BaseSettings):
     SUPABASE_DB_USER: Optional[str] = None
     SUPABASE_DB_PASSWORD: Optional[str] = None
     SUPABASE_DB_SSLMODE: str = "require"
+    POSTGRES_URL: Optional[str] = None
+    POSTGRES_PRISMA_URL: Optional[str] = None
+    POSTGRES_URL_NON_POOLING: Optional[str] = None
+    POSTGRES_URL_NO_SSL: Optional[str] = None
+    DIRECT_URL: Optional[str] = None
+    POSTGRES_HOST: Optional[str] = None
+    POSTGRES_PORT: int = 5432
+    POSTGRES_USER: Optional[str] = None
+    POSTGRES_PASSWORD: Optional[str] = None
+    POSTGRES_DATABASE: Optional[str] = None
+    POSTGRES_DB: Optional[str] = None
 
     # Database Connection Pool Settings
     DB_POOL_SIZE: int = 5  # Number of connections to keep open
@@ -110,8 +123,8 @@ class Settings(BaseSettings):
             if not self.ALLOW_NON_SUPABASE_DATABASE and not self.is_supabase_database:
                 raise ValueError(
                     "Production must use Supabase as the backend database. "
-                    "Set DATABASE_URL to the Supabase Postgres connection string, or configure "
-                    "SUPABASE_PROJECT_REF/SUPABASE_DB_PASSWORD. "
+                    "Set DATABASE_URL, SUPABASE_DATABASE_URL, or POSTGRES_URL to the Supabase "
+                    "Postgres connection string, or configure SUPABASE_PROJECT_REF/SUPABASE_DB_PASSWORD. "
                     "Set ALLOW_NON_SUPABASE_DATABASE=true only for an intentional break-glass migration."
                 )
         return self
@@ -173,13 +186,32 @@ class Settings(BaseSettings):
     def _select_database_url(self) -> str:
         if self.DATABASE_URL and self._url_is_sqlite(self.DATABASE_URL):
             return self.DATABASE_URL
-        if self.DATABASE_URL and self._url_is_supabase(self.DATABASE_URL):
-            return self.DATABASE_URL
+        for url in self._candidate_database_urls():
+            if self._url_is_supabase(url):
+                return url
+        if self._can_build_supabase_postgres_url():
+            return self._build_supabase_postgres_url()
         if self._can_build_supabase_database_url():
             return self._build_supabase_database_url()
         if self.DATABASE_URL:
             return self.DATABASE_URL
         return self._build_supabase_database_url()
+
+    def _candidate_database_urls(self) -> list[str]:
+        return [
+            url
+            for url in (
+                self.DATABASE_URL,
+                self.SUPABASE_DATABASE_URL,
+                self.SUPABASE_POSTGRES_URL,
+                self.POSTGRES_URL,
+                self.POSTGRES_PRISMA_URL,
+                self.POSTGRES_URL_NON_POOLING,
+                self.POSTGRES_URL_NO_SSL,
+                self.DIRECT_URL,
+            )
+            if url
+        ]
 
     def _can_build_supabase_database_url(self) -> bool:
         project_ref = self.SUPABASE_PROJECT_REF or self._project_ref_from_supabase_url()
@@ -188,6 +220,22 @@ class Settings(BaseSettings):
         )
         password = self.SUPABASE_DB_PASSWORD or self.DB_PASSWORD
         return bool(host and password)
+
+    def _can_build_supabase_postgres_url(self) -> bool:
+        return bool(
+            self.POSTGRES_HOST
+            and self._host_is_supabase(self.POSTGRES_HOST)
+            and self.POSTGRES_USER
+            and self.POSTGRES_PASSWORD
+        )
+
+    def _build_supabase_postgres_url(self) -> str:
+        database = self.POSTGRES_DATABASE or self.POSTGRES_DB or "postgres"
+        return (
+            f"postgresql://{quote(self.POSTGRES_USER or '', safe='')}:"
+            f"{quote(self.POSTGRES_PASSWORD or '', safe='')}@"
+            f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{quote(database, safe='')}"
+        )
 
     def _default_supabase_db_user(self, host: str, project_ref: Optional[str]) -> str:
         if host.endswith(".pooler.supabase.com") and project_ref:
