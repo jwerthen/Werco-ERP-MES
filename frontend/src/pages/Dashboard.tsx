@@ -836,7 +836,7 @@ export default function Dashboard() {
             {data.recent_completions.map((completion, index) => (
               <div
                 key={index}
-                className="flex items-center justify-between py-4 first:pt-0 last:pb-0"
+                className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="flex items-center gap-4">
                   <div className="p-2 rounded-lg bg-emerald-500/20">
@@ -850,11 +850,27 @@ export default function Dashboard() {
                     </p>
                   </div>
                 </div>
-                <div className="text-right">
-                  <p className="font-semibold text-white tabular-nums">
-                    {completion.quantity_complete} units
-                  </p>
-                  <p className="text-sm text-slate-400">Quantity</p>
+                <div className="grid grid-cols-3 gap-4 pl-14 text-left sm:min-w-[360px] sm:pl-0 sm:text-right">
+                  <div>
+                    <p className="font-semibold text-white tabular-nums">
+                      {completion.completed_at
+                        ? formatCentralDate(completion.completed_at, { year: undefined })
+                        : '-'}
+                    </p>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Date</p>
+                  </div>
+                  <div>
+                    <p className="font-semibold text-white tabular-nums">
+                      {completion.completed_at ? formatCentralTime(completion.completed_at) : '-'}
+                    </p>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Time</p>
+                  </div>
+                  <div>
+                    <p className="font-semibold text-white tabular-nums">
+                      {completion.quantity_complete} units
+                    </p>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Qty Completed</p>
+                  </div>
                 </div>
               </div>
             ))}
