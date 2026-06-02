@@ -69,6 +69,11 @@ interface DropTarget {
   date: string; // ISO date string
 }
 
+interface CapacityCellFocus {
+  wcId: number;
+  date: string;
+}
+
 interface CapacityForDate {
   work_center_id: number;
   work_center_code: string;
@@ -160,6 +165,7 @@ export default function Scheduling() {
   const [bulkShiftDays, setBulkShiftDays] = useState(1);
   const [bulkActionRunning, setBulkActionRunning] = useState<string | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
+  const scheduleBoardRef = useRef<HTMLDivElement | null>(null);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
     return buildWsUrl('/ws/updates', token ? { token } : undefined);
@@ -168,6 +174,7 @@ export default function Scheduling() {
   // Drag and drop state
   const [dragState, setDragState] = useState<DragState>({ job: null, isDragging: false });
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const [capacityCellFocus, setCapacityCellFocus] = useState<CapacityCellFocus | null>(null);
   const canEditPriority = can('work_orders:edit');
 
   // Enhanced schedule modal state
@@ -764,12 +771,39 @@ export default function Scheduling() {
     return 'bg-slate-800 text-slate-100';
   };
 
+  const capacityDayClass = (day: CapacityHeatmapDay) => {
+    if (day.utilization_pct > 100) return 'bg-red-500 text-white border-red-400';
+    if (day.utilization_pct >= 90) return 'bg-amber-500 text-slate-950 border-amber-300';
+    if (day.utilization_pct >= 70) return 'bg-yellow-400 text-slate-950 border-yellow-200';
+    if (day.scheduled_hours > 0) return 'bg-emerald-500 text-slate-950 border-emerald-300';
+    return 'bg-slate-700 text-slate-300 border-slate-600';
+  };
+
+  const capacityStatusLabel = (day: CapacityHeatmapDay) => {
+    if (day.utilization_pct > 100) return 'Over capacity';
+    if (day.utilization_pct >= 90) return 'Near full';
+    if (day.utilization_pct >= 70) return 'Busy';
+    if (day.scheduled_hours > 0) return 'Scheduled';
+    return 'Open';
+  };
+
+  const handleCapacityDaySelect = (workCenterId: number, date: string) => {
+    setCapacityCellFocus({ wcId: workCenterId, date });
+    scheduleBoardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    window.requestAnimationFrame(() => {
+      const cell = document.querySelector<HTMLElement>(`[data-capacity-cell="${workCenterId}-${date}"]`);
+      cell?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    });
+  };
+
   const navigateWeek = (direction: number) => {
     setWeekStart(addDays(weekStart, direction * 7));
+    setCapacityCellFocus(null);
   };
 
   const goToToday = () => {
     setWeekStart(startOfWeek(getCentralTodayDate(), { weekStartsOn: 1 }));
+    setCapacityCellFocus(null);
   };
 
   if (loading) {
@@ -850,10 +884,24 @@ export default function Scheduling() {
 
       {/* Machine Capacity Overview */}
       <div className="card">
-        <div className="card-header">
+        <div className="card-header items-start gap-3">
           <div>
             <h2 className="card-title">Machine Capacity</h2>
-            <p className="card-subtitle">Scheduled load across all work centers for the visible week</p>
+            <p className="card-subtitle">Weekly total above; Mon-Sat daily load chips below</p>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2 text-[11px] text-slate-400">
+            {[
+              { label: 'Open', className: 'bg-slate-700' },
+              { label: 'Scheduled', className: 'bg-emerald-500' },
+              { label: '70%+', className: 'bg-yellow-400' },
+              { label: '90%+', className: 'bg-amber-500' },
+              { label: 'Over', className: 'bg-red-500' },
+            ].map((item) => (
+              <span key={item.label} className="flex items-center gap-1 whitespace-nowrap">
+                <span className={`h-2.5 w-2.5 rounded-sm ${item.className}`} />
+                {item.label}
+              </span>
+            ))}
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -882,19 +930,35 @@ export default function Scheduling() {
                   <span>{machine.scheduled_hours.toFixed(1)}h scheduled</span>
                   <span>{machine.capacity_hours.toFixed(1)}h cap</span>
                 </div>
-                <div className="mt-3 grid grid-cols-6 gap-1">
+                <div className="mt-3 flex items-center justify-between text-[11px] font-medium uppercase text-slate-500">
+                  <span>Daily load</span>
+                  <span>{machine.overloaded_days > 0 ? `${machine.overloaded_days} over` : `${machine.available_hours.toFixed(1)}h open`}</span>
+                </div>
+                <div className="mt-1.5 grid grid-cols-6 gap-1">
                   {machine.days.map((day) => {
-                    const dayClass =
-                      day.utilization_pct > 100 ? 'bg-red-500/100' :
-                      day.utilization_pct >= 90 ? 'bg-amber-500/100' :
-                      day.utilization_pct >= 70 ? 'bg-yellow-400' :
-                      day.scheduled_hours > 0 ? 'bg-emerald-500/100' : 'bg-slate-700';
+                    const isFocused = capacityCellFocus?.wcId === machine.work_center_id && capacityCellFocus?.date === day.date;
+                    const statusLabel = capacityStatusLabel(day);
                     return (
-                      <div
+                      <button
+                        type="button"
                         key={`${machine.work_center_id}-${day.date}`}
-                        className={`h-7 rounded ${dayClass}`}
-                        title={`${formatCentralDate(day.date, { year: undefined })}: ${day.scheduled_hours.toFixed(1)}h / ${day.capacity_hours.toFixed(1)}h`}
-                      />
+                        onClick={() => handleCapacityDaySelect(machine.work_center_id, day.date)}
+                        className={`h-12 rounded border px-1 text-center transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-cyan-400 ${capacityDayClass(day)} ${
+                          isFocused ? 'ring-2 ring-cyan-300 ring-offset-2 ring-offset-slate-900' : ''
+                        }`}
+                        title={`${formatCentralDate(day.date, { year: undefined })} - ${statusLabel}: ${day.scheduled_hours.toFixed(1)}h scheduled of ${day.capacity_hours.toFixed(1)}h capacity (${Math.round(day.utilization_pct)}%)`}
+                        aria-label={`${machine.work_center_code} ${formatCentralDate(day.date, { year: undefined })}: ${statusLabel}, ${day.scheduled_hours.toFixed(1)} scheduled hours of ${day.capacity_hours.toFixed(1)} capacity hours`}
+                      >
+                        <span className="block text-[10px] font-semibold leading-4">
+                          {formatInCentralTime(day.date, { weekday: 'short' })}
+                        </span>
+                        <span className="block text-[11px] font-bold leading-4 tabular-nums">
+                          {Math.round(day.utilization_pct)}%
+                        </span>
+                        <span className="block truncate text-[9px] leading-3 opacity-80">
+                          {day.scheduled_hours > 0 ? `${day.scheduled_hours.toFixed(1)}h` : 'open'}
+                        </span>
+                      </button>
                     );
                   })}
                 </div>
@@ -911,7 +975,7 @@ export default function Scheduling() {
       </div>
 
       {/* Gantt Chart with Continuous Bars and Drag-Drop */}
-      <div className="card overflow-hidden">
+      <div ref={scheduleBoardRef} className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full border-collapse" style={{ tableLayout: 'fixed' }}>
             <thead>
@@ -997,6 +1061,7 @@ export default function Scheduling() {
                       const isToday = getCentralDateStamp(day) === todayStamp;
                       const cellDateStr = getCentralDateStamp(day);
                       const isCellDropTarget = dropTarget?.wcId === wc.id && dropTarget?.date === cellDateStr;
+                      const isCapacityFocus = capacityCellFocus?.wcId === wc.id && capacityCellFocus?.date === cellDateStr;
 
                       // If a job is spanning through this day (but didn't start here), render empty cell
                       // The bar from the start day will cover this cell via colspan
@@ -1008,9 +1073,11 @@ export default function Scheduling() {
                         <td
                           key={dayIdx}
                           colSpan={jobsStartingToday.length > 0 ? 1 : 1}
+                          data-capacity-cell={`${wc.id}-${cellDateStr}`}
                           className={`px-1 py-1 border-r align-top h-16 relative transition-colors ${
                             isCellDropTarget
                               ? 'bg-blue-200 ring-2 ring-inset ring-blue-400'
+                              : isCapacityFocus ? 'bg-cyan-500/15 ring-2 ring-inset ring-cyan-400'
                               : isToday ? 'bg-blue-500/10' : isWeekend ? 'bg-slate-800/50' : ''
                           }`}
                           onDragOver={(e) => handleDragOverCell(e, wc.id, cellDateStr)}
