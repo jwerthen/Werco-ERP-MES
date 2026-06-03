@@ -12,10 +12,12 @@ import {
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
+import { AIRecommendation } from '../types/aiLearning';
 
 type Severity = 'high' | 'medium' | 'low' | 'info';
-type ItemSource = 'setup' | 'master-data' | 'notification';
-type FilterKey = 'open' | 'high' | 'master-data' | 'setup' | 'notifications' | 'dismissed';
+type ItemSource = 'setup' | 'master-data' | 'notification' | 'ai';
+type FilterKey = 'open' | 'high' | 'ai' | 'master-data' | 'setup' | 'notifications' | 'dismissed';
 
 interface SetupStep {
   key: string;
@@ -65,6 +67,7 @@ interface InboxItem {
   count?: number;
   href?: string;
   timestamp?: string;
+  recommendation?: AIRecommendation;
 }
 
 const severityStyles: Record<Severity, string> = {
@@ -78,11 +81,13 @@ const sourceLabels: Record<ItemSource, string> = {
   setup: 'Setup',
   'master-data': 'Master Data',
   notification: 'Notification',
+  ai: 'AI',
 };
 
 const filterLabels: Record<FilterKey, string> = {
   open: 'Open',
   high: 'High',
+  ai: 'AI',
   'master-data': 'Master Data',
   setup: 'Setup',
   notifications: 'Notifications',
@@ -107,8 +112,11 @@ const getStoredDismissed = () => {
 export default function ActionInbox() {
   const [health, setHealth] = useState<SetupHealth | null>(null);
   const [notifications, setNotifications] = useState<NotificationLog[]>([]);
+  const [aiRecommendations, setAiRecommendations] = useState<AIRecommendation[]>([]);
   const [notificationsAvailable, setNotificationsAvailable] = useState(true);
+  const [aiAvailable, setAiAvailable] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [actioningId, setActioningId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<FilterKey>('open');
@@ -123,9 +131,10 @@ export default function ActionInbox() {
     setLoading(true);
     setError(null);
 
-    const [healthResult, notificationResult] = await Promise.allSettled([
+    const [healthResult, notificationResult, aiResult] = await Promise.allSettled([
       api.getSetupHealth(),
       api.getNotificationLogs({ limit: 25 }),
+      api.getAIRecommendations({ status: 'pending', limit: 25 }),
     ]);
 
     if (healthResult.status === 'fulfilled') {
@@ -142,6 +151,14 @@ export default function ActionInbox() {
     } else {
       setNotifications([]);
       setNotificationsAvailable(false);
+    }
+
+    if (aiResult.status === 'fulfilled') {
+      setAiRecommendations(Array.isArray(aiResult.value) ? aiResult.value : []);
+      setAiAvailable(true);
+    } else {
+      setAiRecommendations([]);
+      setAiAvailable(false);
     }
 
     setLoading(false);
@@ -187,8 +204,18 @@ export default function ActionInbox() {
       };
     });
 
-    return [...masterDataItems, ...setupItems, ...notificationItems];
-  }, [health, notifications]);
+    const aiItems: InboxItem[] = aiRecommendations.map((recommendation) => ({
+      id: `ai:${recommendation.id}`,
+      source: 'ai',
+      severity: recommendation.priority === 'high' ? 'high' : recommendation.priority === 'low' ? 'low' : recommendation.priority === 'info' ? 'info' : 'medium',
+      title: recommendation.title,
+      detail: recommendation.summary,
+      timestamp: recommendation.created_at,
+      recommendation,
+    }));
+
+    return [...aiItems, ...masterDataItems, ...setupItems, ...notificationItems];
+  }, [aiRecommendations, health, notifications]);
 
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -198,6 +225,7 @@ export default function ActionInbox() {
       if (filter === 'open' && isDismissed) return false;
       if (filter === 'dismissed' && !isDismissed) return false;
       if (filter === 'high' && item.severity !== 'high') return false;
+      if (filter === 'ai' && item.source !== 'ai') return false;
       if (filter === 'master-data' && item.source !== 'master-data') return false;
       if (filter === 'setup' && item.source !== 'setup') return false;
       if (filter === 'notifications' && item.source !== 'notification') return false;
@@ -209,6 +237,7 @@ export default function ActionInbox() {
 
   const openCount = items.filter((item) => !dismissed.has(item.id)).length;
   const highCount = items.filter((item) => item.severity === 'high' && !dismissed.has(item.id)).length;
+  const aiCount = aiRecommendations.length;
   const setupProgress = health?.progress ?? 0;
 
   const dismissItem = (id: string) => {
@@ -223,6 +252,35 @@ export default function ActionInbox() {
     persistDismissed(next);
   };
 
+  const acceptAIRecommendation = async (recommendation: AIRecommendation) => {
+    setActioningId(recommendation.id);
+    try {
+      await api.acceptAIRecommendation(recommendation.id, 'Accepted from Action Inbox');
+      setAiRecommendations((current) => current.filter((item) => item.id !== recommendation.id));
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  const dismissAIRecommendation = async (recommendation: AIRecommendation) => {
+    setActioningId(recommendation.id);
+    try {
+      await api.dismissAIRecommendation(recommendation.id, 'Dismissed from Action Inbox');
+      setAiRecommendations((current) => current.filter((item) => item.id !== recommendation.id));
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  const sendAIFeedback = async (recommendation: AIRecommendation, feedback: string) => {
+    setActioningId(recommendation.id);
+    try {
+      await api.sendAIRecommendationFeedback(recommendation.id, { feedback });
+    } finally {
+      setActioningId(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
@@ -231,7 +289,7 @@ export default function ActionInbox() {
             <BellAlertIcon className="h-8 w-8 text-cyan-300" />
             <h1 className="text-2xl font-bold text-white">Action Inbox</h1>
           </div>
-          <p className="text-slate-400 mt-1">A focused queue for setup gaps, master-data blockers, and notification activity.</p>
+          <p className="text-slate-400 mt-1">A focused queue for AI recommendations, setup gaps, master-data blockers, and notification activity.</p>
         </div>
         <button onClick={loadInbox} className="btn-secondary flex items-center justify-center" disabled={loading}>
           <ArrowPathIcon className={`h-5 w-5 mr-2 ${loading ? 'animate-spin' : ''}`} />
@@ -239,7 +297,7 @@ export default function ActionInbox() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
           <div className="text-sm uppercase tracking-wide text-slate-400">Open Actions</div>
           <div className="mt-2 text-3xl font-semibold text-white">{openCount}</div>
@@ -247,6 +305,10 @@ export default function ActionInbox() {
         <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
           <div className="text-sm uppercase tracking-wide text-slate-400">High Priority</div>
           <div className="mt-2 text-3xl font-semibold text-red-300">{highCount}</div>
+        </div>
+        <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
+          <div className="text-sm uppercase tracking-wide text-slate-400">AI Suggestions</div>
+          <div className="mt-2 text-3xl font-semibold text-cyan-200">{aiCount}</div>
         </div>
         <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
           <div className="text-sm uppercase tracking-wide text-slate-400">Setup Progress</div>
@@ -317,6 +379,7 @@ export default function ActionInbox() {
                         <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2 py-0.5 text-xs text-slate-300">
                           {sourceLabels[item.source]}
                         </span>
+                        {item.recommendation && <ConfidenceBadge score={item.recommendation.confidence_score} />}
                         {item.count !== undefined && (
                           <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-300">
                             {item.count}
@@ -324,6 +387,21 @@ export default function ActionInbox() {
                         )}
                       </div>
                       <p className="mt-1 text-sm text-slate-400">{item.detail}</p>
+                      {item.recommendation && (
+                        <>
+                          <WhyThisSuggestion
+                            rationale={item.recommendation.rationale}
+                            evidence={item.recommendation.evidence || []}
+                            impact={item.recommendation.impact || {}}
+                          />
+                          <FeedbackButtons
+                            disabled={actioningId === item.recommendation.id}
+                            onAccept={() => acceptAIRecommendation(item.recommendation as AIRecommendation)}
+                            onDismiss={() => dismissAIRecommendation(item.recommendation as AIRecommendation)}
+                            onFeedback={(feedback) => sendAIFeedback(item.recommendation as AIRecommendation, feedback)}
+                          />
+                        </>
+                      )}
                       {formatDate(item.timestamp) && (
                         <p className="mt-2 text-xs text-slate-500">{formatDate(item.timestamp)}</p>
                       )}
@@ -335,7 +413,7 @@ export default function ActionInbox() {
                         Open
                       </Link>
                     )}
-                    {isDismissed ? (
+                    {item.source === 'ai' ? null : isDismissed ? (
                       <button onClick={() => restoreItem(item.id)} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-cyan-500/60 hover:text-cyan-200">
                         Restore
                       </button>
@@ -355,7 +433,7 @@ export default function ActionInbox() {
             <CheckCircleIcon className="mx-auto h-12 w-12 text-emerald-300" />
             <h2 className="mt-4 text-lg font-semibold text-white">No actions in this view</h2>
             <p className="mt-1 text-sm text-slate-400">
-              {filter === 'dismissed' ? 'Dismissed actions will appear here.' : 'Setup and master-data health do not have matching open actions.'}
+              {filter === 'dismissed' ? 'Dismissed actions will appear here.' : 'There are no matching open actions.'}
             </p>
           </div>
         )}
@@ -363,7 +441,12 @@ export default function ActionInbox() {
 
       {!notificationsAvailable && (
         <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-500">
-          Notification log API is not exposed yet, so this inbox is currently powered by setup and master-data health.
+          Notification activity is unavailable, so this inbox is showing setup, master-data, and AI recommendations only.
+        </div>
+      )}
+      {!aiAvailable && (
+        <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-500">
+          AI recommendations are unavailable, so this inbox is showing setup, master-data, and notification activity only.
         </div>
       )}
     </div>

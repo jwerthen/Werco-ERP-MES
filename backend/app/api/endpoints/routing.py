@@ -30,6 +30,8 @@ from app.schemas.routing_generation import (
     RoutingCreateFromGeneration,
     RoutingGenerationResult,
 )
+from app.schemas.ai_learning import AICorrectionCreate, AIInteractionEventCreate
+from app.services.ai_learning_service import AILearningService
 from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
 from app.services.routing_learning_service import (
     create_generation_session,
@@ -40,6 +42,54 @@ from app.services.routing_learning_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _routing_generation_corrections(
+    generation_session: RoutingGenerationSession,
+    approved_operations: List[Dict[str, Any]],
+) -> List[AICorrectionCreate]:
+    proposed_operations = generation_session.proposed_operations or []
+    proposed_by_sequence = {operation.get("sequence"): operation for operation in proposed_operations}
+    corrections: List[AICorrectionCreate] = []
+
+    comparable_fields = [
+        ("operation_name", "name"),
+        ("work_center_id", "work_center_id"),
+        ("work_center_type", "work_center_type"),
+        ("setup_hours", "setup_hours"),
+        ("run_hours_per_unit", "run_hours_per_unit"),
+        ("work_instructions", "work_instructions"),
+        ("is_inspection_point", "is_inspection_point"),
+        ("is_outside_operation", "is_outside_operation"),
+    ]
+
+    if len(proposed_operations) != len(approved_operations):
+        corrections.append(
+            AICorrectionCreate(
+                field_path="operations.count",
+                proposed_value=len(proposed_operations),
+                final_value=len(approved_operations),
+                correction_reason="Human-reviewed routing changed operation count.",
+            )
+        )
+
+    for index, approved in enumerate(approved_operations):
+        sequence = approved.get("sequence")
+        proposed = proposed_by_sequence.get(sequence) or (proposed_operations[index] if index < len(proposed_operations) else {})
+        for proposed_field, approved_field in comparable_fields:
+            proposed_value = proposed.get(proposed_field)
+            approved_value = approved.get(approved_field)
+            if proposed_value != approved_value:
+                corrections.append(
+                    AICorrectionCreate(
+                        field_path=f"operations.{sequence or index + 1}.{approved_field}",
+                        proposed_value=proposed_value,
+                        final_value=approved_value,
+                        correction_reason="Human-reviewed routing approval changed this field.",
+                    )
+                )
+
+    return corrections
 
 
 def calculate_routing_totals(routing: Routing, db: Session):
@@ -403,7 +453,7 @@ def create_routing_from_generation(
     db.refresh(routing)
     calculate_routing_totals(routing, db)
     if generation_session:
-        learn_from_approved_generation(
+        correction_summary = learn_from_approved_generation(
             db,
             generation_session=generation_session,
             approved_operations=approved_operations,
@@ -411,6 +461,31 @@ def create_routing_from_generation(
             routing_id=routing.id,
             approved_by=current_user.id,
             company_id=company_id,
+        )
+        ai_corrections = _routing_generation_corrections(generation_session, approved_operations)
+        AILearningService(db).record_interaction(
+            company_id=company_id,
+            user=current_user,
+            data=AIInteractionEventCreate(
+                event_type="edited" if ai_corrections else "accepted",
+                source_module="routing",
+                ai_feature="drawing_routing_generation",
+                surface="routing.create_from_generation",
+                entity_type="routing",
+                entity_id=routing.id,
+                context_summary=f"Routing generated from drawing for part {part.part_number}.",
+                event_payload={
+                    "generation_session_id": generation_session.id,
+                    "part_id": part.id,
+                    "routing_id": routing.id,
+                    "extraction_confidence": generation_session.extraction_confidence,
+                    "correction_summary": correction_summary,
+                    "suggest_only": True,
+                },
+                confidence_score=0.75 if not ai_corrections else 0.55,
+                model_version=(generation_session.learned_context or {}).get("model"),
+                corrections=ai_corrections,
+            ),
         )
     db.commit()
 

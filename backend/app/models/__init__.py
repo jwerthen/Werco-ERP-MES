@@ -1,3 +1,4 @@
+from .ai_learning import AICorrection, AIInteractionEvent, AIOutcome, AIRecommendation
 from .audit_log import AuditLog
 from .bom import BOM, BOMItem, BOMItemType
 from .company import Company
@@ -53,6 +54,7 @@ from .maintenance import (
 from .mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, PlanningAction
 from .notification import DigestQueue, NotificationLog, NotificationPreference
 from .oee import OEERecord, OEETarget
+from .operational_event import OperationalEvent
 from .operator_certification import (
     CertificationStatus,
     CertificationType,
@@ -77,10 +79,20 @@ from .tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsage
 from .user import User, UserRole
 from .webhook import Webhook, WebhookDelivery
 from .work_center import WorkCenter
+from .work_order_blocker import (
+    WorkOrderBlocker,
+    WorkOrderBlockerCategory,
+    WorkOrderBlockerSeverity,
+    WorkOrderBlockerStatus,
+)
 from .work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 
 __all__ = [
     "Company",
+    "AIInteractionEvent",
+    "AICorrection",
+    "AIRecommendation",
+    "AIOutcome",
     "User",
     "UserRole",
     "WorkCenter",
@@ -100,6 +112,10 @@ __all__ = [
     "WorkOrderStatus",
     "WorkOrderOperation",
     "OperationStatus",
+    "WorkOrderBlocker",
+    "WorkOrderBlockerCategory",
+    "WorkOrderBlockerSeverity",
+    "WorkOrderBlockerStatus",
     "TimeEntry",
     "InventoryItem",
     "InventoryTransaction",
@@ -131,6 +147,7 @@ __all__ = [
     "PriceSnapshot",
     "OEERecord",
     "OEETarget",
+    "OperationalEvent",
     "DowntimeEvent",
     "DowntimeReasonCode",
     "DowntimeCategory",

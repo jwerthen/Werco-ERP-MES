@@ -8,6 +8,7 @@ import SessionWarningModal from './SessionWarningModal';
 import GlobalSearch, { useGlobalSearch } from './GlobalSearch';
 import BottomNav from './ui/BottomNav';
 import SkipLink from './SkipLink';
+import AdaptivePromptPanel from './AdaptivePromptPanel';
 import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
 import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -648,6 +649,8 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Session Warning Modal */}
       <SessionWarningModal />
+
+      {!isKiosk && <AdaptivePromptPanel />}
 
       {/* Employee ID Logout Modal */}
       {logoutModalOpen && isShopFloorKiosk && (

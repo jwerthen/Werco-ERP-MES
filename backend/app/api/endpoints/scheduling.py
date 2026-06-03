@@ -18,6 +18,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.scheduling import LoadChartDataPoint, LoadChartRequest, SchedulingConflict, SchedulingRunRequest
+from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
 
 router = APIRouter()
@@ -550,6 +551,22 @@ def schedule_work_order(
         scheduled_start=schedule.scheduled_start,
         forward_schedule=schedule.forward_schedule,
     )
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="work_order_scheduled",
+        source_module="scheduling",
+        entity_type="work_order",
+        entity_id=work_order.id,
+        work_order_id=work_order.id,
+        operation_id=current_op.id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "work_order_number": work_order.work_order_number,
+            "scheduled_start": schedule.scheduled_start.isoformat(),
+            "forward_schedule": schedule.forward_schedule,
+        },
+    )
     work_center_ids = schedule_result["work_center_ids"]
     db.commit()
 
@@ -610,6 +627,23 @@ def schedule_work_order_earliest(
         current_op=current_op,
         scheduled_start=earliest_start,
         forward_schedule=request.forward_schedule,
+    )
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="work_order_scheduled_earliest",
+        source_module="scheduling",
+        entity_type="work_order",
+        entity_id=work_order.id,
+        work_order_id=work_order.id,
+        operation_id=current_op.id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "work_order_number": work_order.work_order_number,
+            "scheduled_start": earliest_start.isoformat(),
+            "work_center_id": current_op.work_center_id,
+            "forward_schedule": request.forward_schedule,
+        },
     )
     work_center_ids = schedule_result["work_center_ids"]
     db.commit()
@@ -997,6 +1031,22 @@ def run_scheduling(
         horizon_days=request.horizon_days,
         optimize_setup=request.optimize_setup,
     )
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="scheduling_run",
+        source_module="scheduling",
+        entity_type="scheduling_run",
+        user_id=current_user.id,
+        severity="info" if results.get("conflict_count", 0) == 0 else "medium",
+        event_payload={
+            "work_center_ids": request.work_center_ids,
+            "horizon_days": request.horizon_days,
+            "optimize_setup": request.optimize_setup,
+            "scheduled_count": results.get("scheduled_count", 0),
+            "conflict_count": results.get("conflict_count", 0),
+        },
+    )
+    db.commit()
 
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1233,6 +1283,23 @@ def bulk_schedule_earliest(
                 current_op=current_op,
                 scheduled_start=earliest_start,
                 forward_schedule=request.forward_schedule,
+            )
+            OperationalEventService(db).emit(
+                company_id=company_id,
+                event_type="work_order_scheduled_earliest",
+                source_module="scheduling",
+                entity_type="work_order",
+                entity_id=work_order.id,
+                work_order_id=work_order.id,
+                operation_id=current_op.id,
+                user_id=current_user.id,
+                severity="info",
+                event_payload={
+                    "work_order_number": work_order.work_order_number,
+                    "scheduled_start": earliest_start.isoformat(),
+                    "bulk": True,
+                    "forward_schedule": request.forward_schedule,
+                },
             )
             results.append(
                 {

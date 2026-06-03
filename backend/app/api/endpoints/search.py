@@ -13,12 +13,13 @@ Searches across all major entities in the system:
 - Quotes
 """
 
+from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_
+from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
@@ -29,7 +30,10 @@ from app.models.purchasing import PurchaseOrder, Vendor
 from app.models.quote import Quote
 from app.models.routing import Routing
 from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder
+from app.models.work_order import WorkOrderOperation, WorkOrderStatus
+from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerStatus
 
 router = APIRouter()
 
@@ -55,6 +59,24 @@ class SearchResponse(BaseModel):
     total: int
     results: List[SearchResult]
     categories: dict  # Count by category
+
+
+class NaturalLanguageSearchRequest(BaseModel):
+    query: str
+    limit: int = 20
+
+
+class NaturalLanguageSearchResult(SearchResult):
+    explanation: str
+    matched_filters: List[str] = []
+
+
+class NaturalLanguageSearchResponse(BaseModel):
+    query: str
+    confidence: float
+    interpreted_filters: dict
+    used_fallback: bool
+    results: List[NaturalLanguageSearchResult]
 
 
 @router.get("/", response_model=SearchResponse)
@@ -378,6 +400,181 @@ def global_search(
     results = results[:limit]
 
     return SearchResponse(query=q, total=len(results), results=results, categories=categories)
+
+
+def _contains_any(query: str, terms: List[str]) -> bool:
+    return any(term in query for term in terms)
+
+
+def _parse_nl_search(query: str) -> dict:
+    normalized = " ".join(query.lower().strip().split())
+    work_center_terms = []
+    for term in ["laser", "weld", "welding", "brake", "press brake", "bend", "saw", "machining", "paint"]:
+        if term in normalized:
+            work_center_terms.append(term)
+
+    filters = {
+        "late": _contains_any(normalized, ["late", "overdue", "past due", "behind"]),
+        "blocked": _contains_any(normalized, ["blocked", "waiting", "stuck", "hold", "on hold"]),
+        "material_missing": _contains_any(
+            normalized,
+            ["waiting on material", "no material", "missing material", "material missing", "short material"],
+        ),
+        "hot": _contains_any(normalized, ["hot", "expedite", "rush", "critical"]),
+        "work_center_terms": work_center_terms,
+        "active_jobs": _contains_any(normalized, ["job", "jobs", "work order", "work orders", "wo"]),
+    }
+    filter_count = sum(1 for key, value in filters.items() if key != "work_center_terms" and value) + len(
+        work_center_terms
+    )
+    filters["filter_count"] = filter_count
+    return filters
+
+
+def _literal_work_order_fallback(
+    *,
+    db: Session,
+    company_id: int,
+    query: str,
+    limit: int,
+) -> List[NaturalLanguageSearchResult]:
+    search_term = f"%{query.lower()}%"
+    rows = (
+        db.query(WorkOrder)
+        .options(joinedload(WorkOrder.part))
+        .outerjoin(Part, WorkOrder.part_id == Part.id)
+        .filter(
+            WorkOrder.company_id == company_id,
+            or_(
+                func.lower(WorkOrder.work_order_number).like(search_term),
+                func.lower(WorkOrder.customer_po).like(search_term),
+                func.lower(WorkOrder.lot_number).like(search_term),
+                func.lower(WorkOrder.customer_name).like(search_term),
+                func.lower(Part.part_number).like(search_term),
+                func.lower(Part.name).like(search_term),
+            ),
+        )
+        .order_by(WorkOrder.priority, WorkOrder.due_date)
+        .limit(limit)
+        .all()
+    )
+    return [
+        NaturalLanguageSearchResult(
+            id=wo.id,
+            type="work_order",
+            title=wo.work_order_number,
+            subtitle=f"{wo.part.part_number if wo.part else ''} - {wo.status.value}".strip(" -"),
+            url=f"/work-orders/{wo.id}",
+            icon="clipboard",
+            explanation="Matched literal work-order, customer, or part text.",
+            matched_filters=["literal_text"],
+        )
+        for wo in rows
+    ]
+
+
+@router.post("/nl", response_model=NaturalLanguageSearchResponse)
+def natural_language_search(
+    request: NaturalLanguageSearchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Interpret natural-language operational searches into explainable ERP filters."""
+    limit = max(1, min(request.limit or 20, 50))
+    filters = _parse_nl_search(request.query)
+    if filters["filter_count"] == 0:
+        return NaturalLanguageSearchResponse(
+            query=request.query,
+            confidence=0.35,
+            interpreted_filters=filters,
+            used_fallback=True,
+            results=_literal_work_order_fallback(db=db, company_id=company_id, query=request.query, limit=limit),
+        )
+
+    query = (
+        db.query(WorkOrder)
+        .options(joinedload(WorkOrder.part))
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]),
+        )
+    )
+
+    matched_filters: List[str] = []
+    if filters["late"]:
+        query = query.filter(WorkOrder.due_date < date.today())
+        matched_filters.append("late")
+    if filters["hot"]:
+        query = query.filter(WorkOrder.priority <= 2)
+        matched_filters.append("hot_priority")
+    if filters["work_center_terms"]:
+        query = query.join(WorkOrderOperation, WorkOrderOperation.work_order_id == WorkOrder.id).join(
+            WorkCenter, WorkOrderOperation.work_center_id == WorkCenter.id
+        )
+        wc_clauses = []
+        for term in filters["work_center_terms"]:
+            term_filter = f"%{term}%"
+            wc_clauses.extend(
+                [
+                    func.lower(WorkCenter.name).like(term_filter),
+                    func.lower(WorkCenter.code).like(term_filter),
+                    func.lower(WorkCenter.work_center_type).like(term_filter),
+                    func.lower(WorkOrderOperation.name).like(term_filter),
+                    func.lower(WorkOrderOperation.operation_group).like(term_filter),
+                ]
+            )
+        query = query.filter(or_(*wc_clauses))
+        matched_filters.append("work_center:" + ",".join(filters["work_center_terms"]))
+
+    if filters["material_missing"]:
+        query = query.join(
+            WorkOrderBlocker,
+            and_(
+                WorkOrderBlocker.work_order_id == WorkOrder.id,
+                WorkOrderBlocker.company_id == company_id,
+            ),
+        ).filter(
+            WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),
+            WorkOrderBlocker.category == WorkOrderBlockerCategory.MATERIAL_MISSING.value,
+        )
+        matched_filters.append("material_missing_blocker")
+    elif filters["blocked"]:
+        query = query.outerjoin(
+            WorkOrderBlocker,
+            and_(
+                WorkOrderBlocker.work_order_id == WorkOrder.id,
+                WorkOrderBlocker.company_id == company_id,
+                WorkOrderBlocker.status.in_(
+                    [WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]
+                ),
+            ),
+        ).filter(or_(WorkOrder.status == WorkOrderStatus.ON_HOLD, WorkOrderBlocker.id.isnot(None)))
+        matched_filters.append("blocked")
+
+    rows = query.distinct().order_by(WorkOrder.priority, WorkOrder.due_date).limit(limit).all()
+    confidence = min(0.95, 0.35 + (0.15 * filters["filter_count"]))
+    results = [
+        NaturalLanguageSearchResult(
+            id=wo.id,
+            type="work_order",
+            title=wo.work_order_number,
+            subtitle=f"{wo.part.part_number if wo.part else ''} - {wo.status.value}".strip(" -"),
+            url=f"/work-orders/{wo.id}",
+            icon="clipboard",
+            explanation=f"Matched operational filters: {', '.join(matched_filters)}.",
+            matched_filters=matched_filters,
+        )
+        for wo in rows
+    ]
+
+    return NaturalLanguageSearchResponse(
+        query=request.query,
+        confidence=round(confidence, 2),
+        interpreted_filters=filters,
+        used_fallback=False,
+        results=results,
+    )
 
 
 @router.get("/recent")

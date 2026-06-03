@@ -75,6 +75,7 @@ export default function ShopFloor() {
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [workOrderDetails, setWorkOrderDetails] = useState<Record<number, WorkOrderDetails>>({});
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
+  const [reportingBlockerOperationId, setReportingBlockerOperationId] = useState<number | null>(null);
   const [clockingInOperationId, setClockingInOperationId] = useState<number | null>(null);
   const [clockingOut, setClockingOut] = useState(false);
   const [priorityReason, setPriorityReason] = useState('');
@@ -377,6 +378,33 @@ export default function ShopFloor() {
     }
   };
 
+  const handleReportMaterialBlocker = async (item: QueueItem) => {
+    const note = window.prompt(
+      `Report missing material for ${item.work_order_number}?`,
+      'Operator reported material is not available at the work center.'
+    );
+    if (note === null) return;
+
+    setReportingBlockerOperationId(item.operation_id);
+    try {
+      await api.createWorkOrderBlocker(item.work_order_id, {
+        operation_id: item.operation_id,
+        category: 'material_missing',
+        severity: 'high',
+        note: note.trim() || 'Operator reported material is not available at the work center.',
+        put_operation_on_hold: true,
+      });
+      notify('success', `Reported missing material for ${item.work_order_number}`);
+      if (selectedWorkCenter) {
+        await loadQueue(selectedWorkCenter);
+      }
+    } catch (err: any) {
+      notify('error', err.response?.data?.detail || 'Failed to report material blocker');
+    } finally {
+      setReportingBlockerOperationId(null);
+    }
+  };
+
   if (isKiosk) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -612,7 +640,7 @@ export default function ShopFloor() {
                   <th>Progress</th>
                   <th>Due Date</th>
                   <th>Status</th>
-                  <th className="w-32">Action</th>
+                  <th className="w-40">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -716,25 +744,40 @@ export default function ShopFloor() {
                         </span>
                         </td>
                         <td onClick={(e) => e.stopPropagation()}>
-                          {item.status === 'in_progress' ? (
-                            <span className="inline-flex items-center gap-1.5 text-emerald-600 font-medium">
-                              <CheckCircleIcon className="h-5 w-5" />
-                              Active
-                            </span>
-                          ) : (
+                          <div className="flex flex-col gap-2">
+                            {item.status === 'in_progress' ? (
+                              <span className="inline-flex items-center gap-1.5 text-emerald-600 font-medium">
+                                <CheckCircleIcon className="h-5 w-5" />
+                                Active
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleClockIn(item)}
+                                disabled={clockingInOperationId !== null || reportingBlockerOperationId !== null}
+                                className="btn-success btn-sm w-full"
+                              >
+                                {clockingInOperationId === item.operation_id ? (
+                                  <ArrowPathIcon className="h-4 w-4 mr-1.5 animate-spin" />
+                                ) : (
+                                  <PlayIcon className="h-4 w-4 mr-1.5" />
+                                )}
+                                {clockingInOperationId === item.operation_id ? 'Starting...' : 'Start'}
+                              </button>
+                            )}
                             <button
-                              onClick={() => handleClockIn(item)}
-                              disabled={clockingInOperationId !== null}
-                              className="btn-success btn-sm w-full"
+                              onClick={() => handleReportMaterialBlocker(item)}
+                              disabled={reportingBlockerOperationId !== null || item.status === 'on_hold'}
+                              className="btn-secondary btn-sm w-full text-amber-700"
+                              title="Report missing material"
                             >
-                              {clockingInOperationId === item.operation_id ? (
+                              {reportingBlockerOperationId === item.operation_id ? (
                                 <ArrowPathIcon className="h-4 w-4 mr-1.5 animate-spin" />
                               ) : (
-                                <PlayIcon className="h-4 w-4 mr-1.5" />
+                                <StopIcon className="h-4 w-4 mr-1.5" />
                               )}
-                              {clockingInOperationId === item.operation_id ? 'Starting...' : 'Start'}
+                              {reportingBlockerOperationId === item.operation_id ? 'Reporting...' : 'No Material'}
                             </button>
-                          )}
+                          </div>
                         </td>
                       </tr>
 

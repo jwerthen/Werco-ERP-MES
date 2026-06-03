@@ -25,6 +25,8 @@ from app.models.rfq_quote import (
     RfqPackageFile,
 )
 from app.models.user import User, UserRole
+from app.schemas.ai_learning import AIInteractionEventCreate
+from app.services.ai_learning_service import AILearningService
 from app.services.rfq_parsing_service import parse_rfq_package_files
 from app.services.rfq_pricing_service import MaterialPriceService
 from app.services.sheet_metal_costing_service import (
@@ -761,6 +763,32 @@ def approve_estimate(
 
     quote.status = QuoteStatus.PENDING
     package.status = "approved"
+    AILearningService(db).record_interaction(
+        company_id=company_id,
+        user=current_user,
+        data=AIInteractionEventCreate(
+            event_type="accepted",
+            source_module="quoting",
+            ai_feature="rfq_estimate_generation",
+            surface="rfq.approve_create_quote",
+            entity_type="quote",
+            entity_id=quote.id,
+            context_summary=f"AI RFQ estimate approved for package {package.rfq_number}.",
+            event_payload={
+                "rfq_package_id": package.id,
+                "quote_id": quote.id,
+                "estimate_id": latest.id,
+                "grand_total": latest.grand_total,
+                "lead_time_min_days": latest.lead_time_min_days,
+                "lead_time_max_days": latest.lead_time_max_days,
+                "lead_time_confidence": latest.lead_time_confidence,
+                "confidence_score": latest.confidence_score,
+                "missing_specs_count": len(latest.missing_specs or []),
+                "suggest_only": True,
+            },
+            confidence_score=latest.confidence_score or 0.5,
+        ),
+    )
     db.commit()
 
     return {

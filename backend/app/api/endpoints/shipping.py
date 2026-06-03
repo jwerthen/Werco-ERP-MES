@@ -10,6 +10,7 @@ from app.db.database import get_db
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
 
@@ -209,7 +210,7 @@ def create_shipment(
     company_id: int = Depends(get_current_company_id),
 ):
     """Create a new shipment"""
-    wo = db.query(WorkOrder).filter(WorkOrder.id == shipment_in.work_order_id).first()
+    wo = db.query(WorkOrder).filter(WorkOrder.id == shipment_in.work_order_id, WorkOrder.company_id == company_id).first()
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
 
@@ -235,6 +236,25 @@ def create_shipment(
     )
     shipment.company_id = company_id
     db.add(shipment)
+    db.flush()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="shipment_created",
+        source_module="shipping",
+        entity_type="shipment",
+        entity_id=shipment.id,
+        work_order_id=shipment.work_order_id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "shipment_number": shipment.shipment_number,
+            "work_order_number": wo.work_order_number,
+            "quantity_shipped": shipment.quantity_shipped,
+            "carrier": shipment.carrier,
+            "service_type": shipment.service_type,
+            "status": shipment.status.value if hasattr(shipment.status, "value") else shipment.status,
+        },
+    )
     db.commit()
     db.refresh(shipment)
 
@@ -279,6 +299,23 @@ def mark_shipped(
     if wo:
         wo.status = WorkOrderStatus.CLOSED
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="shipment_shipped",
+        source_module="shipping",
+        entity_type="shipment",
+        entity_id=shipment.id,
+        work_order_id=shipment.work_order_id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "shipment_number": shipment.shipment_number,
+            "work_order_number": wo.work_order_number if wo else None,
+            "tracking_number": shipment.tracking_number,
+            "carrier": shipment.carrier,
+            "ship_date": shipment.ship_date.isoformat() if shipment.ship_date else None,
+        },
+    )
     db.commit()
 
     return {"message": "Shipment marked as shipped", "shipment_number": shipment.shipment_number}
@@ -302,6 +339,7 @@ def update_shipment(
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
 
+    previous_status = shipment.status
     update_data = shipment_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         if field == "status":
@@ -309,6 +347,24 @@ def update_shipment(
         else:
             setattr(shipment, field, value)
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="shipment_updated",
+        source_module="shipping",
+        entity_type="shipment",
+        entity_id=shipment.id,
+        work_order_id=shipment.work_order_id,
+        user_id=current_user.id,
+        severity="info" if shipment.status == previous_status else "medium",
+        event_payload={
+            "shipment_number": shipment.shipment_number,
+            "changed_fields": list(update_data.keys()),
+            "previous_status": previous_status.value if hasattr(previous_status, "value") else previous_status,
+            "status": shipment.status.value if hasattr(shipment.status, "value") else shipment.status,
+            "tracking_number": shipment.tracking_number,
+            "carrier": shipment.carrier,
+        },
+    )
     db.commit()
     db.refresh(shipment)
 

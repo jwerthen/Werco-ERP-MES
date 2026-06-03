@@ -10,6 +10,8 @@ from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
 from app.models.downtime import DowntimeCategory, DowntimeEvent, DowntimePlannedType, DowntimeReasonCode
 from app.models.user import User
+from app.models.work_order import WorkOrder
+from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
 
@@ -418,6 +420,14 @@ def create_downtime_event(
     company_id: int = Depends(get_current_company_id),
 ):
     """Start a new downtime event"""
+    if data.work_order_id:
+        work_order_exists = (
+            db.query(WorkOrder.id)
+            .filter(WorkOrder.id == data.work_order_id, WorkOrder.company_id == company_id)
+            .first()
+        )
+        if not work_order_exists:
+            raise HTTPException(status_code=404, detail="Work order not found")
     event = DowntimeEvent(
         work_center_id=data.work_center_id,
         work_order_id=data.work_order_id,
@@ -430,6 +440,23 @@ def create_downtime_event(
     )
     event.company_id = company_id
     db.add(event)
+    db.flush()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="downtime_started",
+        source_module="downtime",
+        entity_type="downtime_event",
+        entity_id=event.id,
+        work_order_id=event.work_order_id,
+        user_id=current_user.id,
+        severity="medium" if data.planned_type == DowntimePlannedType.UNPLANNED else "info",
+        event_payload={
+            "work_center_id": event.work_center_id,
+            "category": data.category.value if hasattr(data.category, "value") else data.category,
+            "planned_type": data.planned_type.value if hasattr(data.planned_type, "value") else data.planned_type,
+            "reason_code": data.reason_code,
+        },
+    )
     db.commit()
     db.refresh(event)
 
@@ -510,6 +537,21 @@ def resolve_downtime_event(
     if data.resolution:
         event.resolution = data.resolution
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="downtime_resolved",
+        source_module="downtime",
+        entity_type="downtime_event",
+        entity_id=event.id,
+        work_order_id=event.work_order_id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "work_center_id": event.work_center_id,
+            "duration_minutes": event.duration_minutes,
+            "resolution": event.resolution,
+        },
+    )
     db.commit()
     db.refresh(event)
 

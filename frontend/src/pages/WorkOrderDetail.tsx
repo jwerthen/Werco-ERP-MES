@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { User, WorkOrder, WorkOrderOperation } from '../types';
+import { WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerSeverity } from '../types/aiForward';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
@@ -10,6 +11,7 @@ import {
   ArrowLeftIcon,
   PlayIcon,
   CheckCircleIcon,
+  ExclamationTriangleIcon,
   PrinterIcon,
   CubeIcon,
   TrashIcon,
@@ -188,6 +190,20 @@ export default function WorkOrderDetail() {
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
+  const [blockers, setBlockers] = useState<WorkOrderBlocker[]>([]);
+  const [blockerForm, setBlockerForm] = useState<{
+    operation_id: string;
+    category: WorkOrderBlockerCategory;
+    severity: WorkOrderBlockerSeverity;
+    note: string;
+  }>({
+    operation_id: '',
+    category: 'material_missing',
+    severity: 'high',
+    note: '',
+  });
+  const [submittingBlocker, setSubmittingBlocker] = useState(false);
+  const [resolvingBlockerId, setResolvingBlockerId] = useState<number | null>(null);
   const [userNameById, setUserNameById] = useState<Record<number, string>>({});
   const [activeUsersOnWorkOrder, setActiveUsersOnWorkOrder] = useState<ActiveShopUser[]>([]);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
@@ -224,6 +240,14 @@ export default function WorkOrderDetail() {
         // Material requirements may not exist for all parts
         setMaterialReqs(null);
       }
+      try {
+        const blockerRows = await api.getWorkOrderBlockers({ work_order_id: currentWorkOrderId, limit: 50 });
+        if (requestId !== loadRequestRef.current) return;
+        setBlockers(blockerRows);
+      } catch {
+        if (requestId !== loadRequestRef.current) return;
+        setBlockers([]);
+      }
     } catch {
       if (requestId !== loadRequestRef.current) return;
       setError('Failed to load work order');
@@ -259,6 +283,7 @@ export default function WorkOrderDetail() {
     setError('');
     setWorkOrder(null);
     setMaterialReqs(null);
+    setBlockers([]);
   }, [workOrderId]);
 
   useEffect(() => {
@@ -460,6 +485,42 @@ export default function WorkOrderDetail() {
     }
   };
 
+  const handleCreateBlocker = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!workOrder) return;
+
+    setSubmittingBlocker(true);
+    try {
+      await api.createWorkOrderBlocker(workOrder.id, {
+        operation_id: blockerForm.operation_id ? Number(blockerForm.operation_id) : undefined,
+        category: blockerForm.category,
+        severity: blockerForm.severity,
+        note: blockerForm.note.trim() || undefined,
+        put_operation_on_hold: true,
+      });
+      setBlockerForm({ operation_id: '', category: 'material_missing', severity: 'high', note: '' });
+      await loadWorkOrder();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to report blocker');
+    } finally {
+      setSubmittingBlocker(false);
+    }
+  };
+
+  const handleResolveBlocker = async (blocker: WorkOrderBlocker) => {
+    const note = prompt(`Resolve blocker "${blocker.title}"?`, 'Resolved');
+    if (note === null) return;
+    setResolvingBlockerId(blocker.id);
+    try {
+      await api.resolveWorkOrderBlocker(blocker.id, note.trim() || undefined);
+      await loadWorkOrder();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Failed to resolve blocker');
+    } finally {
+      setResolvingBlockerId(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -589,6 +650,140 @@ export default function WorkOrderDetail() {
               <p className="mt-1">{workOrder.special_instructions || 'No special instructions'}</p>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
+          <div className="flex items-start gap-3">
+            <ExclamationTriangleIcon className="h-6 w-6 text-amber-300 mt-0.5" />
+            <div>
+              <h2 className="text-lg font-semibold text-white">Blockers</h2>
+              <p className="text-sm text-slate-400">
+                Open issues that can stop this work order from moving cleanly.
+              </p>
+            </div>
+          </div>
+          <span className="text-xs font-semibold px-2 py-1 rounded bg-amber-500/20 text-amber-300 w-fit">
+            {blockers.filter((item) => item.status === 'open' || item.status === 'acknowledged').length} open
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-4">
+          <div className="space-y-3">
+            {blockers.length === 0 ? (
+              <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-4 text-sm text-slate-400">
+                No blockers reported.
+              </div>
+            ) : (
+              blockers.map((blocker) => (
+                <div key={blocker.id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-4">
+                  <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-white">{blocker.title}</span>
+                        <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                          blocker.severity === 'critical' || blocker.severity === 'high'
+                            ? 'bg-red-500/20 text-red-300'
+                            : blocker.severity === 'medium'
+                              ? 'bg-amber-500/20 text-amber-300'
+                              : 'bg-blue-500/20 text-blue-300'
+                        }`}>
+                          {blocker.severity}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                          blocker.status === 'resolved'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-slate-700 text-slate-200'
+                        }`}>
+                          {blocker.status.replace('_', ' ')}
+                        </span>
+                      </div>
+                      <div className="text-sm text-slate-400 mt-1">
+                        {blocker.category.replace('_', ' ')}
+                        {blocker.operation_name ? ` • ${blocker.operation_name}` : ''}
+                        {blocker.material_part_number ? ` • ${blocker.material_part_number}` : ''}
+                      </div>
+                      {blocker.note && <p className="text-sm text-slate-300 mt-2">{blocker.note}</p>}
+                    </div>
+                    {(blocker.status === 'open' || blocker.status === 'acknowledged') && (
+                      <button
+                        onClick={() => handleResolveBlocker(blocker)}
+                        disabled={resolvingBlockerId === blocker.id}
+                        className="btn-success btn-sm"
+                      >
+                        {resolvingBlockerId === blocker.id ? 'Resolving...' : 'Resolve'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          <form onSubmit={handleCreateBlocker} className="rounded-lg border border-slate-700 bg-slate-900/40 p-4 space-y-3">
+            <h3 className="font-semibold text-white">Report Blocker</h3>
+            <div>
+              <label className="text-sm text-slate-400 block mb-1">Operation</label>
+              <select
+                value={blockerForm.operation_id}
+                onChange={(e) => setBlockerForm({ ...blockerForm, operation_id: e.target.value })}
+                className="input"
+              >
+                <option value="">Whole work order</option>
+                {workOrder.operations.map((op) => (
+                  <option key={op.id} value={op.id}>
+                    {op.operation_number || `Op ${op.sequence}`} - {op.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm text-slate-400 block mb-1">Category</label>
+                <select
+                  value={blockerForm.category}
+                  onChange={(e) => setBlockerForm({ ...blockerForm, category: e.target.value as WorkOrderBlockerCategory })}
+                  className="input"
+                >
+                  <option value="material_missing">Material missing</option>
+                  <option value="machine_down">Machine down</option>
+                  <option value="tooling_missing">Tooling missing</option>
+                  <option value="quality_hold">Quality hold</option>
+                  <option value="labor_unavailable">Labor unavailable</option>
+                  <option value="engineering_question">Engineering question</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm text-slate-400 block mb-1">Severity</label>
+                <select
+                  value={blockerForm.severity}
+                  onChange={(e) => setBlockerForm({ ...blockerForm, severity: e.target.value as WorkOrderBlockerSeverity })}
+                  className="input"
+                >
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="critical">Critical</option>
+                  <option value="low">Low</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className="text-sm text-slate-400 block mb-1">Note</label>
+              <textarea
+                value={blockerForm.note}
+                onChange={(e) => setBlockerForm({ ...blockerForm, note: e.target.value })}
+                className="input"
+                rows={3}
+                maxLength={2000}
+                placeholder="What is stopping the job?"
+              />
+            </div>
+            <button type="submit" disabled={submittingBlocker} className="btn-primary w-full">
+              {submittingBlocker ? 'Reporting...' : 'Report Blocker'}
+            </button>
+          </form>
         </div>
       </div>
 

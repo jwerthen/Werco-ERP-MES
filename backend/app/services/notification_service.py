@@ -16,6 +16,7 @@ class NotificationEvent:
 
     WO_RELEASED = "WO_RELEASED"
     WO_LATE = "WO_LATE"
+    WO_BLOCKED = "WO_BLOCKED"
     WO_COMPLETED = "WO_COMPLETED"
     PO_RECEIVED = "PO_RECEIVED"
     INSPECTION_FAILED = "INSPECTION_FAILED"
@@ -33,6 +34,7 @@ class NotificationService:
     DEFAULT_PREFERENCES = {
         NotificationEvent.WO_RELEASED: {"email": True, "digest": False},
         NotificationEvent.WO_LATE: {"email": True, "digest": True},
+        NotificationEvent.WO_BLOCKED: {"email": True, "digest": False},
         NotificationEvent.WO_COMPLETED: {"email": True, "digest": False},
         NotificationEvent.PO_RECEIVED: {"email": True, "digest": False},
         NotificationEvent.INSPECTION_FAILED: {"email": True, "digest": False},

@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.endpoints import (
     admin_settings,
+    ai_learning,
     analytics,
     audit,
     auth,
@@ -23,6 +24,7 @@ from app.api.endpoints import (
     mrp,
     notifications,
     oee,
+    operational_events,
     operator_certifications,
     parts,
     platform,
@@ -48,6 +50,7 @@ from app.api.endpoints import (
     tool_management,
     traceability,
     users,
+    work_order_blockers,
     work_centers,
     work_orders,
 )
@@ -55,6 +58,7 @@ from app.api.endpoints import (
 api_router = APIRouter()
 
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+api_router.include_router(ai_learning.router, prefix="/ai", tags=["AI Learning"])
 api_router.include_router(work_centers.router, prefix="/work-centers", tags=["Work Centers"])
 api_router.include_router(parts.router, prefix="/parts", tags=["Parts"])
 api_router.include_router(bom.router, prefix="/bom", tags=["Bill of Materials"])
@@ -64,6 +68,7 @@ api_router.include_router(mrp.router, prefix="/mrp", tags=["Material Requirement
 api_router.include_router(quality.router, prefix="/quality", tags=["Quality Management"])
 api_router.include_router(custom_fields.router, prefix="/custom-fields", tags=["Custom Fields"])
 api_router.include_router(work_orders.router, prefix="/work-orders", tags=["Work Orders"])
+api_router.include_router(work_order_blockers.router, prefix="/work-order-blockers", tags=["Work Order Blockers"])
 api_router.include_router(shop_floor.router, prefix="/shop-floor", tags=["Shop Floor"])
 api_router.include_router(purchasing.router, prefix="/purchasing", tags=["Purchasing"])
 api_router.include_router(scheduling.router, prefix="/scheduling", tags=["Scheduling"])
@@ -88,6 +93,7 @@ api_router.include_router(search.router, prefix="/search", tags=["Global Search"
 api_router.include_router(exports.router, prefix="/exports", tags=["Data Export"])
 api_router.include_router(print_reports.router, prefix="/print", tags=["Print Reports"])
 api_router.include_router(oee.router, prefix="/oee", tags=["OEE Tracking"])
+api_router.include_router(operational_events.router, prefix="/operational-events", tags=["Operational Events"])
 api_router.include_router(downtime.router, prefix="/downtime", tags=["Downtime Tracking"])
 api_router.include_router(job_costing.router, prefix="/job-costs", tags=["Job Costing"])
 api_router.include_router(tool_management.router, prefix="/tool-management", tags=["Tool & Fixture Management"])

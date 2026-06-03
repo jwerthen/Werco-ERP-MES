@@ -25,9 +25,13 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlockerSeverity
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
+from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
+from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
+from app.services.work_order_blocker_service import WorkOrderBlockerService
 from app.services.work_order_state_service import (
     WorkOrderStateError,
     has_incomplete_predecessors,
@@ -48,6 +52,12 @@ class ProductionReportRequest(BaseModel):
     quantity_complete_delta: float = 0.0
     quantity_scrapped_delta: float = 0.0
     notes: Optional[str] = None
+
+
+class OperationHoldRequest(BaseModel):
+    category: WorkOrderBlockerCategory = WorkOrderBlockerCategory.OTHER
+    severity: WorkOrderBlockerSeverity = WorkOrderBlockerSeverity.MEDIUM
+    note: Optional[str] = None
 
 
 router = APIRouter()
@@ -227,6 +237,22 @@ def clock_in(
     )
 
     db.add(time_entry)
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="labor_clock_in",
+        source_module="shop_floor",
+        entity_type="time_entry",
+        work_order_id=work_order.id,
+        operation_id=operation.id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "work_order_number": work_order.work_order_number,
+            "operation_name": operation.name,
+            "work_center_id": operation.work_center_id,
+            "entry_type": clock_in_data.entry_type.value if hasattr(clock_in_data.entry_type, "value") else clock_in_data.entry_type,
+        },
+    )
     db.commit()
     db.refresh(time_entry)
 
@@ -337,6 +363,24 @@ def clock_out(
         )
 
     work_order.actual_hours += time_entry.duration_hours
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="labor_clock_out",
+        source_module="shop_floor",
+        entity_type="time_entry",
+        entity_id=time_entry.id,
+        work_order_id=work_order.id,
+        operation_id=operation.id if operation else None,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "work_order_number": work_order.work_order_number,
+            "duration_hours": round(time_entry.duration_hours or 0, 4),
+            "quantity_produced": clock_out_data.quantity_produced,
+            "quantity_scrapped": clock_out_data.quantity_scrapped,
+            "scrap_reason": clock_out_data.scrap_reason,
+        },
+    )
 
     # Update statuses if operation complete
     if operation:
@@ -1577,13 +1621,17 @@ def get_operation_details(
 
 @router.put("/operations/{operation_id}/hold")
 def put_operation_on_hold(
-    operation_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    operation_id: int,
+    hold_data: Optional[OperationHoldRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Put an operation on hold"""
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order))
-        .filter(WorkOrderOperation.id == operation_id)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
         .first()
     )
 
@@ -1613,6 +1661,36 @@ def put_operation_on_hold(
         resource_id=operation_id,
         description=f"Put operation {operation.operation_number} on hold",
     )
+    if work_order := operation.work_order:
+        if hold_data and (hold_data.note or hold_data.category != WorkOrderBlockerCategory.OTHER):
+            WorkOrderBlockerService(db).create_blocker(
+                company_id=company_id,
+                user=current_user,
+                work_order_id=work_order.id,
+                data=WorkOrderBlockerCreate(
+                    operation_id=operation.id,
+                    category=hold_data.category,
+                    severity=hold_data.severity,
+                    note=hold_data.note,
+                    put_operation_on_hold=False,
+                ),
+            )
+        else:
+            OperationalEventService(db).emit(
+                company_id=company_id,
+                event_type="operation_hold",
+                source_module="shop_floor",
+                entity_type="work_order_operation",
+                entity_id=operation.id,
+                work_order_id=work_order.id,
+                operation_id=operation.id,
+                user_id=current_user.id,
+                severity="medium",
+                event_payload={
+                    "work_order_number": work_order.work_order_number,
+                    "operation_name": operation.name,
+                },
+            )
 
     db.commit()
 
@@ -1650,12 +1728,17 @@ def put_operation_on_hold(
 
 
 @router.put("/operations/{operation_id}/resume")
-def resume_operation(operation_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def resume_operation(
+    operation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Resume an operation that was on hold"""
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order))
-        .filter(WorkOrderOperation.id == operation_id)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
         .first()
     )
 
@@ -1676,6 +1759,22 @@ def resume_operation(operation_id: int, db: Session = Depends(get_db), current_u
         resource_id=operation_id,
         description=f"Resumed operation {operation.operation_number}",
     )
+    if operation.work_order:
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="operation_resumed",
+            source_module="shop_floor",
+            entity_type="work_order_operation",
+            entity_id=operation.id,
+            work_order_id=operation.work_order.id,
+            operation_id=operation.id,
+            user_id=current_user.id,
+            severity="info",
+            event_payload={
+                "work_order_number": operation.work_order.work_order_number,
+                "operation_name": operation.name,
+            },
+        )
 
     db.commit()
 

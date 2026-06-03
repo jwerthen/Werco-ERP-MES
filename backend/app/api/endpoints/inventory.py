@@ -19,6 +19,7 @@ from app.models.inventory import (
 )
 from app.models.part import Part
 from app.models.user import User, UserRole
+from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
 
@@ -328,6 +329,24 @@ def receive_inventory(
             created_by=current_user.id,
         )
         db.add(txn)
+        db.flush()
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="inventory_received",
+            source_module="inventory",
+            entity_type="inventory_transaction",
+            entity_id=txn.id,
+            user_id=current_user.id,
+            severity="info",
+            event_payload={
+                "part_id": receive_in.part_id,
+                "part_number": part.part_number,
+                "quantity": receive_in.quantity,
+                "location": receive_in.location_code,
+                "lot_number": receive_in.lot_number,
+                "po_number": receive_in.po_number,
+            },
+        )
 
     return {"message": "Inventory received", "inventory_item_id": inv_item.id, "quantity": receive_in.quantity}
 
@@ -371,6 +390,23 @@ def issue_inventory(
             created_by=current_user.id,
         )
         db.add(txn)
+        db.flush()
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="inventory_issued",
+            source_module="inventory",
+            entity_type="inventory_transaction",
+            entity_id=txn.id,
+            user_id=current_user.id,
+            severity="info",
+            event_payload={
+                "part_id": inv_item.part_id,
+                "quantity": issue_in.quantity,
+                "location": inv_item.location,
+                "lot_number": inv_item.lot_number,
+                "work_order_number": issue_in.work_order_number,
+            },
+        )
 
     return {"message": "Inventory issued", "quantity": issue_in.quantity}
 
@@ -447,6 +483,23 @@ def transfer_inventory(
             created_by=current_user.id,
         )
         db.add(txn)
+        db.flush()
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="inventory_transferred",
+            source_module="inventory",
+            entity_type="inventory_transaction",
+            entity_id=txn.id,
+            user_id=current_user.id,
+            severity="info",
+            event_payload={
+                "part_id": inv_item.part_id,
+                "quantity": transfer_in.quantity,
+                "from_location": from_location,
+                "to_location": transfer_in.to_location_code,
+                "lot_number": inv_item.lot_number,
+            },
+        )
 
     return {"message": "Transfer complete"}
 
@@ -489,6 +542,24 @@ def adjust_inventory(
             created_by=current_user.id,
         )
         db.add(txn)
+        db.flush()
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="inventory_adjusted",
+            source_module="inventory",
+            entity_type="inventory_transaction",
+            entity_id=txn.id,
+            user_id=current_user.id,
+            severity="medium",
+            event_payload={
+                "part_id": inv_item.part_id,
+                "old_quantity": old_qty,
+                "new_quantity": adjust_in.new_quantity,
+                "variance": variance,
+                "location": inv_item.location,
+                "reason_code": adjust_in.reason_code,
+            },
+        )
 
     return {"message": "Adjustment complete", "old_quantity": old_qty, "new_quantity": adjust_in.new_quantity}
 

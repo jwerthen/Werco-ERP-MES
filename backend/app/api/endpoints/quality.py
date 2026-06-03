@@ -18,6 +18,7 @@ from app.models.quality import (
     NonConformanceReport,
 )
 from app.models.user import User, UserRole
+from app.models.work_order import WorkOrder
 from app.schemas.quality import (
     CARCreate,
     CARResponse,
@@ -32,11 +33,24 @@ from app.schemas.quality import (
     NCRResponse,
     NCRUpdate,
 )
+from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
 
 
 # ============== NCR Endpoints ==============
+
+
+def _enum_value(value):
+    return value.value if hasattr(value, "value") else value
+
+
+def _validate_work_order_reference(db: Session, company_id: int, work_order_id: Optional[int]) -> None:
+    if work_order_id is None:
+        return
+    exists = db.query(WorkOrder.id).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Work order not found")
 
 
 def generate_ncr_number(db: Session, company_id: int = None) -> str:
@@ -88,6 +102,7 @@ def create_ncr(
     company_id: int = Depends(get_current_company_id),
 ):
     """Create a new NCR"""
+    _validate_work_order_reference(db, company_id, ncr_in.work_order_id)
     ncr = NonConformanceReport(
         ncr_number=generate_ncr_number(db, company_id),
         **ncr_in.model_dump(),
@@ -96,6 +111,26 @@ def create_ncr(
     )
     ncr.company_id = company_id
     db.add(ncr)
+    db.flush()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="ncr_created",
+        source_module="quality",
+        entity_type="ncr",
+        entity_id=ncr.id,
+        work_order_id=ncr.work_order_id,
+        user_id=current_user.id,
+        severity="high" if ncr.source == NCRSource.CUSTOMER_RETURN else "medium",
+        event_payload={
+            "ncr_number": ncr.ncr_number,
+            "title": ncr.title,
+            "source": _enum_value(ncr.source),
+            "status": _enum_value(ncr.status),
+            "disposition": _enum_value(ncr.disposition),
+            "part_id": ncr.part_id,
+            "quantity_affected": float(ncr.quantity_affected or 0),
+        },
+    )
     db.commit()
     db.refresh(ncr)
     return ncr
@@ -138,6 +173,8 @@ def update_ncr(
     if not ncr:
         raise HTTPException(status_code=404, detail="NCR not found")
 
+    previous_status = ncr.status
+    previous_disposition = ncr.disposition
     update_data = ncr_in.model_dump(exclude_unset=True)
 
     # Handle status transitions
@@ -148,6 +185,24 @@ def update_ncr(
     for field, value in update_data.items():
         setattr(ncr, field, value)
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="ncr_updated",
+        source_module="quality",
+        entity_type="ncr",
+        entity_id=ncr.id,
+        work_order_id=ncr.work_order_id,
+        user_id=current_user.id,
+        severity="info" if ncr.status == previous_status else "medium",
+        event_payload={
+            "ncr_number": ncr.ncr_number,
+            "changed_fields": [field for field in update_data.keys() if field != "version"],
+            "previous_status": _enum_value(previous_status),
+            "status": _enum_value(ncr.status),
+            "previous_disposition": _enum_value(previous_disposition),
+            "disposition": _enum_value(ncr.disposition),
+        },
+    )
     db.commit()
     db.refresh(ncr)
     return ncr
@@ -182,6 +237,23 @@ def create_car_from_ncr(
     ncr.car_required = True
     ncr.car_id = car.id
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="car_created_from_ncr",
+        source_module="quality",
+        entity_type="car",
+        entity_id=car.id,
+        work_order_id=ncr.work_order_id,
+        user_id=current_user.id,
+        severity="medium",
+        event_payload={
+            "car_number": car.car_number,
+            "ncr_id": ncr.id,
+            "ncr_number": ncr.ncr_number,
+            "title": car.title,
+            "priority": car.priority,
+        },
+    )
     db.commit()
     db.refresh(car)
     return car
@@ -237,6 +309,24 @@ def create_car(
     )
     car.company_id = company_id
     db.add(car)
+    db.flush()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="car_created",
+        source_module="quality",
+        entity_type="car",
+        entity_id=car.id,
+        user_id=current_user.id,
+        severity="high" if car.priority <= 2 else "medium",
+        event_payload={
+            "car_number": car.car_number,
+            "title": car.title,
+            "car_type": _enum_value(car.car_type),
+            "status": _enum_value(car.status),
+            "priority": car.priority,
+            "due_date": car.due_date.isoformat() if car.due_date else None,
+        },
+    )
     db.commit()
     db.refresh(car)
     return car
@@ -277,6 +367,7 @@ def update_car(
     if not car:
         raise HTTPException(status_code=404, detail="CAR not found")
 
+    previous_status = car.status
     update_data = car_in.model_dump(exclude_unset=True)
 
     if "status" in update_data:
@@ -289,6 +380,22 @@ def update_car(
     for field, value in update_data.items():
         setattr(car, field, value)
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="car_updated",
+        source_module="quality",
+        entity_type="car",
+        entity_id=car.id,
+        user_id=current_user.id,
+        severity="info" if car.status == previous_status else "medium",
+        event_payload={
+            "car_number": car.car_number,
+            "changed_fields": [field for field in update_data.keys() if field != "version"],
+            "previous_status": _enum_value(previous_status),
+            "status": _enum_value(car.status),
+            "priority": car.priority,
+        },
+    )
     db.commit()
     db.refresh(car)
     return car
@@ -346,9 +453,29 @@ def create_fai(
     company_id: int = Depends(get_current_company_id),
 ):
     """Create a new FAI"""
+    _validate_work_order_reference(db, company_id, fai_in.work_order_id)
     fai = FirstArticleInspection(fai_number=generate_fai_number(db, company_id), **fai_in.model_dump())
     fai.company_id = company_id
     db.add(fai)
+    db.flush()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="fai_created",
+        source_module="quality",
+        entity_type="fai",
+        entity_id=fai.id,
+        work_order_id=fai.work_order_id,
+        user_id=current_user.id,
+        severity="medium",
+        event_payload={
+            "fai_number": fai.fai_number,
+            "part_id": fai.part_id,
+            "status": _enum_value(fai.status),
+            "fai_type": fai.fai_type,
+            "reason": fai.reason,
+            "due_date": fai.due_date.isoformat() if fai.due_date else None,
+        },
+    )
     db.commit()
     db.refresh(fai)
     return fai
@@ -391,6 +518,7 @@ def update_fai(
     if not fai:
         raise HTTPException(status_code=404, detail="FAI not found")
 
+    previous_status = fai.status
     update_data = fai_in.model_dump(exclude_unset=True)
 
     if "status" in update_data:
@@ -401,6 +529,24 @@ def update_fai(
     for field, value in update_data.items():
         setattr(fai, field, value)
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="fai_updated",
+        source_module="quality",
+        entity_type="fai",
+        entity_id=fai.id,
+        work_order_id=fai.work_order_id,
+        user_id=current_user.id,
+        severity="high" if fai.status == FAIStatus.FAILED else "info",
+        event_payload={
+            "fai_number": fai.fai_number,
+            "changed_fields": [field for field in update_data.keys() if field != "version"],
+            "previous_status": _enum_value(previous_status),
+            "status": _enum_value(fai.status),
+            "characteristics_passed": fai.characteristics_passed,
+            "characteristics_failed": fai.characteristics_failed,
+        },
+    )
     db.commit()
     db.refresh(fai)
     return fai
@@ -482,6 +628,25 @@ def update_fai_characteristic(
                 fai.characteristics_passed -= 1
                 fai.characteristics_failed += 1
 
+    if "is_conforming" in update_data:
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="fai_characteristic_recorded",
+            source_module="quality",
+            entity_type="fai_characteristic",
+            entity_id=char.id,
+            work_order_id=fai.work_order_id,
+            user_id=current_user.id,
+            severity="high" if char.is_conforming is False else "info",
+            event_payload={
+                "fai_id": fai.id,
+                "fai_number": fai.fai_number,
+                "char_number": char.char_number,
+                "is_conforming": char.is_conforming,
+                "characteristics_passed": fai.characteristics_passed,
+                "characteristics_failed": fai.characteristics_failed,
+            },
+        )
     db.commit()
     db.refresh(char)
     return char

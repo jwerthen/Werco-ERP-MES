@@ -13,7 +13,17 @@ from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
 from app.models.inventory import InventoryItem, InventoryLocation, InventoryTransaction, TransactionType
 from app.models.part import Part
-from app.models.purchasing import POReceipt, POStatus, PurchaseOrder, PurchaseOrderLine, ReceiptStatus, Vendor
+from app.models.purchasing import (
+    DefectType,
+    InspectionMethod,
+    InspectionStatus,
+    POReceipt,
+    POStatus,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    ReceiptStatus,
+    Vendor,
+)
 from app.models.user import User, UserRole
 from app.schemas.purchasing import (
     POCreate,
@@ -29,6 +39,7 @@ from app.schemas.purchasing import (
     VendorResponse,
     VendorUpdate,
 )
+from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
 
@@ -350,7 +361,7 @@ def create_purchase_order(
     company_id: int = Depends(get_current_company_id),
 ):
     # Verify vendor
-    vendor = db.query(Vendor).filter(Vendor.id == po_in.vendor_id).first()
+    vendor = db.query(Vendor).filter(Vendor.id == po_in.vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -373,7 +384,7 @@ def create_purchase_order(
     # Add lines
     subtotal = 0.0
     for idx, line_data in enumerate(po_in.lines, 1):
-        part = db.query(Part).filter(Part.id == line_data.part_id).first()
+        part = db.query(Part).filter(Part.id == line_data.part_id, Part.company_id == company_id).first()
         if not part:
             raise HTTPException(status_code=404, detail=f"Part {line_data.part_id} not found")
 
@@ -388,12 +399,31 @@ def create_purchase_order(
             required_date=line_data.required_date or po_in.required_date,
             notes=line_data.notes,
         )
+        line.company_id = company_id
         db.add(line)
         subtotal += line_total
 
     po.subtotal = subtotal
     po.total = subtotal + po.tax + po.shipping
 
+    db.flush()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="purchase_order_created",
+        source_module="purchasing",
+        entity_type="purchase_order",
+        entity_id=po.id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "po_number": po.po_number,
+            "vendor_id": po.vendor_id,
+            "vendor_name": vendor.name,
+            "line_count": len(po_in.lines),
+            "required_date": po.required_date.isoformat() if po.required_date else None,
+            "total": float(po.total or 0),
+        },
+    )
     db.commit()
     db.refresh(po)
     return po
@@ -430,6 +460,7 @@ def update_purchase_order(
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
+    previous_status = po.status
     update_data = po_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         if field == "status":
@@ -437,6 +468,23 @@ def update_purchase_order(
         else:
             setattr(po, field, value)
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="purchase_order_updated",
+        source_module="purchasing",
+        entity_type="purchase_order",
+        entity_id=po.id,
+        user_id=current_user.id,
+        severity="info" if po.status == previous_status else "medium",
+        event_payload={
+            "po_number": po.po_number,
+            "changed_fields": [field for field in update_data.keys() if field != "version"],
+            "previous_status": previous_status.value if hasattr(previous_status, "value") else previous_status,
+            "status": po.status.value if hasattr(po.status, "value") else po.status,
+            "required_date": po.required_date.isoformat() if po.required_date else None,
+            "expected_date": po.expected_date.isoformat() if po.expected_date else None,
+        },
+    )
     db.commit()
     db.refresh(po)
     return po
@@ -458,6 +506,21 @@ def send_purchase_order(
 
     po.status = POStatus.SENT
     po.order_date = date.today()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="purchase_order_sent",
+        source_module="purchasing",
+        entity_type="purchase_order",
+        entity_id=po.id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "po_number": po.po_number,
+            "vendor_id": po.vendor_id,
+            "order_date": po.order_date.isoformat() if po.order_date else None,
+            "required_date": po.required_date.isoformat() if po.required_date else None,
+        },
+    )
     db.commit()
 
     return {"message": "PO sent", "po_number": po.po_number}
@@ -478,7 +541,7 @@ def add_po_line(
     if po.status not in [POStatus.DRAFT]:
         raise HTTPException(status_code=400, detail="Can only add lines to draft POs")
 
-    part = db.query(Part).filter(Part.id == line_in.part_id).first()
+    part = db.query(Part).filter(Part.id == line_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
 
@@ -499,12 +562,32 @@ def add_po_line(
         required_date=line_in.required_date,
         notes=line_in.notes,
     )
+    line.company_id = company_id
     db.add(line)
 
     # Update PO totals
     po.subtotal += line_total
     po.total = po.subtotal + po.tax + po.shipping
 
+    db.flush()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="purchase_order_line_added",
+        source_module="purchasing",
+        entity_type="purchase_order_line",
+        entity_id=line.id,
+        user_id=current_user.id,
+        severity="info",
+        event_payload={
+            "po_id": po.id,
+            "po_number": po.po_number,
+            "line_number": line.line_number,
+            "part_id": line.part_id,
+            "quantity_ordered": float(line.quantity_ordered or 0),
+            "unit_price": float(line.unit_price or 0),
+            "required_date": line.required_date.isoformat() if line.required_date else None,
+        },
+    )
     db.commit()
     db.refresh(line)
     return line
@@ -592,7 +675,7 @@ def receive_material(
     po_line = (
         db.query(PurchaseOrderLine)
         .options(joinedload(PurchaseOrderLine.purchase_order))
-        .filter(PurchaseOrderLine.id == receipt_in.po_line_id)
+        .filter(PurchaseOrderLine.id == receipt_in.po_line_id, PurchaseOrderLine.company_id == company_id)
         .first()
     )
 
@@ -606,7 +689,11 @@ def receive_material(
     # Validate location if provided
     location = None
     if receipt_in.location_id:
-        location = db.query(InventoryLocation).filter(InventoryLocation.id == receipt_in.location_id).first()
+        location = (
+            db.query(InventoryLocation)
+            .filter(InventoryLocation.id == receipt_in.location_id, InventoryLocation.company_id == company_id)
+            .first()
+        )
         if not location:
             raise HTTPException(status_code=404, detail="Location not found")
 
@@ -629,6 +716,7 @@ def receive_material(
         received_by=current_user.id,
         notes=receipt_in.notes,
     )
+    receipt.company_id = company_id
     db.add(receipt)
 
     qty_received = float(receipt_in.quantity_received)
@@ -651,6 +739,7 @@ def receive_material(
     if not receipt_in.requires_inspection:
         receipt.quantity_accepted = receipt_in.quantity_received
         receipt.status = ReceiptStatus.ACCEPTED
+        receipt.inspection_status = InspectionStatus.PASSED
 
         # Add to inventory
         _add_to_inventory(
@@ -661,8 +750,29 @@ def receive_material(
             receipt_in.lot_number,
             current_user.id,
             receipt_number,
+            company_id,
         )
 
+    db.flush()
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="purchase_order_received",
+        source_module="purchasing",
+        entity_type="po_receipt",
+        entity_id=receipt.id,
+        user_id=current_user.id,
+        severity="info" if receipt.status == ReceiptStatus.ACCEPTED else "medium",
+        event_payload={
+            "receipt_number": receipt.receipt_number,
+            "po_id": po.id,
+            "po_number": po.po_number,
+            "po_line_id": po_line.id,
+            "part_id": po_line.part_id,
+            "quantity_received": qty_received,
+            "requires_inspection": receipt.requires_inspection,
+            "status": receipt.status.value if hasattr(receipt.status, "value") else receipt.status,
+        },
+    )
     db.commit()
     db.refresh(receipt)
     return receipt
@@ -682,7 +792,7 @@ def get_pending_inspection(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.location),
         )
-        .filter(POReceipt.status == ReceiptStatus.PENDING_INSPECTION)
+        .filter(POReceipt.company_id == company_id, POReceipt.status == ReceiptStatus.PENDING_INSPECTION)
         .order_by(POReceipt.received_at)
         .all()
     )
@@ -719,7 +829,7 @@ def inspect_receipt(
     receipt = (
         db.query(POReceipt)
         .options(joinedload(POReceipt.po_line), joinedload(POReceipt.location))
-        .filter(POReceipt.id == receipt_id)
+        .filter(POReceipt.id == receipt_id, POReceipt.company_id == company_id)
         .first()
     )
 
@@ -732,16 +842,32 @@ def inspect_receipt(
     # Validate quantities
     if inspection.quantity_accepted + inspection.quantity_rejected > receipt.quantity_received:
         raise HTTPException(status_code=400, detail="Accepted + rejected cannot exceed received quantity")
+    if inspection.quantity_rejected > 0:
+        if not inspection.defect_type:
+            raise HTTPException(status_code=400, detail="Defect type is required when rejecting material")
+        if not inspection.inspection_notes:
+            raise HTTPException(status_code=400, detail="Inspection notes are required when rejecting material")
 
     receipt.quantity_accepted = inspection.quantity_accepted
     receipt.quantity_rejected = inspection.quantity_rejected
-    receipt.status = ReceiptStatus(inspection.status)
+    receipt.inspection_method = InspectionMethod(inspection.inspection_method)
+    receipt.defect_type = DefectType(inspection.defect_type) if inspection.defect_type else None
     receipt.inspected_by = current_user.id
     receipt.inspected_at = datetime.utcnow()
     receipt.inspection_notes = inspection.inspection_notes
 
-    # If accepted, add to inventory
-    if inspection.quantity_accepted > 0 and inspection.status == "accepted":
+    if inspection.quantity_accepted == receipt.quantity_received:
+        receipt.inspection_status = InspectionStatus.PASSED
+        receipt.status = ReceiptStatus.ACCEPTED
+    elif inspection.quantity_rejected == receipt.quantity_received:
+        receipt.inspection_status = InspectionStatus.FAILED
+        receipt.status = ReceiptStatus.REJECTED
+    else:
+        receipt.inspection_status = InspectionStatus.PARTIAL
+        receipt.status = ReceiptStatus.ACCEPTED
+
+    # If any quantity was accepted, add it to inventory.
+    if inspection.quantity_accepted > 0:
         location_code = receipt.location.code if receipt.location else "RECV-01"
         _add_to_inventory(
             db,
@@ -751,28 +877,60 @@ def inspect_receipt(
             receipt.lot_number,
             current_user.id,
             receipt.receipt_number,
+            company_id,
         )
 
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type="purchase_receipt_inspected",
+        source_module="purchasing",
+        entity_type="po_receipt",
+        entity_id=receipt.id,
+        user_id=current_user.id,
+        severity="high" if inspection.quantity_rejected > 0 else "info",
+        event_payload={
+            "receipt_number": receipt.receipt_number,
+            "po_line_id": receipt.po_line_id,
+            "part_id": receipt.po_line.part_id if receipt.po_line else None,
+            "quantity_received": float(receipt.quantity_received),
+            "quantity_accepted": float(inspection.quantity_accepted),
+            "quantity_rejected": float(inspection.quantity_rejected),
+            "status": receipt.status.value if hasattr(receipt.status, "value") else receipt.status,
+            "inspection_method": inspection.inspection_method,
+            "defect_type": inspection.defect_type,
+        },
+    )
     db.commit()
     db.refresh(receipt)
     return receipt
 
 
 def _add_to_inventory(
-    db: Session, part_id: int, quantity: float, location: str, lot_number: str, user_id: int, reference: str
+    db: Session,
+    part_id: int,
+    quantity: float,
+    location: str,
+    lot_number: str,
+    user_id: int,
+    reference: str,
+    company_id: int,
 ):
     """Helper to add received material to inventory"""
     # Check for existing inventory at location with same lot
     existing = (
         db.query(InventoryItem)
         .filter(
-            InventoryItem.part_id == part_id, InventoryItem.location == location, InventoryItem.lot_number == lot_number
+            InventoryItem.company_id == company_id,
+            InventoryItem.part_id == part_id,
+            InventoryItem.location == location,
+            InventoryItem.lot_number == lot_number,
         )
         .first()
     )
 
     if existing:
         existing.quantity_on_hand += quantity
+        existing.quantity_available = existing.quantity_on_hand - existing.quantity_allocated
     else:
         inv_item = InventoryItem(
             part_id=part_id,
@@ -780,22 +938,25 @@ def _add_to_inventory(
             lot_number=lot_number,
             quantity_on_hand=quantity,
             quantity_allocated=0,
+            quantity_available=quantity,
             is_active=True,
         )
+        inv_item.company_id = company_id
         db.add(inv_item)
 
     # Create transaction record
     txn = InventoryTransaction(
         part_id=part_id,
-        transaction_type=TransactionType.RECEIPT,
+        transaction_type=TransactionType.RECEIVE,
         quantity=quantity,
-        location_to=location,
+        to_location=location,
         lot_number=lot_number,
         reference_type="po_receipt",
-        reference_id=reference,
-        performed_by=user_id,
+        reference_number=reference,
+        created_by=user_id,
         notes=f"Received from {reference}",
     )
+    txn.company_id = company_id
     db.add(txn)
 
 
@@ -817,7 +978,7 @@ def get_receiving_history(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
         )
-        .filter(POReceipt.received_at >= cutoff)
+        .filter(POReceipt.company_id == company_id, POReceipt.received_at >= cutoff)
         .order_by(POReceipt.received_at.desc())
         .limit(100)
         .all()

@@ -95,6 +95,13 @@ async def check_quote_expiring_job(ctx):
     return await check_quote_expiring_task()
 
 
+async def aggregate_ai_learning_job(ctx):
+    """Aggregate AI feedback into improvement recommendations"""
+    from app.jobs.ai_learning_jobs import aggregate_ai_learning_task
+
+    return await aggregate_ai_learning_task()
+
+
 # ============================================================================
 # STARTUP/SHUTDOWN
 # ============================================================================
@@ -136,6 +143,7 @@ class WorkerSettings:
         check_late_work_orders_job,
         check_low_stock_job,
         check_quote_expiring_job,
+        aggregate_ai_learning_job,
     ]
 
     # Cron jobs (scheduled tasks)
@@ -146,6 +154,7 @@ class WorkerSettings:
         cron(check_late_work_orders_job, hour=8, minute=0),  # 8 AM daily
         cron(check_low_stock_job, hour=7, minute=30),  # 7:30 AM daily
         cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily
+        cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily
         cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM
     ]
 

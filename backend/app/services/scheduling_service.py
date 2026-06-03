@@ -13,12 +13,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.cache import invalidate_work_centers_cache
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,13 @@ class SchedulingService:
                 WorkOrderOperation.scheduled_start == None,  # Unscheduled
             )
         )
+        open_blocker_subquery = select(WorkOrderBlocker.operation_id).where(
+            WorkOrderBlocker.status.in_(
+                [WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]
+            ),
+            WorkOrderBlocker.operation_id.isnot(None),
+        )
+        query = query.filter(WorkOrderOperation.id.notin_(open_blocker_subquery))
 
         if work_center_ids:
             query = query.filter(WorkOrderOperation.work_center_id.in_(work_center_ids))
@@ -194,7 +202,7 @@ class SchedulingService:
             # Group by part for setup optimization
             operations.sort(
                 key=lambda op: (
-                    -op.work_order.priority,  # Higher priority first (descending)
+                    op.work_order.priority,  # 1 is highest priority
                     op.work_order.due_date or date.max,  # Earlier due date first
                     op.work_order.part_id,  # Group same parts together
                     op.sequence,  # Operation sequence
@@ -202,7 +210,7 @@ class SchedulingService:
             )
         else:
             # Standard priority + due date sorting
-            operations.sort(key=lambda op: (-op.work_order.priority, op.work_order.due_date or date.max, op.sequence))
+            operations.sort(key=lambda op: (op.work_order.priority, op.work_order.due_date or date.max, op.sequence))
 
         return operations
 

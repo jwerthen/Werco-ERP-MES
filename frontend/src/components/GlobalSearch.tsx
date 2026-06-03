@@ -190,10 +190,21 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
     setIsLoading(true);
     const seq = ++searchSeqRef.current;
     try {
-      const data = await api.search(searchQuery);
+      const shouldTryNaturalLanguage =
+        /\s/.test(searchQuery.trim()) &&
+        /(late|overdue|waiting|material|blocked|stuck|hold|laser|weld|brake|hot|rush|critical)/i.test(searchQuery);
+      const data = shouldTryNaturalLanguage
+        ? await api.naturalLanguageSearch(searchQuery)
+        : await api.search(searchQuery);
       if (seq === searchSeqRef.current) {
-        setResults(data.results || []);
+        const nextResults = data.results || [];
+        setResults(nextResults);
         setSelectedIndex(0);
+        if (nextResults.length === 0) {
+          window.dispatchEvent(
+            new CustomEvent('werco:friction', { detail: { type: 'failed_search', query: searchQuery.trim() } })
+          );
+        }
       }
     } catch (error) {
       console.error('Search failed:', error);

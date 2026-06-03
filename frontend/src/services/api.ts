@@ -12,6 +12,20 @@ import {
   CustomerStatsResponse,
 } from '../types/api';
 import { User, Part, WorkCenter } from '../types';
+import {
+  AIInteractionEventInput,
+  AIOutcomeInput,
+  AIRecommendation,
+  AIRecommendationFeedbackInput,
+  AIRecommendationInput,
+  AIRecommendationStatus,
+} from '../types/aiLearning';
+import {
+  NaturalLanguageSearchResponse,
+  WorkOrderBlocker,
+  WorkOrderBlockerInput,
+  WorkOrderBlockerStatus,
+} from '../types/aiForward';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 
@@ -627,6 +641,36 @@ class ApiService {
     return response.data;
   }
 
+  async getWorkOrderBlockers(params?: {
+    work_order_id?: number;
+    status?: WorkOrderBlockerStatus;
+    category?: string;
+    limit?: number;
+  }): Promise<WorkOrderBlocker[]> {
+    const response = await this.api.get<WorkOrderBlocker[]>('/work-order-blockers/', { params });
+    return response.data;
+  }
+
+  async createWorkOrderBlocker(workOrderId: number, data: WorkOrderBlockerInput): Promise<WorkOrderBlocker> {
+    const response = await this.api.post<WorkOrderBlocker>(`/work-order-blockers/work-orders/${workOrderId}`, data);
+    return response.data;
+  }
+
+  async updateWorkOrderBlocker(
+    blockerId: number,
+    data: Partial<Pick<WorkOrderBlocker, 'status' | 'severity' | 'assigned_to' | 'resolution_note'>>
+  ): Promise<WorkOrderBlocker> {
+    const response = await this.api.put<WorkOrderBlocker>(`/work-order-blockers/${blockerId}`, data);
+    return response.data;
+  }
+
+  async resolveWorkOrderBlocker(blockerId: number, resolutionNote?: string): Promise<WorkOrderBlocker> {
+    const response = await this.api.post<WorkOrderBlocker>(`/work-order-blockers/${blockerId}/resolve`, {
+      resolution_note: resolutionNote,
+    });
+    return response.data;
+  }
+
   // Operations
   async addOperation(workOrderId: number, data: any) {
     const response = await this.api.post(`/work-orders/${workOrderId}/operations`, data);
@@ -683,6 +727,52 @@ class ApiService {
 
   async getNotificationLogs(params?: { limit?: number; status?: string }) {
     const response = await this.api.get('/notifications/logs', { params });
+    return response.data;
+  }
+
+  async naturalLanguageSearch(query: string, limit = 20): Promise<NaturalLanguageSearchResponse> {
+    const response = await this.api.post<NaturalLanguageSearchResponse>('/search/nl', { query, limit });
+    return response.data;
+  }
+
+  async recordAIEvent(data: AIInteractionEventInput) {
+    const response = await this.api.post('/ai/events', data);
+    return response.data;
+  }
+
+  async getAIRecommendations(params?: {
+    status?: AIRecommendationStatus;
+    source_module?: string;
+    target_entity_type?: string;
+    target_entity_id?: number;
+    limit?: number;
+  }): Promise<AIRecommendation[]> {
+    const response = await this.api.get<AIRecommendation[]>('/ai/recommendations', { params });
+    return response.data;
+  }
+
+  async createAIRecommendation(data: AIRecommendationInput): Promise<AIRecommendation> {
+    const response = await this.api.post<AIRecommendation>('/ai/recommendations', data);
+    return response.data;
+  }
+
+  async acceptAIRecommendation(id: number, reason?: string): Promise<AIRecommendation> {
+    const response = await this.api.post<AIRecommendation>(`/ai/recommendations/${id}/accept`, { reason });
+    return response.data;
+  }
+
+  async dismissAIRecommendation(id: number, reason?: string): Promise<AIRecommendation> {
+    const response = await this.api.post<AIRecommendation>(`/ai/recommendations/${id}/dismiss`, { reason });
+    return response.data;
+  }
+
+  async sendAIRecommendationFeedback(id: number, data: AIRecommendationFeedbackInput) {
+    const response = await this.api.post(`/ai/recommendations/${id}/feedback`, data);
+    return response.data;
+  }
+
+  async recordAIOutcome(data: AIOutcomeInput) {
+    const response = await this.api.post('/ai/outcomes', data);
     return response.data;
   }
 

@@ -31,6 +31,7 @@ from app.schemas.work_order import (
     WorkOrderUpdate,
 )
 from app.services.audit_service import AuditService
+from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_state_service import (
     WorkOrderStateError,
@@ -50,6 +51,33 @@ router = APIRouter()
 class WorkOrderPriorityUpdate(BaseModel):
     priority: int = Field(..., ge=1, le=10, description="Priority (1=highest, 10=lowest)")
     reason: Optional[str] = Field(None, max_length=500, description="Optional reason for priority change")
+
+
+def _emit_work_order_event(
+    db: Session,
+    *,
+    company_id: int,
+    current_user: User,
+    work_order: WorkOrder,
+    event_type: str,
+    severity: str = "info",
+    payload: Optional[dict] = None,
+) -> None:
+    OperationalEventService(db).emit(
+        company_id=company_id,
+        event_type=event_type,
+        source_module="work_orders",
+        entity_type="work_order",
+        entity_id=work_order.id,
+        work_order_id=work_order.id,
+        user_id=current_user.id,
+        severity=severity,
+        event_payload={
+            "work_order_number": work_order.work_order_number,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+            **(payload or {}),
+        },
+    )
 
 
 def _get_active_bom(db: Session, part_id: int, company_id: int) -> Optional[BOM]:
@@ -846,6 +874,14 @@ def update_work_order(
     for field, value in update_data.items():
         setattr(work_order, field, value)
 
+    _emit_work_order_event(
+        db,
+        company_id=company_id,
+        current_user=current_user,
+        work_order=work_order,
+        event_type="work_order_updated",
+        payload={"updated_fields": list(update_data.keys())},
+    )
     db.commit()
     db.refresh(work_order)
 
@@ -917,6 +953,15 @@ def update_work_order_priority(
                 + (f" (reason: {reason})" if reason else "")
             ),
             extra_data={"priority_reason": reason} if reason else None,
+        )
+        _emit_work_order_event(
+            db,
+            company_id=company_id,
+            current_user=current_user,
+            work_order=work_order,
+            event_type="work_order_priority_updated",
+            severity="medium" if work_order.priority <= 2 else "info",
+            payload={"old_priority": old_priority, "new_priority": work_order.priority, "reason": reason},
         )
 
     db.refresh(work_order)
@@ -1114,6 +1159,14 @@ def release_work_order(
     work_order.released_at = datetime.utcnow()
 
     release_first_ready_operation(work_order)
+    _emit_work_order_event(
+        db,
+        company_id=company_id,
+        current_user=current_user,
+        work_order=work_order,
+        event_type="work_order_released",
+        payload={"old_status": old_status, "new_status": WorkOrderStatus.RELEASED.value},
+    )
 
     db.commit()
 
@@ -1180,6 +1233,14 @@ def start_work_order(
     if not work_order.actual_start:
         work_order.actual_start = datetime.utcnow()
 
+    _emit_work_order_event(
+        db,
+        company_id=company_id,
+        current_user=current_user,
+        work_order=work_order,
+        event_type="work_order_started",
+        payload={"actual_start": work_order.actual_start.isoformat() if work_order.actual_start else None},
+    )
     db.commit()
     safe_broadcast(
         broadcast_work_order_update,
@@ -1292,6 +1353,14 @@ def complete_work_order(
     work_order.quantity_scrapped = quantity_scrapped
     work_order.actual_end = datetime.utcnow()
 
+    _emit_work_order_event(
+        db,
+        company_id=company_id,
+        current_user=current_user,
+        work_order=work_order,
+        event_type="work_order_completed",
+        payload={"quantity_complete": quantity_complete, "quantity_scrapped": quantity_scrapped},
+    )
     db.commit()
     safe_broadcast(
         broadcast_work_order_update,
