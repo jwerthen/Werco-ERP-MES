@@ -672,12 +672,12 @@ export default function WorkOrderDetail() {
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-4">
           <div className="space-y-3">
             {blockers.length === 0 ? (
-              <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-4 text-sm text-slate-400">
+              <div className="rounded-lg border border-fd-line bg-slate-900/40 p-4 text-sm text-slate-400">
                 No blockers reported.
               </div>
             ) : (
               blockers.map((blocker) => (
-                <div key={blocker.id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-4">
+                <div key={blocker.id} className="rounded-lg border border-fd-line bg-slate-900/40 p-4">
                   <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -721,7 +721,7 @@ export default function WorkOrderDetail() {
             )}
           </div>
 
-          <form onSubmit={handleCreateBlocker} className="rounded-lg border border-slate-700 bg-slate-900/40 p-4 space-y-3">
+          <form onSubmit={handleCreateBlocker} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
             <h3 className="font-semibold text-white">Report Blocker</h3>
             <div>
               <label className="text-sm text-slate-400 block mb-1">Operation</label>
@@ -807,7 +807,7 @@ export default function WorkOrderDetail() {
                     <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Clocked In (CT)</th>
                   </tr>
                 </thead>
-                <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                <tbody className="bg-fd-panel divide-y divide-slate-700">
                   {activeUsersOnWorkOrder.map((entry) => (
                     <tr key={`${entry.user_id}-${entry.clock_in ?? ''}-${entry.operation ?? 'op'}`} className="hover:bg-slate-800/50">
                       <td className="px-4 py-3 text-sm font-medium text-white">
@@ -859,7 +859,7 @@ export default function WorkOrderDetail() {
                   <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
+              <tbody className="bg-fd-panel divide-y divide-slate-700">
                 {(() => {
                   let lastGroup = '';
                   return workOrder.operations.map((op) => {
@@ -868,13 +868,13 @@ export default function WorkOrderDetail() {
                     const operationTarget = Number(op.component_quantity || workOrder.quantity_ordered || 0);
                     
                     const groupColors: Record<string, string> = {
-                      'LASER': 'bg-red-500/20 text-red-300',
-                      'MACHINE': 'bg-blue-500/20 text-blue-300',
-                      'BEND': 'bg-orange-500/20 text-orange-300',
-                      'WELD': 'bg-yellow-500/20 text-yellow-300',
-                      'FINISH': 'bg-purple-500/20 text-purple-300',
-                      'ASSEMBLY': 'bg-green-500/20 text-green-300',
-                      'INSPECT': 'bg-blue-500/20 text-blue-300',
+                      'LASER': 'bg-fd-red/15 text-fd-red',
+                      'MACHINE': 'bg-fd-blue/15 text-fd-blue',
+                      'BEND': 'bg-fd-amber/15 text-fd-amber',
+                      'WELD': 'bg-amber-500/15 text-amber-300',
+                      'FINISH': 'bg-fd-cyan/15 text-fd-cyan',
+                      'ASSEMBLY': 'bg-fd-green/15 text-fd-green',
+                      'INSPECT': 'bg-fd-blue/15 text-fd-blue',
                     };
                     
                     return (
@@ -992,7 +992,7 @@ export default function WorkOrderDetail() {
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">UOM</th>
                 </tr>
               </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
+              <tbody className="bg-fd-panel divide-y divide-slate-700">
                 {materialReqs.materials.map((mat) => (
                   <tr key={mat.bom_item_id} className={mat.is_optional ? 'bg-yellow-500/10' : 'hover:bg-slate-800/50'}>
                     <td className="px-4 py-3 text-sm font-medium">{mat.item_number}</td>

@@ -490,8 +490,8 @@ export default function ShopFloor() {
 
               <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-6">
                 <div className="flex items-start gap-4">
-                  <div className="p-3 bg-[#151b28]/20 rounded-xl">
-                    <div className="h-4 w-4 rounded-full bg-[#151b28] animate-pulse"></div>
+                  <div className="p-3 bg-fd-panel/20 rounded-xl">
+                    <div className="h-4 w-4 rounded-full bg-fd-panel animate-pulse"></div>
                   </div>
                   <div>
                     <p className="text-emerald-100 text-sm font-medium uppercase tracking-wide mb-1">
@@ -523,7 +523,7 @@ export default function ShopFloor() {
                       setClockOutData({ quantity_produced: remaining, quantity_scrapped: 0, notes: '' });
                       setClockOutModal(true);
                     }}
-                    className="btn bg-[#151b28] text-emerald-400 hover:bg-emerald-500/100/10 shadow-lg"
+                    className="btn bg-fd-panel text-emerald-400 hover:bg-emerald-500/100/10 shadow-lg"
                   >
                     <StopIcon className="h-5 w-5 mr-2" />
                     Clock Out
@@ -545,7 +545,7 @@ export default function ShopFloor() {
               px-5 py-3 rounded-xl font-semibold transition-all duration-200
               ${selectedWorkCenter === wc.id
                 ? 'bg-werco-600 text-white shadow-md shadow-werco-600/30'
-                : 'bg-[#151b28] text-slate-200 border border-slate-700 hover:border-werco-400 hover:bg-werco-500/10'
+                : 'bg-fd-panel text-slate-200 border border-fd-line hover:border-werco-400 hover:bg-werco-500/10'
               }
             `}
           >
@@ -569,7 +569,7 @@ export default function ShopFloor() {
                   key={`focus-${item.operation_id}`}
                   type="button"
                   className={`text-left p-3 rounded-xl border transition-colors ${
-                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/100/20' : 'border-surface-200 bg-[#151b28] hover:bg-surface-50'
+                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/100/20' : 'border-surface-200 bg-fd-panel hover:bg-surface-50'
                   }`}
                   onClick={() => toggleRowExpansion(item.work_order_id)}
                 >
@@ -807,21 +807,21 @@ export default function ShopFloor() {
 
                                   {/* Info Cards */}
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
+                                    <div className="bg-fd-panel rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer</p>
                                       <p className="font-semibold text-surface-900">{details.customer_name || '\u2014'}</p>
                                     </div>
-                                    <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
+                                    <div className="bg-fd-panel rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Customer PO</p>
                                       <p className="font-semibold text-surface-900">{details.customer_po || '\u2014'}</p>
                                     </div>
-                                    <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
+                                    <div className="bg-fd-panel rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Qty Complete / Ordered</p>
                                       <p className="font-semibold text-surface-900">
                                         {details.quantity_complete} / {details.quantity_ordered}
                                       </p>
                                     </div>
-                                    <div className="bg-[#151b28] rounded-lg p-4 border border-surface-200">
+                                    <div className="bg-fd-panel rounded-lg p-4 border border-surface-200">
                                       <p className="text-sm text-surface-500">Due Date</p>
                                       <p className="font-semibold text-surface-900">
                                         {details.due_date ? formatCentralDate(details.due_date) : '\u2014'}
@@ -845,7 +845,7 @@ export default function ShopFloor() {
                                   {/* Operations Table */}
                                   <div>
                                     <h4 className="font-medium text-surface-700 mb-2">All Operations</h4>
-                                    <div className="bg-[#151b28] rounded-lg border border-surface-200 overflow-hidden">
+                                    <div className="bg-fd-panel rounded-lg border border-surface-200 overflow-hidden">
                                       <table className="w-full text-sm">
                                         <thead className="bg-surface-100">
                                           <tr>

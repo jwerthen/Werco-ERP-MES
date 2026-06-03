@@ -218,19 +218,23 @@ const NavGroup = React.memo(function NavGroup({
       <Link
         to={item.href}
         className={`
-          group flex items-center gap-3 px-3 py-2.5 rounded-xl
-          text-sm font-medium transition-all duration-200
-          ${isActive ? 'bg-white/15 text-white shadow-sm' : 'text-white/70 hover:bg-white/10 hover:text-white'}
+          group relative flex items-center gap-3 px-3 py-2 rounded-[3px]
+          text-[13px] font-medium transition-all duration-150
+          ${
+            isActive
+              ? 'bg-[rgba(47,129,247,0.1)] text-fd-ink shadow-[inset_2px_0_0_#2f81f7]'
+              : 'text-fd-body hover:bg-white/[0.03] hover:text-fd-ink'
+          }
         `}
         onClick={onNavigate}
         title={collapsed ? item.name : undefined}
       >
         <item.icon
-          className={`h-5 w-5 flex-shrink-0 transition-colors ${isActive ? 'text-white' : 'text-white/60 group-hover:text-white'}`}
+          className={`h-[17px] w-[17px] flex-shrink-0 transition-colors ${isActive ? 'text-fd-blue' : 'text-fd-mute group-hover:text-fd-body'}`}
         />
-        {!collapsed && <span>{item.name}</span>}
+        {!collapsed && <span className="flex-1">{item.name}</span>}
         {item.badge && !collapsed && (
-          <span className="ml-auto bg-accent-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">
+          <span className="ml-auto bg-fd-red text-white text-[10px] font-bold font-mono px-1.5 py-0.5 rounded-[3px]">
             {item.badge}
           </span>
         )}
@@ -243,25 +247,25 @@ const NavGroup = React.memo(function NavGroup({
       <button
         onClick={() => setIsOpen(!isOpen)}
         className={`
-          group w-full flex items-center gap-3 px-3 py-2.5 rounded-xl
-          text-sm font-medium transition-all duration-200
-          ${hasActiveChild ? 'bg-white/10 text-white' : 'text-white/70 hover:bg-white/10 hover:text-white'}
+          group w-full flex items-center gap-3 px-3 py-2 rounded-[3px]
+          text-[13px] font-medium transition-all duration-150
+          ${hasActiveChild ? 'text-fd-ink' : 'text-fd-body hover:bg-white/[0.03] hover:text-fd-ink'}
         `}
         title={collapsed ? item.name : undefined}
       >
         <item.icon
-          className={`h-5 w-5 flex-shrink-0 transition-colors ${hasActiveChild ? 'text-white' : 'text-white/60 group-hover:text-white'}`}
+          className={`h-[17px] w-[17px] flex-shrink-0 transition-colors ${hasActiveChild ? 'text-fd-blue' : 'text-fd-mute group-hover:text-fd-body'}`}
         />
         {!collapsed && (
           <>
             <span className="flex-1 text-left">{item.name}</span>
-            <ChevronDownIcon className={`h-4 w-4 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+            <ChevronDownIcon className={`h-4 w-4 text-fd-mute transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
           </>
         )}
       </button>
 
       {!collapsed && isOpen && visibleChildren && visibleChildren.length > 0 && (
-        <div className="mt-1 ml-3 pl-3 border-l-2 border-white/20 space-y-0.5">
+        <div className="mt-0.5 ml-[18px] pl-3 border-l border-fd-line space-y-px">
           {visibleChildren.map(child => {
             const isChildActive = isHrefActive(child.href, location);
             return (
@@ -269,17 +273,17 @@ const NavGroup = React.memo(function NavGroup({
                 key={child.name}
                 to={child.href!}
                 className={`
-                  flex items-center gap-2.5 px-3 py-2 rounded-lg
-                  text-sm transition-all duration-200
+                  flex items-center gap-2.5 px-3 py-1.5 rounded-[3px]
+                  text-[12.5px] transition-all duration-150
                   ${
                     isChildActive
-                      ? 'bg-white/15 text-white font-medium'
-                      : 'text-white/60 hover:bg-white/10 hover:text-white'
+                      ? 'bg-[rgba(47,129,247,0.1)] text-fd-ink font-medium shadow-[inset_2px_0_0_#2f81f7]'
+                      : 'text-fd-mute hover:bg-white/[0.03] hover:text-fd-body'
                   }
                 `}
                 onClick={onNavigate}
               >
-                <child.icon className="h-4 w-4 flex-shrink-0" />
+                <child.icon className={`h-4 w-4 flex-shrink-0 ${isChildActive ? 'text-fd-blue' : ''}`} />
                 <span>{child.name}</span>
               </Link>
             );
@@ -314,6 +318,18 @@ const SidebarPattern = () => (
     <rect width="100%" height="100%" fill="url(#sidebar-blueprint)" />
   </svg>
 );
+
+// Foundry HUD live clock (24h)
+const HudClock = React.memo(function HudClock() {
+  const [t, setT] = useState('');
+  useEffect(() => {
+    const tick = () => setT(new Date().toLocaleTimeString('en-GB'));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+  return <span className="text-fd-ink tabular-nums">{t}</span>;
+});
 
 export default function Layout({ children }: LayoutProps) {
   const { user, logout, logoutWithEmployeeId } = useAuth();
@@ -410,7 +426,7 @@ export default function Layout({ children }: LayoutProps) {
   };
 
   return (
-    <div className="min-h-screen" style={{ background: '#0d1117' }}>
+    <div className="min-h-screen" style={{ background: 'var(--fd-canvas)' }}>
       {/* Skip to main content link for accessibility */}
       <SkipLink />
 
@@ -422,7 +438,7 @@ export default function Layout({ children }: LayoutProps) {
         />
       )}
 
-      {/* Sidebar - Werco Navy */}
+      {/* Sidebar - Foundry instrument rail */}
       <aside
         className={`
           fixed inset-y-0 left-0 z-50 w-72
@@ -432,26 +448,31 @@ export default function Layout({ children }: LayoutProps) {
           flex flex-col overflow-hidden
         `}
         style={{
-          background: 'linear-gradient(180deg, #0a1628 0%, #0f2952 40%, #0a1628 100%)',
+          background: 'var(--fd-panel)',
+          borderRight: '1px solid var(--fd-line)',
         }}
       >
         {/* Blueprint grid background */}
         <SidebarPattern />
-        <div className="absolute top-1/4 -left-20 w-40 h-40 bg-blue-500/8 rounded-full blur-3xl" />
-        <div className="absolute bottom-1/4 -right-20 w-60 h-60 bg-blue-600/6 rounded-full blur-3xl" />
 
         {/* Logo header */}
-        <div className="relative flex items-center justify-between h-20 px-4 border-b border-white/10 flex-shrink-0">
+        <div className="relative flex items-center justify-between h-14 px-4 flex-shrink-0" style={{ borderBottom: '1px solid var(--fd-line)' }}>
           <Link to="/" className="flex items-center gap-3">
-            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-12 w-auto brightness-0 invert" />
+            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-6 w-auto brightness-0 invert" />
           </Link>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="lg:hidden p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
-            aria-label="Close navigation menu"
-          >
-            <XMarkIcon className="h-6 w-6" aria-hidden="true" />
-          </button>
+          <div className="flex items-center gap-2">
+            <span className="hidden lg:inline-flex items-center gap-1.5 font-mono text-[10px] tracking-[0.08em] text-fd-green px-1.5 py-0.5 rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
+              <span className="w-1.5 h-1.5 rounded-full bg-fd-green shadow-[0_0_5px_#3fb950]" />
+              LIVE
+            </span>
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="lg:hidden p-2 rounded-[3px] text-fd-mute hover:text-fd-ink hover:bg-white/5 transition-colors"
+              aria-label="Close navigation menu"
+            >
+              <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+            </button>
+          </div>
         </div>
 
         {/* Navigation */}
@@ -473,30 +494,33 @@ export default function Layout({ children }: LayoutProps) {
         </nav>
 
         {/* Certifications strip */}
-        <div className="relative flex-shrink-0 px-4 py-2 border-t border-white/5">
-          <div className="flex items-center justify-center gap-3 text-[10px] font-mono uppercase tracking-widest text-white/30">
+        <div className="relative flex-shrink-0 px-4 py-2" style={{ borderTop: '1px solid var(--fd-line)' }}>
+          <div className="flex items-center justify-center gap-2 text-[9px] font-mono uppercase tracking-[0.14em] text-fd-faint">
             <span>AS9100D</span>
-            <span className="text-white/15">|</span>
+            <span>·</span>
             <span>ISO 9001</span>
-            <span className="text-white/15">|</span>
+            <span>·</span>
             <span>ITAR</span>
           </div>
         </div>
 
         {/* User section */}
-        <div className="relative flex-shrink-0 p-4 border-t border-white/10 bg-white/[0.03]">
-          <div className="flex items-center gap-3">
+        <div className="relative flex-shrink-0 px-3.5 py-2.5" style={{ borderTop: '1px solid var(--fd-line)' }}>
+          <div className="flex items-center gap-2.5">
             <div className="flex-shrink-0">
-              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-werco-navy-600 to-blue-700 flex items-center justify-center text-white font-semibold text-sm shadow-lg ring-1 ring-white/10">
+              <div
+                className="h-[30px] w-[30px] rounded-[3px] flex items-center justify-center text-fd-blue font-bold font-mono text-xs"
+                style={{ background: 'var(--fd-raised)', border: '1px solid var(--fd-line-bright)' }}
+              >
                 {user?.first_name?.[0]}
                 {user?.last_name?.[0]}
               </div>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-white truncate">
+              <p className="text-[12.5px] font-semibold text-fd-ink truncate">
                 {user?.first_name} {user?.last_name}
               </p>
-              <p className="text-xs text-blue-300/60 truncate capitalize">{user?.role?.replace('_', ' ')}</p>
+              <p className="text-[10px] font-mono tracking-[0.05em] uppercase text-fd-mute truncate">{user?.role?.replace('_', ' ')}</p>
             </div>
             <button
               onClick={() => {
@@ -506,10 +530,10 @@ export default function Layout({ children }: LayoutProps) {
                   logout();
                 }
               }}
-              className="p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-all duration-200"
+              className="p-1.5 rounded-[3px] text-fd-mute hover:text-fd-ink hover:bg-white/5 transition-all duration-150"
               title="Sign out"
             >
-              <ArrowRightOnRectangleIcon className="h-5 w-5" />
+              <ArrowRightOnRectangleIcon className="h-[18px] w-[18px]" />
             </button>
           </div>
         </div>
@@ -517,20 +541,24 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Main content area */}
       <div className="lg:pl-72 flex flex-col min-h-screen">
-        {/* Top bar - Clean white with subtle border */}
-        <header className="sticky top-0 z-30 bg-[#151b28]/90 backdrop-blur-xl border-b border-slate-700/50 shadow-sm">
-          <div className="flex items-center justify-between h-16 px-4 sm:px-6 lg:px-8">
+        {/* Top bar - Foundry HUD command bar */}
+        <header
+          className="sticky top-0 z-30 backdrop-blur-md"
+          style={{ background: 'rgba(12,16,23,0.92)', borderBottom: '1px solid var(--fd-line)' }}
+        >
+          <div className="flex items-center justify-between h-14 px-4 sm:px-6 lg:px-8">
             {/* Mobile menu button */}
             <button
               onClick={() => setSidebarOpen(true)}
-              className="lg:hidden p-2 -ml-2 rounded-xl text-slate-400 hover:bg-slate-700 transition-colors"
+              className="lg:hidden p-2 -ml-2 rounded-[3px] text-fd-mute hover:bg-white/5 transition-colors"
             >
               <Bars3Icon className="h-6 w-6" />
             </button>
 
-            {/* Page title (desktop) */}
-            <div className="hidden lg:block">
-              <h1 className="text-lg font-semibold text-slate-100">{pageTitle}</h1>
+            {/* Breadcrumb (desktop) */}
+            <div className="hidden lg:block font-mono text-xs tracking-[0.04em] whitespace-nowrap">
+              <span className="text-fd-mute">WERCO / </span>
+              <span className="text-fd-ink">{pageTitle}</span>
             </div>
 
             {/* Mobile logo / kiosk operator identity */}
@@ -572,16 +600,30 @@ export default function Layout({ children }: LayoutProps) {
                 {/* Quick search button */}
                 <button
                   onClick={globalSearch.open}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-all duration-200 border border-slate-600"
+                  className="flex items-center gap-2 px-3 h-[34px] rounded-[3px] text-fd-mute hover:text-fd-body transition-all duration-150"
+                  style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line)' }}
                   title="Search (Ctrl+K)"
                   data-tour="search"
                 >
                   <MagnifyingGlassIcon className="h-4 w-4" />
-                  <span className="hidden md:inline text-sm">Search...</span>
-                  <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 text-xs font-medium text-slate-500 bg-slate-700 rounded">
-                    Ctrl+K
+                  <span className="hidden md:inline font-mono text-xs">search</span>
+                  <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-faint rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
+                    /
                   </kbd>
                 </button>
+
+                {/* HUD status cluster */}
+                <div className="hidden xl:flex items-center gap-3.5 pl-1 font-mono text-[11px]">
+                  <div>
+                    <span className="text-fd-faint">SYNC </span>
+                    <span className="text-fd-green">OK</span>
+                  </div>
+                  <div>
+                    <span className="text-fd-faint">SHIFT </span>
+                    <span className="text-fd-ink">A</span>
+                  </div>
+                  <HudClock />
+                </div>
 
                 {/* Keyboard shortcuts help */}
                 <button
@@ -620,22 +662,31 @@ export default function Layout({ children }: LayoutProps) {
         <ReadOnlyBanner />
 
         {/* Main content - extra bottom padding for mobile nav */}
-        <main id="main-content" className="flex-1 p-4 sm:p-6 lg:p-8 pb-20 lg:pb-8" role="main" tabIndex={-1}>
-          <div className="max-w-7xl mx-auto animate-fade-in">{children}</div>
+        <main id="main-content" className="relative flex-1 p-4 sm:p-6 lg:p-8 pb-20 lg:pb-8" role="main" tabIndex={-1}>
+          <div
+            className="pointer-events-none absolute inset-0 opacity-40"
+            aria-hidden="true"
+            style={{
+              backgroundImage:
+                'linear-gradient(rgba(36,48,68,.25) 1px,transparent 1px),linear-gradient(90deg,rgba(36,48,68,.25) 1px,transparent 1px)',
+              backgroundSize: '28px 28px',
+            }}
+          />
+          <div className="relative max-w-7xl mx-auto animate-fade-in">{children}</div>
         </main>
 
         {/* Footer - Hidden on mobile, visible on desktop */}
-        <footer className="hidden lg:block flex-shrink-0 py-4 px-6 border-t border-slate-700/50 bg-[#0f1419]/60">
-          <div className="max-w-7xl mx-auto flex items-center justify-between text-sm text-slate-500">
-            <div className="flex items-center gap-2">
-              <span className="font-medium text-slate-300">Werco Manufacturing</span>
-              <span className="text-slate-600">|</span>
-              <span className="text-blue-400 font-semibold">ERP / MES</span>
+        <footer className="hidden lg:block flex-shrink-0 py-3 px-6" style={{ borderTop: '1px solid var(--fd-line)', background: 'var(--fd-sunken)' }}>
+          <div className="max-w-7xl mx-auto flex items-center justify-between text-sm text-fd-mute">
+            <div className="flex items-center gap-2 font-mono text-xs">
+              <span className="font-medium text-fd-body">WERCO MANUFACTURING</span>
+              <span className="text-fd-faint">·</span>
+              <span className="text-fd-blue font-semibold">ERP / MES</span>
             </div>
-            <div className="flex items-center gap-3">
-              <span className="text-[10px] font-mono uppercase tracking-widest text-slate-500">AS9100D &middot; ISO 9001 &middot; ITAR</span>
-              <span className="text-slate-600">|</span>
-              <span className="text-slate-500">v1.0.0</span>
+            <div className="flex items-center gap-3 font-mono">
+              <span className="text-[10px] uppercase tracking-[0.14em] text-fd-faint">AS9100D &middot; ISO 9001 &middot; ITAR</span>
+              <span className="text-fd-faint">·</span>
+              <span className="text-[10px] text-fd-mute">v1.0.0</span>
             </div>
           </div>
         </footer>

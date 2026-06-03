@@ -1,63 +1,21 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { ShieldCheckIcon, LockClosedIcon, EnvelopeIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
+import {
+  ShieldCheckIcon,
+  LockClosedIcon,
+  EnvelopeIcon,
+  EyeIcon,
+  EyeSlashIcon,
+  ArrowRightIcon,
+} from '@heroicons/react/24/outline';
 
-// Blueprint grid pattern - matches wercomfg.com aesthetic
-const BlueprintGrid = () => (
-  <svg className="absolute inset-0 w-full h-full opacity-[0.04]" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-      <pattern id="blueprint-grid" width="40" height="40" patternUnits="userSpaceOnUse">
-        <path
-          d="M0 0h40v40H0z"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="0.5"
-          className="text-blue-300"
-        />
-        <path
-          d="M20 0v40M0 20h40"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="0.25"
-          className="text-blue-300"
-        />
-      </pattern>
-    </defs>
-    <rect width="100%" height="100%" fill="url(#blueprint-grid)" />
-  </svg>
-);
-
-// Subtle animated background elements
-const AnimatedBackground = () => (
-  <div className="absolute inset-0 overflow-hidden pointer-events-none">
-    {/* Soft gradient orbs */}
-    <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-blue-500/100/8 rounded-full blur-3xl animate-pulse" />
-    <div
-      className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-600/6 rounded-full blur-3xl animate-pulse"
-      style={{ animationDelay: '1s' }}
-    />
-    <div
-      className="absolute top-1/2 left-1/2 w-72 h-72 bg-blue-400/4 rounded-full blur-3xl animate-pulse"
-      style={{ animationDelay: '2s' }}
-    />
-
-    {/* Power flow lines - confined to upper portion to avoid overlapping stat cards */}
-    {[...Array(3)].map((_, i) => (
-      <div
-        key={i}
-        className="absolute h-px bg-gradient-to-r from-transparent via-blue-400/20 to-transparent"
-        style={{
-          width: '200%',
-          top: `${15 + i * 12}%`,
-          left: '-50%',
-          animation: `flowLine ${10 + i * 3}s linear infinite`,
-          animationDelay: `${i * 2}s`,
-        }}
-      />
-    ))}
-  </div>
-);
+// Foundry blueprint grid texture
+const gridTex: React.CSSProperties = {
+  backgroundImage:
+    'linear-gradient(rgba(36,48,68,.25) 1px,transparent 1px),linear-gradient(90deg,rgba(36,48,68,.25) 1px,transparent 1px)',
+  backgroundSize: '28px 28px',
+};
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -118,195 +76,143 @@ export default function Login() {
     }
   };
 
-  return (
-    <div className="min-h-screen flex">
-      {/* CSS for custom animations */}
-      <style>{`
-        @keyframes flowLine {
-          0% { transform: translateX(-50%); }
-          100% { transform: translateX(50%); }
-        }
-        .glass-card {
-          background: rgba(21, 27, 40, 0.95);
-          backdrop-filter: blur(20px);
-          border: 1px solid rgba(51, 65, 85, 0.5);
-        }
-      `}</style>
+  const fieldFocusRing = (field: string): React.CSSProperties =>
+    focusedField === field
+      ? { borderColor: 'var(--fd-blue)', boxShadow: '0 0 0 3px rgba(47,129,247,0.12)' }
+      : { borderColor: 'var(--fd-line)' };
 
-      {/* Left side - Werco Branding Panel */}
-      <div className="hidden lg:flex lg:w-1/2 relative overflow-hidden">
-        {/* Deep navy background - matching wercomfg.com */}
+  return (
+    <div className="min-h-screen flex font-sans" style={{ background: 'var(--fd-canvas)' }}>
+      {/* Left — Brand instrument panel */}
+      <div
+        className="hidden lg:block lg:w-[52%] relative overflow-hidden"
+        style={{ background: 'var(--fd-panel)', borderRight: '1px solid var(--fd-line)' }}
+      >
+        <div className="absolute inset-0 opacity-50" style={gridTex} />
         <div
-          className="absolute inset-0"
+          className="absolute"
           style={{
-            background: 'linear-gradient(135deg, #0a1628 0%, #0f2952 40%, #123266 60%, #0a1628 100%)',
+            top: '15%',
+            left: '12%',
+            width: 320,
+            height: 320,
+            borderRadius: '50%',
+            background: 'rgba(47,129,247,.1)',
+            filter: 'blur(90px)',
           }}
         />
 
-        {/* Background patterns */}
-        <BlueprintGrid />
-        <AnimatedBackground />
+        <div className="relative z-10 h-full p-12 flex flex-col justify-between box-border">
+          {/* Logo + live chip */}
+          <div className="flex items-center gap-3">
+            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-[30px] brightness-0 invert" />
+            <span
+              className="font-mono text-[10px] tracking-[0.1em] text-fd-green px-1.5 py-1 rounded-[3px]"
+              style={{ border: '1px solid var(--fd-line)' }}
+            >
+              ● SYSTEM LIVE
+            </span>
+          </div>
 
-        {/* Gradient overlays for depth */}
-        <div className="absolute inset-0 bg-gradient-to-t from-[#0a1628]/80 via-transparent to-[#0a1628]/40" />
-
-        {/* Content */}
-        <div className="relative z-10 p-12 flex flex-col justify-between w-full">
+          {/* Headline + metrics */}
           <div>
-            <img
-              src="/Werco_Logo-PNG.png"
-              alt="Werco Manufacturing"
-              className="h-14 brightness-0 invert drop-shadow-lg"
-            />
-          </div>
+            <div className="font-mono text-xs text-fd-blue tracking-[0.2em] mb-[18px]">ERP // MES</div>
+            <h1 className="text-[44px] font-extrabold leading-[1.05] tracking-[-0.02em] m-0 text-fd-ink">
+              Built for What Flies,
+              <br />
+              Fights &amp; Powers
+              <br />
+              <span className="text-fd-blue">the Future.</span>
+            </h1>
 
-          <div className="space-y-8">
-            {/* Main heading */}
-            <div>
-              <h1 className="text-5xl font-bold leading-tight">
-                <span className="text-white">Manufacturing</span>
-                <br />
-                <span className="bg-gradient-to-r from-blue-300 via-blue-400 to-white bg-clip-text text-transparent">
-                  Execution System
-                </span>
-              </h1>
-            </div>
-
-            {/* Tagline from wercomfg.com */}
-            <p className="text-lg text-slate-300 max-w-md leading-relaxed">
-              Built for What Flies, Fights, and Powers the Future.
-            </p>
-
-            {/* Key metrics - matching wercomfg.com */}
-            <div className="grid grid-cols-3 gap-4 pt-2">
-              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
-                <div className="text-2xl font-bold text-white">24hr</div>
-                <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">RFQ Response</div>
-              </div>
-              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
-                <div className="text-2xl font-bold text-white">95%+</div>
-                <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">On-Time</div>
-              </div>
-              <div className="text-center p-3 rounded-xl bg-white/[0.04] border border-white/[0.08]">
-                <div className="text-2xl font-bold text-white">99%+</div>
-                <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">First-Pass</div>
-              </div>
-            </div>
-
-            {/* Certification badges */}
-            <div className="flex flex-wrap items-center gap-3 pt-4">
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
-                <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
-                <span className="text-sm font-medium text-white/90">AS9100D</span>
-              </div>
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
-                <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
-                <span className="text-sm font-medium text-white/90">ISO 9001</span>
-              </div>
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/[0.08]">
-                <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
-                <span className="text-sm font-medium text-white/90">ITAR</span>
-              </div>
+            <div className="grid grid-cols-3 gap-2.5 mt-8 max-w-[440px]">
+              {[
+                ['24H', 'RFQ RESPONSE'],
+                ['95%+', 'ON-TIME'],
+                ['99%+', 'FIRST-PASS'],
+              ].map(([v, l]) => (
+                <div
+                  key={l}
+                  className="p-3.5 rounded-[3px]"
+                  style={{ border: '1px solid var(--fd-line)', background: 'var(--fd-raised)' }}
+                >
+                  <div className="font-mono text-2xl font-bold text-fd-ink tabular-nums">{v}</div>
+                  <div className="font-mono text-[9.5px] text-fd-mute tracking-[0.1em] mt-1.5">{l}</div>
+                </div>
+              ))}
             </div>
           </div>
 
-          <p className="text-slate-500 text-sm">&copy; 2026 Werco Manufacturing. All rights reserved.</p>
+          <div className="font-mono text-[11px] text-fd-faint tracking-[0.12em]">
+            AS9100D · ISO 9001 · CMMC L2 · ITAR
+          </div>
         </div>
       </div>
 
-      {/* Right side - Login form */}
-      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-[#0d1117] via-[#151b28] to-[#1a1f2e] p-8 relative">
-        {/* Subtle dot pattern */}
-        <div className="absolute inset-0 opacity-[0.02]">
-          <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <pattern id="dots" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse">
-                <circle cx="2" cy="2" r="1" className="fill-slate-900" />
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#dots)" />
-          </svg>
-        </div>
-
-        <div className="w-full max-w-md relative z-10">
+      {/* Right — Form */}
+      <div className="flex-1 flex items-center justify-center p-8 relative">
+        <div className="absolute inset-0 opacity-[0.25]" style={gridTex} aria-hidden="true" />
+        <div className="w-full max-w-[380px] relative z-10">
           {/* Mobile logo */}
           <div className="lg:hidden text-center mb-8">
-            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-14 mx-auto mb-2" />
-            <p className="text-slate-500 text-sm">Manufacturing Execution System</p>
+            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-12 mx-auto mb-2 brightness-0 invert" />
+            <p className="font-mono text-[11px] tracking-[0.18em] text-fd-mute uppercase">ERP // MES</p>
           </div>
 
-          {/* Login card */}
-          <div className="glass-card rounded-3xl shadow-xl p-10 relative overflow-hidden">
-            {/* Top accent bar - Werco blue gradient */}
-            <div
-              className="absolute top-0 left-0 right-0 h-1"
-              style={{ background: 'linear-gradient(90deg, #1B4D9C 0%, #3366FF 50%, #1B4D9C 100%)' }}
-            />
+          {/* Auth card */}
+          <div
+            className="relative p-9"
+            style={{ background: 'var(--fd-panel)', border: '1px solid var(--fd-line)', borderRadius: 'var(--fd-radius-lg)' }}
+          >
+            {/* Top accent bar */}
+            <div className="absolute top-[-1px] left-[-1px] right-[-1px] h-0.5" style={{ background: 'var(--fd-blue)' }} />
 
-            <div className="text-center mb-8">
-              {/* Lock icon container - Werco navy */}
-              <div className="relative w-16 h-16 mx-auto mb-5">
-                <div className="absolute inset-0 bg-gradient-to-br from-werco-navy-600 to-blue-700 rounded-2xl rotate-3 opacity-20" />
-                <div className="absolute inset-0 bg-gradient-to-br from-werco-navy-600 to-blue-700 rounded-2xl -rotate-3 opacity-20" />
-                <div
-                  className="relative w-full h-full rounded-2xl flex items-center justify-center shadow-lg"
-                  style={{ background: 'linear-gradient(135deg, #0a1628 0%, #0f2952 100%)' }}
-                >
-                  <LockClosedIcon className="h-8 w-8 text-blue-300" />
-                </div>
-              </div>
-              <h2 className="text-2xl font-bold text-slate-100">Welcome back</h2>
-              <p className="text-slate-500 mt-2">Sign in to access your dashboard</p>
-            </div>
+            <div className="font-mono text-[11px] text-fd-mute tracking-[0.18em]">AUTHENTICATE</div>
+            <h2 className="text-2xl font-bold text-fd-ink mt-2.5 mb-1">Sign in</h2>
+            <p className="text-[13.5px] text-fd-mute mb-6">Access your production dashboard.</p>
 
-            <form onSubmit={handleSubmit} className="space-y-6">
+            <form onSubmit={handleSubmit} className="flex flex-col gap-[18px]">
+              {/* Mode toggle */}
               <div
-                className={`du-join du-join-horizontal grid grid-cols-2 w-full ${forceEmployeeMode ? 'opacity-70 pointer-events-none' : ''}`}
+                className={`grid grid-cols-2 overflow-hidden rounded-[3px] ${forceEmployeeMode ? 'opacity-70 pointer-events-none' : ''}`}
+                style={{ border: '1px solid var(--fd-line)' }}
               >
-                <button
-                  type="button"
-                  onClick={() => setLoginMode('employee')}
-                  className={`du-btn du-join-item h-11 normal-case text-sm font-semibold ${
-                    loginMode === 'employee' ? 'du-btn-primary' : 'du-btn-outline'
-                  }`}
-                >
-                  Employee ID
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLoginMode('email')}
-                  className={`du-btn du-join-item h-11 normal-case text-sm font-semibold ${
-                    loginMode === 'email' ? 'du-btn-primary' : 'du-btn-outline'
-                  }`}
-                >
-                  Email Login
-                </button>
+                {(['employee', 'email'] as const).map(m => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setLoginMode(m)}
+                    className="py-2.5 px-2 font-mono text-[11px] font-semibold tracking-[0.08em] uppercase transition-colors"
+                    style={
+                      loginMode === m
+                        ? { background: 'var(--fd-blue)', color: '#04101f' }
+                        : { background: 'transparent', color: 'var(--fd-mute)' }
+                    }
+                  >
+                    {m === 'employee' ? 'Badge ID' : 'Email'}
+                  </button>
+                ))}
               </div>
 
               {error && (
-                <div className="du-alert du-alert-error animate-fade-in">
-                  <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path
-                      fillRule="evenodd"
-                      d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
+                <div className="alert alert-danger animate-fade-in text-sm">
                   <span>{error}</span>
                 </div>
               )}
 
               {loginMode === 'employee' ? (
-                <div className="space-y-2">
-                  <label htmlFor="employeeId" className="block text-sm font-medium text-slate-300">
-                    Employee ID
+                <div>
+                  <label
+                    htmlFor="employeeId"
+                    className="block font-mono text-[10px] uppercase tracking-[0.14em] text-fd-body mb-1.5"
+                  >
+                    Employee / Badge ID
                   </label>
                   <div className="relative">
-                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                       <LockClosedIcon
-                        className={`h-5 w-5 transition-colors duration-200 ${
-                          focusedField === 'employeeId' ? 'text-werco-navy-600' : 'text-slate-400'
-                        }`}
+                        className="h-[17px] w-[17px]"
+                        style={{ color: focusedField === 'employeeId' ? 'var(--fd-blue)' : 'var(--fd-faint)' }}
                       />
                     </div>
                     <input
@@ -319,26 +225,30 @@ export default function Login() {
                       onChange={e => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                       onFocus={() => setFocusedField('employeeId')}
                       onBlur={() => setFocusedField(null)}
-                      className="du-input du-input-bordered w-full h-14 pl-12 pr-4 text-center text-lg bg-[#151b28]"
+                      className="w-full font-mono text-base text-fd-ink rounded-[3px] pl-10 pr-4 py-2.5 outline-none transition-all min-h-[44px]"
+                      style={{ background: 'var(--fd-sunken)', border: '1px solid', ...fieldFocusRing('employeeId') }}
                       placeholder="0000 or EMP-1001"
                       autoComplete="off"
                     />
                   </div>
-                  <p className="text-xs text-slate-500">Use your employee ID or 4-digit badge ID.</p>
+                  <p className="font-mono text-[9.5px] tracking-[0.1em] text-fd-mute mt-1.5">
+                    Use your employee ID or 4-digit badge ID.
+                  </p>
                 </div>
               ) : (
                 <>
-                  {/* Email field */}
-                  <div className="space-y-2">
-                    <label htmlFor="email" className="block text-sm font-medium text-slate-300">
-                      Email Address
+                  <div>
+                    <label
+                      htmlFor="email"
+                      className="block font-mono text-[10px] uppercase tracking-[0.14em] text-fd-body mb-1.5"
+                    >
+                      Email
                     </label>
                     <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                         <EnvelopeIcon
-                          className={`h-5 w-5 transition-colors duration-200 ${
-                            focusedField === 'email' ? 'text-werco-navy-600' : 'text-slate-400'
-                          }`}
+                          className="h-[17px] w-[17px]"
+                          style={{ color: focusedField === 'email' ? 'var(--fd-blue)' : 'var(--fd-faint)' }}
                         />
                       </div>
                       <input
@@ -349,24 +259,26 @@ export default function Login() {
                         onChange={e => setEmail(e.target.value)}
                         onFocus={() => setFocusedField('email')}
                         onBlur={() => setFocusedField(null)}
-                        className="du-input du-input-bordered w-full h-14 pl-12 pr-4 bg-[#151b28]"
+                        className="w-full font-mono text-base text-fd-ink rounded-[3px] pl-10 pr-4 py-2.5 outline-none transition-all min-h-[44px]"
+                        style={{ background: 'var(--fd-sunken)', border: '1px solid', ...fieldFocusRing('email') }}
                         placeholder="you@werco.com"
                         autoComplete="email"
                       />
                     </div>
                   </div>
 
-                  {/* Password field */}
-                  <div className="space-y-2">
-                    <label htmlFor="password" className="block text-sm font-medium text-slate-300">
+                  <div>
+                    <label
+                      htmlFor="password"
+                      className="block font-mono text-[10px] uppercase tracking-[0.14em] text-fd-body mb-1.5"
+                    >
                       Password
                     </label>
                     <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                         <LockClosedIcon
-                          className={`h-5 w-5 transition-colors duration-200 ${
-                            focusedField === 'password' ? 'text-werco-navy-600' : 'text-slate-400'
-                          }`}
+                          className="h-[17px] w-[17px]"
+                          style={{ color: focusedField === 'password' ? 'var(--fd-blue)' : 'var(--fd-faint)' }}
                         />
                       </div>
                       <input
@@ -377,16 +289,17 @@ export default function Login() {
                         onChange={e => setPassword(e.target.value)}
                         onFocus={() => setFocusedField('password')}
                         onBlur={() => setFocusedField(null)}
-                        className="du-input du-input-bordered w-full h-14 pl-12 pr-12 bg-[#151b28]"
+                        className="w-full font-mono text-base text-fd-ink rounded-[3px] pl-10 pr-10 py-2.5 outline-none transition-all min-h-[44px]"
+                        style={{ background: 'var(--fd-sunken)', border: '1px solid', ...fieldFocusRing('password') }}
                         placeholder="Enter your password"
                         autoComplete="current-password"
                       />
                       <button
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
-                        className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-400 transition-colors"
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-fd-faint hover:text-fd-body transition-colors"
                       >
-                        {showPassword ? <EyeSlashIcon className="h-5 w-5" /> : <EyeIcon className="h-5 w-5" />}
+                        {showPassword ? <EyeSlashIcon className="h-[18px] w-[18px]" /> : <EyeIcon className="h-[18px] w-[18px]" />}
                       </button>
                     </div>
                   </div>
@@ -394,78 +307,52 @@ export default function Login() {
               )}
 
               {loginMode === 'email' && (
-                <div className="flex justify-end">
-                  <button type="button" className="du-link du-link-primary text-sm">
+                <div className="flex justify-end -mt-2">
+                  <button type="button" className="font-mono text-[11px] text-fd-blue hover:text-blue-400 transition-colors">
                     Forgot password?
                   </button>
                 </div>
               )}
 
-              {/* Submit button */}
-              <button
-                type="submit"
-                disabled={loading}
-                className="du-btn du-btn-primary du-btn-block h-14 normal-case text-base font-semibold"
-              >
+              <button type="submit" disabled={loading} className="btn-primary btn-block w-full">
                 {loading ? (
-                  <span className="flex items-center justify-center gap-3">
-                    <span className="du-loading du-loading-spinner du-loading-sm" aria-hidden="true" />
-                    Signing in...
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="spinner h-4 w-4" aria-hidden="true" />
+                    Signing in…
                   </span>
                 ) : (
                   <span className="flex items-center justify-center gap-2">
                     Sign In
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                    </svg>
+                    <ArrowRightIcon className="w-4 h-4" />
                   </span>
                 )}
               </button>
             </form>
 
-            {/* Create account link */}
-            <div className="mt-6 text-center">
-              <p className="text-sm text-slate-500">
-                Don't have an account?{' '}
-                <Link to="/register" className="du-link du-link-primary font-semibold">Create one</Link>
+            {/* Create account */}
+            <div className="mt-5 text-center">
+              <p className="text-sm text-fd-mute">
+                Don&apos;t have an account?{' '}
+                <Link to="/register" className="text-fd-blue font-semibold hover:text-blue-400 transition-colors">
+                  Create one
+                </Link>
               </p>
             </div>
 
-            {/* Security badge */}
-            <div className="mt-6 pt-6 border-t border-slate-700/30">
-              <div className="flex items-center justify-center gap-2 text-slate-400">
-                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                  <path
-                    fillRule="evenodd"
-                    d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-                    clipRule="evenodd"
-                  />
-                </svg>
-                <span className="text-xs">Secured with 256-bit encryption</span>
-              </div>
+            {/* Security strip */}
+            <div
+              className="mt-5 pt-4 flex items-center justify-center gap-2 text-fd-mute"
+              style={{ borderTop: '1px solid var(--fd-line)' }}
+            >
+              <ShieldCheckIcon className="h-[15px] w-[15px]" />
+              <span className="font-mono text-[10.5px] tracking-[0.08em]">256-BIT ENCRYPTED</span>
             </div>
           </div>
 
-          {/* Mobile compliance badges */}
-          <div className="lg:hidden flex flex-wrap items-center justify-center gap-3 mt-8">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
-              <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
-              <span className="text-xs font-medium">AS9100D</span>
-            </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
-              <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
-              <span className="text-xs font-medium">ISO 9001</span>
-            </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
-              <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
-              <span className="text-xs font-medium">ITAR</span>
-            </div>
+          {/* Mobile compliance */}
+          <div className="lg:hidden mt-6 text-center font-mono text-[10px] tracking-[0.14em] text-fd-faint">
+            AS9100D · ISO 9001 · CMMC L2 · ITAR
           </div>
-
-          {/* Mobile footer */}
-          <p className="lg:hidden text-center text-slate-400 text-xs mt-6">
-            &copy; 2026 Werco Manufacturing. All rights reserved.
-          </p>
         </div>
       </div>
     </div>

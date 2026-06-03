@@ -34,34 +34,35 @@ import {
   CheckCircleIcon as CheckCircleSolid
 } from '@heroicons/react/24/solid';
 
+// Foundry tactical palette — no purple/indigo/orange; blue · cyan · green · amber · red
 const workCenterTypeColors: Record<string, string> = {
-  fabrication: 'bg-blue-500/100',
-  cnc_machining: 'bg-purple-500/100',
-  laser: 'bg-werco-navy-600',
-  press_brake: 'bg-indigo-500/100',
-  paint: 'bg-amber-500/100',
-  powder_coating: 'bg-orange-500/100',
-  assembly: 'bg-emerald-500/100',
-  welding: 'bg-red-500/100',
-  inspection: 'bg-werco-navy-600',
-  shipping: 'bg-slate-800/500',
+  fabrication: 'bg-fd-blue',
+  cnc_machining: 'bg-fd-cyan',
+  laser: 'bg-blue-600',
+  press_brake: 'bg-sky-500',
+  paint: 'bg-fd-amber',
+  powder_coating: 'bg-amber-600',
+  assembly: 'bg-fd-green',
+  welding: 'bg-fd-red',
+  inspection: 'bg-fd-blue',
+  shipping: 'bg-slate-600',
 };
 
 const statusColors: Record<string, { bg: string; dot: string; text: string }> = {
-  available: { bg: 'bg-emerald-500/10', dot: 'bg-emerald-500/100', text: 'text-emerald-400' },
-  in_use: { bg: 'bg-blue-500/10', dot: 'bg-blue-500/100', text: 'text-blue-400' },
-  maintenance: { bg: 'bg-amber-500/10', dot: 'bg-amber-500/100', text: 'text-amber-400' },
-  offline: { bg: 'bg-red-500/10', dot: 'bg-red-500/100', text: 'text-red-400' },
+  available: { bg: 'bg-fd-green/10', dot: 'bg-fd-green', text: 'text-fd-green' },
+  in_use: { bg: 'bg-fd-blue/10', dot: 'bg-fd-blue', text: 'text-fd-blue' },
+  maintenance: { bg: 'bg-fd-amber/10', dot: 'bg-fd-amber', text: 'text-fd-amber' },
+  offline: { bg: 'bg-fd-red/10', dot: 'bg-fd-red', text: 'text-fd-red' },
 };
 
 const roleBadgeClasses: Record<string, string> = {
-  admin: 'bg-slate-800/50 text-slate-300',
-  manager: 'bg-indigo-500/20 text-indigo-400',
-  supervisor: 'bg-blue-500/20 text-blue-400',
-  operator: 'bg-emerald-500/20 text-emerald-400',
-  quality: 'bg-amber-500/20 text-amber-400',
-  shipping: 'bg-blue-500/20 text-werco-navy-700',
-  viewer: 'bg-slate-800/50 text-slate-400',
+  admin: 'bg-slate-700/40 text-slate-300',
+  manager: 'bg-fd-cyan/15 text-fd-cyan',
+  supervisor: 'bg-fd-blue/15 text-fd-blue',
+  operator: 'bg-fd-green/15 text-fd-green',
+  quality: 'bg-fd-amber/15 text-fd-amber',
+  shipping: 'bg-fd-blue/15 text-fd-blue',
+  viewer: 'bg-slate-700/40 text-slate-400',
 };
 
 interface Alert {
@@ -343,7 +344,7 @@ export default function Dashboard() {
   const capacityDayClass = (day: CapacityHeatmapDay) => {
     if (day.utilization_pct > 100) return 'bg-red-500 text-white border-red-400';
     if (day.utilization_pct >= 90) return 'bg-amber-500 text-slate-950 border-amber-300';
-    if (day.utilization_pct >= 70) return 'bg-yellow-400 text-slate-950 border-yellow-200';
+    if (day.utilization_pct >= 70) return 'bg-fd-amber text-slate-950 border-yellow-200';
     if (day.scheduled_hours > 0) return 'bg-emerald-500 text-slate-950 border-emerald-300';
     return 'bg-slate-700 text-slate-300 border-slate-600';
   };
@@ -381,7 +382,7 @@ export default function Dashboard() {
             <h1 className="page-title">Dashboard</h1>
             {/* Data changed indicator */}
             {dataChanged && (
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-300 animate-pulse">
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-fd-green/15 text-emerald-300 animate-pulse">
                 Updated
               </span>
             )}
@@ -428,9 +429,9 @@ export default function Dashboard() {
                 className={`
                   group flex items-center gap-4 p-4 rounded-xl border transition-all duration-200
                   ${alert.type === 'error'
-                    ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/100/20'
+                    ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-fd-red/20'
                     : alert.type === 'warning'
-                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/100/20'
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-fd-amber/20'
                     : 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/100/20'
                   }
                 `}
@@ -469,8 +470,8 @@ export default function Dashboard() {
         />
         <StatCard
           icon={UserGroupIcon}
-          iconBg="bg-emerald-500/20"
-          iconColor="text-emerald-600"
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
           label="Checked In Now"
           value={data?.summary.checked_in_users || 0}
           subtitle="Active time entries"
@@ -486,8 +487,8 @@ export default function Dashboard() {
         />
         <StatCard
           icon={ExclamationTriangleIcon}
-          iconBg={data?.summary.overdue ? "bg-red-500/20" : "bg-emerald-500/20"}
-          iconColor={data?.summary.overdue ? "text-red-600" : "text-emerald-600"}
+          iconBg={data?.summary.overdue ? "bg-red-500/20" : "bg-fd-green/15"}
+          iconColor={data?.summary.overdue ? "text-red-600" : "text-fd-green"}
           label="Overdue"
           value={data?.summary.overdue || 0}
           valueColor={data?.summary.overdue ? "text-red-600" : undefined}
@@ -507,8 +508,8 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           icon={WrenchScrewdriverIcon}
-          iconBg={equipmentDue > 0 ? "bg-amber-500/20" : "bg-emerald-500/20"}
-          iconColor={equipmentDue > 0 ? "text-amber-600" : "text-emerald-600"}
+          iconBg={equipmentDue > 0 ? "bg-amber-500/20" : "bg-fd-green/15"}
+          iconColor={equipmentDue > 0 ? "text-amber-600" : "text-fd-green"}
           label="Calibration Due"
           value={equipmentDue}
           subtitle="Within 30 days"
@@ -516,8 +517,8 @@ export default function Dashboard() {
         />
         <StatCard
           icon={CubeIcon}
-          iconBg={lowInventory > 0 ? "bg-red-500/20" : "bg-emerald-500/20"}
-          iconColor={lowInventory > 0 ? "text-red-600" : "text-emerald-600"}
+          iconBg={lowInventory > 0 ? "bg-red-500/20" : "bg-fd-green/15"}
+          iconColor={lowInventory > 0 ? "text-red-600" : "text-fd-green"}
           label="Low Stock Items"
           value={lowInventory}
           valueColor={lowInventory > 0 ? "text-red-600" : undefined}
@@ -525,19 +526,19 @@ export default function Dashboard() {
         />
         <StatCard
           icon={CheckCircleIcon}
-          iconBg="bg-emerald-500/20"
-          iconColor="text-emerald-600"
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
           label="Completed Today"
           value={data?.summary.completed_today ?? data?.recent_completions?.length ?? 0}
           href="/work-orders"
         />
         <StatCard
           icon={ShieldExclamationIcon}
-          iconBg={openNCRs > 0 ? "bg-orange-500/20" : "bg-emerald-500/20"}
-          iconColor={openNCRs > 0 ? "text-orange-600" : "text-emerald-600"}
+          iconBg={openNCRs > 0 ? "bg-fd-amber/15" : "bg-fd-green/15"}
+          iconColor={openNCRs > 0 ? "text-fd-amber" : "text-fd-green"}
           label="Open NCRs"
           value={openNCRs}
-          valueColor={openNCRs > 0 ? "text-orange-600" : undefined}
+          valueColor={openNCRs > 0 ? "text-fd-amber" : undefined}
           href="/quality"
         />
       </div>
@@ -554,7 +555,7 @@ export default function Dashboard() {
               {[
                 { label: 'Open', className: 'bg-slate-700' },
                 { label: 'Scheduled', className: 'bg-emerald-500' },
-                { label: '70%+', className: 'bg-yellow-400' },
+                { label: '70%+', className: 'bg-fd-amber' },
                 { label: '90%+', className: 'bg-amber-500' },
                 { label: 'Over', className: 'bg-red-500' },
               ].map((item) => (
@@ -570,15 +571,15 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-          <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4">
+          <div className="rounded-xl border border-fd-line bg-slate-900/40 p-4">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Scheduled</p>
             <p className="mt-1 text-2xl font-bold text-white">{totalScheduledHours.toFixed(1)}h</p>
           </div>
-          <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4">
+          <div className="rounded-xl border border-fd-line bg-slate-900/40 p-4">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Capacity</p>
             <p className="mt-1 text-2xl font-bold text-white">{totalCapacityHours.toFixed(1)}h</p>
           </div>
-          <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4">
+          <div className="rounded-xl border border-fd-line bg-slate-900/40 p-4">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Utilization</p>
             <p className={`mt-1 text-2xl font-bold ${totalCapacityUtilization > 100 ? 'text-red-500' : totalCapacityUtilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
               {Math.round(totalCapacityUtilization)}%
@@ -589,12 +590,12 @@ export default function Dashboard() {
           {machineCapacityOverview.map((machine) => {
             const utilization = machine.utilization_pct;
             const barClass =
-              utilization > 100 ? 'bg-red-500/100' :
-              utilization >= 90 ? 'bg-amber-500/100' :
-              utilization >= 70 ? 'bg-yellow-400' : 'bg-emerald-500/100';
+              utilization > 100 ? 'bg-fd-red' :
+              utilization >= 90 ? 'bg-fd-amber' :
+              utilization >= 70 ? 'bg-fd-amber' : 'bg-fd-green';
 
             return (
-              <div key={machine.work_center_id} className="rounded-xl border border-slate-700 bg-[#151b28] p-4">
+              <div key={machine.work_center_id} className="rounded-xl border border-fd-line bg-fd-panel p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="truncate font-semibold text-white">{machine.work_center_code}</p>
@@ -622,7 +623,7 @@ export default function Dashboard() {
                       <Link
                         to="/scheduling"
                         key={`${machine.work_center_id}-${day.date}`}
-                        className={`h-12 rounded border px-1 text-center transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-cyan-400 ${capacityDayClass(day)}`}
+                        className={`h-12 rounded border px-1 text-center transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-fd-blue ${capacityDayClass(day)}`}
                         title={`${formatCentralDate(day.date, { year: undefined })} - ${statusLabel}: ${day.scheduled_hours.toFixed(1)}h scheduled of ${day.capacity_hours.toFixed(1)}h capacity (${Math.round(day.utilization_pct)}%)`}
                         aria-label={`${machine.work_center_code} ${formatCentralDate(day.date, { year: undefined })}: ${statusLabel}, ${day.scheduled_hours.toFixed(1)} scheduled hours of ${day.capacity_hours.toFixed(1)} capacity hours`}
                       >
@@ -667,7 +668,7 @@ export default function Dashboard() {
           <span className="rounded-full bg-slate-800/50 px-3 py-1 font-medium text-slate-300">
             Signed in = active authenticated ERP session
           </span>
-          <span className="rounded-full bg-emerald-500/20 px-3 py-1 font-medium text-emerald-400">
+          <span className="rounded-full bg-fd-green/15 px-3 py-1 font-medium text-emerald-400">
             Checked in = active time clock entry
           </span>
         </div>
@@ -695,7 +696,7 @@ export default function Dashboard() {
             ))}
           </div>
         ) : (
-          <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/40 px-6 py-12 text-center">
+          <div className="rounded-2xl border border-dashed border-fd-line bg-slate-900/40 px-6 py-12 text-center">
             <UserGroupIcon className="mx-auto h-10 w-10 text-slate-500" />
             <p className="mt-4 text-lg font-medium text-slate-300">No one is clocked into a job right now</p>
             <p className="mt-2 text-sm text-slate-400">
@@ -727,8 +728,8 @@ export default function Dashboard() {
               <div
                 key={wc.id}
                 className={`
-                  rounded-xl border border-slate-700 p-4 transition-all duration-200
-                  hover:shadow-card-hover hover:border-slate-700
+                  rounded-xl border border-fd-line p-4 transition-all duration-200
+                  hover:shadow-card-hover hover:border-fd-line
                   ${statusStyle.bg}
                 `}
               >
@@ -762,14 +763,14 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <div className="mt-4 border-t border-slate-700 pt-4">
+                <div className="mt-4 border-t border-fd-line pt-4">
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
                     Active People
                   </p>
                   {wc.active_people.length > 0 ? (
                     <div className="space-y-2">
                       {wc.active_people.map((person) => (
-                        <div key={`${wc.id}-${person.user_id}-${person.clock_in}`} className="rounded-lg bg-[#151b28]/70 p-3">
+                        <div key={`${wc.id}-${person.user_id}-${person.clock_in}`} className="rounded-lg bg-fd-panel/70 p-3">
                           <div className="flex items-center justify-between gap-3">
                             <div>
                               <p className="font-medium text-slate-200">{person.name}</p>
@@ -839,8 +840,8 @@ export default function Dashboard() {
                 className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="flex items-center gap-4">
-                  <div className="p-2 rounded-lg bg-emerald-500/20">
-                    <CheckCircleSolid className="h-5 w-5 text-emerald-600" />
+                  <div className="p-2 rounded-lg bg-fd-green/15">
+                    <CheckCircleSolid className="h-5 w-5 text-fd-green" />
                   </div>
                   <div>
                     <p className="font-semibold text-white">{completion.work_order_number || '-'}</p>
@@ -896,7 +897,7 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
   const isOverdue = Boolean(dueDate && isDateBeforeTodayInCentral(dueDate));
 
   return (
-    <div className="rounded-2xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
+    <div className="rounded-2xl border border-fd-line bg-fd-panel p-5 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
@@ -913,7 +914,7 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
             {assignment.user.department ? ` • ${assignment.user.department}` : ''}
           </p>
         </div>
-        <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-400">
+        <span className="rounded-full bg-fd-green/15 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-400">
           {getEntryTypeLabel(assignment.entry_type)}
         </span>
       </div>
@@ -946,12 +947,12 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-        <div className="rounded-xl border border-slate-700 p-3">
+        <div className="rounded-xl border border-fd-line p-3">
           <p className="text-slate-400">Started</p>
           <p className="mt-1 font-semibold text-white">{formatCentralTime(assignment.clock_in)}</p>
           <p className="mt-1 text-xs text-slate-400">{formatElapsed(assignment.clock_in, nowMs)} elapsed</p>
         </div>
-        <div className="rounded-xl border border-slate-700 p-3">
+        <div className="rounded-xl border border-fd-line p-3">
           <p className="text-slate-400">Due</p>
           <p className={`mt-1 font-semibold ${isOverdue ? 'text-red-600' : 'text-white'}`}>
             {dueDate ? formatCentralDate(dueDate, { year: undefined }) : 'No due date'}
@@ -977,7 +978,7 @@ function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignm
 
 function SignedInUserRow({ user }: { user: SignedInUserStatus }) {
   return (
-    <div className="rounded-xl border border-slate-700 bg-[#151b28] p-4">
+    <div className="rounded-xl border border-fd-line bg-fd-panel p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
@@ -991,7 +992,7 @@ function SignedInUserRow({ user }: { user: SignedInUserStatus }) {
             {user.department ? ` • ${user.department}` : ''}
           </p>
         </div>
-        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${user.has_active_job ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${user.has_active_job ? 'bg-fd-green/15 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
           {user.has_active_job ? 'Checked In' : 'Signed In'}
         </span>
       </div>

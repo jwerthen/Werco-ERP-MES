@@ -68,29 +68,48 @@ module.exports = {
           900: '#0f172a',
           950: '#020617',
         },
-        // Surface colors - dark theme palette (Palantir-style)
+        // Surface colors - Foundry near-black instrument-panel palette.
+        // 50-300 are background/border surfaces; 400-950 are text (inverted for dark).
         surface: {
-          50: '#1e293b',   // was #fafafa - lightest surface in dark mode
-          100: '#1a2236',  // was #f4f4f5 - card/panel backgrounds
-          200: '#334155',  // was #e4e4e7 - borders, dividers
-          300: '#475569',  // was #d4d4d8 - heavier borders
-          400: '#94a3b8',  // was #a1a1aa - muted text (kept similar)
-          500: '#94a3b8',  // was #71717a - secondary text
-          600: '#cbd5e1',  // was #52525b - body text (inverted for dark)
-          700: '#e2e8f0',  // was #3f3f46 - primary text (inverted for dark)
-          800: '#f1f5f9',  // was #27272a - headings (inverted for dark)
-          900: '#f8fafc',  // was #18181b - strongest text (inverted for dark)
-          950: '#ffffff',  // was #09090b - maximum contrast text
+          50: '#10151e',   // raised surface / nested tiles
+          100: '#0c1017',  // card/panel backgrounds
+          200: '#1a212c',  // hairline borders, dividers
+          300: '#243044',  // heavier / emphasis borders
+          400: '#5b6677',  // muted text / labels
+          500: '#9aa7b8',  // secondary / body text
+          600: '#9aa7b8',  // body text
+          700: '#cbd5e1',  // primary text
+          800: '#e6edf3',  // headings
+          900: '#f1f5f9',  // strongest text
+          950: '#ffffff',  // maximum contrast text
         },
-        // Status colors - high contrast for quick scanning
+        // Foundry tactical accents (instrument-panel status palette)
+        fd: {
+          canvas: '#080a0f',
+          panel: '#0c1017',
+          raised: '#10151e',
+          sunken: '#070910',
+          line: '#1a212c',
+          'line-bright': '#243044',
+          ink: '#e6edf3',
+          body: '#9aa7b8',
+          mute: '#5b6677',
+          faint: '#3f4856',
+          blue: '#2f81f7',
+          red: '#f04438',
+          amber: '#d29922',
+          green: '#3fb950',
+          cyan: '#39c5cf',
+        },
+        // Status colors - high contrast for quick scanning (Foundry tactical)
         status: {
-          success: '#10b981',
+          success: '#3fb950',
           'success-light': '#d1fae5',
-          warning: '#f59e0b',
+          warning: '#d29922',
           'warning-light': '#fef3c7',
-          danger: '#ef4444',
+          danger: '#f04438',
           'danger-light': '#fee2e2',
-          info: '#3b82f6',
+          info: '#2f81f7',
           'info-light': '#dbeafe',
         },
         // Work order status specific colors
@@ -135,27 +154,29 @@ module.exports = {
         22: '5.5rem',
         30: '7.5rem',
       },
+      // Foundry: sharp corners everywhere (3-4px workhorse). rounded-full stays full.
       borderRadius: {
-        sm: '0.25rem',
-        DEFAULT: '0.5rem',
-        md: '0.5rem',
-        lg: '0.75rem',
-        xl: '1rem',
-        '2xl': '1.25rem',
-        '3xl': '1.5rem',
+        sm: '2px',
+        DEFAULT: '3px',
+        md: '3px',
+        lg: '4px',
+        xl: '4px',
+        '2xl': '6px',
+        '3xl': '8px',
       },
+      // Foundry: near-flat elevation; depth comes from hairline borders, not shadow.
       boxShadow: {
-        sm: '0 1px 2px 0 rgb(0 0 0 / 0.05)',
-        DEFAULT: '0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)',
-        md: '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)',
-        lg: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)',
-        xl: '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
-        glow: '0 0 20px rgb(27 77 156 / 0.3)',
-        'glow-blue': '0 0 20px rgb(51 102 255 / 0.3)',
-        'glow-accent': '0 0 20px rgb(200 53 43 / 0.3)',
-        'inner-glow': 'inset 0 2px 4px 0 rgb(0 0 0 / 0.05)',
-        card: '0 2px 8px -2px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.06)',
-        'card-hover': '0 8px 24px -4px rgb(0 0 0 / 0.12), 0 4px 8px -2px rgb(0 0 0 / 0.08)',
+        sm: '0 1px 2px 0 rgb(0 0 0 / 0.4)',
+        DEFAULT: '0 1px 3px 0 rgb(0 0 0 / 0.5)',
+        md: '0 2px 8px -2px rgb(0 0 0 / 0.5)',
+        lg: '0 8px 24px -6px rgb(0 0 0 / 0.55)',
+        xl: '0 16px 40px -10px rgb(0 0 0 / 0.6)',
+        glow: '0 0 20px rgb(47 129 247 / 0.3)',
+        'glow-blue': '0 0 20px rgb(47 129 247 / 0.35)',
+        'glow-accent': '0 0 20px rgb(240 68 56 / 0.35)',
+        'inner-glow': 'inset 0 1px 3px 0 rgb(0 0 0 / 0.4)',
+        card: '0 1px 3px 0 rgb(0 0 0 / 0.5)',
+        'card-hover': '0 2px 10px -2px rgb(0 0 0 / 0.55)',
       },
       animation: {
         'fade-in': 'fadeIn 0.2s ease-out',
