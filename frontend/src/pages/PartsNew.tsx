@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { Part, PartType } from '../types';
+import { CustomerNameOption } from '../types/api';
 import { partTypeColors } from '../types/engineering';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/Toast';
@@ -77,6 +78,9 @@ export default function PartsPage() {
   const [componentPartIds, setComponentPartIds] = useState<Set<number>>(new Set());
   const [savedFilters, setSavedFilters] = useState<SavedPartFilter[]>([]);
   const [selectedPartIds, setSelectedPartIds] = useState<Set<number>>(new Set());
+  const [customerOptions, setCustomerOptions] = useState<CustomerNameOption[]>([]);
+  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
+  const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
 
   // Create form
   const [createForm, setCreateForm] = useState({
@@ -141,6 +145,23 @@ export default function PartsPage() {
   }, [loadParts]);
 
   useEffect(() => {
+    let mounted = true;
+
+    api.getCustomerNames()
+      .then(customers => {
+        if (!mounted) return;
+        setCustomerOptions([...customers].sort((a, b) => a.name.localeCompare(b.name)));
+      })
+      .catch(() => {
+        if (mounted) setCustomerOptions([]);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     try {
       const stored = window.localStorage.getItem(SAVED_FILTERS_KEY);
       if (stored) setSavedFilters(JSON.parse(stored));
@@ -185,6 +206,27 @@ export default function PartsPage() {
   );
   const allVisibleSelected = filteredParts.length > 0 && visibleSelectedCount === filteredParts.length;
   const hasActiveFilters = Boolean(search || typeFilter || statusFilter || showBOMComponents);
+  const normalizedCustomerSearch = createForm.customer_name.trim().toLowerCase();
+  const matchingCustomers = useMemo(() => {
+    if (!normalizedCustomerSearch) return customerOptions;
+
+    return customerOptions.filter(customer =>
+      customer.name.toLowerCase().includes(normalizedCustomerSearch)
+    );
+  }, [customerOptions, normalizedCustomerSearch]);
+  const filteredCustomers = useMemo(() => {
+    const ranked = [...matchingCustomers].sort((a, b) => {
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+      const aStarts = normalizedCustomerSearch ? aName.startsWith(normalizedCustomerSearch) : false;
+      const bStarts = normalizedCustomerSearch ? bName.startsWith(normalizedCustomerSearch) : false;
+
+      if (aStarts !== bStarts) return aStarts ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    return ranked.slice(0, 8);
+  }, [matchingCustomers, normalizedCustomerSearch]);
 
   useEffect(() => {
     setSelectedPartIds(prev => {
@@ -193,6 +235,10 @@ export default function PartsPage() {
       return next.size === prev.size ? prev : next;
     });
   }, [parts]);
+
+  useEffect(() => {
+    setHighlightedCustomerIndex(-1);
+  }, [createForm.customer_name, showCustomerDropdown]);
 
   const toggleExpanded = useCallback((partId: number, event: React.MouseEvent) => {
     event.stopPropagation();
@@ -317,6 +363,54 @@ export default function PartsPage() {
       showToast('success', `Copied ${selectedParts.length} part${selectedParts.length !== 1 ? 's' : ''}`);
     } catch {
       showToast('error', 'Could not copy selected parts');
+    }
+  };
+
+  const selectCustomer = (customerName: string) => {
+    setCreateForm(prev => ({ ...prev, customer_name: customerName }));
+    setShowCustomerDropdown(false);
+    setHighlightedCustomerIndex(-1);
+  };
+
+  const handleCustomerKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      if (!showCustomerDropdown) {
+        setShowCustomerDropdown(true);
+        return;
+      }
+      if (filteredCustomers.length === 0) return;
+      setHighlightedCustomerIndex(prev => {
+        const next = prev + 1;
+        return next >= filteredCustomers.length ? 0 : next;
+      });
+      return;
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!showCustomerDropdown) {
+        setShowCustomerDropdown(true);
+        return;
+      }
+      if (filteredCustomers.length === 0) return;
+      setHighlightedCustomerIndex(prev => {
+        const next = prev - 1;
+        return next < 0 ? filteredCustomers.length - 1 : next;
+      });
+      return;
+    }
+
+    if (event.key === 'Enter' && showCustomerDropdown && highlightedCustomerIndex >= 0) {
+      event.preventDefault();
+      const customer = filteredCustomers[highlightedCustomerIndex];
+      if (customer) selectCustomer(customer.name);
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      setShowCustomerDropdown(false);
+      setHighlightedCustomerIndex(-1);
     }
   };
 
@@ -859,15 +953,70 @@ export default function PartsPage() {
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
+                <div className="relative">
                   <label className="label">Customer</label>
-                  <input
-                    type="text"
-                    value={createForm.customer_name}
-                    onChange={e => setCreateForm(p => ({ ...p, customer_name: e.target.value }))}
-                    className="input"
-                    placeholder="Optional"
-                  />
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={createForm.customer_name}
+                      onChange={e => {
+                        setCreateForm(p => ({ ...p, customer_name: e.target.value }));
+                        setShowCustomerDropdown(true);
+                      }}
+                      onFocus={() => setShowCustomerDropdown(true)}
+                      onBlur={() => setTimeout(() => setShowCustomerDropdown(false), 200)}
+                      onKeyDown={handleCustomerKeyDown}
+                      className="input pr-8"
+                      placeholder="Select or type customer"
+                      role="combobox"
+                      aria-expanded={showCustomerDropdown}
+                      aria-controls="new-part-customer-results"
+                      aria-autocomplete="list"
+                    />
+                    <ChevronDownIcon
+                      className="h-5 w-5 absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 cursor-pointer"
+                      onClick={() => setShowCustomerDropdown(!showCustomerDropdown)}
+                    />
+                  </div>
+                  {showCustomerDropdown && (
+                    <div
+                      id="new-part-customer-results"
+                      className="absolute z-20 w-full mt-1 bg-[#151b28] border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto"
+                      role="listbox"
+                    >
+                      {filteredCustomers.length > 0 ? (
+                        <>
+                          {filteredCustomers.map((customer, index) => (
+                            <button
+                              key={customer.id}
+                              type="button"
+                              className={`w-full text-left px-3 py-2 text-sm ${
+                                highlightedCustomerIndex === index ? 'bg-cyan-500/10 text-cyan-100' : 'hover:bg-slate-800'
+                              }`}
+                              onMouseEnter={() => setHighlightedCustomerIndex(index)}
+                              onMouseDown={event => {
+                                event.preventDefault();
+                                selectCustomer(customer.name);
+                              }}
+                              role="option"
+                              aria-selected={createForm.customer_name === customer.name}
+                            >
+                              {customer.name}
+                            </button>
+                          ))}
+                          {matchingCustomers.length > filteredCustomers.length && (
+                            <div className="px-3 py-2 text-xs text-slate-400 border-t border-slate-700/30">
+                              Showing {filteredCustomers.length} of {matchingCustomers.length}. Keep typing to narrow results.
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="px-3 py-2 text-sm text-slate-400">
+                          {customerOptions.length === 0 ? 'No customers loaded' : 'No matching customers'}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="label">Drawing #</label>
