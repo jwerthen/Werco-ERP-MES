@@ -10,12 +10,13 @@ from sqlalchemy.orm import Session
 from app.models.part import Part, PartType
 from app.models.quote_config import MaterialCategory, QuoteMaterial, QuoteSettings
 from app.models.rfq_quote import PriceSnapshot, RfqPackage
-from app.services.sheet_metal_costing_service import normalize_material
+from app.services.sheet_metal_costing_service import normalize_material, normalize_thickness_key, parse_thickness_to_inches
 
 DEFAULT_MATERIAL_PRICE_PER_LB = {
     "carbon_steel": 1.10,
     "stainless": 2.80,
     "aluminum": 2.40,
+    "copper": 4.25,
 }
 
 
@@ -28,20 +29,28 @@ class PriceResult:
     source_url: Optional[str] = None
     is_fallback: bool = False
     notes: Optional[str] = None
+    density_lb_per_cubic_inch: Optional[float] = None
+    machinability_factor: Optional[float] = None
+    material_markup_pct: Optional[float] = None
 
 
 class MaterialPriceProvider(Protocol):
     provider_name: str
 
     def get_material_price(
-        self, db: Session, material: str, thickness: Optional[str] = None
+        self, db: Session, material: str, thickness: Optional[str] = None, company_id: Optional[int] = None
     ) -> Optional[PriceResult]: ...
 
-    def get_hardware_price(self, db: Session, item_code: Optional[str], description: str) -> Optional[PriceResult]: ...
+    def get_hardware_price(
+        self, db: Session, item_code: Optional[str], description: str, company_id: Optional[int] = None
+    ) -> Optional[PriceResult]: ...
 
 
-def _get_quote_setting(db: Session, key: str, default):
-    setting = db.query(QuoteSettings).filter(QuoteSettings.setting_key == key).first()
+def _get_quote_setting(db: Session, key: str, default, company_id: Optional[int] = None):
+    query = db.query(QuoteSettings).filter(QuoteSettings.setting_key == key)
+    if company_id is not None:
+        query = query.filter(QuoteSettings.company_id == company_id)
+    setting = query.first()
     if not setting:
         return default
     if setting.setting_type == "number":
@@ -66,35 +75,41 @@ class InternalPriceListProvider:
     def _pick_sheet_price(self, sheet_pricing: Dict[str, float], thickness: Optional[str]) -> Optional[float]:
         if not sheet_pricing:
             return None
-        if thickness and thickness in sheet_pricing:
-            return float(sheet_pricing[thickness])
+        thickness_key = normalize_thickness_key(thickness)
+        normalized_pricing = {
+            normalize_thickness_key(str(key)): float(value)
+            for key, value in sheet_pricing.items()
+            if normalize_thickness_key(str(key)) is not None
+        }
+        if thickness_key and thickness_key in normalized_pricing:
+            return float(normalized_pricing[thickness_key])
         numeric_keys: List[Tuple[float, float]] = []
         for key, value in sheet_pricing.items():
             try:
-                if key.endswith("ga"):
-                    continue
-                numeric_keys.append((abs(float(key)), float(value)))
+                key_text = str(key).strip().lower()
+                thickness_value = parse_thickness_to_inches(key_text)
+                if thickness_value:
+                    numeric_keys.append((abs(thickness_value), float(value)))
             except Exception:
                 continue
         if thickness:
-            try:
-                thickness_value = abs(float(thickness))
-                if numeric_keys:
-                    closest = min(numeric_keys, key=lambda item: abs(item[0] - thickness_value))
-                    return closest[1]
-            except Exception:
-                pass
+            thickness_value = parse_thickness_to_inches(thickness)
+            if thickness_value and numeric_keys:
+                closest = min(numeric_keys, key=lambda item: abs(item[0] - thickness_value))
+                return closest[1]
         first_value = next(iter(sheet_pricing.values()), None)
         return float(first_value) if first_value is not None else None
 
-    def get_material_price(self, db: Session, material: str, thickness: Optional[str] = None) -> Optional[PriceResult]:
+    def get_material_price(
+        self, db: Session, material: str, thickness: Optional[str] = None, company_id: Optional[int] = None
+    ) -> Optional[PriceResult]:
+        if normalize_material(material) == "copper":
+            return None
         category = self._category_for_material(material)
-        mat = (
-            db.query(QuoteMaterial)
-            .filter(QuoteMaterial.category == category, QuoteMaterial.is_active.is_(True))
-            .order_by(QuoteMaterial.updated_at.desc())
-            .first()
-        )
+        query = db.query(QuoteMaterial).filter(QuoteMaterial.category == category, QuoteMaterial.is_active.is_(True))
+        if company_id is not None:
+            query = query.filter(QuoteMaterial.company_id == company_id)
+        mat = query.order_by(QuoteMaterial.updated_at.desc()).first()
         if not mat:
             return None
 
@@ -103,8 +118,8 @@ class InternalPriceListProvider:
             sheet_price = self._pick_sheet_price(mat.sheet_pricing, thickness)
             if sheet_price and mat.density_lb_per_cubic_inch and thickness:
                 # Convert sheet price ($/sqft) to approximate $/lb for consistent costing.
+                thickness_in = parse_thickness_to_inches(thickness)
                 try:
-                    thickness_in = float(thickness)
                     lbs_per_sqft = thickness_in * 144.0 * mat.density_lb_per_cubic_inch
                     if lbs_per_sqft > 0:
                         price_per_lb = sheet_price / lbs_per_sqft
@@ -120,13 +135,20 @@ class InternalPriceListProvider:
             supplier="Internal Catalog",
             source_name=f"QuoteMaterial:{mat.name}",
             source_url=None,
+            density_lb_per_cubic_inch=float(mat.density_lb_per_cubic_inch or 0) or None,
+            machinability_factor=float(mat.machinability_factor or 0) or None,
+            material_markup_pct=float(mat.material_markup_pct or 0) or None,
         )
 
-    def get_hardware_price(self, db: Session, item_code: Optional[str], description: str) -> Optional[PriceResult]:
+    def get_hardware_price(
+        self, db: Session, item_code: Optional[str], description: str, company_id: Optional[int] = None
+    ) -> Optional[PriceResult]:
         query = db.query(Part).filter(
             Part.part_type.in_([PartType.HARDWARE, PartType.CONSUMABLE]),
             Part.is_active.is_(True),
         )
+        if company_id is not None:
+            query = query.filter(Part.company_id == company_id)
         part = None
         if item_code:
             part = query.filter(Part.part_number == item_code).first()
@@ -151,10 +173,14 @@ class WebLookupProvider:
 
     provider_name = "WebLookup"
 
-    def get_material_price(self, db: Session, material: str, thickness: Optional[str] = None) -> Optional[PriceResult]:
+    def get_material_price(
+        self, db: Session, material: str, thickness: Optional[str] = None, company_id: Optional[int] = None
+    ) -> Optional[PriceResult]:
         return None
 
-    def get_hardware_price(self, db: Session, item_code: Optional[str], description: str) -> Optional[PriceResult]:
+    def get_hardware_price(
+        self, db: Session, item_code: Optional[str], description: str, company_id: Optional[int] = None
+    ) -> Optional[PriceResult]:
         return None
 
 
@@ -162,8 +188,8 @@ class MaterialPriceService:
     def __init__(self, providers: Optional[List[MaterialPriceProvider]] = None):
         self.providers = providers or [InternalPriceListProvider(), WebLookupProvider()]
 
-    def _cache_hours(self, db: Session) -> int:
-        value = _get_quote_setting(db, "rfq_price_cache_hours", 12)
+    def _cache_hours(self, db: Session, company_id: Optional[int] = None) -> int:
+        value = _get_quote_setting(db, "rfq_price_cache_hours", 12, company_id=company_id)
         try:
             return max(1, int(value))
         except Exception:
@@ -176,9 +202,12 @@ class MaterialPriceService:
         material: Optional[str] = None,
         thickness: Optional[str] = None,
         item_code: Optional[str] = None,
+        company_id: Optional[int] = None,
         stale_ok: bool = False,
     ) -> Optional[PriceSnapshot]:
         query = db.query(PriceSnapshot).filter(PriceSnapshot.price_type == price_type)
+        if company_id is not None:
+            query = query.filter(PriceSnapshot.company_id == company_id)
         if material:
             query = query.filter(PriceSnapshot.material == material)
         if thickness:
@@ -190,7 +219,7 @@ class MaterialPriceService:
             return None
         if stale_ok:
             return row
-        freshness_threshold = datetime.utcnow() - timedelta(hours=self._cache_hours(db))
+        freshness_threshold = datetime.utcnow() - timedelta(hours=self._cache_hours(db, company_id=company_id))
         if row.fetched_at and row.fetched_at >= freshness_threshold:
             return row
         return None
@@ -216,6 +245,7 @@ class MaterialPriceService:
         result: PriceResult,
         raw_data: Optional[dict] = None,
     ) -> PriceSnapshot:
+        company_id = self._resolve_company_id(db, rfq_package_id)
         snapshot = PriceSnapshot(
             quote_estimate_id=quote_estimate_id,
             rfq_package_id=rfq_package_id,
@@ -234,8 +264,8 @@ class MaterialPriceService:
             notes=result.notes,
             raw_data=raw_data,
             fetched_at=datetime.utcnow(),
-            expires_at=datetime.utcnow() + timedelta(hours=self._cache_hours(db)),
-            company_id=self._resolve_company_id(db, rfq_package_id),
+            expires_at=datetime.utcnow() + timedelta(hours=self._cache_hours(db, company_id=company_id)),
+            company_id=company_id,
         )
         db.add(snapshot)
         return snapshot
@@ -249,8 +279,9 @@ class MaterialPriceService:
         quote_estimate_id: Optional[int] = None,
     ) -> PriceResult:
         normalized = normalize_material(material) or "carbon_steel"
+        company_id = self._resolve_company_id(db, rfq_package_id)
 
-        cached = self._lookup_cached(db, "material", material=normalized, thickness=thickness)
+        cached = self._lookup_cached(db, "material", material=normalized, thickness=thickness, company_id=company_id)
         if cached:
             result = PriceResult(
                 unit_price=float(cached.unit_price),
@@ -260,6 +291,9 @@ class MaterialPriceService:
                 source_url=cached.source_url,
                 is_fallback=cached.is_fallback,
                 notes=cached.notes,
+                density_lb_per_cubic_inch=(cached.raw_data or {}).get("density_lb_per_cubic_inch"),
+                machinability_factor=(cached.raw_data or {}).get("machinability_factor"),
+                material_markup_pct=(cached.raw_data or {}).get("material_markup_pct"),
             )
             self._store_snapshot(
                 db,
@@ -276,7 +310,7 @@ class MaterialPriceService:
             return result
 
         for provider in self.providers:
-            price = provider.get_material_price(db, normalized, thickness)
+            price = provider.get_material_price(db, normalized, thickness, company_id=company_id)
             if not price:
                 continue
             self._store_snapshot(
@@ -289,7 +323,12 @@ class MaterialPriceService:
                 material=normalized,
                 thickness=thickness,
                 result=price,
-                raw_data={"provider": provider.provider_name},
+                raw_data={
+                    "provider": provider.provider_name,
+                    "density_lb_per_cubic_inch": price.density_lb_per_cubic_inch,
+                    "machinability_factor": price.machinability_factor,
+                    "material_markup_pct": price.material_markup_pct,
+                },
             )
             self._store_snapshot(
                 db,
@@ -301,11 +340,18 @@ class MaterialPriceService:
                 material=normalized,
                 thickness=thickness,
                 result=price,
-                raw_data={"provider": provider.provider_name},
+                raw_data={
+                    "provider": provider.provider_name,
+                    "density_lb_per_cubic_inch": price.density_lb_per_cubic_inch,
+                    "machinability_factor": price.machinability_factor,
+                    "material_markup_pct": price.material_markup_pct,
+                },
             )
             return price
 
-        stale = self._lookup_cached(db, "material", material=normalized, thickness=thickness, stale_ok=True)
+        stale = self._lookup_cached(
+            db, "material", material=normalized, thickness=thickness, company_id=company_id, stale_ok=True
+        )
         if stale:
             fallback_result = PriceResult(
                 unit_price=float(stale.unit_price),
@@ -330,7 +376,7 @@ class MaterialPriceService:
             )
             return fallback_result
 
-        configured = _get_quote_setting(db, "rfq_default_material_price_per_lb", None)
+        configured = _get_quote_setting(db, "rfq_default_material_price_per_lb", None, company_id=company_id)
         if isinstance(configured, str):
             configured = None
         price_default = None
@@ -370,7 +416,8 @@ class MaterialPriceService:
         quote_estimate_id: Optional[int] = None,
         consumables_factor_pct: float = 8.0,
     ) -> PriceResult:
-        cached = self._lookup_cached(db, "hardware", item_code=item_code)
+        company_id = self._resolve_company_id(db, rfq_package_id)
+        cached = self._lookup_cached(db, "hardware", item_code=item_code, company_id=company_id)
         if cached:
             result = PriceResult(
                 unit_price=float(cached.unit_price),
@@ -396,7 +443,7 @@ class MaterialPriceService:
             return result
 
         for provider in self.providers:
-            price = provider.get_hardware_price(db, item_code, description)
+            price = provider.get_hardware_price(db, item_code, description, company_id=company_id)
             if not price:
                 continue
             self._store_snapshot(
@@ -425,7 +472,7 @@ class MaterialPriceService:
             )
             return price
 
-        stale = self._lookup_cached(db, "hardware", item_code=item_code, stale_ok=True)
+        stale = self._lookup_cached(db, "hardware", item_code=item_code, company_id=company_id, stale_ok=True)
         if stale:
             fallback = PriceResult(
                 unit_price=float(stale.unit_price),
@@ -451,12 +498,12 @@ class MaterialPriceService:
             return fallback
 
         assumed = PriceResult(
-            unit_price=0.25 * (1.0 + max(consumables_factor_pct, 0.0) / 100.0),
+            unit_price=0.25,
             unit="each",
             supplier="Assumed",
             source_name="ConsumablesFactorModel",
             is_fallback=True,
-            notes="Hardware item not in item master; using standard consumables factor.",
+            notes="Hardware item not in item master; using assumed unit price before RFQ consumables factor.",
         )
         self._store_snapshot(
             db,

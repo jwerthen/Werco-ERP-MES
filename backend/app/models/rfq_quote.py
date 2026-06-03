@@ -124,6 +124,14 @@ class QuoteLineSummary(Base, TenantMixin):
     assembly_required = Column(Boolean, default=False)
     part_total = Column(Float, default=0.0)
 
+    parent_part_number = Column(String(120), nullable=True, index=True)
+    line_type = Column(String(40), nullable=True, index=True)
+    item_type = Column(String(40), nullable=True)
+    bom_level = Column(Integer, default=0)
+    item_number = Column(String(40), nullable=True)
+    quantity_per_assembly = Column(Float, nullable=True)
+    unit_of_measure = Column(String(20), nullable=True)
+
     confidence = Column(JSON, nullable=True)
     sources = Column(JSON, nullable=True)
     notes = Column(Text, nullable=True)

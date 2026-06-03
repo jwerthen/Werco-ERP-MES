@@ -786,6 +786,11 @@ def seed_default_data(db: Session = Depends(get_db), current_user: User = Depend
         ("minimum_order_charge", "150", "number"),
         ("rush_multiplier", "1.5", "number"),
         ("standard_lead_days", "10", "number"),
+        ("rfq_scrap_factor", "0.10", "number"),
+        ("rfq_laser_pierce_seconds", "0.8", "number"),
+        ("rfq_laser_min_charge", "35", "number"),
+        ("rfq_brake_min_charge", "25", "number"),
+        ("rfq_finish_min_charge", "0", "number"),
         ("quantity_breaks", '{"10": 0.95, "25": 0.90, "50": 0.85, "100": 0.80}', "json"),
         ("tolerance_surcharges", '{"standard": 1.0, "tight": 1.15, "precision": 1.35, "ultra": 1.6}', "json"),
     ]

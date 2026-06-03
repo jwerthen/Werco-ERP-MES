@@ -353,6 +353,31 @@ def seed_quote_config_if_needed():
                         "setting_type": "number",
                     },
                     {
+                        "setting_key": "rfq_scrap_factor",
+                        "setting_value": "0.10",
+                        "setting_type": "number",
+                    },
+                    {
+                        "setting_key": "rfq_laser_pierce_seconds",
+                        "setting_value": "0.8",
+                        "setting_type": "number",
+                    },
+                    {
+                        "setting_key": "rfq_laser_min_charge",
+                        "setting_value": "35",
+                        "setting_type": "number",
+                    },
+                    {
+                        "setting_key": "rfq_brake_min_charge",
+                        "setting_value": "25",
+                        "setting_type": "number",
+                    },
+                    {
+                        "setting_key": "rfq_finish_min_charge",
+                        "setting_value": "0",
+                        "setting_type": "number",
+                    },
+                    {
                         "setting_key": "quantity_breaks",
                         "setting_value": '{"10": 0.95, "25": 0.90, "50": 0.85, "100": 0.80}',
                         "setting_type": "json",

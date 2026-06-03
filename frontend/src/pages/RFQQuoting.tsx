@@ -42,6 +42,14 @@ interface QuoteLineSummary {
   part_total: number;
   confidence: Record<string, number>;
   sources: Record<string, string[]>;
+  notes?: string;
+  parent_part_number?: string;
+  line_type?: string;
+  item_type?: string;
+  bom_level?: number;
+  item_number?: string;
+  quantity_per_assembly?: number;
+  unit_of_measure?: string;
 }
 
 interface EstimateResponse {
@@ -67,6 +75,58 @@ function downloadBlob(blob: Blob, filename: string) {
   anchor.click();
   anchor.remove();
   window.URL.revokeObjectURL(url);
+}
+
+function formatSummary(summary?: Record<string, any>) {
+  if (!summary) return '-';
+  return Object.entries(summary)
+    .filter(([, value]) => value !== null && value !== undefined && value !== '' && (!Array.isArray(value) || value.length > 0))
+    .map(([key, value]) => {
+      const label = key.replace(/_/g, ' ');
+      const display = Array.isArray(value) ? value.join(', ') : String(value);
+      return `${label}: ${display}`;
+    })
+    .join(' | ') || '-';
+}
+
+function lineSourceTrail(line: QuoteLineSummary) {
+  const priority = [
+    'drawing_pdf',
+    'flat_pattern_dxf',
+    'bom',
+    'material',
+    'thickness',
+    'geometry',
+    'finish',
+    'features',
+  ];
+  return priority
+    .flatMap((key) => (line.sources?.[key] || []).map((ref) => `${key.replace(/_/g, ' ')}: ${ref}`))
+    .slice(0, 4);
+}
+
+function lineTypeLabel(type?: string) {
+  const normalized = (type || 'manufactured').replace(/_/g, ' ');
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function lineTypeClass(type?: string) {
+  switch (type) {
+    case 'assembly':
+      return 'bg-blue-500/20 text-blue-300';
+    case 'manufactured':
+      return 'bg-emerald-500/20 text-emerald-300';
+    case 'hardware':
+    case 'consumable':
+    case 'purchased':
+      return 'bg-amber-500/20 text-amber-300';
+    case 'process':
+      return 'bg-cyan-500/20 text-cyan-300';
+    case 'reference':
+      return 'bg-slate-700 text-slate-300';
+    default:
+      return 'bg-slate-800 text-slate-300';
+  }
 }
 
 export default function RFQQuoting() {
@@ -182,7 +242,7 @@ export default function RFQQuoting() {
         <div>
           <h1 className="text-2xl font-bold text-white">AI Quoting Agent (Sheet Metal)</h1>
           <p className="text-sm text-slate-400 mt-1">
-            Upload RFQ package files (PDF/XLSX/DXF/STEP), generate deterministic estimate, review assumptions, and publish quote.
+            Upload BOM spreadsheets, assembly PDFs, STEP models, and matching flat-pattern DXFs, then review traced quote inputs before publishing.
           </p>
         </div>
       </div>
@@ -322,7 +382,7 @@ export default function RFQQuoting() {
                           </span>
                         </td>
                         <td className="px-3 py-2 text-slate-400">
-                          {file.parse_error || (file.summary ? JSON.stringify(file.summary) : '-')}
+                          {file.parse_error || formatSummary(file.summary)}
                         </td>
                       </tr>
                     ))}
@@ -377,7 +437,9 @@ export default function RFQQuoting() {
               <thead className="bg-slate-800/50 text-slate-400">
                 <tr>
                   <th className="text-left px-3 py-2">Part</th>
+                  <th className="text-left px-3 py-2">Type</th>
                   <th className="text-right px-3 py-2">Qty</th>
+                  <th className="text-right px-3 py-2">Qty/Asm</th>
                   <th className="text-left px-3 py-2">Material</th>
                   <th className="text-left px-3 py-2">Thickness</th>
                   <th className="text-right px-3 py-2">Area in^2</th>
@@ -388,22 +450,38 @@ export default function RFQQuoting() {
                 </tr>
               </thead>
               <tbody>
-                {estimate.line_summaries.map((line, idx) => (
-                  <tr key={`${line.part_number || line.part_name}-${idx}`} className="border-t">
-                    <td className="px-3 py-2">
-                      <div className="font-medium text-white">{line.part_number || line.part_name}</div>
-                      <div className="text-xs text-slate-400">{line.part_name}</div>
-                    </td>
-                    <td className="px-3 py-2 text-right">{line.quantity}</td>
-                    <td className="px-3 py-2">{line.material || 'TBD'}</td>
-                    <td className="px-3 py-2">{line.thickness || 'TBD'}</td>
-                    <td className="px-3 py-2 text-right">{line.flat_area ? line.flat_area.toFixed(2) : '-'}</td>
-                    <td className="px-3 py-2 text-right">{line.cut_length ? line.cut_length.toFixed(2) : '-'}</td>
-                    <td className="px-3 py-2 text-right">{line.bend_count ?? '-'}</td>
-                    <td className="px-3 py-2">{line.finish || '-'}</td>
-                    <td className="px-3 py-2 text-right font-semibold">${line.part_total.toFixed(2)}</td>
-                  </tr>
-                ))}
+                {estimate.line_summaries.map((line, idx) => {
+                  const sourceTrail = lineSourceTrail(line);
+                  return (
+                    <tr key={`${line.part_number || line.part_name}-${idx}`} className="border-t">
+                      <td className="px-3 py-2 min-w-[300px]" style={{ paddingLeft: `${12 + (line.bom_level || 0) * 18}px` }}>
+                        <div className="font-medium text-white">{line.part_number || line.part_name}</div>
+                        <div className="text-xs text-slate-400">{line.part_name}</div>
+                        {line.parent_part_number && <div className="text-[11px] text-slate-500">Parent: {line.parent_part_number}</div>}
+                        {line.notes && <div className="text-xs text-slate-500 mt-1">{line.notes}</div>}
+                        {sourceTrail.length > 0 && (
+                          <div className="text-[11px] leading-4 text-slate-500 mt-1 max-w-md">
+                            {sourceTrail.join(' | ')}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`px-2 py-0.5 rounded-full text-xs whitespace-nowrap ${lineTypeClass(line.line_type)}`}>
+                          {line.item_number ? `${line.item_number} · ` : ''}{lineTypeLabel(line.line_type)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-right">{line.quantity}</td>
+                      <td className="px-3 py-2 text-right">{line.quantity_per_assembly ?? '-'}</td>
+                      <td className="px-3 py-2">{line.material || 'TBD'}</td>
+                      <td className="px-3 py-2">{line.thickness || 'TBD'}</td>
+                      <td className="px-3 py-2 text-right">{line.flat_area ? line.flat_area.toFixed(2) : '-'}</td>
+                      <td className="px-3 py-2 text-right">{line.cut_length ? line.cut_length.toFixed(2) : '-'}</td>
+                      <td className="px-3 py-2 text-right">{line.bend_count ?? '-'}</td>
+                      <td className="px-3 py-2">{line.finish || '-'}</td>
+                      <td className="px-3 py-2 text-right font-semibold">${line.part_total.toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

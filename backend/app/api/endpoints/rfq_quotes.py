@@ -32,6 +32,7 @@ from app.services.rfq_pricing_service import MaterialPriceService
 from app.services.sheet_metal_costing_service import (
     SheetMetalCostConfig,
     calc_bending_cost,
+    calc_dynamic_scrap_factor,
     calc_cutting_cost,
     calc_finishing_cost,
     calc_margin,
@@ -40,7 +41,9 @@ from app.services.sheet_metal_costing_service import (
     calc_shop_labor_oh,
     calc_weld_assembly_cost,
     estimate_lead_time_range,
+    estimate_unique_bend_groups,
     normalize_material,
+    parse_thickness_to_inches,
 )
 
 router = APIRouter()
@@ -87,6 +90,14 @@ class QuoteLineSummaryResponse(BaseModel):
     part_total: float
     confidence: Dict[str, float] = {}
     sources: Dict[str, List[str]] = {}
+    notes: Optional[str] = None
+    parent_part_number: Optional[str] = None
+    line_type: Optional[str] = None
+    item_type: Optional[str] = None
+    bom_level: int = 0
+    item_number: Optional[str] = None
+    quantity_per_assembly: Optional[float] = None
+    unit_of_measure: Optional[str] = None
 
 
 class QuoteEstimateResponse(BaseModel):
@@ -103,8 +114,11 @@ class QuoteEstimateResponse(BaseModel):
     line_summaries: List[QuoteLineSummaryResponse]
 
 
-def _get_setting_number(db: Session, key: str, default: float) -> float:
-    setting = db.query(QuoteSettings).filter(QuoteSettings.setting_key == key).first()
+def _get_setting_number(db: Session, key: str, default: float, company_id: Optional[int] = None) -> float:
+    query = db.query(QuoteSettings).filter(QuoteSettings.setting_key == key)
+    if company_id is not None:
+        query = query.filter(QuoteSettings.company_id == company_id)
+    setting = query.first()
     if not setting:
         return default
     try:
@@ -171,26 +185,7 @@ def _thickness_to_float(part_spec: Dict[str, Any]) -> Optional[float]:
         except Exception:
             pass
     thickness_str = str(part_spec.get("thickness") or "").strip().lower()
-    if not thickness_str:
-        return None
-    if thickness_str.endswith("ga"):
-        gauge_map = {
-            "24ga": 0.0239,
-            "22ga": 0.0299,
-            "20ga": 0.0359,
-            "18ga": 0.0478,
-            "16ga": 0.0598,
-            "14ga": 0.0747,
-            "12ga": 0.1046,
-            "11ga": 0.1196,
-            "10ga": 0.1345,
-            "7ga": 0.1793,
-        }
-        return gauge_map.get(thickness_str)
-    try:
-        return float(thickness_str.replace("in", "").replace('"', "").strip())
-    except Exception:
-        return None
+    return parse_thickness_to_inches(thickness_str)
 
 
 @router.post("/", response_model=RfqPackageResponse)
@@ -344,22 +339,23 @@ def generate_estimate(
     if not parsed["parts"]:
         raise HTTPException(status_code=400, detail="No parsable part data found in RFQ files.")
 
+    manufactured_parts = [part for part in parsed["parts"] if str(part.get("line_type") or "manufactured") == "manufactured"]
     geometry_ready_parts = [
         part
-        for part in parsed["parts"]
+        for part in manufactured_parts
         if float(part.get("flat_area") or 0) > 0 and float(part.get("cut_length") or 0) > 0
     ]
-    if not geometry_ready_parts:
+    if manufactured_parts and not geometry_ready_parts:
         package.parsing_warnings = parsed["warnings"] + [
-            "No usable geometry extracted. Provide flat pattern DXF or BOM length/width columns before generating estimate."
+            "No usable geometry extracted for manufactured sheet-metal BOM rows. Provide flat pattern DXFs or STEP/DXF geometry for at least one detail part before generating estimate."
         ]
         package.status = "needs_review"
         db.commit()
         raise HTTPException(
             status_code=400,
             detail=(
-                "Could not extract geometry (flat area + cut length) from uploaded files. "
-                "Upload at least one flat pattern DXF, or include BOM dimensions."
+                "Could not extract geometry (flat area + cut length) for manufactured sheet-metal BOM rows. "
+                "Upload matching flat pattern DXFs or usable STEP/DXF geometry for the detail parts."
             ),
         )
 
@@ -396,31 +392,37 @@ def generate_estimate(
     target_margin_pct = (
         request.target_margin_pct
         if request.target_margin_pct is not None
-        else _get_setting_number(db, "default_markup_pct", 22.0)
+        else _get_setting_number(db, "default_markup_pct", 22.0, company_id)
     )
     config = SheetMetalCostConfig(
-        scrap_factor=_get_setting_number(db, "rfq_scrap_factor", 0.10),
-        laser_rate_per_hour=_get_setting_number(db, "rfq_laser_rate_per_hour", 150.0),
-        brake_rate_per_hour=_get_setting_number(db, "rfq_brake_rate_per_hour", 85.0),
-        welding_rate_per_hour=_get_setting_number(db, "rfq_welding_rate_per_hour", 95.0),
-        assembly_rate_per_hour=_get_setting_number(db, "rfq_assembly_rate_per_hour", 70.0),
-        shop_overhead_pct=_get_setting_number(db, "rfq_shop_overhead_pct", 20.0),
-        sec_per_bend=_get_setting_number(db, "rfq_sec_per_bend", 30.0),
-        bend_setup_minutes=_get_setting_number(db, "rfq_bend_setup_minutes", 8.0),
-        laser_setup_minutes=_get_setting_number(db, "rfq_laser_setup_minutes", 12.0),
-        weld_minutes_per_part=_get_setting_number(db, "rfq_weld_minutes_per_part", 12.0),
-        assembly_minutes_per_part=_get_setting_number(db, "rfq_assembly_minutes_per_part", 10.0),
-        finish_default_rate_per_sqft=_get_setting_number(db, "rfq_finish_rate_per_sqft", 8.0),
-        base_queue_days=int(_get_setting_number(db, "rfq_base_queue_days", 3)),
-        effective_daily_capacity_hours=_get_setting_number(db, "rfq_daily_capacity_hours", 24.0),
-        outside_service_buffer_days=int(_get_setting_number(db, "rfq_outside_service_buffer_days", 0)),
+        scrap_factor=_get_setting_number(db, "rfq_scrap_factor", 0.10, company_id),
+        laser_rate_per_hour=_get_setting_number(db, "rfq_laser_rate_per_hour", 150.0, company_id),
+        brake_rate_per_hour=_get_setting_number(db, "rfq_brake_rate_per_hour", 85.0, company_id),
+        welding_rate_per_hour=_get_setting_number(db, "rfq_welding_rate_per_hour", 95.0, company_id),
+        assembly_rate_per_hour=_get_setting_number(db, "rfq_assembly_rate_per_hour", 70.0, company_id),
+        shop_overhead_pct=_get_setting_number(db, "rfq_shop_overhead_pct", 20.0, company_id),
+        sec_per_bend=_get_setting_number(db, "rfq_sec_per_bend", 30.0, company_id),
+        bend_setup_minutes=_get_setting_number(db, "rfq_bend_setup_minutes", 8.0, company_id),
+        laser_setup_minutes=_get_setting_number(db, "rfq_laser_setup_minutes", 12.0, company_id),
+        laser_pierce_seconds=_get_setting_number(db, "rfq_laser_pierce_seconds", 0.8, company_id),
+        laser_min_charge=_get_setting_number(db, "rfq_laser_min_charge", 0.0, company_id),
+        brake_min_charge=_get_setting_number(db, "rfq_brake_min_charge", 0.0, company_id),
+        weld_minutes_per_part=_get_setting_number(db, "rfq_weld_minutes_per_part", 12.0, company_id),
+        assembly_minutes_per_part=_get_setting_number(db, "rfq_assembly_minutes_per_part", 10.0, company_id),
+        finish_default_rate_per_sqft=_get_setting_number(db, "rfq_finish_rate_per_sqft", 8.0, company_id),
+        finish_min_charge=_get_setting_number(db, "rfq_finish_min_charge", 0.0, company_id),
+        base_queue_days=int(_get_setting_number(db, "rfq_base_queue_days", 3, company_id)),
+        effective_daily_capacity_hours=_get_setting_number(db, "rfq_daily_capacity_hours", 24.0, company_id),
+        outside_service_buffer_days=int(_get_setting_number(db, "rfq_outside_service_buffer_days", 0, company_id)),
         target_margin_pct=target_margin_pct,
     )
+    minimum_order_charge = _get_setting_number(db, "minimum_order_charge", 0.0, company_id)
 
     pricing = MaterialPriceService()
     material_total = 0.0
     outside_total = 0.0
     shop_labor_oh_total = 0.0
+    hardware_total = 0.0
     total_shop_hours = 0.0
     max_outside_days = 0
 
@@ -431,6 +433,8 @@ def generate_estimate(
 
     for idx, part in enumerate(parsed["parts"], start=1):
         qty = float(part.get("qty") or 1.0)
+        line_type = str(part.get("line_type") or "manufactured")
+        item_type = str(part.get("item_type") or ("make" if line_type == "manufactured" else "buy"))
         material_name = part.get("material") or "Carbon Steel"
         material_key = normalize_material(material_name) or "carbon_steel"
         thickness_str = _thickness_to_str(part)
@@ -440,6 +444,149 @@ def generate_estimate(
         bend_count = int(part.get("bend_count") or 0)
         hole_count = int(part.get("hole_count") or 0) if part.get("hole_count") is not None else None
         finish_name = part.get("finish")
+        geometry_confidence = float((part.get("confidence") or {}).get("geometry") or 0.0)
+
+        if line_type in {"hardware", "consumable", "purchased"}:
+            consumables_factor_pct = _get_setting_number(db, "rfq_consumables_factor_pct", 8.0, company_id)
+            item_price = pricing.get_hardware_price(
+                db=db,
+                item_code=part.get("part_id"),
+                description=part.get("part_name") or part.get("notes") or "",
+                rfq_package_id=package.id,
+                quote_estimate_id=estimate.id,
+                consumables_factor_pct=consumables_factor_pct,
+            )
+            line_cost = item_price.unit_price * max(qty, 0.0)
+            hardware_total += line_cost
+            if item_price.is_fallback:
+                assumptions.append(
+                    {
+                        "part_id": part.get("part_id"),
+                        "field": f"{line_type}_price",
+                        "assumption": item_price.notes or f"Fallback {line_type} price used.",
+                        "confidence": 0.5,
+                    }
+                )
+            line_payloads.append(
+                {
+                    "line_number": idx,
+                    "part_number": part.get("part_id"),
+                    "part_name": part.get("part_name") or str(part.get("part_id")),
+                    "quantity": qty,
+                    "material": None,
+                    "thickness": None,
+                    "flat_area": None,
+                    "cut_length": None,
+                    "hole_count": None,
+                    "bend_count": None,
+                    "finish": None,
+                    "weld_required": False,
+                    "assembly_required": False,
+                    "confidence": part.get("confidence") or {},
+                    "sources": part.get("sources") or {},
+                    "subtotal_no_margin": line_cost,
+                    "cost_breakdown": {
+                        "line_type": line_type,
+                        "item_unit_price": round(item_price.unit_price, 4),
+                        "item_cost": round(line_cost, 2),
+                        "supplier": item_price.supplier,
+                        "source_name": item_price.source_name,
+                    },
+                    "notes": part.get("notes"),
+                    "parent_part_number": part.get("parent_part_number"),
+                    "line_type": line_type,
+                    "item_type": item_type,
+                    "bom_level": int(part.get("bom_level") or 0),
+                    "item_number": part.get("item_number"),
+                    "quantity_per_assembly": part.get("quantity_per_assembly"),
+                    "unit_of_measure": part.get("unit_of_measure"),
+                }
+            )
+            confidence_values.append(0.65 if not item_price.is_fallback else 0.45)
+            continue
+
+        if line_type == "reference":
+            line_payloads.append(
+                {
+                    "line_number": idx,
+                    "part_number": part.get("part_id"),
+                    "part_name": part.get("part_name") or str(part.get("part_id")),
+                    "quantity": qty,
+                    "material": None,
+                    "thickness": None,
+                    "flat_area": None,
+                    "cut_length": None,
+                    "hole_count": None,
+                    "bend_count": None,
+                    "finish": None,
+                    "weld_required": False,
+                    "assembly_required": False,
+                    "confidence": part.get("confidence") or {},
+                    "sources": part.get("sources") or {},
+                    "subtotal_no_margin": 0.0,
+                    "cost_breakdown": {"line_type": "reference", "item_cost": 0.0},
+                    "notes": part.get("notes"),
+                    "parent_part_number": part.get("parent_part_number"),
+                    "line_type": line_type,
+                    "item_type": item_type,
+                    "bom_level": int(part.get("bom_level") or 0),
+                    "item_number": part.get("item_number"),
+                    "quantity_per_assembly": part.get("quantity_per_assembly"),
+                    "unit_of_measure": part.get("unit_of_measure"),
+                }
+            )
+            continue
+
+        if line_type in {"process", "assembly"}:
+            assembly_labor = calc_weld_assembly_cost(
+                weld_required=False,
+                assembly_required=line_type == "assembly",
+                quantity=max(qty, 1.0),
+                weld_minutes_per_part=0.0,
+                assembly_minutes_per_part=config.assembly_minutes_per_part,
+                welding_rate_per_hour=config.welding_rate_per_hour,
+                assembly_rate_per_hour=config.assembly_rate_per_hour,
+            )
+            process_shop_oh = calc_shop_labor_oh(assembly_labor["cost"], config.shop_overhead_pct)
+            process_total = assembly_labor["cost"] + process_shop_oh
+            shop_labor_oh_total += process_total
+            total_shop_hours += assembly_labor["hours"]
+            line_payloads.append(
+                {
+                    "line_number": idx,
+                    "part_number": part.get("part_id"),
+                    "part_name": part.get("part_name") or str(part.get("part_id")),
+                    "quantity": qty,
+                    "material": None,
+                    "thickness": None,
+                    "flat_area": None,
+                    "cut_length": None,
+                    "hole_count": None,
+                    "bend_count": None,
+                    "finish": part.get("finish"),
+                    "weld_required": False,
+                    "assembly_required": line_type == "assembly",
+                    "confidence": part.get("confidence") or {},
+                    "sources": part.get("sources") or {},
+                    "subtotal_no_margin": process_total,
+                    "cost_breakdown": {
+                        "line_type": line_type,
+                        "assembly_hours": round(assembly_labor["hours"], 4),
+                        "assembly_labor_cost": round(assembly_labor["cost"], 2),
+                        "shop_labor_oh": round(process_shop_oh, 2),
+                    },
+                    "notes": part.get("notes"),
+                    "parent_part_number": part.get("parent_part_number"),
+                    "line_type": line_type,
+                    "item_type": item_type,
+                    "bom_level": int(part.get("bom_level") or 0),
+                    "item_number": part.get("item_number"),
+                    "quantity_per_assembly": part.get("quantity_per_assembly"),
+                    "unit_of_measure": part.get("unit_of_measure"),
+                }
+            )
+            confidence_values.append(0.7 if line_type == "assembly" else 0.55)
+            continue
 
         material_price = pricing.get_material_price(
             db=db,
@@ -463,26 +610,58 @@ def generate_estimate(
             thickness_in=thickness_in,
             material_key=material_key,
             quantity=qty,
+            density_override=material_price.density_lb_per_cubic_inch,
+        )
+        scrap_factor = calc_dynamic_scrap_factor(
+            base_scrap_factor=config.scrap_factor,
+            quantity=qty,
+            flat_area_in2=flat_area,
+            cut_length_in=cut_length,
+            bend_count=bend_count,
+            hole_count=hole_count,
+            geometry_confidence=geometry_confidence,
         )
         part_material_cost = calc_material_cost(
             required_weight_lbs=required_weight,
             unit_price_per_lb=material_price.unit_price,
-            scrap_factor=config.scrap_factor,
+            scrap_factor=scrap_factor,
+            material_markup_pct=material_price.material_markup_pct or 0.0,
         )
 
+        pierce_count = (hole_count or 0) + (1 if cut_length > 0 else 0)
         cutting = calc_cutting_cost(
             cut_length_in=cut_length,
             quantity=qty,
             material_key=material_key,
             machine_rate_per_hour=config.laser_rate_per_hour,
             setup_minutes=config.laser_setup_minutes,
+            thickness_in=thickness_in,
+            pierce_count=pierce_count,
+            pierce_time_seconds=config.laser_pierce_seconds,
+            min_charge=config.laser_min_charge,
         )
+        if material_price.machinability_factor and material_price.machinability_factor > 0:
+            cutting = calc_cutting_cost(
+                cut_length_in=cut_length,
+                quantity=qty,
+                material_key=material_key,
+                machine_rate_per_hour=config.laser_rate_per_hour,
+                setup_minutes=config.laser_setup_minutes,
+                cut_speed_ipm_override=cutting["speed_ipm"] * material_price.machinability_factor,
+                thickness_in=None,
+                pierce_count=pierce_count,
+                pierce_time_seconds=config.laser_pierce_seconds,
+                min_charge=config.laser_min_charge,
+            )
         bending = calc_bending_cost(
             bend_count=bend_count,
             quantity=qty,
             sec_per_bend=config.sec_per_bend,
             setup_minutes=config.bend_setup_minutes,
             brake_rate_per_hour=config.brake_rate_per_hour,
+            unique_bend_groups=estimate_unique_bend_groups(bend_count),
+            complexity_multiplier=1.15 if bend_count >= 8 else 1.0,
+            min_charge=config.brake_min_charge,
         )
         weld_assembly = calc_weld_assembly_cost(
             weld_required=bool(part.get("weld_required")),
@@ -497,24 +676,47 @@ def generate_estimate(
         part_shop_labor_oh = calc_shop_labor_oh(direct_labor, config.shop_overhead_pct)
 
         finish_rate = None
+        finish_price_per_part = 0.0
+        finish_price_per_lb = 0.0
+        finish_min_charge = config.finish_min_charge
         finish_days = 0
+        finish_matched = False
         if finish_name:
             finish = (
                 db.query(QuoteFinish)
-                .filter(QuoteFinish.is_active.is_(True), QuoteFinish.name.ilike(f"%{finish_name}%"))
+                .filter(
+                    QuoteFinish.company_id == company_id,
+                    QuoteFinish.is_active.is_(True),
+                    QuoteFinish.name.ilike(f"%{finish_name}%"),
+                )
                 .first()
             )
+            finish_matched = bool(finish)
             if finish and finish.price_per_sqft and finish.price_per_sqft > 0:
                 finish_rate = float(finish.price_per_sqft)
+            if finish and finish.price_per_part and finish.price_per_part > 0:
+                finish_price_per_part = float(finish.price_per_part)
+            if finish and finish.price_per_lb and finish.price_per_lb > 0:
+                finish_price_per_lb = float(finish.price_per_lb)
+            if finish and finish.minimum_charge and finish.minimum_charge > 0:
+                finish_min_charge = max(finish_min_charge, float(finish.minimum_charge))
             if finish and finish.additional_days:
                 finish_days = int(finish.additional_days)
+        effective_finish_rate = finish_rate
+        if effective_finish_rate is None:
+            has_non_area_finish_price = finish_matched and (finish_price_per_part > 0 or finish_price_per_lb > 0)
+            effective_finish_rate = 0.0 if has_non_area_finish_price else config.finish_default_rate_per_sqft
         part_outside_cost = calc_finishing_cost(
             finish=finish_name,
             flat_area_in2=flat_area,
             quantity=qty,
-            finish_rate_per_sqft=finish_rate or config.finish_default_rate_per_sqft,
+            finish_rate_per_sqft=effective_finish_rate,
+            price_per_part=finish_price_per_part,
+            price_per_lb=finish_price_per_lb,
+            required_weight_lbs=required_weight,
+            minimum_charge=finish_min_charge,
         )
-        if finish_name and not finish_rate:
+        if finish_name and not finish_matched:
             assumptions.append(
                 {
                     "part_id": part.get("part_id"),
@@ -552,14 +754,40 @@ def generate_estimate(
                 "confidence": part.get("confidence") or {},
                 "sources": part.get("sources") or {},
                 "subtotal_no_margin": part_subtotal_no_margin,
+                "cost_breakdown": {
+                    "required_weight_lbs": round(required_weight, 4),
+                    "material_unit_price_per_lb": round(material_price.unit_price, 4),
+                    "material_markup_pct": round(material_price.material_markup_pct or 0.0, 3),
+                    "scrap_factor": round(scrap_factor, 4),
+                    "material_cost": round(part_material_cost, 2),
+                    "cutting_hours": round(cutting["hours"], 4),
+                    "cutting_speed_ipm": round(cutting["speed_ipm"], 3),
+                    "pierce_count": pierce_count,
+                    "cutting_cost": round(cutting["cost"], 2),
+                    "cutting_minimum_applied": round(cutting.get("minimum_charge_applied", 0.0), 2),
+                    "bending_hours": round(bending["hours"], 4),
+                    "unique_bend_groups": int(bending.get("unique_bend_groups", 0)),
+                    "bending_cost": round(bending["cost"], 2),
+                    "bending_minimum_applied": round(bending.get("minimum_charge_applied", 0.0), 2),
+                    "weld_assembly_hours": round(weld_assembly["hours"], 4),
+                    "weld_assembly_cost": round(weld_assembly["cost"], 2),
+                    "finish_cost": round(part_outside_cost, 2),
+                    "shop_labor_oh": round(part_shop_labor_oh, 2),
+                },
                 "notes": part.get("notes"),
+                "parent_part_number": part.get("parent_part_number"),
+                "line_type": line_type,
+                "item_type": item_type,
+                "bom_level": int(part.get("bom_level") or 0),
+                "item_number": part.get("item_number"),
+                "quantity_per_assembly": part.get("quantity_per_assembly"),
+                "unit_of_measure": part.get("unit_of_measure"),
             }
         )
         part_conf = (sum((part.get("confidence") or {}).values()) / 4.0) if part.get("confidence") else 0.0
         confidence_values.append(part_conf)
 
-    hardware_total = 0.0
-    consumables_factor_pct = _get_setting_number(db, "rfq_consumables_factor_pct", 8.0)
+    consumables_factor_pct = _get_setting_number(db, "rfq_consumables_factor_pct", 8.0, company_id)
     for hardware in parsed["hardware_items"]:
         qty = float(hardware.get("qty") or 1.0)
         hardware_price = pricing.get_hardware_price(
@@ -586,6 +814,18 @@ def generate_estimate(
     subtotal_no_margin = material_total + outside_total + shop_labor_oh_total + hardware_consumables_total
     margin_total = calc_margin(subtotal_no_margin, config.target_margin_pct)
     grand_total = subtotal_no_margin + margin_total
+    minimum_order_adjustment = max(0.0, minimum_order_charge - grand_total)
+    if minimum_order_adjustment > 0:
+        margin_total += minimum_order_adjustment
+        grand_total += minimum_order_adjustment
+        assumptions.append(
+            {
+                "part_id": None,
+                "field": "minimum_order_charge",
+                "assumption": f"Applied minimum order charge of ${minimum_order_charge:.2f}.",
+                "confidence": 0.95,
+            }
+        )
 
     for payload in line_payloads:
         proportion = (payload["subtotal_no_margin"] / subtotal_no_margin) if subtotal_no_margin > 0 else 0.0
@@ -640,6 +880,13 @@ def generate_estimate(
                 weld_required=payload.get("weld_required"),
                 assembly_required=payload.get("assembly_required"),
                 part_total=payload.get("part_total") or 0.0,
+                parent_part_number=payload.get("parent_part_number"),
+                line_type=payload.get("line_type"),
+                item_type=payload.get("item_type"),
+                bom_level=payload.get("bom_level") or 0,
+                item_number=payload.get("item_number"),
+                quantity_per_assembly=payload.get("quantity_per_assembly"),
+                unit_of_measure=payload.get("unit_of_measure"),
                 confidence=payload.get("confidence"),
                 sources=payload.get("sources"),
                 notes=payload.get("notes"),
@@ -673,6 +920,9 @@ def generate_estimate(
         "total_shop_hours": round(total_shop_hours, 3),
         "outside_service_days": max_outside_days,
         "target_margin_pct": config.target_margin_pct,
+        "minimum_order_charge": round(minimum_order_charge, 2),
+        "minimum_order_adjustment": round(minimum_order_adjustment, 2),
+        "line_breakdowns": [payload.get("cost_breakdown", {}) for payload in line_payloads],
     }
 
     package.status = "estimated"
@@ -730,6 +980,14 @@ def generate_estimate(
                 part_total=item.part_total,
                 confidence=item.confidence or {},
                 sources=item.sources or {},
+                notes=item.notes,
+                parent_part_number=item.parent_part_number,
+                line_type=item.line_type,
+                item_type=item.item_type,
+                bom_level=item.bom_level or 0,
+                item_number=item.item_number,
+                quantity_per_assembly=item.quantity_per_assembly,
+                unit_of_measure=item.unit_of_measure,
             )
             for item in summaries
         ],
@@ -859,6 +1117,13 @@ def export_internal_estimate(
                 "weld_required": line.weld_required,
                 "assembly_required": line.assembly_required,
                 "part_total": line.part_total,
+                "parent_part_number": line.parent_part_number,
+                "line_type": line.line_type,
+                "item_type": line.item_type,
+                "bom_level": line.bom_level or 0,
+                "item_number": line.item_number,
+                "quantity_per_assembly": line.quantity_per_assembly,
+                "unit_of_measure": line.unit_of_measure,
                 "confidence": line.confidence,
                 "sources": line.sources,
                 "notes": line.notes,
