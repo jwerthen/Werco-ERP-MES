@@ -9,6 +9,8 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List
 
+from app.services.llm_model_router import LLMTaskContext, select_anthropic_model
+
 logger = logging.getLogger(__name__)
 
 # Hard cap on Anthropic API calls. Without this the SDK can hang an
@@ -141,9 +143,12 @@ Return ONLY the JSON object, no other text."""
 
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=LLM_API_TIMEOUT_SECONDS)
+        model_decision = select_anthropic_model(
+            LLMTaskContext(task="bom_extraction", input_chars=len(pdf_text), is_ocr=is_ocr)
+        )
 
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=model_decision.model,
             max_tokens=4096,
             messages=[{"role": "user", "content": user_prompt}],
             system=SYSTEM_PROMPT,
@@ -162,10 +167,16 @@ Return ONLY the JSON object, no other text."""
         result["_extraction_metadata"] = {
             "extracted_at": datetime.utcnow().isoformat(),
             "source_was_ocr": is_ocr,
-            "model": "claude-sonnet-4-20250514",
+            "model": model_decision.model,
+            "model_tier": model_decision.tier.value,
+            "model_selection_reason": model_decision.reason,
         }
 
-        logger.info(f"LLM BOM extraction successful: {len(result.get('items', []))} items")
+        logger.info(
+            "LLM BOM extraction successful: %s items using %s",
+            len(result.get("items", [])),
+            model_decision.model,
+        )
         return result
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response as JSON: {e}")
@@ -241,9 +252,17 @@ Return ONLY the JSON object, no other text."""
 
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=LLM_API_TIMEOUT_SECONDS)
+        model_decision = select_anthropic_model(
+            LLMTaskContext(
+                task="po_extraction",
+                input_chars=len(pdf_text),
+                is_ocr=is_ocr,
+                document_type=document_type,
+            )
+        )
 
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=model_decision.model,
             max_tokens=4096,
             messages=[{"role": "user", "content": user_prompt}],
             system=SYSTEM_PROMPT,
@@ -265,10 +284,16 @@ Return ONLY the JSON object, no other text."""
         result["_extraction_metadata"] = {
             "extracted_at": datetime.utcnow().isoformat(),
             "source_was_ocr": is_ocr,
-            "model": "claude-sonnet-4-20250514",
+            "model": model_decision.model,
+            "model_tier": model_decision.tier.value,
+            "model_selection_reason": model_decision.reason,
         }
 
-        logger.info(f"LLM extraction successful: {len(result.get('line_items', []))} line items")
+        logger.info(
+            "LLM extraction successful: %s line items using %s",
+            len(result.get("line_items", [])),
+            model_decision.model,
+        )
         return result
 
     except json.JSONDecodeError as e:

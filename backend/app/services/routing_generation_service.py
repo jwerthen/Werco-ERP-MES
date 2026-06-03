@@ -11,6 +11,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from app.services.llm_model_router import LLMTaskContext, select_anthropic_model
+
 logger = logging.getLogger(__name__)
 
 # Fallback work center types. Runtime generation receives the tenant-configured
@@ -244,9 +246,18 @@ Return ONLY the JSON object, no other text."""
     try:
         client = anthropic.Anthropic(api_key=api_key)
 
-        model = os.getenv("ANTHROPIC_ROUTING_MODEL", "claude-sonnet-4-20250514")
+        model_decision = select_anthropic_model(
+            LLMTaskContext(
+                task="routing_generation",
+                input_chars=len(drawing_text),
+                is_ocr=is_ocr,
+                geometry=geometry,
+                learned_examples=bool(learned_examples_context),
+                is_assembly=is_assembly,
+            )
+        )
         message = client.messages.create(
-            model=model,
+            model=model_decision.model,
             max_tokens=4096,
             messages=[{"role": "user", "content": user_prompt}],
             system=ROUTING_SYSTEM_PROMPT,
@@ -266,10 +277,16 @@ Return ONLY the JSON object, no other text."""
         result["_extraction_metadata"] = {
             "extracted_at": datetime.utcnow().isoformat(),
             "source_was_ocr": is_ocr,
-            "model": model,
+            "model": model_decision.model,
+            "model_tier": model_decision.tier.value,
+            "model_selection_reason": model_decision.reason,
         }
 
-        logger.info(f"LLM routing extraction successful: {len(result.get('operations', []))} operations proposed")
+        logger.info(
+            "LLM routing extraction successful: %s operations proposed using %s",
+            len(result.get("operations", [])),
+            model_decision.model,
+        )
         return result
 
     except json.JSONDecodeError as e:

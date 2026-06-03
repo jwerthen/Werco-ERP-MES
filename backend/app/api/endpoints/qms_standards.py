@@ -31,6 +31,7 @@ from app.services.auto_evidence_service import (
     compute_overall_compliance,
     discover_evidence_for_clause,
 )
+from app.services.llm_model_router import LLMTaskContext, select_anthropic_model
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -181,8 +182,15 @@ Return ONLY a valid JSON array. No markdown, no explanations."""
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
+        model_decision = select_anthropic_model(
+            LLMTaskContext(
+                task="qms_clause_extraction",
+                input_chars=len(pdf_text),
+                max_output_tokens=16000,
+            )
+        )
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=model_decision.model,
             max_tokens=16000,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -235,7 +243,13 @@ Return ONLY a valid JSON array. No markdown, no explanations."""
     for c in clauses:
         db.refresh(c)
 
-    logger.info(f"Extracted {len(clauses)} clauses from PDF for standard {standard.name}")
+    logger.info(
+        "Extracted %s clauses from PDF for standard %s using %s (%s)",
+        len(clauses),
+        standard.name,
+        model_decision.model,
+        model_decision.reason,
+    )
     return clauses
 
 

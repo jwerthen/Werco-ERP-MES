@@ -343,6 +343,14 @@ class Settings(BaseSettings):
 
     # LLM Integration
     ANTHROPIC_API_KEY: Optional[str] = None
+    ANTHROPIC_MODEL_SELECTION: str = "auto"
+    ANTHROPIC_FAST_MODEL: str = "claude-haiku-4-5-20251001"
+    ANTHROPIC_DEFAULT_MODEL: str = "claude-sonnet-4-6"
+    ANTHROPIC_REASONING_MODEL: str = "claude-opus-4-8"
+    ANTHROPIC_BOM_MODEL: Optional[str] = None
+    ANTHROPIC_PO_MODEL: Optional[str] = None
+    ANTHROPIC_ROUTING_MODEL: Optional[str] = None
+    ANTHROPIC_QMS_MODEL: Optional[str] = None
     NOTION_TOKEN: Optional[str] = None
 
     # Email Configuration
