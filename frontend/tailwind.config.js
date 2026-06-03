@@ -71,30 +71,30 @@ module.exports = {
         // Surface colors - Foundry near-black instrument-panel palette.
         // 50-300 are background/border surfaces; 400-950 are text (inverted for dark).
         surface: {
-          50: '#10151e',   // raised surface / nested tiles
-          100: '#0c1017',  // card/panel backgrounds
-          200: '#1a212c',  // hairline borders, dividers
-          300: '#243044',  // heavier / emphasis borders
-          400: '#5b6677',  // muted text / labels
-          500: '#9aa7b8',  // secondary / body text
-          600: '#9aa7b8',  // body text
-          700: '#cbd5e1',  // primary text
-          800: '#e6edf3',  // headings
-          900: '#f1f5f9',  // strongest text
+          50: '#1b2330',   // raised surface / nested tiles
+          100: '#141b26',  // card/panel backgrounds
+          200: '#243042',  // hairline borders, dividers
+          300: '#32415a',  // heavier / emphasis borders
+          400: '#8a98ab',  // muted text / labels
+          500: '#b7c3d4',  // secondary / body text
+          600: '#c3cedd',  // body text
+          700: '#dbe2ec',  // primary text
+          800: '#f0f4f9',  // headings
+          900: '#f6f8fb',  // strongest text
           950: '#ffffff',  // maximum contrast text
         },
         // Foundry tactical accents (instrument-panel status palette)
         fd: {
-          canvas: '#080a0f',
-          panel: '#0c1017',
-          raised: '#10151e',
-          sunken: '#070910',
-          line: '#1a212c',
-          'line-bright': '#243044',
-          ink: '#e6edf3',
-          body: '#9aa7b8',
-          mute: '#5b6677',
-          faint: '#3f4856',
+          canvas: '#0d1117',
+          panel: '#141b26',
+          raised: '#1b2330',
+          sunken: '#0a0e15',
+          line: '#243042',
+          'line-bright': '#32415a',
+          ink: '#f0f4f9',
+          body: '#b7c3d4',
+          mute: '#8a98ab',
+          faint: '#616f82',
           blue: '#2f81f7',
           red: '#f04438',
           amber: '#d29922',

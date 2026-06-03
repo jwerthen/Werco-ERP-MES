@@ -13,10 +13,10 @@
   default: true;
   prefersdark: true;
   color-scheme: dark;
-  --color-base-100: #0c1017;   /* panels, cards */
-  --color-base-200: #080a0f;   /* canvas */
-  --color-base-300: #1a212c;   /* hairlines, raised */
-  --color-base-content: #e6edf3;
+  --color-base-100: #141b26;   /* panels, cards */
+  --color-base-200: #0d1117;   /* canvas */
+  --color-base-300: #243042;   /* hairlines, raised */
+  --color-base-content: #f0f4f9;
   --color-primary: #2f81f7;
   --color-primary-content: #04101f;
   --color-secondary: #1b4d9c;
@@ -48,16 +48,16 @@
    Source of truth for the ERP/MES "instrument panel" surface.
    ============================================ */
 :root {
-  --fd-canvas: #080a0f;
-  --fd-panel: #0c1017;
-  --fd-raised: #10151e;
-  --fd-sunken: #070910;
-  --fd-line: #1a212c;
-  --fd-line-bright: #243044;
-  --fd-ink: #e6edf3;
-  --fd-body: #9aa7b8;
-  --fd-mute: #5b6677;
-  --fd-faint: #3f4856;
+  --fd-canvas: #0d1117;
+  --fd-panel: #141b26;
+  --fd-raised: #1b2330;
+  --fd-sunken: #0a0e15;
+  --fd-line: #243042;
+  --fd-line-bright: #32415a;
+  --fd-ink: #f0f4f9;
+  --fd-body: #b7c3d4;
+  --fd-mute: #8a98ab;
+  --fd-faint: #616f82;
   --fd-blue: #2f81f7;
   --fd-blue-glow: rgba(47, 129, 247, 0.5);
   --fd-red: #f04438;
