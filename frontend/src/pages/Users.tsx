@@ -6,6 +6,7 @@ import { PlusIcon, PencilIcon, KeyIcon, UserMinusIcon, UserPlusIcon, ArrowUpTray
 
 interface UserData {
   id: number;
+  version?: number;
   email: string;
   employee_id: string;
   first_name: string;
@@ -53,6 +54,27 @@ const roleLabels: Record<UserRole, string> = {
   quality: 'Quality',
   shipping: 'Shipping',
   viewer: 'View Only',
+};
+
+const passwordRequirements = [
+  'At least 12 characters',
+  'Uppercase and lowercase letters',
+  'At least one number',
+  'At least one special character',
+  'No common words like password, admin, or welcome',
+];
+
+const getApiErrorMessage = (err: any, fallback: string) => {
+  const detail = err.response?.data?.detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        const path = Array.isArray(item.loc) ? item.loc.filter((part: string) => part !== 'body').join('.') : '';
+        return path ? `${path}: ${item.msg}` : item.msg;
+      })
+      .join('\n');
+  }
+  return detail || fallback;
 };
 
 export default function Users() {
@@ -104,7 +126,10 @@ export default function Users() {
       if (editingUser) {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { password: _password, employee_id: _employee_id, ...updateData } = formData;
-        await api.updateUser(editingUser.id, updateData);
+        await api.updateUser(editingUser.id, {
+          ...updateData,
+          version: editingUser.version ?? 0,
+        });
       } else {
         await api.createUser(formData);
       }
@@ -112,7 +137,7 @@ export default function Users() {
       resetForm();
       loadUsers();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save user');
+      alert(getApiErrorMessage(err, 'Failed to save user'));
     }
   };
 
@@ -126,7 +151,7 @@ export default function Users() {
       setNewPassword('');
       setSelectedUserId(null);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to reset password');
+      alert(getApiErrorMessage(err, 'Failed to reset password'));
     }
   };
 
@@ -139,7 +164,7 @@ export default function Users() {
       }
       loadUsers();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to update user status');
+      alert(getApiErrorMessage(err, 'Failed to update user status'));
     }
   };
 
@@ -189,7 +214,7 @@ export default function Users() {
         await loadUsers();
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to import CSV');
+      alert(getApiErrorMessage(err, 'Failed to import CSV'));
     } finally {
       setImporting(false);
     }
@@ -423,8 +448,14 @@ export default function Users() {
                     onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                     className="input"
                     required
-                    minLength={6}
+                    minLength={12}
+                    autoComplete="new-password"
                   />
+                  <ul className="mt-2 space-y-1 text-xs text-slate-400">
+                    {passwordRequirements.map((requirement) => (
+                      <li key={requirement}>{requirement}</li>
+                    ))}
+                  </ul>
                 </div>
               )}
 
@@ -484,8 +515,14 @@ export default function Users() {
                   onChange={(e) => setNewPassword(e.target.value)}
                   className="input"
                   required
-                  minLength={6}
+                  minLength={12}
+                  autoComplete="new-password"
                 />
+                <ul className="mt-2 space-y-1 text-xs text-slate-400">
+                  {passwordRequirements.map((requirement) => (
+                    <li key={requirement}>{requirement}</li>
+                  ))}
+                </ul>
               </div>
               <div className="flex justify-end gap-3">
                 <button type="button" onClick={() => setShowPasswordModal(false)} className="btn-secondary">
