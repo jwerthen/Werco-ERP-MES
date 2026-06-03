@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import { ImportPreview, ImportItem, ImportAssembly } from '../../types/engineering';
 import { useToast } from '../ui/Toast';
-import { XMarkIcon } from '@heroicons/react/24/outline';
+import { ArrowUturnLeftIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline';
 
 interface Props {
   onComplete: () => Promise<void>;
@@ -11,6 +11,7 @@ interface Props {
 }
 
 type Step = 'upload' | 'preview';
+type RemovedImportItem = { item: ImportItem; index: number };
 
 const COLUMN_FIELDS = [
   { key: 'line_number', label: 'Line #' },
@@ -36,6 +37,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [columnMap, setColumnMap] = useState<Record<string, number | null>>({});
   const [derivedItems, setDerivedItems] = useState<ImportItem[]>([]);
+  const [removedItems, setRemovedItems] = useState<RemovedImportItem[]>([]);
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -87,6 +89,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
       } else {
         setDerivedItems(result.items || []);
       }
+      setRemovedItems([]);
       setStep('preview');
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to generate preview');
@@ -106,10 +109,39 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
     const nextMap = { ...columnMap, [field]: idx };
     setColumnMap(nextMap);
     setDerivedItems(buildItemsFromRaw(preview.raw_columns, preview.raw_rows, nextMap));
+    setRemovedItems([]);
+  };
+
+  const updateDerivedItem = (index: number, patch: Partial<ImportItem>) => {
+    setDerivedItems(items => items.map((item, idx) => (
+      idx === index ? { ...item, ...patch } : item
+    )));
+  };
+
+  const removeDerivedItem = (index: number) => {
+    const item = derivedItems[index];
+    if (!item) return;
+    setDerivedItems(items => items.filter((_, idx) => idx !== index));
+    setRemovedItems(items => [{ item, index }, ...items]);
+  };
+
+  const restoreLastRemovedItem = () => {
+    const lastRemoved = removedItems[0];
+    if (!lastRemoved) return;
+    setDerivedItems(items => {
+      const next = [...items];
+      next.splice(Math.min(lastRemoved.index, next.length), 0, lastRemoved.item);
+      return next;
+    });
+    setRemovedItems(items => items.slice(1));
   };
 
   const handleCommit = async () => {
     if (!preview) return;
+    if (preview.document_type === 'bom' && derivedItems.length === 0) {
+      showToast('error', 'Add at least one BOM line before creating');
+      return;
+    }
     setLoading(true);
     try {
       const result = await api.commitBOMImport({
@@ -254,71 +286,123 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
 
               {/* Items Table */}
               {preview.document_type === 'bom' && (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-slate-700 text-sm">
-                    <thead className="bg-slate-800">
-                      <tr>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Line</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part #</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Description</th>
-                        <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">UOM</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Line Type</th>
-                      </tr>
-                    </thead>
-                    <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                      {displayItems.map((item, idx) => (
-                        <tr key={idx}>
-                          <td className="px-3 py-2">
-                            <input className="input w-16 py-1 text-sm" type="number" value={item.line_number || (idx + 1) * 10}
-                              onChange={e => { const next = [...displayItems]; next[idx] = { ...next[idx], line_number: parseInt(e.target.value) }; setDerivedItems(next); }}
-                            />
-                          </td>
-                          <td className="px-3 py-2">
-                            <input className="input py-1 text-sm w-32" value={item.part_number || ''}
-                              onChange={e => { const next = [...displayItems]; next[idx] = { ...next[idx], part_number: e.target.value }; setDerivedItems(next); }}
-                            />
-                          </td>
-                          <td className="px-3 py-2">
-                            <input className="input py-1 text-sm" value={item.description || ''}
-                              onChange={e => { const next = [...displayItems]; next[idx] = { ...next[idx], description: e.target.value }; setDerivedItems(next); }}
-                            />
-                          </td>
-                          <td className="px-3 py-2">
-                            <input className="input w-20 py-1 text-sm text-right" type="number" step="1" value={item.quantity ?? 1}
-                              onChange={e => { const next = [...displayItems]; next[idx] = { ...next[idx], quantity: parseFloat(e.target.value) }; setDerivedItems(next); }}
-                            />
-                          </td>
-                          <td className="px-3 py-2">
-                            <input className="input w-16 py-1 text-sm" value={item.unit_of_measure || ''}
-                              onChange={e => { const next = [...displayItems]; next[idx] = { ...next[idx], unit_of_measure: e.target.value }; setDerivedItems(next); }}
-                            />
-                          </td>
-                          <td className="px-3 py-2">
-                            <select className="input py-1 text-sm" value={item.item_type || 'buy'}
-                              onChange={e => { const next = [...displayItems]; next[idx] = { ...next[idx], item_type: e.target.value }; setDerivedItems(next); }}>
-                              <option value="make">Make</option>
-                              <option value="buy">Buy</option>
-                              <option value="phantom">Phantom</option>
-                            </select>
-                          </td>
-                          <td className="px-3 py-2">
-                            <select className="input py-1 text-sm" value={item.line_type || 'component'}
-                              onChange={e => { const next = [...displayItems]; next[idx] = { ...next[idx], line_type: e.target.value as any }; setDerivedItems(next); }}>
-                              <option value="component">Component</option>
-                              <option value="hardware">Hardware</option>
-                              <option value="consumable">Consumable</option>
-                              <option value="reference">Reference</option>
-                            </select>
-                          </td>
+                <div className="space-y-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <p className="text-sm text-slate-400">
+                      {displayItems.length} line{displayItems.length !== 1 ? 's' : ''} ready
+                      {removedItems.length > 0 && ` · ${removedItems.length} removed`}
+                    </p>
+                    {removedItems.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={restoreLastRemovedItem}
+                        className="btn-secondary btn-sm inline-flex items-center gap-1 self-start sm:self-auto"
+                      >
+                        <ArrowUturnLeftIcon className="h-4 w-4" />
+                        Undo Remove
+                      </button>
+                    )}
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-slate-700 text-sm">
+                      <thead className="bg-slate-800">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Line</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part #</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Description</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">UOM</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Line Type</th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase">Remove</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {displayItems.length === 0 && (
-                    <p className="text-sm text-slate-400 py-4 text-center">No BOM items detected.</p>
-                  )}
+                      </thead>
+                      <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                        {displayItems.map((item, idx) => {
+                          const lineNumber = item.line_number || (idx + 1) * 10;
+                          return (
+                            <tr key={`${lineNumber}-${item.part_number || 'line'}-${idx}`}>
+                              <td className="px-3 py-2">
+                                <input
+                                  className="input w-16 py-1 text-sm"
+                                  type="number"
+                                  value={lineNumber}
+                                  onChange={e => updateDerivedItem(idx, { line_number: parseInt(e.target.value) })}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  className="input py-1 text-sm w-32"
+                                  value={item.part_number || ''}
+                                  onChange={e => updateDerivedItem(idx, { part_number: e.target.value })}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  className="input py-1 text-sm"
+                                  value={item.description || ''}
+                                  onChange={e => updateDerivedItem(idx, { description: e.target.value })}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  className="input w-20 py-1 text-sm text-right"
+                                  type="number"
+                                  step="1"
+                                  value={item.quantity ?? 1}
+                                  onChange={e => updateDerivedItem(idx, { quantity: parseFloat(e.target.value) })}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  className="input w-16 py-1 text-sm"
+                                  value={item.unit_of_measure || ''}
+                                  onChange={e => updateDerivedItem(idx, { unit_of_measure: e.target.value })}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <select
+                                  className="input py-1 text-sm"
+                                  value={item.item_type || 'buy'}
+                                  onChange={e => updateDerivedItem(idx, { item_type: e.target.value })}
+                                >
+                                  <option value="make">Make</option>
+                                  <option value="buy">Buy</option>
+                                  <option value="phantom">Phantom</option>
+                                </select>
+                              </td>
+                              <td className="px-3 py-2">
+                                <select
+                                  className="input py-1 text-sm"
+                                  value={item.line_type || 'component'}
+                                  onChange={e => updateDerivedItem(idx, { line_type: e.target.value as any })}
+                                >
+                                  <option value="component">Component</option>
+                                  <option value="hardware">Hardware</option>
+                                  <option value="consumable">Consumable</option>
+                                  <option value="reference">Reference</option>
+                                </select>
+                              </td>
+                              <td className="px-3 py-2 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => removeDerivedItem(idx)}
+                                  className="rounded-lg p-2 text-slate-500 hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-red-500/40"
+                                  title={`Remove line ${lineNumber}`}
+                                  aria-label={`Remove line ${lineNumber}`}
+                                >
+                                  <TrashIcon className="h-4 w-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    {displayItems.length === 0 && (
+                      <p className="text-sm text-slate-400 py-4 text-center">No BOM items selected.</p>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -338,7 +422,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
           {step === 'preview' && (
             <>
               <button type="button" onClick={() => setStep('upload')} className="btn-secondary">Back</button>
-              <button type="button" onClick={handleCommit} className="btn-primary" disabled={loading}>
+              <button type="button" onClick={handleCommit} className="btn-primary" disabled={loading || (preview?.document_type === 'bom' && displayItems.length === 0)}>
                 {loading ? 'Creating...' : 'Create'}
               </button>
             </>
