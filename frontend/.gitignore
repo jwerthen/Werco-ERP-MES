@@ -1,1 +1,4 @@
 .vercel
+.browser-harness/
+playwright-report/
+test-results/

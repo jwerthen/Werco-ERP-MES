@@ -20,4 +20,9 @@ Use the `preview_*` tools, not Bash, to verify:
 3. `preview_snapshot` to confirm content/structure; `preview_click`/`preview_fill` + snapshot to test interactions; `preview_resize` for responsive/dark behavior.
 4. Share a `preview_screenshot` as proof for visual changes.
 
+When the `preview_*` tools aren't available — e.g. the `landing/` site, or any local
+service — fall back to the Bash browser harness (`npm run harness -- screenshot|snapshot|logs|pdf <url>`,
+see `docs/BROWSER_HARNESS.md`). It is read-only/unauthenticated and only reaches
+localhost/loopback (any port) and `*.wercomfg.app`. `preview_*` stays the primary path.
+
 Run `npm run type-check` and `npm run lint` before finishing, and add/adjust Jest or Playwright tests for meaningful behavior. Report what you changed and the proof you captured.

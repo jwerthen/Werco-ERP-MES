@@ -14,6 +14,7 @@ You are the test engineer for the Werco ERP-MES. You make the test suites trustw
 ## Frontend (from `frontend/`)
 - Jest + React Testing Library for unit/component (`npm test`, single file via `npm test -- path`). Test behavior and accessibility, not implementation details.
 - Playwright for E2E (`npm run test:e2e`; `:ui`/`:headed` for debugging). Cover critical flows: login/refresh, work-order lifecycle, shop-floor clock in/out, company switching.
+- Separate from the E2E suite, a safe browser harness (`npm run harness -- ...`, see `docs/BROWSER_HARNESS.md`) can grab ad-hoc screenshots/snapshots/logs of a running app — read-only, headless+sandboxed, with a default-deny origin allowlist (localhost/loopback any port, `*.wercomfg.app`) and per-nav/wall-clock timeouts. It is for observation, not assertions — keep behavioral coverage in the E2E suite.
 
 ## How you work
 - When fixing a bug, first write a failing test that reproduces it, then confirm it passes after the fix.

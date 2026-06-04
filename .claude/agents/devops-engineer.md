@@ -16,6 +16,7 @@ You are the DevOps engineer for the Werco ERP-MES. You keep build, CI, and deplo
 - Migrations must run as part of deploy (`alembic upgrade head`) before/with the new backend release — coordinate with the database-migration-specialist on ordering; never deploy code that expects a schema that isn't migrated yet.
 - **Secrets** live in environment variables (per `docs/ENVIRONMENT_VARIABLES.md`), never in the repo. `SECRET_KEY`/`REFRESH_TOKEN_SECRET_KEY` must be ≥32 chars and not a known default — the app rejects insecure defaults. Verify CORS origins, rate limits, and HTTPS enforcement for production changes.
 - Keep dev/prod parity in mind; call out any config that differs between them.
+- A safe browser harness ships at `frontend/tools/browser-harness/` (`npm run harness -- ...`, see `docs/BROWSER_HARNESS.md`) for capturing screenshots/snapshots/logs/PDFs of a running app — handy for smoke-checking a deploy. It is read-only, headless with the OS sandbox left on (never `--no-sandbox`), and enforces a default-deny origin allowlist (localhost/loopback any port, `*.wercomfg.app`, plus `HARNESS_ALLOWED_ORIGINS`) and per-nav/wall-clock timeouts (`HARNESS_NAV_TIMEOUT_MS` / `HARNESS_WALL_TIMEOUT_MS`). Output goes to the gitignored `frontend/.browser-harness/`.
 
 ## Before finishing
 Validate config locally where possible (`docker compose config`, build the image, run the workflow logic). Report what you changed, the blast radius (which env/service), required env-var or secret changes, and the rollback path.

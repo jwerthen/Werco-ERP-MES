@@ -68,6 +68,10 @@ npm run test:e2e       # Playwright E2E (test:e2e:ui / test:e2e:headed for debug
 npm run lint           # eslint src --ext .ts,.tsx  (lint:fix to autofix)
 npm run type-check     # tsc --noEmit
 npm run format         # prettier
+
+# Safe browser harness — headless-Chromium screenshot/snapshot/logs/pdf of a running app.
+# Fixed subcommands, default-deny origin allowlist, sandboxed output. See docs/BROWSER_HARNESS.md.
+npm run harness -- screenshot http://localhost:5173
 ```
 
 ### Full stack
@@ -129,7 +133,7 @@ There are 37+ Alembic versions over live, multi-tenant data. When adding a migra
 
 ## Where to look for operational context
 
-`docs/` holds the runbooks that aren't obvious from code: `RBAC_PERMISSIONS.md` (the role model), `CMMC_LEVEL_2_COMPLIANCE.md`, `AI_QUOTING_AGENT_RUNBOOK.md` + `IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md` (the Anthropic-powered RFQ/quoting feature), `DEPLOYMENT.md` / `RAILWAY_DEPLOYMENT.md`, `ENVIRONMENT_VARIABLES.md`, `API.md`, and `DEVELOPMENT.md`.
+`docs/` holds the runbooks that aren't obvious from code: `RBAC_PERMISSIONS.md` (the role model), `CMMC_LEVEL_2_COMPLIANCE.md`, `AI_QUOTING_AGENT_RUNBOOK.md` + `IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md` (the Anthropic-powered RFQ/quoting feature), `DEPLOYMENT.md` / `RAILWAY_DEPLOYMENT.md`, `ENVIRONMENT_VARIABLES.md`, `API.md`, `DEVELOPMENT.md`, and `BROWSER_HARNESS.md` (the safe headless-Chromium CLI for screenshots/snapshots/logs/PDFs of a running app).
 
 ## Conventions worth matching
 
