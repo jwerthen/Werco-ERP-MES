@@ -9,12 +9,17 @@ import { useAuth } from '../context/AuthContext';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ArrowLeftIcon,
+  ArrowDownTrayIcon,
   PlayIcon,
   CheckCircleIcon,
   ExclamationTriangleIcon,
   PrinterIcon,
   CubeIcon,
   TrashIcon,
+  ArrowUpTrayIcon,
+  DocumentTextIcon,
+  EyeIcon,
+  PaperClipIcon,
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
@@ -69,8 +74,49 @@ interface ActiveShopUser {
   entry_type?: string;
 }
 
+interface LaserNestPreview {
+  package_name: string;
+  nest_count: number;
+  total_planned_runs: number;
+  nests: {
+    nest_name: string;
+    cnc_file_name: string;
+    planned_runs: number;
+    material?: string | null;
+    thickness?: string | null;
+    sheet_size?: string | null;
+  }[];
+}
+
+interface WorkOrderDocument {
+  id: number;
+  document_number: string;
+  revision: string;
+  title: string;
+  document_type: string;
+  description?: string | null;
+  part_id?: number | null;
+  work_order_id?: number | null;
+  vendor_id?: number | null;
+  file_name?: string | null;
+  file_size?: number | null;
+  mime_type?: string | null;
+  status: string;
+  created_at: string;
+}
+
 const formatDateTimeCT = (value?: string) =>
   formatCentralDateTime(value, { timeZoneName: 'short' });
+
+const isPdfDocument = (document: WorkOrderDocument) =>
+  document.mime_type === 'application/pdf' || Boolean(document.file_name?.toLowerCase().endsWith('.pdf'));
+
+const formatFileSize = (bytes?: number | null) => {
+  if (!bytes) return '-';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+};
 
 const operationProgressKey = (op: WorkOrderOperation) => {
   if (op.sequence !== undefined && op.sequence !== null) {
@@ -172,6 +218,7 @@ const hydrateOperationsFromShopFloor = async (workOrder: WorkOrder): Promise<Wor
           actual_end: liveOp.actual_end ?? op.actual_end,
           started_by: liveOp.started_by ?? op.started_by,
           completed_by: liveOp.completed_by ?? op.completed_by,
+          laser_nest: liveOp.laser_nest ?? op.laser_nest,
         };
       }),
     });
@@ -206,8 +253,25 @@ export default function WorkOrderDetail() {
   const [resolvingBlockerId, setResolvingBlockerId] = useState<number | null>(null);
   const [userNameById, setUserNameById] = useState<Record<number, string>>({});
   const [activeUsersOnWorkOrder, setActiveUsersOnWorkOrder] = useState<ActiveShopUser[]>([]);
+  const [laserNestFile, setLaserNestFile] = useState<File | null>(null);
+  const [laserNestSourcePath, setLaserNestSourcePath] = useState('');
+  const [laserNestPreview, setLaserNestPreview] = useState<LaserNestPreview | null>(null);
+  const [laserNestLoading, setLaserNestLoading] = useState(false);
+  const [laserNestError, setLaserNestError] = useState('');
+  const [workOrderDocuments, setWorkOrderDocuments] = useState<WorkOrderDocument[]>([]);
+  const [availablePdfDocuments, setAvailablePdfDocuments] = useState<WorkOrderDocument[]>([]);
+  const [documentUploadFile, setDocumentUploadFile] = useState<File | null>(null);
+  const [documentTitle, setDocumentTitle] = useState('');
+  const [attachDocumentId, setAttachDocumentId] = useState('');
+  const [documentBusy, setDocumentBusy] = useState(false);
+  const [documentError, setDocumentError] = useState('');
+  const [documentUploadInputKey, setDocumentUploadInputKey] = useState(0);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<number | null>(null);
+  const [documentPreviewUrl, setDocumentPreviewUrl] = useState<string | null>(null);
+  const [documentPreviewLoading, setDocumentPreviewLoading] = useState(false);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const loadRequestRef = useRef(0);
+  const documentPreviewObjectUrlRef = useRef<string | null>(null);
   const workOrderId = useMemo(() => (id ? parseInt(id, 10) : null), [id]);
   const realtimeUrl = useMemo(() => {
     if (!id) return null;
@@ -215,6 +279,14 @@ export default function WorkOrderDetail() {
     if (!token) return null;
     return buildWsUrl(`/ws/work-order/${id}`, { token });
   }, [id]);
+
+  const replaceDocumentPreviewUrl = useCallback((url: string | null) => {
+    if (documentPreviewObjectUrlRef.current) {
+      window.URL.revokeObjectURL(documentPreviewObjectUrlRef.current);
+    }
+    documentPreviewObjectUrlRef.current = url;
+    setDocumentPreviewUrl(url);
+  }, []);
 
   const loadWorkOrder = useCallback(async () => {
     if (!id) return;
@@ -247,6 +319,26 @@ export default function WorkOrderDetail() {
       } catch {
         if (requestId !== loadRequestRef.current) return;
         setBlockers([]);
+      }
+      try {
+        const [attachedRows, availableRows] = await Promise.all([
+          api.getDocuments({ work_order_id: currentWorkOrderId, limit: 100 }),
+          api.getDocuments({ limit: 500 }),
+        ]);
+        if (requestId !== loadRequestRef.current) return;
+
+        const attachedPdfRows = (attachedRows as WorkOrderDocument[]).filter(isPdfDocument);
+        const attachedIds = new Set(attachedPdfRows.map((document) => document.id));
+        setWorkOrderDocuments(attachedPdfRows);
+        setAvailablePdfDocuments(
+          (availableRows as WorkOrderDocument[])
+            .filter(isPdfDocument)
+            .filter((document) => !document.work_order_id && !attachedIds.has(document.id))
+        );
+      } catch {
+        if (requestId !== loadRequestRef.current) return;
+        setWorkOrderDocuments([]);
+        setAvailablePdfDocuments([]);
       }
     } catch {
       if (requestId !== loadRequestRef.current) return;
@@ -284,7 +376,20 @@ export default function WorkOrderDetail() {
     setWorkOrder(null);
     setMaterialReqs(null);
     setBlockers([]);
-  }, [workOrderId]);
+    setLaserNestFile(null);
+    setLaserNestSourcePath('');
+    setLaserNestPreview(null);
+    setLaserNestError('');
+    setWorkOrderDocuments([]);
+    setAvailablePdfDocuments([]);
+    setDocumentUploadFile(null);
+    setDocumentTitle('');
+    setDocumentUploadInputKey((key) => key + 1);
+    setAttachDocumentId('');
+    setDocumentError('');
+    setSelectedDocumentId(null);
+    replaceDocumentPreviewUrl(null);
+  }, [workOrderId, replaceDocumentPreviewUrl]);
 
   useEffect(() => {
     loadWorkOrder();
@@ -296,8 +401,55 @@ export default function WorkOrderDetail() {
         clearTimeout(realtimeRefreshRef.current);
         realtimeRefreshRef.current = null;
       }
+      replaceDocumentPreviewUrl(null);
     };
-  }, []);
+  }, [replaceDocumentPreviewUrl]);
+
+  useEffect(() => {
+    if (workOrderDocuments.length === 0) {
+      setSelectedDocumentId(null);
+      return;
+    }
+    if (!selectedDocumentId || !workOrderDocuments.some((document) => document.id === selectedDocumentId)) {
+      setSelectedDocumentId(workOrderDocuments[0].id);
+    }
+  }, [selectedDocumentId, workOrderDocuments]);
+
+  useEffect(() => {
+    if (!selectedDocumentId) {
+      replaceDocumentPreviewUrl(null);
+      setDocumentPreviewLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadPreview = async () => {
+      setDocumentPreviewLoading(true);
+      try {
+        const response = await api.downloadDocument(selectedDocumentId);
+        const url = window.URL.createObjectURL(new Blob([response], { type: 'application/pdf' }));
+        if (cancelled) {
+          window.URL.revokeObjectURL(url);
+          return;
+        }
+        replaceDocumentPreviewUrl(url);
+      } catch {
+        if (!cancelled) {
+          replaceDocumentPreviewUrl(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setDocumentPreviewLoading(false);
+        }
+      }
+    };
+
+    loadPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [replaceDocumentPreviewUrl, selectedDocumentId]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -485,6 +637,124 @@ export default function WorkOrderDetail() {
     }
   };
 
+  const handlePreviewLaserNestPackage = async () => {
+    if (!workOrder) return;
+    if (!laserNestFile && !laserNestSourcePath.trim()) {
+      setLaserNestError('Choose a zip package or enter a folder path.');
+      return;
+    }
+
+    setLaserNestLoading(true);
+    setLaserNestError('');
+    try {
+      const preview = await api.previewLaserNestPackage(workOrder.id, {
+        file: laserNestFile,
+        source_path: laserNestSourcePath.trim() || undefined,
+      });
+      setLaserNestPreview(preview);
+    } catch (err: any) {
+      setLaserNestError(err.response?.data?.detail || 'Failed to preview laser nest package');
+      setLaserNestPreview(null);
+    } finally {
+      setLaserNestLoading(false);
+    }
+  };
+
+  const handleImportLaserNestPackage = async () => {
+    if (!workOrder) return;
+    if (!laserNestPreview) {
+      await handlePreviewLaserNestPackage();
+      return;
+    }
+
+    setLaserNestLoading(true);
+    setLaserNestError('');
+    try {
+      const result = await api.importLaserNestPackage(workOrder.id, {
+        file: laserNestFile,
+        source_path: laserNestSourcePath.trim() || undefined,
+      });
+      const childId = result?.child_work_order?.id;
+      if (childId) {
+        navigate(`/work-orders/${childId}`);
+      } else {
+        await loadWorkOrder();
+      }
+    } catch (err: any) {
+      setLaserNestError(err.response?.data?.detail || 'Failed to import laser nest package');
+    } finally {
+      setLaserNestLoading(false);
+    }
+  };
+
+  const handleUploadWorkOrderPdf = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!workOrder || !documentUploadFile) return;
+
+    const isPdfFile =
+      documentUploadFile.type === 'application/pdf' ||
+      documentUploadFile.name.toLowerCase().endsWith('.pdf');
+    if (!isPdfFile) {
+      setDocumentError('Only PDF files can be attached to the work order preview.');
+      return;
+    }
+
+    setDocumentBusy(true);
+    setDocumentError('');
+    try {
+      const formData = new FormData();
+      formData.append('file', documentUploadFile);
+      formData.append('title', documentTitle.trim() || documentUploadFile.name.replace(/\.pdf$/i, ''));
+      formData.append('document_type', 'drawing');
+      formData.append('revision', 'A');
+      formData.append('work_order_id', String(workOrder.id));
+      const uploadedDocument = await api.uploadDocument(formData);
+      setDocumentUploadFile(null);
+      setDocumentTitle('');
+      setDocumentUploadInputKey((key) => key + 1);
+      setSelectedDocumentId(uploadedDocument.id);
+      await loadWorkOrder();
+    } catch (err: any) {
+      setDocumentError(err.response?.data?.detail || 'Failed to upload work order PDF');
+    } finally {
+      setDocumentBusy(false);
+    }
+  };
+
+  const handleAttachExistingPdf = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!workOrder || !attachDocumentId) return;
+
+    setDocumentBusy(true);
+    setDocumentError('');
+    try {
+      const attachedDocument = await api.attachDocumentToWorkOrder(Number(attachDocumentId), workOrder.id);
+      setAttachDocumentId('');
+      setSelectedDocumentId(attachedDocument.id);
+      await loadWorkOrder();
+    } catch (err: any) {
+      setDocumentError(err.response?.data?.detail || 'Failed to attach PDF to work order');
+    } finally {
+      setDocumentBusy(false);
+    }
+  };
+
+  const handleDownloadWorkOrderPdf = async (document: WorkOrderDocument) => {
+    try {
+      const response = await api.downloadDocument(document.id);
+      const url = window.URL.createObjectURL(new Blob([response], { type: document.mime_type || 'application/pdf' }));
+      const link = window.document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', document.file_name || `${document.title}.pdf`);
+      window.document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      setDocumentError('Failed to download PDF');
+    }
+  };
+
   const handleCreateBlocker = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!workOrder) return;
@@ -538,6 +808,7 @@ export default function WorkOrderDetail() {
   }
 
   const operationProgress = getDetailWorkOrderProgress(workOrder);
+  const selectedDocument = workOrderDocuments.find((document) => document.id === selectedDocumentId) || null;
 
   return (
     <div className="space-y-6">
@@ -652,6 +923,287 @@ export default function WorkOrderDetail() {
           </div>
         </div>
       </div>
+
+      <div className="card">
+        <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4 mb-4">
+          <div className="flex items-start gap-3">
+            <DocumentTextIcon className="h-6 w-6 text-fd-blue mt-0.5" />
+            <div>
+              <h2 className="text-lg font-semibold text-white">Part Drawing PDF</h2>
+              <p className="text-sm text-slate-400">
+                {selectedDocument
+                  ? `${selectedDocument.title} • Rev ${selectedDocument.revision || '-'}`
+                  : 'Attach a PDF drawing to show the part preview on this work order.'}
+              </p>
+            </div>
+          </div>
+          <span className="text-xs font-semibold px-2 py-1 rounded bg-fd-blue/15 text-fd-blue w-fit">
+            {workOrderDocuments.length} attached
+          </span>
+        </div>
+
+        {documentError && (
+          <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+            {documentError}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-4">
+          <div className="space-y-4">
+            <div className="rounded-lg border border-fd-line bg-slate-900/40">
+              <div className="border-b border-fd-line px-4 py-3">
+                <h3 className="text-sm font-semibold text-white">Attached PDFs</h3>
+              </div>
+              <div className="divide-y divide-slate-700">
+                {workOrderDocuments.length === 0 ? (
+                  <div className="px-4 py-5 text-sm text-slate-400">No drawing PDF attached.</div>
+                ) : (
+                  workOrderDocuments.map((document) => (
+                    <button
+                      key={document.id}
+                      type="button"
+                      onClick={() => setSelectedDocumentId(document.id)}
+                      className={`w-full px-4 py-3 text-left transition-colors ${
+                        selectedDocumentId === document.id
+                          ? 'bg-fd-blue/10 text-white'
+                          : 'hover:bg-slate-800/50 text-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold">{document.title}</div>
+                          <div className="mt-1 truncate text-xs text-slate-400">
+                            {document.file_name || document.document_number}
+                          </div>
+                        </div>
+                        <span className="shrink-0 rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300">
+                          {formatFileSize(document.file_size)}
+                        </span>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <form onSubmit={handleUploadWorkOrderPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
+              <h3 className="text-sm font-semibold text-white">Upload PDF</h3>
+              <label className="block">
+                <span className="text-xs font-medium text-slate-400">PDF File</span>
+                <input
+                  key={documentUploadInputKey}
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0] || null;
+                    setDocumentUploadFile(file);
+                    if (file && !documentTitle.trim()) {
+                      setDocumentTitle(file.name.replace(/\.pdf$/i, ''));
+                    }
+                    setDocumentError('');
+                  }}
+                  className="mt-1 block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-slate-400">Title</span>
+                <input
+                  type="text"
+                  value={documentTitle}
+                  onChange={(event) => setDocumentTitle(event.target.value)}
+                  placeholder="Drawing title"
+                  className="input mt-1 w-full"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={documentBusy || !documentUploadFile}
+                className="btn-primary w-full flex items-center justify-center"
+              >
+                <ArrowUpTrayIcon className="h-4 w-4 mr-2" />
+                {documentBusy ? 'Uploading...' : 'Upload PDF'}
+              </button>
+            </form>
+
+            <form onSubmit={handleAttachExistingPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
+              <h3 className="text-sm font-semibold text-white">Attach Existing PDF</h3>
+              <select
+                value={attachDocumentId}
+                onChange={(event) => setAttachDocumentId(event.target.value)}
+                className="input w-full"
+              >
+                <option value="">Select unassigned PDF</option>
+                {availablePdfDocuments.map((document) => (
+                  <option key={document.id} value={document.id}>
+                    {document.title} - {document.file_name || document.document_number}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="submit"
+                disabled={documentBusy || !attachDocumentId}
+                className="btn-secondary w-full flex items-center justify-center"
+              >
+                <PaperClipIcon className="h-4 w-4 mr-2" />
+                {documentBusy ? 'Attaching...' : 'Attach PDF'}
+              </button>
+            </form>
+          </div>
+
+          <div className="min-h-[520px] rounded-lg border border-fd-line bg-slate-950/60 overflow-hidden">
+            <div className="flex items-center justify-between border-b border-fd-line px-4 py-3">
+              <div className="min-w-0">
+                <h3 className="truncate text-sm font-semibold text-white">
+                  {selectedDocument?.file_name || selectedDocument?.title || 'Preview'}
+                </h3>
+                <p className="text-xs text-slate-400">
+                  {selectedDocument ? `${selectedDocument.document_number} • ${formatCentralDate(selectedDocument.created_at)}` : 'No PDF selected'}
+                </p>
+              </div>
+              {selectedDocument && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDocumentId(selectedDocument.id)}
+                    className="btn-secondary btn-sm flex items-center"
+                  >
+                    <EyeIcon className="h-4 w-4 mr-1" />
+                    Preview
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadWorkOrderPdf(selectedDocument)}
+                    className="btn-secondary btn-sm flex items-center"
+                  >
+                    <ArrowDownTrayIcon className="h-4 w-4 mr-1" />
+                    Download
+                  </button>
+                </div>
+              )}
+            </div>
+            {documentPreviewLoading ? (
+              <div className="flex h-[470px] items-center justify-center text-sm text-slate-400">
+                Loading PDF preview...
+              </div>
+            ) : documentPreviewUrl ? (
+              <iframe
+                title={selectedDocument?.title || 'Work order drawing PDF'}
+                src={documentPreviewUrl}
+                className="h-[470px] w-full bg-white"
+              />
+            ) : (
+              <div className="flex h-[470px] flex-col items-center justify-center px-4 text-center text-slate-400">
+                <DocumentTextIcon className="mb-3 h-12 w-12 text-slate-600" />
+                <p className="text-sm">No PDF preview available.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {workOrder.work_order_type !== 'laser_cutting' && (
+        <div className="card">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
+            <div className="flex items-start gap-3">
+              <ArrowUpTrayIcon className="h-6 w-6 text-fd-red mt-0.5" />
+              <div>
+                <h2 className="text-lg font-semibold text-white">Laser Nest Package</h2>
+                <p className="text-sm text-slate-400">
+                  Import a zipped Ermaksan folder or a server folder path to create the linked laser cutting work order.
+                </p>
+              </div>
+            </div>
+            {laserNestPreview && (
+              <span className="text-xs font-semibold px-2 py-1 rounded bg-fd-red/15 text-fd-red w-fit">
+                {laserNestPreview.nest_count} nests • {laserNestPreview.total_planned_runs} runs
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_auto] gap-3">
+            <label className="block">
+              <span className="text-xs font-medium text-slate-400">Zip Package</span>
+              <input
+                type="file"
+                accept=".zip"
+                onChange={(event) => {
+                  setLaserNestFile(event.target.files?.[0] || null);
+                  setLaserNestPreview(null);
+                  setLaserNestError('');
+                }}
+                className="mt-1 block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-medium text-slate-400">Folder Path</span>
+              <input
+                type="text"
+                value={laserNestSourcePath}
+                onChange={(event) => {
+                  setLaserNestSourcePath(event.target.value);
+                  setLaserNestPreview(null);
+                  setLaserNestError('');
+                }}
+                placeholder="/path/to/ermaksan/nest-folder"
+                className="input mt-1 w-full"
+              />
+            </label>
+            <div className="flex items-end gap-2">
+              <button
+                type="button"
+                onClick={handlePreviewLaserNestPackage}
+                disabled={laserNestLoading || (!laserNestFile && !laserNestSourcePath.trim())}
+                className="btn-secondary"
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                onClick={handleImportLaserNestPackage}
+                disabled={laserNestLoading || !laserNestPreview}
+                className="btn-primary"
+              >
+                {laserNestLoading ? 'Working...' : 'Import'}
+              </button>
+            </div>
+          </div>
+
+          {laserNestError && (
+            <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+              {laserNestError}
+            </div>
+          )}
+
+          {laserNestPreview && (
+            <div className="mt-4 overflow-x-auto rounded-lg border border-fd-line">
+              <table className="min-w-full divide-y divide-slate-700">
+                <thead className="bg-slate-800/50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Nest</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">CNC File</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Runs</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Material</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Sheet</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-700 bg-fd-panel">
+                  {laserNestPreview.nests.map((nest, index) => (
+                    <tr key={`${nest.cnc_file_name}-${index}`} className="hover:bg-slate-800/50">
+                      <td className="px-4 py-3 text-sm font-medium text-white">{nest.nest_name}</td>
+                      <td className="px-4 py-3 text-sm text-slate-300">{nest.cnc_file_name}</td>
+                      <td className="px-4 py-3 text-sm text-right font-semibold tabular-nums">{nest.planned_runs}</td>
+                      <td className="px-4 py-3 text-sm text-slate-300">
+                        {[nest.material, nest.thickness].filter(Boolean).join(' • ') || '-'}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-slate-300">{nest.sheet_size || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card">
         <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
@@ -865,7 +1417,7 @@ export default function WorkOrderDetail() {
                   return workOrder.operations.map((op) => {
                     const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
                     if (op.operation_group) lastGroup = op.operation_group;
-                    const operationTarget = Number(op.component_quantity || workOrder.quantity_ordered || 0);
+                    const operationTarget = Number(op.laser_nest?.planned_runs || op.component_quantity || workOrder.quantity_ordered || 0);
                     
                     const groupColors: Record<string, string> = {
                       'LASER': 'bg-fd-red/15 text-fd-red',
@@ -896,6 +1448,22 @@ export default function WorkOrderDetail() {
                             {op.description && (
                               <div className="text-xs text-slate-400 mt-0.5">{op.description}</div>
                             )}
+                            {op.laser_nest && (
+                              <div className="mt-2 rounded border border-fd-line bg-slate-900/50 px-2 py-1.5 text-xs text-slate-300">
+                                <div className="flex items-center gap-1.5 font-medium text-fd-red">
+                                  <DocumentTextIcon className="h-4 w-4" />
+                                  {op.laser_nest.nest_name}
+                                </div>
+                                <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                                  <span>CNC: {op.laser_nest.cnc_file_name}</span>
+                                  <span>Runs: {op.laser_nest.completed_runs}/{op.laser_nest.planned_runs}</span>
+                                  {(op.laser_nest.material || op.laser_nest.thickness) && (
+                                    <span>{[op.laser_nest.material, op.laser_nest.thickness].filter(Boolean).join(' • ')}</span>
+                                  )}
+                                  {op.laser_nest.sheet_size && <span>Sheet: {op.laser_nest.sheet_size}</span>}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </td>
                         <td className="px-4 py-3">
@@ -914,6 +1482,7 @@ export default function WorkOrderDetail() {
                           <div>
                             <span className="font-medium text-sm">{op.quantity_complete}</span>
                             <span className="text-slate-400 text-sm">/{operationTarget}</span>
+                            {op.laser_nest && <div className="text-xs text-slate-400">runs</div>}
                           </div>
                         </td>
                         <td className="px-4 py-3 text-sm">

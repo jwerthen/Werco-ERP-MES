@@ -688,6 +688,30 @@ class ApiService {
     return response.data;
   }
 
+  async previewLaserNestPackage(workOrderId: number, data: { file?: File | null; source_path?: string }) {
+    const formData = new FormData();
+    if (data.file) formData.append('file', data.file);
+    if (data.source_path) formData.append('source_path', data.source_path);
+    const response = await this.api.post(`/work-orders/${workOrderId}/laser-nest-packages/preview`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  async importLaserNestPackage(
+    workOrderId: number,
+    data: { file?: File | null; source_path?: string; work_center_id?: number | null }
+  ) {
+    const formData = new FormData();
+    if (data.file) formData.append('file', data.file);
+    if (data.source_path) formData.append('source_path', data.source_path);
+    if (data.work_center_id) formData.append('work_center_id', String(data.work_center_id));
+    const response = await this.api.post(`/work-orders/${workOrderId}/laser-nest-packages/import`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
   async getWorkOrderBlockers(params?: {
     work_order_id?: number;
     status?: WorkOrderBlockerStatus;
@@ -1348,6 +1372,13 @@ class ApiService {
   async uploadDocument(formData: FormData) {
     const response = await this.api.post('/documents/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  }
+
+  async attachDocumentToWorkOrder(documentId: number, workOrderId: number) {
+    const response = await this.api.post(`/documents/${documentId}/attach-work-order`, {
+      work_order_id: workOrderId,
     });
     return response.data;
   }

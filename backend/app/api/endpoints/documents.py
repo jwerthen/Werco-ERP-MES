@@ -8,10 +8,13 @@ from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.document import Document, DocumentType
+from app.models.part import Part
+from app.models.purchasing import Vendor
 from app.models.user import User, UserRole
+from app.models.work_order import WorkOrder
 
 router = APIRouter()
 
@@ -52,6 +55,10 @@ class DocumentResponse(BaseModel):
         use_enum_values = True
 
 
+class WorkOrderDocumentAttachRequest(BaseModel):
+    work_order_id: int
+
+
 def generate_document_number(db: Session, doc_type: str) -> str:
     prefix = doc_type[:3].upper()
     today = datetime.now().strftime("%Y%m")
@@ -83,8 +90,9 @@ def list_documents(
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(Document)
+    query = db.query(Document).filter(Document.company_id == company_id)
 
     if part_id:
         query = query.filter(Document.part_id == part_id)
@@ -119,8 +127,45 @@ async def upload_document(
     revision: str = Form("A"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Upload a new document"""
+    try:
+        parsed_document_type = DocumentType(document_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid document type") from exc
+
+    normalized_part_id = part_id if part_id and part_id > 0 else None
+    normalized_work_order_id = work_order_id if work_order_id and work_order_id > 0 else None
+    normalized_vendor_id = vendor_id if vendor_id and vendor_id > 0 else None
+
+    if normalized_part_id:
+        part = (
+            db.query(Part)
+            .filter(Part.id == normalized_part_id, Part.company_id == company_id)
+            .first()
+        )
+        if not part:
+            raise HTTPException(status_code=404, detail="Part not found")
+
+    if normalized_work_order_id:
+        work_order = (
+            db.query(WorkOrder)
+            .filter(WorkOrder.id == normalized_work_order_id, WorkOrder.company_id == company_id)
+            .first()
+        )
+        if not work_order:
+            raise HTTPException(status_code=404, detail="Work order not found")
+
+    if normalized_vendor_id:
+        vendor = (
+            db.query(Vendor)
+            .filter(Vendor.id == normalized_vendor_id, Vendor.company_id == company_id)
+            .first()
+        )
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+
     # Generate unique filename
     file_ext = os.path.splitext(file.filename)[1] if file.filename else ""
     unique_name = f"{uuid.uuid4()}{file_ext}"
@@ -138,17 +183,18 @@ async def upload_document(
         document_number=doc_number,
         revision=revision,
         title=title,
-        document_type=DocumentType(document_type),
+        document_type=parsed_document_type,
         description=description,
-        part_id=part_id if part_id and part_id > 0 else None,
-        work_order_id=work_order_id if work_order_id and work_order_id > 0 else None,
-        vendor_id=vendor_id if vendor_id and vendor_id > 0 else None,
+        part_id=normalized_part_id,
+        work_order_id=normalized_work_order_id,
+        vendor_id=normalized_vendor_id,
         file_name=file.filename,
         file_path=file_path,
         file_size=len(content),
         mime_type=file.content_type,
         status="released",
         created_by=current_user.id,
+        company_id=company_id,
     )
 
     db.add(document)
@@ -164,18 +210,28 @@ def list_document_types(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)
-def get_document(document_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    document = db.query(Document).filter(Document.id == document_id).first()
+def get_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
 
 
 @router.get("/{document_id}/download")
-def download_document(document_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def download_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     from fastapi.responses import FileResponse
 
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -185,13 +241,45 @@ def download_document(document_id: int, db: Session = Depends(get_db), current_u
     return FileResponse(document.file_path, filename=document.file_name, media_type=document.mime_type)
 
 
+@router.post("/{document_id}/attach-work-order", response_model=DocumentResponse)
+def attach_document_to_work_order(
+    document_id: int,
+    payload: WorkOrderDocumentAttachRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    work_order = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.id == payload.work_order_id, WorkOrder.company_id == company_id)
+        .first()
+    )
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+    file_name = document.file_name or ""
+    is_pdf = document.mime_type == "application/pdf" or file_name.lower().endswith(".pdf")
+    if not is_pdf:
+        raise HTTPException(status_code=400, detail="Only PDF documents can be attached as work order drawings")
+
+    document.work_order_id = payload.work_order_id
+    db.commit()
+    db.refresh(document)
+    return document
+
+
 @router.delete("/{document_id}")
 def delete_document(
     document_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
 ):
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 

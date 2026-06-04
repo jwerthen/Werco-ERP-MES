@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
+from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.part import Part
 from app.models.routing import Routing, RoutingOperation
 from app.models.time_entry import TimeEntry, TimeEntryType
@@ -191,6 +192,174 @@ class TestWorkOrdersAPI:
         assert item["operation_count"] == 2
         assert item["operations_complete"] == 1
         assert item["operation_progress_percent"] == 50.0
+
+    def test_preview_laser_nest_package_from_folder(self, client: TestClient, auth_headers: dict, db_session, tmp_path):
+        part = Part(
+            part_number="ASM-LASER-PREVIEW",
+            name="Laser Preview Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(part)
+        db_session.flush()
+        work_order = WorkOrder(
+            work_order_number="WO-LASER-PREVIEW",
+            part_id=part.id,
+            quantity_ordered=1,
+            status=WorkOrderStatus.RELEASED,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(work_order)
+        db_session.commit()
+
+        package_dir = tmp_path / "ermaksan"
+        package_dir.mkdir()
+        (package_dir / "NEST-A_A36_10ga_60x120_QTY3.nc").write_text("M30")
+        (package_dir / "NEST-B_304SS_0.25in_48x96_x2.tap").write_text("M30")
+
+        response = client.post(
+            f"/api/v1/work-orders/{work_order.id}/laser-nest-packages/preview",
+            headers=auth_headers,
+            data={"source_path": str(package_dir)},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["nest_count"] == 2
+        assert data["total_planned_runs"] == 5
+        assert {nest["planned_runs"] for nest in data["nests"]} == {2, 3}
+
+    def test_import_laser_nest_package_creates_child_wo_and_run_tasks(
+        self, client: TestClient, auth_headers: dict, db_session, tmp_path
+    ):
+        part = Part(
+            part_number="ASM-LASER-IMPORT",
+            name="Laser Import Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        laser_wc = WorkCenter(
+            code="LASER-IMPORT",
+            name="Laser Import",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, laser_wc])
+        db_session.flush()
+        parent = WorkOrder(
+            work_order_number="WO-LASER-PARENT",
+            part_id=part.id,
+            quantity_ordered=1,
+            status=WorkOrderStatus.RELEASED,
+            priority=3,
+            company_id=1,
+        )
+        db_session.add(parent)
+        db_session.commit()
+
+        package_dir = tmp_path / "import-package"
+        package_dir.mkdir()
+        (package_dir / "NEST-A_A36_10ga_60x120_QTY3.nc").write_text("M30")
+        (package_dir / "NEST-B_304SS_0.25in_48x96_x2.tap").write_text("M30")
+
+        response = client.post(
+            f"/api/v1/work-orders/{parent.id}/laser-nest-packages/import",
+            headers=auth_headers,
+            data={"source_path": str(package_dir), "work_center_id": str(laser_wc.id)},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        child = response.json()["child_work_order"]
+        assert child["parent_work_order_id"] == parent.id
+        assert child["work_order_type"] == "laser_cutting"
+        assert child["quantity_ordered"] == 5
+        assert len(child["operations"]) == 2
+
+        refreshed_child = db_session.get(WorkOrder, child["id"])
+        assert refreshed_child.parent_work_order_id == parent.id
+        assert refreshed_child.work_order_type == "laser_cutting"
+
+        package = db_session.query(LaserNestPackage).filter_by(child_work_order_id=child["id"]).one()
+        nests = db_session.query(LaserNest).filter_by(package_id=package.id).order_by(LaserNest.planned_runs).all()
+        assert [nest.planned_runs for nest in nests] == [2, 3]
+        assert db_session.query(WorkOrderOperation).filter_by(work_order_id=child["id"]).count() == 2
+        assert {op.component_quantity for op in refreshed_child.operations} == {2, 3}
+
+    def test_shop_floor_production_updates_laser_nest_completed_runs(
+        self, client: TestClient, auth_headers: dict, db_session, tmp_path
+    ):
+        part = Part(
+            part_number="ASM-LASER-PROD",
+            name="Laser Production Assembly",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        laser_wc = WorkCenter(
+            code="LASER-PROD",
+            name="Laser Production",
+            work_center_type="laser",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([part, laser_wc])
+        db_session.flush()
+        parent = WorkOrder(
+            work_order_number="WO-LASER-PROD-PARENT",
+            part_id=part.id,
+            quantity_ordered=1,
+            status=WorkOrderStatus.RELEASED,
+            priority=3,
+            company_id=1,
+        )
+        db_session.add(parent)
+        db_session.commit()
+
+        package_dir = tmp_path / "prod-package"
+        package_dir.mkdir()
+        (package_dir / "NEST-A_A36_10ga_60x120_QTY3.nc").write_text("M30")
+
+        import_response = client.post(
+            f"/api/v1/work-orders/{parent.id}/laser-nest-packages/import",
+            headers=auth_headers,
+            data={"source_path": str(package_dir), "work_center_id": str(laser_wc.id)},
+        )
+        assert import_response.status_code == status.HTTP_200_OK
+        child = import_response.json()["child_work_order"]
+        operation = child["operations"][0]
+
+        clock_in_response = client.post(
+            "/api/v1/shop-floor/clock-in",
+            headers=auth_headers,
+            json={
+                "work_order_id": child["id"],
+                "operation_id": operation["id"],
+                "work_center_id": laser_wc.id,
+                "entry_type": "run",
+            },
+        )
+        assert clock_in_response.status_code == status.HTTP_200_OK
+
+        production_response = client.post(
+            f"/api/v1/shop-floor/operations/{operation['id']}/production",
+            headers=auth_headers,
+            json={"quantity_complete_delta": 1, "quantity_scrapped_delta": 0},
+        )
+        assert production_response.status_code == status.HTTP_200_OK
+
+        refreshed_nest = db_session.query(LaserNest).filter_by(work_order_operation_id=operation["id"]).one()
+        refreshed_operation = db_session.get(WorkOrderOperation, operation["id"])
+        assert refreshed_operation.quantity_complete == 1
+        assert refreshed_operation.status == OperationStatus.IN_PROGRESS
+        assert refreshed_nest.completed_runs == 1
+        assert refreshed_nest.remaining_runs == 2
 
     def test_work_order_progress_matches_regenerated_slot_when_name_changes(
         self, client: TestClient, auth_headers: dict, operator_user: User, db_session

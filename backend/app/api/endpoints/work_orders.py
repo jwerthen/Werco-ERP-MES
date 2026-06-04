@@ -1,7 +1,11 @@
+import os
+import shutil
+import tempfile
+import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -20,7 +24,7 @@ from app.models.part import Part, PartType
 from app.models.routing import Routing, RoutingOperation
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.schemas.work_order import (
     WorkOrderCreate,
     WorkOrderOperationCreate,
@@ -29,6 +33,14 @@ from app.schemas.work_order import (
     WorkOrderResponse,
     WorkOrderSummary,
     WorkOrderUpdate,
+)
+from app.services.laser_nest_service import (
+    build_laser_nest_child_work_order,
+    copy_laser_nest_folder,
+    extract_laser_nest_zip,
+    parse_laser_nest_folder,
+    parse_laser_nest_zip,
+    sync_laser_nest_from_operation,
 )
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
@@ -51,6 +63,13 @@ router = APIRouter()
 class WorkOrderPriorityUpdate(BaseModel):
     priority: int = Field(..., ge=1, le=10, description="Priority (1=highest, 10=lowest)")
     reason: Optional[str] = Field(None, max_length=500, description="Optional reason for priority change")
+
+
+class LaserNestPreviewResponse(BaseModel):
+    package_name: str
+    nest_count: int
+    total_planned_runs: int
+    nests: list[dict]
 
 
 def _emit_work_order_event(
@@ -224,6 +243,7 @@ def _enrich_work_order_operations(work_order: WorkOrder) -> None:
         op.estimated_hours = float(op.setup_time_hours) + float(op.run_time_hours)
         op.actual_hours = float(op.actual_setup_hours) + float(op.actual_run_hours)
         op.work_center_name = op.work_center.name if op.work_center else None
+        sync_laser_nest_from_operation(op)
 
         if op.component_part_id:
             component = op.component_part
@@ -261,6 +281,117 @@ def generate_work_order_number(db: Session, company_id: int = None) -> str:
         new_num = 1
 
     return f"{prefix}{new_num:03d}"
+
+
+def _resolve_laser_upload_root() -> str:
+    preferred_dir = os.getenv("UPLOAD_DIR", "/app/uploads")
+    try:
+        root = os.path.join(preferred_dir, "laser_nest_packages")
+        os.makedirs(root, exist_ok=True)
+        return root
+    except OSError:
+        root = os.path.abspath(os.path.join(os.getenv("UPLOAD_DIR_FALLBACK", "./uploads"), "laser_nest_packages"))
+        os.makedirs(root, exist_ok=True)
+        return root
+
+
+def _find_laser_work_center(db: Session, company_id: int, work_center_id: Optional[int] = None) -> WorkCenter:
+    query = db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True)
+    if work_center_id:
+        work_center = query.filter(WorkCenter.id == work_center_id).first()
+        if not work_center:
+            raise HTTPException(status_code=404, detail="Laser work center not found")
+        return work_center
+
+    work_center = (
+        query.filter(
+            or_(
+                WorkCenter.name.ilike("%laser%"),
+                WorkCenter.work_center_type.ilike("%laser%"),
+                WorkCenter.code.ilike("%laser%"),
+            )
+        )
+        .order_by(WorkCenter.id)
+        .first()
+    )
+    if not work_center:
+        raise HTTPException(status_code=400, detail="No active laser work center found")
+    return work_center
+
+
+async def _save_upload_to_temp(file: UploadFile) -> str:
+    suffix = os.path.splitext(file.filename or "")[1] or ".zip"
+    fd, temp_path = tempfile.mkstemp(suffix=suffix)
+    with os.fdopen(fd, "wb") as handle:
+        shutil.copyfileobj(file.file, handle)
+    await file.close()
+    return temp_path
+
+
+def _laser_package_name(file: Optional[UploadFile], source_path: Optional[str]) -> str:
+    if file and file.filename:
+        return file.filename
+    if source_path:
+        return os.path.basename(os.path.normpath(source_path)) or "Laser nest package"
+    return "Laser nest package"
+
+
+def _ensure_laser_child_work_order(
+    db: Session,
+    *,
+    parent_work_order: WorkOrder,
+    company_id: int,
+) -> WorkOrder:
+    child = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.parent_work_order_id == parent_work_order.id,
+            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+        )
+        .first()
+    )
+    if child:
+        return child
+
+    child = WorkOrder(
+        company_id=company_id,
+        work_order_number=generate_work_order_number(db, company_id),
+        part_id=parent_work_order.part_id,
+        parent_work_order_id=parent_work_order.id,
+        work_order_type=WorkOrderType.LASER_CUTTING.value,
+        quantity_ordered=1,
+        status=WorkOrderStatus.RELEASED,
+        priority=parent_work_order.priority,
+        due_date=parent_work_order.due_date,
+        customer_name=parent_work_order.customer_name,
+        customer_po=parent_work_order.customer_po,
+        notes=f"Laser cutting child work order for {parent_work_order.work_order_number}",
+    )
+    db.add(child)
+    db.flush()
+    return child
+
+
+def _load_parent_work_order(db: Session, work_order_id: int, company_id: int) -> WorkOrder:
+    work_order = (
+        db.query(WorkOrder)
+        .options(joinedload(WorkOrder.part))
+        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .first()
+    )
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    return work_order
+
+
+def _build_laser_preview_response(package_name: str, nests: list[dict]) -> LaserNestPreviewResponse:
+    return LaserNestPreviewResponse(
+        package_name=package_name,
+        nest_count=len(nests),
+        total_planned_runs=sum(int(nest.get("planned_runs") or 0) for nest in nests),
+        nests=nests,
+    )
 
 
 @router.get("/", response_model=List[WorkOrderSummary])
@@ -626,6 +757,7 @@ def create_work_order(
             joinedload(WorkOrder.part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
         )
         .filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id)
         .first()
@@ -787,6 +919,145 @@ def _create_assembly_routing_operations(
         sequence += 10
 
 
+@router.post("/{work_order_id}/laser-nest-packages/preview", response_model=LaserNestPreviewResponse)
+async def preview_laser_nest_package_import(
+    work_order_id: int,
+    file: Optional[UploadFile] = File(None),
+    source_path: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Preview nest operations detected from a zipped Ermaksan package or server folder."""
+    _load_parent_work_order(db, work_order_id, company_id)
+    package_name = _laser_package_name(file, source_path)
+    temp_path = None
+    try:
+        if file:
+            temp_path = await _save_upload_to_temp(file)
+            nests = [nest.as_dict() for nest in parse_laser_nest_zip(temp_path)]
+        elif source_path:
+            nests = [nest.as_dict() for nest in parse_laser_nest_folder(source_path)]
+        else:
+            raise HTTPException(status_code=400, detail="Upload a zipped package or provide source_path")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    return _build_laser_preview_response(package_name, nests)
+
+
+@router.post("/{work_order_id}/laser-nest-packages/import")
+async def import_laser_nest_package(
+    work_order_id: int,
+    file: Optional[UploadFile] = File(None),
+    source_path: Optional[str] = Form(None),
+    work_center_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Create or update a child laser work order from one nest package."""
+    parent_work_order = _load_parent_work_order(db, work_order_id, company_id)
+    package_name = _laser_package_name(file, source_path)
+    temp_path = None
+    package_dir = os.path.join(_resolve_laser_upload_root(), str(uuid.uuid4()))
+
+    try:
+        if file:
+            temp_path = await _save_upload_to_temp(file)
+            extract_laser_nest_zip(temp_path, package_dir)
+        elif source_path:
+            copy_laser_nest_folder(source_path, package_dir)
+        else:
+            raise HTTPException(status_code=400, detail="Upload a zipped package or provide source_path")
+
+        nests = parse_laser_nest_folder(package_dir)
+        laser_work_center = _find_laser_work_center(db, company_id, work_center_id)
+
+        with atomic_transaction(db):
+            child_work_order = _ensure_laser_child_work_order(
+                db,
+                parent_work_order=parent_work_order,
+                company_id=company_id,
+            )
+            child_work_order.status = WorkOrderStatus.RELEASED
+            child_work_order.quantity_complete = 0
+            child_work_order.quantity_scrapped = 0
+
+            package = build_laser_nest_child_work_order(
+                db,
+                parent_work_order=parent_work_order,
+                child_work_order=child_work_order,
+                package_name=package_name,
+                package_source_path=package_dir,
+                nests=nests,
+                laser_work_center=laser_work_center,
+                company_id=company_id,
+                created_by=current_user.id,
+            )
+            _emit_work_order_event(
+                db,
+                company_id=company_id,
+                current_user=current_user,
+                work_order=child_work_order,
+                event_type="laser_nest_package_imported",
+                payload={
+                    "parent_work_order_id": parent_work_order.id,
+                    "package_id": package.id,
+                    "nest_count": len(nests),
+                    "total_planned_runs": sum(nest.planned_runs for nest in nests),
+                },
+            )
+    except ValueError as exc:
+        if os.path.isdir(package_dir):
+            shutil.rmtree(package_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    child_work_order = (
+        db.query(WorkOrder)
+        .options(
+            joinedload(WorkOrder.part),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
+        )
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.parent_work_order_id == parent_work_order.id,
+            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+        )
+        .first()
+    )
+    _enrich_work_order_operations(child_work_order)
+
+    safe_broadcast(
+        broadcast_work_order_update,
+        child_work_order.id,
+        {
+            "event": "laser_nest_package_imported",
+            "status": child_work_order.status.value,
+        },
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "laser_nest_package_imported",
+            "work_order_id": child_work_order.id,
+            "parent_work_order_id": parent_work_order.id,
+        },
+    )
+
+    return {
+        "package": _build_laser_preview_response(package_name, [nest.as_dict() for nest in nests]).model_dump(),
+        "child_work_order": WorkOrderResponse.model_validate(child_work_order).model_dump(mode="json"),
+    }
+
+
 @router.get("/{work_order_id}", response_model=WorkOrderResponse)
 def get_work_order(
     work_order_id: int,
@@ -804,6 +1075,7 @@ def get_work_order(
             joinedload(WorkOrder.part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
         )
         .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
         .first()
@@ -842,7 +1114,10 @@ def get_work_order_by_number(
     response.headers["Pragma"] = "no-cache"
     work_order = (
         db.query(WorkOrder)
-        .options(joinedload(WorkOrder.operations))
+        .options(
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
+        )
         .filter(WorkOrder.work_order_number == wo_number, WorkOrder.company_id == company_id)
         .first()
     )
@@ -1418,6 +1693,7 @@ def update_operation(
     update_data = operation_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(operation, field, value)
+    sync_laser_nest_from_operation(operation)
 
     db.commit()
     db.refresh(operation)
@@ -1541,6 +1817,7 @@ def complete_operation(
     operation.quantity_complete = quantity_complete
     operation.quantity_scrapped = quantity_scrapped
     operation.updated_at = datetime.utcnow()
+    sync_laser_nest_from_operation(operation)
 
     is_fully_complete = quantity_complete >= target_qty
     if is_fully_complete:

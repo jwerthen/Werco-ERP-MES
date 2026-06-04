@@ -29,6 +29,7 @@ from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlo
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
+from app.services.laser_nest_service import sync_laser_nest_from_operation
 from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_blocker_service import WorkOrderBlockerService
@@ -85,6 +86,25 @@ def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dic
     return {
         "can_check_in": can_check_in,
         "blocked_by_previous_operations": blocked,
+    }
+
+
+def _laser_nest_payload(operation: WorkOrderOperation) -> Optional[dict]:
+    sync_laser_nest_from_operation(operation)
+    nest = operation.laser_nest
+    if not nest:
+        return None
+    return {
+        "id": nest.id,
+        "nest_name": nest.nest_name,
+        "cnc_file_name": nest.cnc_file_name,
+        "cnc_file_path": nest.cnc_file_path,
+        "planned_runs": nest.planned_runs,
+        "completed_runs": nest.completed_runs,
+        "remaining_runs": nest.remaining_runs,
+        "material": nest.material,
+        "thickness": nest.thickness,
+        "sheet_size": nest.sheet_size,
     }
 
 
@@ -145,6 +165,7 @@ def get_my_active_job(
                 "quantity_complete": (
                     float(operation.quantity_complete) if operation and operation.quantity_complete else 0
                 ),
+                "laser_nest": _laser_nest_payload(operation) if operation else None,
             }
         )
 
@@ -361,6 +382,7 @@ def clock_out(
         operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + float(
             clock_out_data.quantity_scrapped or 0
         )
+        sync_laser_nest_from_operation(operation)
 
     work_order.actual_hours += time_entry.duration_hours
     OperationalEventService(db).emit(
@@ -990,6 +1012,7 @@ def get_all_operations(
                 "component_quantity": op.component_quantity,
                 "quantity_complete": op.quantity_complete,
                 "quantity_scrapped": op.quantity_scrapped,
+                "laser_nest": _laser_nest_payload(op),
                 "priority": wo.priority,
                 "due_date": wo.due_date.isoformat() if wo.due_date else None,
                 "customer_name": wo.customer_name,
@@ -1217,6 +1240,7 @@ def report_operation_production(
     operation.quantity_complete = next_complete_qty
     operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + scrap_delta
     operation.updated_at = datetime.utcnow()
+    sync_laser_nest_from_operation(operation)
 
     active_entry.quantity_produced = float(active_entry.quantity_produced or 0) + good_delta
     active_entry.quantity_scrapped = float(active_entry.quantity_scrapped or 0) + scrap_delta
@@ -1356,6 +1380,7 @@ def complete_operation(
     # Update quantity
     operation.quantity_complete = completion_data.quantity_complete
     operation.updated_at = datetime.utcnow()
+    sync_laser_nest_from_operation(operation)
 
     # Check if fully complete
     is_fully_complete = completion_data.quantity_complete >= ordered_qty
@@ -1550,6 +1575,7 @@ def get_operation_details(
             "component_quantity": operation.component_quantity,
             "quantity_complete": operation.quantity_complete,
             "quantity_scrapped": operation.quantity_scrapped,
+            "laser_nest": _laser_nest_payload(operation),
             "setup_instructions": operation.setup_instructions,
             "run_instructions": operation.run_instructions,
             "setup_time_hours": operation.setup_time_hours,
@@ -1597,6 +1623,7 @@ def get_operation_details(
                 "component_quantity": op.component_quantity,
                 "quantity_complete": op.quantity_complete,
                 "quantity_scrapped": op.quantity_scrapped,
+                "laser_nest": _laser_nest_payload(op),
                 "actual_setup_hours": op.actual_setup_hours,
                 "actual_run_hours": op.actual_run_hours,
                 "actual_start": op.actual_start.isoformat() if op.actual_start else None,

@@ -352,8 +352,8 @@ export default function AdminSettings() {
 
       {/* Tab content */}
       <div className="card">
-        {/* Show inactive toggle (not for audit/overhead) */}
-        {!['overhead', 'audit', 'workcentertypes'].includes(activeTab) && (
+        {/* Show inactive toggle (not for configuration-only tabs) */}
+        {!['overhead', 'audit', 'workcentertypes', 'roles'].includes(activeTab) && (
           <div className="flex items-center justify-between mb-4 pb-4 border-b border-surface-200">
             <label className="flex items-center gap-2 cursor-pointer">
               <input

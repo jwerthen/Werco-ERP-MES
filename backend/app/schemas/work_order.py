@@ -43,6 +43,22 @@ class WorkOrderOperationBase(BaseModel):
     operation_group: Optional[str] = Field(None, max_length=50)
 
 
+class LaserNestOperationInfo(BaseModel):
+    id: int
+    nest_name: str
+    cnc_file_name: str
+    cnc_file_path: Optional[str] = None
+    planned_runs: int
+    completed_runs: float
+    remaining_runs: float = 0.0
+    material: Optional[str] = None
+    thickness: Optional[str] = None
+    sheet_size: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
 class WorkOrderOperationCreate(WorkOrderOperationBase):
     pass
 
@@ -92,6 +108,7 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     operation_group: Optional[str] = None
     started_by: Optional[int] = None
     completed_by: Optional[int] = None
+    laser_nest: Optional[LaserNestOperationInfo] = None
 
     @field_serializer(
         "setup_time_hours",
@@ -124,6 +141,8 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
 
 class WorkOrderBase(BaseModel):
     part_id: int = Field(..., gt=0, description="Part ID")
+    parent_work_order_id: Optional[int] = Field(None, gt=0)
+    work_order_type: str = Field(default="production", max_length=50)
     quantity_ordered: MoneySmall = Field(..., gt=Decimal("0"), description="Quantity ordered")
     priority: int = Field(default=5, ge=1, le=10, description="Priority (1=highest, 10=lowest)")
     due_date: Optional[date] = Field(None, description="Due date")
@@ -218,6 +237,8 @@ class WorkOrderSummary(BaseModel):
     id: int
     work_order_number: str
     part_id: int
+    parent_work_order_id: Optional[int] = None
+    work_order_type: str = "production"
     part_number: Optional[str] = None
     part_name: Optional[str] = None
     part_type: Optional[str] = None

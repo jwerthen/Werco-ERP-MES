@@ -20,6 +20,11 @@ class WorkOrderStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class WorkOrderType(str, enum.Enum):
+    PRODUCTION = "production"
+    LASER_CUTTING = "laser_cutting"
+
+
 class OperationStatus(str, enum.Enum):
     PENDING = "pending"
     READY = "ready"
@@ -39,6 +44,8 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
 
     # Part/Assembly being made
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=False)
+    parent_work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True, index=True)
+    work_order_type = Column(String(50), default=WorkOrderType.PRODUCTION.value, nullable=False, index=True)
     quantity_ordered = Column(Float, nullable=False)
     quantity_complete = Column(Float, default=0.0)
     quantity_scrapped = Column(Float, default=0.0)
@@ -88,6 +95,7 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
 
     # Relationships
     part = relationship("Part")
+    parent_work_order = relationship("WorkOrder", remote_side=[id], backref="child_work_orders")
     operations = relationship("WorkOrderOperation", back_populates="work_order", order_by="WorkOrderOperation.sequence")
     time_entries = relationship("TimeEntry", back_populates="work_order")
 
@@ -154,3 +162,4 @@ class WorkOrderOperation(Base, TenantMixin):
     work_center = relationship("WorkCenter", back_populates="operations")
     time_entries = relationship("TimeEntry", back_populates="operation")
     component_part = relationship("Part", foreign_keys=[component_part_id])
+    laser_nest = relationship("LaserNest", back_populates="operation", uselist=False)

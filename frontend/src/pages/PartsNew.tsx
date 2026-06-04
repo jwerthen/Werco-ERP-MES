@@ -27,6 +27,19 @@ import {
 type ViewMode = 'table' | 'grid';
 
 const SAVED_FILTERS_KEY = 'werco.parts.savedFilters.v1';
+const INITIAL_CREATE_FORM = {
+  part_number: '',
+  name: '',
+  part_type: 'manufactured' as PartType,
+  description: '',
+  revision: 'A',
+  standard_cost: 0,
+  is_critical: false,
+  requires_inspection: true,
+  customer_name: '',
+  customer_part_number: '',
+  drawing_number: '',
+};
 
 interface SavedPartFilter {
   id: string;
@@ -82,21 +95,12 @@ export default function PartsPage() {
   const [customerOptions, setCustomerOptions] = useState<CustomerNameOption[]>([]);
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
+  const [createDrawingPdf, setCreateDrawingPdf] = useState<File | null>(null);
+  const [createDrawingInputKey, setCreateDrawingInputKey] = useState(0);
+  const [creatingPart, setCreatingPart] = useState(false);
 
   // Create form
-  const [createForm, setCreateForm] = useState({
-    part_number: '',
-    name: '',
-    part_type: 'manufactured' as PartType,
-    description: '',
-    revision: 'A',
-    standard_cost: 0,
-    is_critical: false,
-    requires_inspection: true,
-    customer_name: '',
-    customer_part_number: '',
-    drawing_number: '',
-  });
+  const [createForm, setCreateForm] = useState(INITIAL_CREATE_FORM);
 
   const loadParts = useCallback(async () => {
     try {
@@ -415,15 +419,53 @@ export default function PartsPage() {
     }
   };
 
+  const closeCreateModal = () => {
+    if (creatingPart) return;
+    setShowCreateModal(false);
+    setCreateDrawingPdf(null);
+    setCreateDrawingInputKey(key => key + 1);
+  };
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (createDrawingPdf) {
+      const isPdf = createDrawingPdf.type === 'application/pdf' || createDrawingPdf.name.toLowerCase().endsWith('.pdf');
+      if (!isPdf) {
+        showToast('error', 'Please choose a PDF drawing file');
+        return;
+      }
+    }
+
+    setCreatingPart(true);
     try {
       const newPart = await api.createPart(createForm);
-      showToast('success', `Part ${newPart.part_number} created`);
+
+      if (createDrawingPdf) {
+        try {
+          const formData = new FormData();
+          formData.append('file', createDrawingPdf);
+          formData.append('title', createDrawingPdf.name.replace(/\.pdf$/i, '') || `${newPart.part_number} Drawing`);
+          formData.append('document_type', 'drawing');
+          formData.append('revision', newPart.revision || createForm.revision || 'A');
+          formData.append('part_id', String(newPart.id));
+          await api.uploadDocument(formData);
+          showToast('success', `Part ${newPart.part_number} created with drawing PDF`);
+        } catch (uploadErr: any) {
+          showToast('error', uploadErr.response?.data?.detail || `Part ${newPart.part_number} was created, but the PDF upload failed`);
+        }
+      } else {
+        showToast('success', `Part ${newPart.part_number} created`);
+      }
+
       setShowCreateModal(false);
+      setCreateForm(INITIAL_CREATE_FORM);
+      setCreateDrawingPdf(null);
+      setCreateDrawingInputKey(key => key + 1);
       navigate(`/parts/${newPart.id}`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create part');
+    } finally {
+      setCreatingPart(false);
     }
   };
 
@@ -872,7 +914,7 @@ export default function PartsPage() {
 
       {/* Create Part Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCreateModal(false)}>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={closeCreateModal}>
           <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-4">New Part</h3>
             <form onSubmit={handleCreate} className="space-y-4">
@@ -1025,6 +1067,22 @@ export default function PartsPage() {
                 </div>
               </div>
 
+              <div>
+                <label className="label">Drawing PDF</label>
+                <input
+                  key={createDrawingInputKey}
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  onChange={e => setCreateDrawingPdf(e.target.files?.[0] || null)}
+                  className="block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
+                />
+                {createDrawingPdf && (
+                  <p className="mt-1 text-xs text-slate-400">
+                    {createDrawingPdf.name}
+                  </p>
+                )}
+              </div>
+
               <div className="flex gap-4">
                 <label className="flex items-center gap-2">
                   <input
@@ -1047,11 +1105,11 @@ export default function PartsPage() {
               </div>
 
               <div className="flex justify-end gap-3 pt-2">
-                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">
+                <button type="button" onClick={closeCreateModal} className="btn-secondary" disabled={creatingPart}>
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary">
-                  Create Part
+                <button type="submit" className="btn-primary" disabled={creatingPart}>
+                  {creatingPart ? 'Creating...' : 'Create Part'}
                 </button>
               </div>
             </form>

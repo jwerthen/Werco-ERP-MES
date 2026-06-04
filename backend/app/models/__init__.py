@@ -42,6 +42,7 @@ from .inventory import (
 )
 from .job import Job, JobPriority, JobStatus
 from .job_costing import CostEntry, CostEntrySource, CostEntryType, JobCost, JobCostStatus
+from .laser_nest import LaserNest, LaserNestPackage
 from .maintenance import (
     MaintenanceFrequency,
     MaintenanceLog,
@@ -112,6 +113,8 @@ __all__ = [
     "WorkOrderStatus",
     "WorkOrderOperation",
     "OperationStatus",
+    "LaserNest",
+    "LaserNestPackage",
     "WorkOrderBlocker",
     "WorkOrderBlockerCategory",
     "WorkOrderBlockerSeverity",

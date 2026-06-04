@@ -963,7 +963,7 @@ def get_all_role_permissions(
     Get permissions for all roles.
     Returns stored custom permissions or defaults if not customized.
     """
-    stored = db.query(RolePermission).all()
+    stored = db.query(RolePermission).filter(RolePermission.company_id == company_id).all()
     stored_map = {rp.role: rp.permissions for rp in stored}
 
     result = {}
@@ -994,7 +994,11 @@ def get_role_permissions(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
 
-    stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
+    stored = (
+        db.query(RolePermission)
+        .filter(RolePermission.role == user_role, RolePermission.company_id == company_id)
+        .first()
+    )
 
     if stored:
         return {"role": role, "permissions": stored.permissions, "is_customized": True}
@@ -1023,7 +1027,11 @@ def update_role_permissions(
         raise HTTPException(status_code=400, detail=f"Invalid permissions: {invalid}")
 
     # Get or create role permission record
-    stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
+    stored = (
+        db.query(RolePermission)
+        .filter(RolePermission.role == user_role, RolePermission.company_id == company_id)
+        .first()
+    )
 
     old_permissions = stored.permissions if stored else DEFAULT_ROLE_PERMISSIONS.get(user_role, [])
 
@@ -1031,7 +1039,12 @@ def update_role_permissions(
         stored.permissions = permissions
         stored.updated_by = current_user.id
     else:
-        stored = RolePermission(role=user_role, permissions=permissions, updated_by=current_user.id)
+        stored = RolePermission(
+            role=user_role,
+            permissions=permissions,
+            updated_by=current_user.id,
+            company_id=company_id,
+        )
         db.add(stored)
 
     # Log the change
@@ -1068,7 +1081,11 @@ def reset_role_permissions(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
 
-    stored = db.query(RolePermission).filter(RolePermission.role == user_role).first()
+    stored = (
+        db.query(RolePermission)
+        .filter(RolePermission.role == user_role, RolePermission.company_id == company_id)
+        .first()
+    )
 
     if stored:
         old_permissions = stored.permissions

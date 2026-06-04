@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
-import { ActiveJob } from '../types';
+import { ActiveJob, LaserNestInfo } from '../types';
 import { calculateDispatchScore } from '../utils/dispatchScore';
 import {
   formatCentralDate,
@@ -56,6 +56,7 @@ interface Operation {
   requires_inspection: boolean;
   can_check_in?: boolean;
   blocked_by_previous_operations?: boolean;
+  laser_nest?: LaserNestInfo | null;
 }
 
 interface WorkCenter {
@@ -1368,12 +1369,29 @@ export default function ShopFloorSimple() {
                       Work Center: {op.work_center_name}
                     </p>
                   )}
+                  {op.laser_nest && (
+                    <div className="mt-2 rounded border border-red-500/20 bg-red-500/10 px-2 py-1.5 text-xs text-red-100">
+                      <div className="font-semibold text-red-200">{op.laser_nest.nest_name}</div>
+                      <div className="mt-1 grid grid-cols-1 gap-1 text-red-100/80">
+                        <span>CNC: {op.laser_nest.cnc_file_name}</span>
+                        <span>
+                          Runs: {op.laser_nest.completed_runs} / {op.laser_nest.planned_runs}
+                          {op.laser_nest.remaining_runs > 0 ? ` (${op.laser_nest.remaining_runs} left)` : ''}
+                        </span>
+                        {(op.laser_nest.material || op.laser_nest.thickness || op.laser_nest.sheet_size) && (
+                          <span>
+                            {[op.laser_nest.material, op.laser_nest.thickness, op.laser_nest.sheet_size].filter(Boolean).join(' • ')}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 
                 {/* Progress */}
                 <div className="mb-3">
                   <div className="flex justify-between text-sm mb-1">
-                    <span className="font-medium text-slate-300">Progress</span>
+                    <span className="font-medium text-slate-300">{op.laser_nest ? 'Runs' : 'Progress'}</span>
                     <span className="font-semibold tabular-nums">
                       {op.quantity_complete} / {op.quantity_ordered}
                     </span>

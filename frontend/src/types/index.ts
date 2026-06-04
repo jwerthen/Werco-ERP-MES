@@ -83,6 +83,8 @@ export interface WorkOrder {
   version: number;  // For optimistic locking
   work_order_number: string;
   part_id: number;
+  parent_work_order_id?: number;
+  work_order_type: string;
   quantity_ordered: number;
   quantity_complete: number;
   quantity_scrapped: number;
@@ -147,14 +149,30 @@ export interface WorkOrderOperation {
   operation_group?: string;
   started_by?: number;
   completed_by?: number;
+  laser_nest?: LaserNestInfo | null;
 }
 
 export type OperationStatus = 'pending' | 'ready' | 'in_progress' | 'complete' | 'on_hold';
+
+export interface LaserNestInfo {
+  id: number;
+  nest_name: string;
+  cnc_file_name: string;
+  cnc_file_path?: string | null;
+  planned_runs: number;
+  completed_runs: number;
+  remaining_runs: number;
+  material?: string | null;
+  thickness?: string | null;
+  sheet_size?: string | null;
+}
 
 export interface WorkOrderSummary {
   id: number;
   work_order_number: string;
   part_id: number;
+  parent_work_order_id?: number;
+  work_order_type: string;
   part_number?: string;
   part_name?: string;
   part_type?: string;
@@ -302,4 +320,5 @@ export interface ActiveJob {
   work_order_quantity_ordered?: number;
   component_quantity?: number | null;
   quantity_complete?: number;
+  laser_nest?: LaserNestInfo | null;
 }
