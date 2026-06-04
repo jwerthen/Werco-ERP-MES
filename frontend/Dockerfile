@@ -47,4 +47,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/ || exit 1
 
 # Start server - Railway provides PORT env var
-CMD serve -s build -l ${PORT:-3000}
+CMD ["sh", "-c", "exec serve -s build -l ${PORT:-3000}"]

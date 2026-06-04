@@ -42,7 +42,7 @@ COPY --from=frontend-build /app/build ./build
 EXPOSE 3000
 
 # Start server - Railway provides PORT env var
-CMD serve -s build -l ${PORT:-3000}
+CMD ["sh", "-c", "exec serve -s build -l ${PORT:-3000}"]
 
 
 # =========================
@@ -73,4 +73,4 @@ COPY backend/ ./
 EXPOSE 8000
 
 # Start command - Railway provides PORT environment variable
-CMD alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WEB_CONCURRENCY:-2} --proxy-headers
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WEB_CONCURRENCY:-2} --proxy-headers"]
