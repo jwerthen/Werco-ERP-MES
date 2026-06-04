@@ -460,6 +460,53 @@ class ApiService {
     return response.data;
   }
 
+  // Materials & Supplies
+  async getMaterials(params?: PartListParams): Promise<Part[]> {
+    if (params?.limit) {
+      const response = await this.api.get<Part[]>('/materials/', { params });
+      return response.data;
+    }
+
+    const pageSize = 500;
+    const allMaterials: Part[] = [];
+    let skip = params?.skip ?? params?.offset ?? 0;
+
+    while (true) {
+      const response = await this.api.get<Part[]>('/materials/', {
+        params: { ...params, skip, limit: pageSize },
+      });
+      allMaterials.push(...response.data);
+      if (response.data.length < pageSize) break;
+      skip += pageSize;
+    }
+
+    return allMaterials;
+  }
+
+  async createMaterial(data: PartCreate): Promise<Part> {
+    const response = await this.api.post<Part>('/materials/', data);
+    return response.data;
+  }
+
+  async updateMaterial(id: number, data: PartUpdate): Promise<Part> {
+    const response = await this.api.put<Part>(`/materials/${id}`, data);
+    return response.data;
+  }
+
+  async deleteMaterial(id: number) {
+    const response = await this.api.delete(`/materials/${id}`);
+    return response.data;
+  }
+
+  async importMaterialsCsv(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post('/materials/import-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  }
+
   // BOM (Bill of Materials)
   async getBOMs(params?: { status?: string; active_only?: boolean; skip?: number; limit?: number }) {
     if (params?.limit) {

@@ -19,6 +19,31 @@ class PartType(str, enum.Enum):
     CONSUMABLE = "consumable"  # Consumables (adhesives, lubricants, etc.)
 
 
+ENGINEERING_PART_TYPES = (PartType.MANUFACTURED, PartType.ASSEMBLY)
+MATERIAL_SUPPLY_PART_TYPES = (
+    PartType.PURCHASED,
+    PartType.RAW_MATERIAL,
+    PartType.HARDWARE,
+    PartType.CONSUMABLE,
+)
+
+
+def normalize_part_type_value(value) -> str:
+    if hasattr(value, "value"):
+        return str(value.value).strip().lower()
+    if isinstance(value, str):
+        return value.strip().lower()
+    return str(value).strip().lower()
+
+
+def is_engineering_part_type(value) -> bool:
+    return normalize_part_type_value(value) in {part_type.value for part_type in ENGINEERING_PART_TYPES}
+
+
+def is_material_supply_part_type(value) -> bool:
+    return normalize_part_type_value(value) in {part_type.value for part_type in MATERIAL_SUPPLY_PART_TYPES}
+
+
 class UnitOfMeasure(str, enum.Enum):
     EACH = "each"
     FEET = "feet"

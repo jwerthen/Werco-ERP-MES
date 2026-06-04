@@ -74,6 +74,7 @@ export interface PartUpdate {
 export interface PartListParams {
   search?: string;
   part_type?: PartType;
+  item_group?: 'engineering' | 'materials' | 'all';
   active_only?: boolean;
   include_bom_components?: boolean;
   limit?: number;

@@ -246,7 +246,7 @@ export default function Purchasing() {
         api.getPurchaseOrders(),
         api.getReceivingQueue(),
         api.getPendingInspection(),
-        api.getParts({ active_only: true }),
+        api.getParts({ active_only: true, item_group: 'all' }),
         api.getInventoryLocations()
       ]);
       setVendors(vendorsRes);

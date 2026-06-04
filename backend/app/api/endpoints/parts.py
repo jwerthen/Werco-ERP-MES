@@ -1,4 +1,5 @@
 import csv
+import enum
 import io
 from typing import List, Optional
 
@@ -10,13 +11,19 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem
-from app.models.part import Part, PartType, UnitOfMeasure
+from app.models.part import ENGINEERING_PART_TYPES, Part, PartType, UnitOfMeasure, is_engineering_part_type
 from app.models.user import User, UserRole
 from app.schemas.part import PartCreate, PartResponse, PartUpdate
 from app.services.audit_service import AuditService
 from app.services.part_number_service import generate_werco_part_number, normalize_description
 
 router = APIRouter()
+
+
+class PartItemGroup(str, enum.Enum):
+    ENGINEERING = "engineering"
+    MATERIALS = "materials"
+    ALL = "all"
 
 
 class PartCsvImportError(BaseModel):
@@ -75,6 +82,50 @@ def _parse_int(value: str, field_name: str, default: int = 0) -> int:
         raise ValueError(f"{field_name} must be an integer") from exc
 
 
+def _normalize_enum(value, fallback):
+    if hasattr(value, "value"):
+        return str(value.value).strip().lower()
+    if isinstance(value, str):
+        return value.strip().lower()
+    return fallback
+
+
+def _part_to_response(part: Part) -> Optional[PartResponse]:
+    try:
+        part_type_val = _normalize_enum(part.part_type, PartType.MANUFACTURED.value)
+        uom_val = _normalize_enum(part.unit_of_measure, UnitOfMeasure.EACH.value)
+        return PartResponse(
+            id=part.id,
+            part_number=part.part_number or "",
+            revision=part.revision or "A",
+            name=part.name or "",
+            description=part.description,
+            part_type=PartType(part_type_val),
+            unit_of_measure=UnitOfMeasure(uom_val),
+            standard_cost=part.standard_cost or 0.0,
+            material_cost=part.material_cost or 0.0,
+            labor_cost=part.labor_cost or 0.0,
+            overhead_cost=part.overhead_cost or 0.0,
+            lead_time_days=part.lead_time_days or 0,
+            safety_stock=part.safety_stock or 0.0,
+            reorder_point=part.reorder_point or 0.0,
+            reorder_quantity=part.reorder_quantity or 0.0,
+            is_critical=part.is_critical or False,
+            requires_inspection=part.requires_inspection if part.requires_inspection is not None else True,
+            inspection_requirements=part.inspection_requirements,
+            customer_name=part.customer_name,
+            customer_part_number=part.customer_part_number,
+            drawing_number=part.drawing_number,
+            is_active=part.is_active if part.is_active is not None else True,
+            status=part.status or "active",
+            created_at=part.created_at,
+            updated_at=part.updated_at,
+            version=0,
+        )
+    except Exception:
+        return None
+
+
 @router.get("/", response_model=List[PartResponse], summary="List all parts")
 def list_parts(
     skip: int = Query(0, ge=0, description="Number of records to skip for pagination"),
@@ -84,6 +135,10 @@ def list_parts(
     ),
     part_type: Optional[PartType] = Query(
         None, description="Filter by part type (manufactured, purchased, assembly, raw_material)"
+    ),
+    item_group: PartItemGroup = Query(
+        PartItemGroup.ENGINEERING,
+        description="Catalog group to list: engineering, materials, or all",
     ),
     active_only: bool = Query(True, description="Only return active parts"),
     include_bom_components: bool = Query(True, description="Include parts used as active BOM components"),
@@ -117,6 +172,13 @@ def list_parts(
     if active_only:
         query = query.filter(Part.is_active == True)
 
+    if item_group == PartItemGroup.ENGINEERING:
+        query = query.filter(Part.part_type.in_(ENGINEERING_PART_TYPES))
+    elif item_group == PartItemGroup.MATERIALS:
+        from app.models.part import MATERIAL_SUPPLY_PART_TYPES
+
+        query = query.filter(Part.part_type.in_(MATERIAL_SUPPLY_PART_TYPES))
+
     if part_type:
         query = query.filter(Part.part_type == part_type)
 
@@ -147,53 +209,7 @@ def list_parts(
 
     parts = query.order_by(Part.part_number).offset(skip).limit(limit).all()
 
-    def normalize_enum(value, fallback):
-        if hasattr(value, "value"):
-            return str(value.value).strip().lower()
-        if isinstance(value, str):
-            return value.strip().lower()
-        return fallback
-
-    # Build response manually to handle any edge cases
-    result = []
-    for part in parts:
-        try:
-            part_type_val = normalize_enum(part.part_type, PartType.MANUFACTURED.value)
-            uom_val = normalize_enum(part.unit_of_measure, UnitOfMeasure.EACH.value)
-            result.append(
-                PartResponse(
-                    id=part.id,
-                    part_number=part.part_number or "",
-                    revision=part.revision or "A",
-                    name=part.name or "",
-                    description=part.description,
-                    part_type=PartType(part_type_val),
-                    unit_of_measure=UnitOfMeasure(uom_val),
-                    standard_cost=part.standard_cost or 0.0,
-                    material_cost=part.material_cost or 0.0,
-                    labor_cost=part.labor_cost or 0.0,
-                    overhead_cost=part.overhead_cost or 0.0,
-                    lead_time_days=part.lead_time_days or 0,
-                    safety_stock=part.safety_stock or 0.0,
-                    reorder_point=part.reorder_point or 0.0,
-                    reorder_quantity=part.reorder_quantity or 0.0,
-                    is_critical=part.is_critical or False,
-                    requires_inspection=part.requires_inspection if part.requires_inspection is not None else True,
-                    inspection_requirements=part.inspection_requirements,
-                    customer_name=part.customer_name,
-                    customer_part_number=part.customer_part_number,
-                    drawing_number=part.drawing_number,
-                    is_active=part.is_active if part.is_active is not None else True,
-                    status=part.status or "active",
-                    created_at=part.created_at,
-                    updated_at=part.updated_at,
-                    version=0,
-                )
-            )
-        except Exception:
-            pass  # Skip parts that fail to serialize
-
-    return result
+    return [response for part in parts if (response := _part_to_response(part))]
 
 
 @router.post("/", response_model=PartResponse, status_code=status.HTTP_201_CREATED, summary="Create a new part")
@@ -226,6 +242,12 @@ def create_part(
         data["part_type"] = str(part_type_val.value).strip().lower()
     elif isinstance(part_type_val, str):
         data["part_type"] = part_type_val.strip().lower()
+
+    if not is_engineering_part_type(data.get("part_type")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Engineering parts must be manufactured or assembly. Use the materials endpoint for supplies.",
+        )
 
     uom_val = data.get("unit_of_measure")
     if hasattr(uom_val, "value"):
@@ -298,6 +320,8 @@ async def import_parts_csv(
                 raise ValueError("part_number is required")
             if part_number in existing_part_numbers:
                 raise ValueError("Part number already exists")
+            if not is_engineering_part_type(row.get("part_type", "")):
+                raise ValueError("part_type must be manufactured or assembly")
 
             part_in = PartCreate(
                 part_number=part_number,
@@ -431,6 +455,11 @@ def update_part(
                 value = str(value.value).strip().lower()
             elif isinstance(value, str):
                 value = value.strip().lower()
+            if not is_engineering_part_type(value):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Engineering parts must be manufactured or assembly. Use the materials endpoint for supplies.",
+                )
         if field == "unit_of_measure":
             if hasattr(value, "value"):
                 value = str(value.value).strip().lower()

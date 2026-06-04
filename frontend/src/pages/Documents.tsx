@@ -75,7 +75,7 @@ export default function Documents() {
     try {
       const [docsRes, partsRes, typesRes] = await Promise.all([
         api.getDocuments({ document_type: filterType || undefined }),
-        api.getParts({ active_only: true }),
+        api.getParts({ active_only: true, item_group: 'all' }),
         api.getDocumentTypes()
       ]);
       setDocuments(docsRes);

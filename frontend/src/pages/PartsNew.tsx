@@ -4,6 +4,7 @@ import api from '../services/api';
 import { Part, PartType } from '../types';
 import { CustomerNameOption } from '../types/api';
 import { partTypeColors } from '../types/engineering';
+import { ENGINEERING_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/Toast';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
@@ -525,12 +526,9 @@ export default function PartsPage() {
         <div className="flex gap-2 items-center">
           <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} className="input py-2 text-sm w-40">
             <option value="">All Types</option>
-            <option value="manufactured">Manufactured</option>
-            <option value="assembly">Assembly</option>
-            <option value="purchased">Purchased</option>
-            <option value="hardware">Hardware</option>
-            <option value="consumable">Consumable</option>
-            <option value="raw_material">Raw Material</option>
+            {ENGINEERING_PART_TYPE_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
           </select>
           <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="input py-2 text-sm w-32">
             <option value="">All Status</option>
@@ -921,12 +919,9 @@ export default function PartsPage() {
                     onChange={e => setCreateForm(p => ({ ...p, part_type: e.target.value as PartType }))}
                     className="input"
                   >
-                    <option value="manufactured">Manufactured</option>
-                    <option value="assembly">Assembly</option>
-                    <option value="purchased">Purchased</option>
-                    <option value="hardware">Hardware</option>
-                    <option value="consumable">Consumable</option>
-                    <option value="raw_material">Raw Material</option>
+                    {ENGINEERING_PART_TYPE_OPTIONS.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
                   </select>
                 </div>
                 <div>

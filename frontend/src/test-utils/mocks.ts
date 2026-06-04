@@ -161,6 +161,10 @@ export const createMockApi = () => ({
   createPart: jest.fn().mockResolvedValue(mockPart),
   updatePart: jest.fn().mockResolvedValue(mockPart),
   deletePart: jest.fn().mockResolvedValue({ message: 'Deleted' }),
+  getMaterials: jest.fn().mockResolvedValue(mockParts.filter(part => ['purchased', 'raw_material', 'hardware', 'consumable'].includes(part.part_type))),
+  createMaterial: jest.fn().mockResolvedValue(mockParts[2]),
+  updateMaterial: jest.fn().mockResolvedValue(mockParts[2]),
+  deleteMaterial: jest.fn().mockResolvedValue({ message: 'Deleted' }),
   
   getWorkOrders: jest.fn().mockResolvedValue(mockWorkOrders),
   getWorkOrder: jest.fn().mockResolvedValue(mockWorkOrder),

@@ -129,7 +129,7 @@ export default function QualityPage() {
         api.getCARs(),
         api.getFAIs(),
         api.getQualitySummary(),
-        api.getParts({ active_only: true })
+        api.getParts({ active_only: true, item_group: 'all' })
       ]);
       setNcrs(ncrsRes);
       setCars(carsRes);

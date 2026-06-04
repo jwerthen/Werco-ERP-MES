@@ -37,6 +37,7 @@ const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
 const ImportCenter = lazyWithRetry(() => import('./pages/ImportCenter'));
 const ActionInbox = lazyWithRetry(() => import('./pages/ActionInbox'));
 const Warehouse = lazyWithRetry(() => import('./pages/Warehouse'));
+const Materials = lazyWithRetry(() => import('./pages/Materials'));
 const MRP = lazyWithRetry(() => import('./pages/MRP'));
 const Quality = lazyWithRetry(() => import('./pages/Quality'));
 const CustomFields = lazyWithRetry(() => import('./pages/CustomFields'));
@@ -114,6 +115,7 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/routing', permission: 'routings:view' },
   { prefix: '/engineering-changes', anyOf: ['parts:view', 'boms:view', 'routings:view'] },
   { prefix: '/warehouse', anyOf: ['inventory:view', 'receiving:view', 'shipping:view'] },
+  { prefix: '/materials', permission: 'inventory:view' },
   { prefix: '/inventory', permission: 'inventory:view' },
   { prefix: '/receiving', permission: 'receiving:view' },
   { prefix: '/shipping', permission: 'shipping:view' },
@@ -399,6 +401,13 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><Warehouse /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+      <Route path="/materials" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><Materials /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

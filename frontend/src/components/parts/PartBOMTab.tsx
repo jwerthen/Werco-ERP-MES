@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import { Part, PartType } from '../../types';
+import { isMaterialSupplyPartType } from '../../utils/catalogGroups';
 import {
   BOM, BOMItem, LineType, lineTypeColors, lineTypeLabels,
 } from '../../types/engineering';
@@ -97,7 +98,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
   // Load parts for add-item dropdown
   useEffect(() => {
     if (showAddItem && allParts.length === 0) {
-      api.getParts({}).then(setAllParts).catch(() => {});
+      api.getParts({ item_group: 'all' }).then(setAllParts).catch(() => {});
     }
   }, [showAddItem, allParts.length]);
 
@@ -212,7 +213,9 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
   const handleCreateNewPart = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const createdPart = await api.createPart(newPart);
+      const createdPart = isMaterialSupplyPartType(newPart.part_type)
+        ? await api.createMaterial(newPart)
+        : await api.createPart(newPart);
       setAllParts(prev => [...prev, createdPart]);
       setNewItem(prev => ({ ...prev, component_part_id: createdPart.id }));
       setPartSearch(`${createdPart.part_number} - ${createdPart.name}`);
@@ -275,14 +278,17 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
     try {
       const createdParts: Part[] = [];
       for (const row of rowsToCreate) {
-        const createdPart = await api.createPart({
+        const payload = {
           part_number: row.part_number,
           revision: row.revision,
           name: row.name,
           description: row.description || undefined,
           part_type: row.part_type,
           unit_of_measure: 'each',
-        });
+        };
+        const createdPart = isMaterialSupplyPartType(row.part_type)
+          ? await api.createMaterial(payload)
+          : await api.createPart(payload);
 
         createdParts.push(createdPart);
 
@@ -290,7 +296,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
           component_part_id: createdPart.id,
           item_number: row.item_number,
           quantity: row.quantity,
-          item_type: row.part_type === 'purchased' || row.part_type === 'hardware' || row.part_type === 'consumable' ? 'buy' : 'make',
+          item_type: isMaterialSupplyPartType(row.part_type) ? 'buy' : 'make',
           line_type: row.line_type,
           notes: row.notes || undefined,
         });

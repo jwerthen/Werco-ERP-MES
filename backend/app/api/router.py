@@ -21,6 +21,7 @@ from app.api.endpoints import (
     inventory,
     job_costing,
     maintenance,
+    materials,
     mrp,
     notifications,
     oee,
@@ -61,6 +62,7 @@ api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(ai_learning.router, prefix="/ai", tags=["AI Learning"])
 api_router.include_router(work_centers.router, prefix="/work-centers", tags=["Work Centers"])
 api_router.include_router(parts.router, prefix="/parts", tags=["Parts"])
+api_router.include_router(materials.router, prefix="/materials", tags=["Materials & Supplies"])
 api_router.include_router(bom.router, prefix="/bom", tags=["Bill of Materials"])
 api_router.include_router(routing.router, prefix="/routing", tags=["Routing"])
 api_router.include_router(inventory.router, prefix="/inventory", tags=["Inventory"])

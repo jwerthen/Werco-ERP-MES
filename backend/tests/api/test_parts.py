@@ -94,6 +94,42 @@ class TestPartsAPI:
         data = response.json()
         assert all(item["part_type"] == test_part.part_type.value for item in data)
 
+    def test_parts_default_to_engineering_items(self, client: TestClient, auth_headers: dict, db_session: Session):
+        """The engineering parts list excludes materials and supplies by default."""
+        rows = [
+            Part(part_number="ENG-001", name="Machined Bracket", part_type="manufactured", unit_of_measure="each", is_active=True, company_id=1),
+            Part(part_number="ASM-001", name="Top Assembly", part_type="assembly", unit_of_measure="each", is_active=True, company_id=1),
+            Part(part_number="RAW-001", name="Steel Sheet", part_type="raw_material", unit_of_measure="sheets", is_active=True, company_id=1),
+            Part(part_number="HW-001", name="Hex Bolt", part_type="hardware", unit_of_measure="each", is_active=True, company_id=1),
+            Part(part_number="BUY-001", name="Purchased Motor", part_type="purchased", unit_of_measure="each", is_active=True, company_id=1),
+        ]
+        db_session.add_all(rows)
+        db_session.commit()
+
+        response = client.get("/api/v1/parts/?limit=500", headers=auth_headers)
+        assert response.status_code == status.HTTP_200_OK
+        part_numbers = {part["part_number"] for part in response.json()}
+        assert part_numbers == {"ASM-001", "ENG-001"}
+
+        response = client.get("/api/v1/parts/?item_group=all&limit=500", headers=auth_headers)
+        assert response.status_code == status.HTTP_200_OK
+        part_numbers = {part["part_number"] for part in response.json()}
+        assert {"ASM-001", "ENG-001", "RAW-001", "HW-001", "BUY-001"}.issubset(part_numbers)
+
+    def test_create_part_rejects_material_types(self, client: TestClient, auth_headers: dict):
+        """Engineering parts endpoint does not create material/supply records."""
+        response = client.post(
+            "/api/v1/parts/",
+            headers=auth_headers,
+            json={
+                "part_number": "RAW-BLOCKED-001",
+                "name": "Steel Sheet",
+                "part_type": "raw_material",
+                "unit_of_measure": "sheets",
+            },
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
     def test_hide_active_bom_components(self, client: TestClient, auth_headers: dict, db_session: Session):
         """Parts used in active BOMs can be hidden from the top-level parts list."""
         assembly = Part(
@@ -154,6 +190,60 @@ class TestPartsAPI:
         part_numbers = {part["part_number"] for part in response.json()}
         assert assembly.part_number in part_numbers
         assert component.part_number in part_numbers
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestMaterialsAPI:
+    """Test materials and supplies API endpoints."""
+
+    def test_list_materials_only(self, client: TestClient, auth_headers: dict, db_session: Session):
+        rows = [
+            Part(part_number="ENG-MAT-001", name="Machined Bracket", part_type="manufactured", unit_of_measure="each", is_active=True, company_id=1),
+            Part(part_number="RAW-MAT-001", name="Aluminum Sheet", part_type="raw_material", unit_of_measure="sheets", is_active=True, company_id=1),
+            Part(part_number="HW-MAT-001", name="Washer", part_type="hardware", unit_of_measure="each", is_active=True, company_id=1),
+            Part(part_number="CON-MAT-001", name="Primer", part_type="consumable", unit_of_measure="gallons", is_active=True, company_id=1),
+            Part(part_number="BUY-MAT-001", name="Purchased Pump", part_type="purchased", unit_of_measure="each", is_active=True, company_id=1),
+        ]
+        db_session.add_all(rows)
+        db_session.commit()
+
+        response = client.get("/api/v1/materials/?limit=500", headers=auth_headers)
+        assert response.status_code == status.HTTP_200_OK
+        part_numbers = {part["part_number"] for part in response.json()}
+        assert part_numbers == {"BUY-MAT-001", "CON-MAT-001", "HW-MAT-001", "RAW-MAT-001"}
+
+    def test_create_material_rejects_engineering_types(self, client: TestClient, auth_headers: dict):
+        response = client.post(
+            "/api/v1/materials/",
+            headers=auth_headers,
+            json={
+                "part_number": "ASM-BLOCKED-001",
+                "name": "Assembly",
+                "part_type": "assembly",
+                "unit_of_measure": "each",
+            },
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_update_material_rejects_engineering_types(self, client: TestClient, auth_headers: dict, db_session: Session):
+        material = Part(
+            part_number="RAW-UPD-001",
+            name="Steel Sheet",
+            part_type="raw_material",
+            unit_of_measure="sheets",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(material)
+        db_session.commit()
+
+        response = client.put(
+            f"/api/v1/materials/{material.id}",
+            headers=auth_headers,
+            json={"version": 0, "part_type": "manufactured"},
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
 
 
 @pytest.mark.api

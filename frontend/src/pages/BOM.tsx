@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
-import { Part } from '../types';
+import { Part, PartType } from '../types';
+import { isMaterialSupplyPartType } from '../utils/catalogGroups';
 import { useNavigate } from 'react-router-dom';
 import { 
   PlusIcon, 
@@ -168,7 +169,7 @@ export default function BOMPage() {
   const [newPart, setNewPart] = useState({
     part_number: '',
     name: '',
-    part_type: 'manufactured' as 'manufactured' | 'purchased' | 'assembly' | 'raw_material',
+    part_type: 'manufactured' as PartType,
     revision: 'A',
     description: ''
   });
@@ -190,7 +191,7 @@ export default function BOMPage() {
       // Load BOMs and parts separately so one failure doesn't block the other
       const [bomsResult, partsResult] = await Promise.allSettled([
         api.getBOMs({ active_only: true }),
-        api.getParts({ active_only: true })
+        api.getParts({ active_only: true, item_group: 'all' })
       ]);
       
       if (bomsResult.status === 'fulfilled') {
@@ -458,7 +459,9 @@ export default function BOMPage() {
   const handleCreateNewPart = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const createdPart = await api.createPart(newPart);
+      const createdPart = isMaterialSupplyPartType(newPart.part_type)
+        ? await api.createMaterial(newPart)
+        : await api.createPart(newPart);
       // Add to parts list and select it
       setParts([...parts, createdPart]);
       handleSelectPart(createdPart.id);
@@ -1514,6 +1517,8 @@ export default function BOMPage() {
                   <option value="purchased">Purchased</option>
                   <option value="assembly">Assembly</option>
                   <option value="raw_material">Raw Material</option>
+                  <option value="hardware">Hardware</option>
+                  <option value="consumable">Consumable</option>
                 </select>
               </div>
               <div>

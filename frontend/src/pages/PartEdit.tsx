@@ -4,6 +4,7 @@ import api from '../services/api';
 import { Part, PartType } from '../types';
 import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { useToast } from '../components/ui/Toast';
+import { ENGINEERING_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
 
 export default function PartEdit() {
   const { id } = useParams<{ id: string }>();
@@ -132,12 +133,9 @@ export default function PartEdit() {
                 onChange={e => setForm(p => ({ ...p, part_type: e.target.value as PartType }))}
                 className="input"
               >
-                <option value="manufactured">Manufactured</option>
-                <option value="assembly">Assembly</option>
-                <option value="purchased">Purchased</option>
-                <option value="hardware">Hardware</option>
-                <option value="consumable">Consumable</option>
-                <option value="raw_material">Raw Material</option>
+                {ENGINEERING_PART_TYPE_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
               </select>
             </div>
             <div>

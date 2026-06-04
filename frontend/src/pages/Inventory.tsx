@@ -148,7 +148,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       const [invRes, summaryRes, partsRes, locsRes, lowStockRes] = await Promise.all([
         api.getInventory(),
         api.getInventorySummary(),
-        api.getParts({ active_only: true }),
+        api.getParts({ active_only: true, item_group: 'all' }),
         api.getInventoryLocations(),
         api.getLowStockAlerts()
       ]);
@@ -232,7 +232,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         <div className="flex justify-between items-center">
           <div>
             <h1 className="text-2xl font-bold text-white">Inventory</h1>
-            <p className="text-sm text-slate-400 mt-1">Parts, materials, hardware, and assemblies in one place</p>
+            <p className="text-sm text-slate-400 mt-1">Engineering parts, materials, and supplies in one place</p>
           </div>
           <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
             <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
@@ -317,7 +317,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             {[
               { id: 'all', label: 'All Inventory' },
               { id: 'parts', label: 'Manufactured & Assemblies' },
-              { id: 'materials', label: 'Materials & Hardware' },
+              { id: 'materials', label: 'Materials & Supplies' },
             ].map((chip) => (
               <button
                 key={chip.id}

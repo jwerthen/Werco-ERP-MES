@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.models.bom import BOM, BOMItemType
 from app.models.inventory import InventoryItem
 from app.models.mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, PlanningAction
-from app.models.part import Part, PartType
+from app.models.part import Part, is_material_supply_part_type
 from app.models.work_order import WorkOrder, WorkOrderStatus
 
 
@@ -43,6 +43,14 @@ class MRPService:
             new_num = 1
 
         return f"{prefix}{new_num:03d}"
+
+    @staticmethod
+    def _enum_value(value) -> str:
+        if hasattr(value, "value"):
+            return str(value.value).strip().lower()
+        if isinstance(value, str):
+            return value.strip().lower()
+        return str(value).strip().lower()
 
     def get_inventory_summary(self, part_id: int) -> Tuple[float, float, float]:
         """Get inventory quantities for a part: (on_hand, allocated, on_order)"""
@@ -146,18 +154,18 @@ class MRPService:
                     'part_id': part.id,
                     'part_number': part.part_number,
                     'part_name': part.name,
-                    'part_type': part.part_type.value,
+                    'part_type': self._enum_value(part.part_type),
                     'quantity': ext_qty,
                     'required_date': item_required_date,
                     'bom_level': level,
                     'parent_part_id': bom.part_id,
-                    'item_type': item.item_type.value,
+                    'item_type': self._enum_value(item.item_type),
                     'lead_time_days': part.lead_time_days,
                 }
             )
 
             # If this is a MAKE item, recurse into its BOM
-            if item.item_type == BOMItemType.MAKE:
+            if self._enum_value(item.item_type) == BOMItemType.MAKE.value:
                 child_bom = self.db.query(BOM).filter(BOM.part_id == part.id, BOM.is_active == True).first()
 
                 if child_bom:
@@ -260,8 +268,8 @@ class MRPService:
                     lead_time = part.lead_time_days or 0
                     order_date = req_date - timedelta(days=lead_time)
 
-                    # Determine action type based on part type
-                    if part.part_type == PartType.PURCHASED:
+                    # Determine action type based on catalog group
+                    if is_material_supply_part_type(part.part_type):
                         action_type = PlanningAction.ORDER
                     else:
                         action_type = PlanningAction.MANUFACTURE
