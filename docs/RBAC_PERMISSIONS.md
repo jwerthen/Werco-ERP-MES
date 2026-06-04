@@ -16,6 +16,16 @@ Werco ERP implements a comprehensive RBAC system with 7 predefined roles. Permis
 | **Shipping** | Shipping operations | Shipping clerks, warehouse staff |
 | **Viewer** | Read-only access | Auditors, executives, guests |
 
+## Access enforcement model
+
+Permissions are enforced at two layers, and the two layers **intentionally differ for reads**:
+
+- **Writes / state changes** (Create, Edit, Delete, Approve, Release, Send, Adjust, Transfer, Complete, Inspect, …) are enforced **server-side** via the `require_role` dependency on the endpoint. These are the authoritative access controls and match the matrix below.
+- **Operational/domain reads** — the **View** rows for the operational modules below (e.g. Work Orders, Parts, BOMs, Routings, Inventory, Purchasing, Receiving, Customers, Quotes) — are **tenant-scoped** (every query is filtered to the caller's active company via `get_current_company_id`) and are available to **any authenticated user within that tenant**. The list/detail GET endpoints depend on `get_current_user` only and do **not** restrict reads by role. The **View** columns therefore describe the *intended in-app navigation* (which the frontend gates for usability), not a server-enforced read restriction. This is the current intended design: **read-broad / write-restricted**.
+- **Administrative / governance reads are the exception and _are_ enforced server-side:** **Users** (`require_role([ADMIN, MANAGER])`), **Admin Settings** (`ADMIN`), and **Audit Logs** (`require_role([ADMIN, MANAGER])`).
+
+> If the business requires least-privilege on domain reads (e.g. hiding vendor pricing / PO financials from Operator/Quality/Shipping at the API), enforce it **uniformly** by adding `require_role` to the read endpoints across modules, with authorization tests — not per-router. Until then, treat the **View** columns for operational modules as UI-visibility, not as a server-enforced control.
+
 ## Permission Matrix
 
 ### Work Orders
@@ -74,15 +84,13 @@ Werco ERP implements a comprehensive RBAC system with 7 predefined roles. Permis
 | Create | ✓ | ✓ | ✓ | | | | |
 | Approve | ✓ | ✓ | | | | | |
 
-> **Known discrepancy (under review):** The matrix above shows Purchasing **View**
-> as restricted, but the implementation does **not** currently enforce a role on
-> the purchasing list/read endpoints (`list_vendors`, `list_purchase_orders`, and
-> the single-record GETs in `app/api/endpoints/purchasing.py` depend only on
-> `get_current_user`). As a result, **any authenticated user — including Operator,
-> Quality, and Shipping — can read vendor and PO data.** Write/approve actions
-> (Create, Approve, send, line edits) remain role-gated as documented. A compliance
-> review is deciding whether to enforce the role on reads or update this matrix; do
-> not treat the **View** row as enforced until that decision lands.
+> **Read enforcement:** Per the [Access enforcement model](#access-enforcement-model),
+> Purchasing list/detail reads (`list_vendors`, `list_purchase_orders`, and the
+> single-record GETs in `app/api/endpoints/purchasing.py`) are tenant-scoped but **not**
+> role-restricted — any authenticated user in the tenant can read vendor and PO data, so
+> the **View** row above reflects intended UI visibility rather than a server-enforced
+> restriction. Only the write/approve actions (Create, Approve, send, line edits) are
+> role-gated. Receiving (below) follows the same read-broad / write-restricted pattern.
 
 ### Receiving
 
