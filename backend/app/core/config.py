@@ -297,7 +297,7 @@ class Settings(BaseSettings):
 
     # CORS - Include localhost for dev; production origins must be set via env var
     CORS_ORIGINS: str = (
-        "http://localhost:3000,http://localhost:3001,http://localhost:8000"
+        "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"
     )
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: str = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
