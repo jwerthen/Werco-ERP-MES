@@ -6,6 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Werco ERP-MES is a custom Enterprise Resource Planning + Manufacturing Execution System for precision manufacturing, built for **AS9100D, ISO 9001, and CMMC Level 2** compliance. The compliance posture is not incidental — audit trails, traceability, and access control are correctness requirements, not features. See the "Compliance-critical invariants" section below before changing data-writing code.
 
+## Subagent delegation policy
+
+This repo ships a team of specialized subagents in `.claude/agents/`. Route work to them automatically — don't wait to be asked by name:
+
+- **backend-engineer** — FastAPI endpoints, services, models, schemas.
+- **frontend-engineer** — React/TS pages, components, forms, styling.
+- **database-migration-specialist** — any Alembic migration (schema/enum/constraint change).
+- **ai-integration-specialist** — Anthropic-powered RFQ parsing / quoting / learning.
+- **devops-engineer** — Docker, CI/CD, Railway/Vercel, workers, env/secrets.
+- **compliance-auditor** — review for tenant isolation, audit logging, RBAC, soft-delete, traceability.
+- **code-reviewer** — diff review for correctness + cleanups, runs the lint/type/security gate.
+- **test-engineer** — pytest / Jest / Playwright coverage.
+- **documentation-engineer** — README, docs/ runbooks, CLAUDE.md, API/OpenAPI, compliance docs.
+
+**Definition of done for any code change.** A change is not complete until:
+1. The **test-engineer** has added or updated tests for the changed behavior (and they pass), AND
+2. The **documentation-engineer** has updated any docs the change affects — API endpoints, env vars, roles/permissions, deploy steps, features, or documented behavior (or has confirmed none are affected).
+
+Invoke these two after the implementing agent finishes, as a matter of course — they are the standing QA and documentation gates, not optional extras. For changes touching data access, auth, or deletion, also route through **compliance-auditor** before considering the work done. Skipping these is only acceptable for genuinely non-code changes (e.g. a typo fix in a comment) — and say so explicitly when you skip.
+
 ## Monorepo layout
 
 - `backend/` — Python 3.11 / FastAPI API (the bulk of the system)
