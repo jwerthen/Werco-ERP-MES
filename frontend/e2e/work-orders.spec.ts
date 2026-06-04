@@ -60,13 +60,16 @@ test.describe('Work Orders', () => {
 
   test('work order creation requires part selection', async ({ page }) => {
     await page.goto('/work-orders/new');
-    
-    // Try to submit without selecting part
-    const submitBtn = page.locator('button[type="submit"], button').filter({ hasText: /create|save|submit/i }).first();
-    await submitBtn.click();
-    
-    // Should show validation error
-    await expect(page.locator('text=/required|select.*part/i')).toBeVisible({ timeout: 3000 });
+
+    // The form guards against submitting without a part by disabling the submit
+    // button (`disabled={submitting || !form.part_id}`). Wait for the form to load,
+    // then assert the "Create Work Order" button is disabled while no part is chosen.
+    const submitBtn = page.locator('button[type="submit"]').filter({ hasText: /create work order/i });
+    await expect(submitBtn).toBeVisible({ timeout: 10000 });
+    await expect(submitBtn).toBeDisabled();
+
+    // The form also prompts the operator to pick a part before operations appear.
+    await expect(page.getByText(/select a part to see available operations/i)).toBeVisible();
   });
 
   test('can view work order details', async ({ page }) => {

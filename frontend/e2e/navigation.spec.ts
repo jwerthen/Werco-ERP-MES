@@ -13,13 +13,20 @@ test.describe('Sidebar Navigation', () => {
 
   test('sidebar shows main navigation items', async ({ page }) => {
     await page.goto('/');
-    
+
+    // The sidebar renders a <nav> nested inside an <aside>, so a `nav, aside`
+    // selector matches each link's containers twice. Scope each assertion with
+    // .first() to avoid strict-mode violations while still proving the link exists.
     const nav = page.locator('nav, aside');
-    
+
     // Core navigation items should be visible
-    await expect(nav.locator('a').filter({ hasText: /dashboard/i })).toBeVisible();
-    await expect(nav.locator('a').filter({ hasText: /work.*order/i })).toBeVisible();
-    await expect(nav.locator('a').filter({ hasText: /parts/i })).toBeVisible();
+    // Both a desktop sidebar and a hidden mobile bottom-nav render these links, so
+    // restrict to the visible one before asserting.
+    await expect(nav.locator('a').filter({ hasText: /dashboard/i }).filter({ visible: true }).first()).toBeVisible();
+    await expect(nav.locator('a').filter({ hasText: /work.*order/i }).filter({ visible: true }).first()).toBeVisible();
+    // "Parts" lives under the collapsible "Engineering" group on desktop (and in the
+    // mobile bottom-nav), so assert the nav link is present rather than expanded.
+    await expect(page.locator('a[href="/parts"]').first()).toBeAttached();
   });
 
   test('can navigate to each main section', async ({ page }) => {
@@ -64,26 +71,40 @@ test.describe('Global Search', () => {
   });
 
   test('can open search with keyboard shortcut', async ({ page }) => {
-    // Press Cmd/Ctrl+K
+    // The Ctrl+K handler is registered on document keydown once the app mounts.
+    // Wait for the sidebar to render and ensure the document has focus before
+    // dispatching the shortcut, otherwise the keypress can land before the
+    // listener is attached.
+    await expect(page.locator('nav[aria-label="Main navigation"] a').first()).toBeVisible({ timeout: 10000 });
+    await page.locator('body').click();
+
+    // Press Cmd/Ctrl+K to open the command palette
     await page.keyboard.press('Control+k');
-    
-    // Search modal/input should appear
-    await expect(page.locator('input[placeholder*="search" i], [role="dialog"] input').first()).toBeVisible({ timeout: 3000 });
+
+    // The command palette opens a dialog whose input reads "Search across your workspace…"
+    await expect(page.getByPlaceholder(/search across/i)).toBeVisible({ timeout: 3000 });
   });
 
   test('search shows results', async ({ page }) => {
+    // Same readiness wait as the shortcut test before triggering Ctrl+K.
+    await expect(page.locator('nav[aria-label="Main navigation"] a').first()).toBeVisible({ timeout: 10000 });
+    await page.locator('body').click();
+
     // Open search
     await page.keyboard.press('Control+k');
-    
-    const searchInput = page.locator('input[placeholder*="search" i], [role="dialog"] input').first();
-    if (await searchInput.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await searchInput.fill('test');
-      await page.waitForTimeout(500);
-      
-      // Results should appear
-      const results = page.locator('[role="listbox"] [role="option"], [data-testid="search-result"]');
-      await page.waitForTimeout(1000);
-    }
+
+    const searchInput = page.getByPlaceholder(/search across/i);
+    await expect(searchInput).toBeVisible({ timeout: 3000 });
+
+    // Search for a seeded part prefix; the backend search should return matches.
+    await searchInput.fill('WERCO');
+
+    const dialog = page.locator('[role="dialog"]');
+    // Either result rows render, or the palette explicitly says there are none —
+    // both prove the search executed and rendered a response.
+    await expect(
+      dialog.locator('ul li').first().or(dialog.getByText(/no results/i))
+    ).toBeVisible({ timeout: 5000 });
   });
 
   test('can navigate to search result', async ({ page }) => {

@@ -28,12 +28,22 @@ test.describe('Parts List', () => {
   });
 
   test('displays parts in table with columns', async ({ page }) => {
+    // The parts list defaults to the table view. Assert the page heading and the
+    // actual column headers the app renders ("Part #" and "Name"), not assumed labels.
+    await expect(page.locator('h1').filter({ hasText: /^parts$/i })).toBeVisible();
     await page.waitForSelector('table thead', { timeout: 10000 });
-    
-    // Check for expected columns
+
     const headers = page.locator('table thead th');
-    await expect(headers.filter({ hasText: /part.*number/i })).toBeVisible();
-    await expect(headers.filter({ hasText: /name|description/i }).first()).toBeVisible();
+    await expect(headers.filter({ hasText: /part\s*#/i }).first()).toBeVisible();
+    await expect(headers.filter({ hasText: /^name$/i }).first()).toBeVisible();
+
+    // A known seeded part should appear in the table body. The WERCO-002 family
+    // is always present (assemblies are never collapsed under another row).
+    await expect(
+      page.locator('table tbody tr')
+        .filter({ hasText: /WERCO-002-01|WERCO-002-02|RAW-001|WERCO-002|WERCO-001/ })
+        .first()
+    ).toBeVisible({ timeout: 10000 });
   });
 
   test('can search parts', async ({ page }) => {
@@ -94,34 +104,50 @@ test.describe('Part Creation', () => {
 
   test('shows validation errors for empty submission', async ({ page }) => {
     await openCreatePartForm(page);
-    
-    // Submit empty form
-    const submitBtn = page.locator('button[type="submit"], button').filter({ hasText: /create|save|submit/i }).first();
+
+    // The New Part form guards required fields with native HTML5 validation:
+    // Part Number / Revision / Name carry the `required` attribute, so an empty
+    // submit is blocked by the browser and never reaches the API.
+    const partNumberInput = page.locator('label:has-text("Part Number") + input').first();
+    await expect(partNumberInput).toHaveJSProperty('required', true);
+
+    let createCalled = false;
+    page.on('request', (req) => {
+      // api.createPart() POSTs to `${API}/parts/` (trailing slash, no sub-path).
+      if (req.method() === 'POST' && /\/parts\/(\?.*)?$/.test(req.url())) createCalled = true;
+    });
+
+    // Attempt to submit the empty form.
+    const submitBtn = page.locator('button[type="submit"]').filter({ hasText: /create part/i }).first();
     await submitBtn.click();
-    
-    // Should show validation errors
-    await expect(page.locator('text=/required/i')).toBeVisible({ timeout: 3000 });
+
+    // Submission is blocked: the modal/form stays open, the required field reports
+    // invalid via the Constraint Validation API, and no create request was issued.
+    await expect(page.locator('form')).toBeVisible();
+    const partNumberValid = await partNumberInput.evaluate(
+      (el) => (el as HTMLInputElement).checkValidity()
+    );
+    expect(partNumberValid).toBe(false);
+    expect(createCalled).toBe(false);
   });
 
   test('part number must be unique', async ({ page }) => {
     await openCreatePartForm(page);
-    
-    // Fill with existing part number (if we know one)
-    await page.fill('input[name*="part" i][name*="number" i], label:has-text("Part Number") + input', 'TEST-001');
-    await page.fill('input[name*="name" i], label:has-text("Name") + input', 'Test Part');
-    
-    // Select type
-    const typeSelect = page.locator('select[name*="type" i], label:has-text("Type") + select');
-    if (await typeSelect.isVisible()) {
-      await typeSelect.selectOption({ index: 1 });
-    }
-    
-    // Submit
-    const submitBtn = page.locator('button[type="submit"], button').filter({ hasText: /create|save/i }).first();
+
+    // Fill every required field with a DUPLICATE part number. Revision defaults to
+    // "A" and Type defaults to "manufactured", so Part Number + Name complete the form.
+    // WERCO-002-01 is a seeded part, so the backend rejects it as a duplicate.
+    await page.locator('label:has-text("Part Number") + input').first().fill('WERCO-002-01');
+    await page.locator('label:has-text("Name") + input').first().fill('Duplicate Part Number Test');
+
+    // Submit the now-valid form; the create request reaches the API.
+    const submitBtn = page.locator('button[type="submit"]').filter({ hasText: /create part/i }).first();
     await submitBtn.click();
-    
-    // May show duplicate error (depends on existing data)
-    await page.waitForTimeout(2000);
+
+    // The API returns 400 "Part number already exists" and the page surfaces it as
+    // an error toast. The modal stays open (no navigation to a new part detail page).
+    await expect(page.getByText(/already exists/i)).toBeVisible({ timeout: 8000 });
+    await expect(page).toHaveURL(/\/parts$/);
   });
 });
 
@@ -145,16 +171,25 @@ test.describe('Part Details', () => {
   });
 
   test('part detail shows key information', async ({ page }) => {
-    await page.waitForSelector('table tbody tr', { timeout: 10000 });
-    
-    const firstRow = page.locator('table tbody tr').first();
-    if (await firstRow.isVisible()) {
-      await firstRow.click();
-      await page.waitForURL(/\/parts\/\d+/, { timeout: 5000 }).catch(() => null);
-      
-      // Should show part information
-      await expect(page.locator('text=/part.*number|revision|type|status/i').first()).toBeVisible({ timeout: 5000 });
-    }
+    // Resolve a real part id via the API (using the logged-in token) and open its
+    // detail page directly — robust against list view-mode and row-click targeting
+    // (the list->detail click flow is covered by "can click part row to view details").
+    const token = await page.evaluate(() => sessionStorage.getItem('token'));
+    const res = await page.request.get('http://localhost:8000/api/v1/parts/?limit=1', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body = await res.json();
+    const part = Array.isArray(body) ? body[0] : (body.items || body.data || body.results || [])[0];
+    expect(part?.id, 'expected at least one seeded part').toBeTruthy();
+    await page.goto(`/parts/${part.id}`);
+
+    // The detail page renders the part number as the page heading and a row of
+    // quick stats on the default Overview tab — both are always visible (not
+    // gated behind a tab panel). Assert against those visible elements.
+    await expect(page.locator('h1').first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('h1').first()).toHaveText(/\w/);
+    await expect(page.getByText('Standard Cost').first()).toBeVisible();
+    await expect(page.getByText(/Rev\s+\w/).first()).toBeVisible();
   });
 });
 

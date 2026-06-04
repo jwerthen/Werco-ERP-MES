@@ -31,9 +31,14 @@ test.describe('Authentication', () => {
 
   test('shows validation errors for empty fields', async ({ page }) => {
     await page.click('button[type="submit"]');
-    
-    // Should show validation errors
-    await expect(page.locator('text=/required|enter/i')).toBeVisible();
+
+    // Native HTML5 `required` validation blocks submission and marks the field
+    // invalid (no network request fires; the page stays on /login).
+    await expect(page).toHaveURL(/\/login/);
+    const emailInvalid = await page
+      .locator('input[name="email"]')
+      .evaluate((el: HTMLInputElement) => !el.validity.valid);
+    expect(emailInvalid).toBe(true);
   });
 
   test('successful login redirects to dashboard', async ({ page }) => {
@@ -92,12 +97,10 @@ test.describe('Role-Based Access', () => {
   test('operator cannot access admin settings', async ({ page }) => {
     await loginAs(page, TEST_USERS.operator);
     await page.goto('/admin/settings');
-    
-    // Should see unauthorized or be redirected
-    const isUnauthorized = await page.locator('text=/unauthorized|access denied|forbidden/i').isVisible().catch(() => false);
-    const isRedirected = await page.url().includes('/unauthorized') || /\/$/.test(new URL(page.url()).pathname);
-    
-    expect(isUnauthorized || isRedirected).toBe(true);
+
+    // AdminRoute (requireAdmin) redirects non-admins away client-side, so the
+    // operator must not remain on the admin settings page.
+    await expect(page).not.toHaveURL(/\/admin\/settings/, { timeout: 10000 });
   });
 
   test('operator can access shop floor', async ({ page }) => {
