@@ -74,6 +74,16 @@ Werco ERP implements a comprehensive RBAC system with 7 predefined roles. Permis
 | Create | ✓ | ✓ | ✓ | | | | |
 | Approve | ✓ | ✓ | | | | | |
 
+> **Known discrepancy (under review):** The matrix above shows Purchasing **View**
+> as restricted, but the implementation does **not** currently enforce a role on
+> the purchasing list/read endpoints (`list_vendors`, `list_purchase_orders`, and
+> the single-record GETs in `app/api/endpoints/purchasing.py` depend only on
+> `get_current_user`). As a result, **any authenticated user — including Operator,
+> Quality, and Shipping — can read vendor and PO data.** Write/approve actions
+> (Create, Approve, send, line edits) remain role-gated as documented. A compliance
+> review is deciding whether to enforce the role on reads or update this matrix; do
+> not treat the **View** row as enforced until that decision lands.
+
 ### Receiving
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
