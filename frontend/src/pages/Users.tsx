@@ -2,7 +2,17 @@ import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { UserRole } from '../types';
 import { useSearchParams } from 'react-router-dom';
-import { PlusIcon, PencilIcon, KeyIcon, UserMinusIcon, UserPlusIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline';
+import { useAuth } from '../context/AuthContext';
+import {
+  PlusIcon,
+  PencilIcon,
+  KeyIcon,
+  UserMinusIcon,
+  UserPlusIcon,
+  ArrowUpTrayIcon,
+  CheckCircleIcon,
+  ClockIcon,
+} from '@heroicons/react/24/outline';
 
 interface UserData {
   id: number;
@@ -64,6 +74,8 @@ const passwordRequirements = [
   'No common words like password, admin, or welcome',
 ];
 
+const approvableRoles: UserRole[] = ['operator', 'supervisor', 'quality', 'shipping', 'manager', 'admin', 'viewer'];
+
 const getApiErrorMessage = (err: any, fallback: string) => {
   const detail = err.response?.data?.detail;
   if (Array.isArray(detail)) {
@@ -79,7 +91,12 @@ const getApiErrorMessage = (err: any, fallback: string) => {
 
 export default function Users() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const { user: currentUser } = useAuth();
+  const approvalMode = searchParams.get('approvals') === 'pending';
+  const canApproveUsers =
+    currentUser?.role === 'admin' || currentUser?.role === 'platform_admin' || currentUser?.is_superuser === true;
   const [users, setUsers] = useState<UserData[]>([]);
+  const [pendingUsers, setPendingUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
   const [showInactive, setShowInactive] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -91,6 +108,8 @@ export default function Users() {
   const [importDefaultPassword, setImportDefaultPassword] = useState('');
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<UserCsvImportResult | null>(null);
+  const [approvalRoles, setApprovalRoles] = useState<Record<number, UserRole>>({});
+  const [approvingUserIds, setApprovingUserIds] = useState<Record<number, boolean>>({});
 
   const [formData, setFormData] = useState({
     email: '',
@@ -107,18 +126,40 @@ export default function Users() {
 
   const loadUsers = useCallback(async () => {
     try {
-      const response = await api.getUsers(showInactive);
-      setUsers(response);
+      const [userList, pendingApprovals] = await Promise.all([
+        api.getUsers(showInactive || approvalMode),
+        canApproveUsers ? api.getPendingUserApprovals() : Promise.resolve([]),
+      ]);
+      setUsers(userList);
+      setPendingUsers(pendingApprovals);
     } catch (err) {
       console.error('Failed to load users:', err);
     } finally {
       setLoading(false);
     }
-  }, [showInactive]);
+  }, [approvalMode, canApproveUsers, showInactive]);
 
   useEffect(() => {
     loadUsers();
   }, [loadUsers]);
+
+  useEffect(() => {
+    if (approvalMode) {
+      setShowInactive(true);
+    }
+  }, [approvalMode]);
+
+  useEffect(() => {
+    setApprovalRoles((current) => {
+      const next = { ...current };
+      pendingUsers.forEach((user) => {
+        if (!next[user.id]) {
+          next[user.id] = 'operator';
+        }
+      });
+      return next;
+    });
+  }, [pendingUsers]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -165,6 +206,25 @@ export default function Users() {
       loadUsers();
     } catch (err: any) {
       alert(getApiErrorMessage(err, 'Failed to update user status'));
+    }
+  };
+
+  const handleApproveUser = async (user: UserData) => {
+    setApprovingUserIds((current) => ({ ...current, [user.id]: true }));
+    try {
+      await api.approveUser(user.id, {
+        role: approvalRoles[user.id] || 'operator',
+        department: user.department || undefined,
+      });
+      await loadUsers();
+    } catch (err: any) {
+      alert(getApiErrorMessage(err, 'Failed to approve user'));
+    } finally {
+      setApprovingUserIds((current) => {
+        const next = { ...current };
+        delete next[user.id];
+        return next;
+      });
     }
   };
 
@@ -248,8 +308,29 @@ export default function Users() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-white">User Management</h1>
+        <div>
+          <h1 className="text-2xl font-bold text-white">User Management</h1>
+          {pendingUsers.length > 0 && (
+            <p className="mt-1 text-sm text-amber-300">
+              {pendingUsers.length} account{pendingUsers.length === 1 ? '' : 's'} awaiting approval
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-2">
+          {pendingUsers.length > 0 && (
+            <button
+              onClick={() => {
+                const nextParams = new URLSearchParams(searchParams);
+                nextParams.set('approvals', 'pending');
+                setSearchParams(nextParams, { replace: true });
+                setShowInactive(true);
+              }}
+              className="btn-secondary flex items-center"
+            >
+              <ClockIcon className="h-5 w-5 mr-2 text-amber-300" />
+              Pending ({pendingUsers.length})
+            </button>
+          )}
           <button
             onClick={() => setShowImportModal(true)}
             className="btn-secondary flex items-center"
@@ -306,6 +387,60 @@ export default function Users() {
               </ul>
             </div>
           )}
+        </div>
+      )}
+
+      {pendingUsers.length > 0 && (
+        <div className="card border-amber-500/30 bg-amber-500/5">
+          <div className="card-header">
+            <div>
+              <h2 className="card-title flex items-center gap-2">
+                <ClockIcon className="h-5 w-5 text-amber-300" />
+                Pending Account Approvals
+              </h2>
+              <p className="card-subtitle">New self-registered accounts are inactive until an admin approves them.</p>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3">
+            {pendingUsers.map((user) => (
+              <div
+                key={user.id}
+                className="grid gap-3 rounded-[4px] border border-slate-700 bg-[#101722] p-4 lg:grid-cols-[minmax(0,1fr)_180px_120px] lg:items-center"
+              >
+                <div className="min-w-0">
+                  <div className="font-medium text-white">{user.first_name} {user.last_name}</div>
+                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-400">
+                    <span>{user.email}</span>
+                    <span>ID: {user.employee_id}</span>
+                    <span>Requested {new Date(user.created_at).toLocaleDateString()}</span>
+                  </div>
+                </div>
+                <select
+                  value={approvalRoles[user.id] || 'operator'}
+                  onChange={(e) =>
+                    setApprovalRoles((current) => ({
+                      ...current,
+                      [user.id]: e.target.value as UserRole,
+                    }))
+                  }
+                  className="input h-10"
+                  aria-label={`Approval role for ${user.first_name} ${user.last_name}`}
+                >
+                  {approvableRoles.map((role) => (
+                    <option key={role} value={role}>{roleLabels[role]}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => handleApproveUser(user)}
+                  className="btn-primary h-10 justify-center"
+                  disabled={!!approvingUserIds[user.id]}
+                >
+                  <CheckCircleIcon className="h-5 w-5 mr-2" />
+                  {approvingUserIds[user.id] ? 'Approving' : 'Approve'}
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

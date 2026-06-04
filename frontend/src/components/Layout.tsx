@@ -9,6 +9,7 @@ import GlobalSearch, { useGlobalSearch } from './GlobalSearch';
 import BottomNav from './ui/BottomNav';
 import SkipLink from './SkipLink';
 import AdaptivePromptPanel from './AdaptivePromptPanel';
+import api from '../services/api';
 import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
 import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -48,6 +49,7 @@ import {
   ArrowUpTrayIcon,
   RocketLaunchIcon,
   BellAlertIcon,
+  UserPlusIcon,
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -143,6 +145,7 @@ const navigation: NavItem[] = [
       { name: 'Import Center', href: '/import-center', icon: ArrowUpTrayIcon },
       { name: 'Work Centers', href: '/work-centers', icon: CogIcon },
       { name: 'Users', href: '/users', icon: UsersIcon },
+      { name: 'User Approvals', href: '/users?approvals=pending', icon: UserPlusIcon, adminOnly: true },
       { name: 'Operator Certifications', href: '/certifications', icon: ShieldCheckIcon },
       { name: 'Supplier Scorecards', href: '/supplier-scorecards', icon: ChartBarIcon },
       { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
@@ -285,6 +288,11 @@ const NavGroup = React.memo(function NavGroup({
               >
                 <child.icon className={`h-4 w-4 flex-shrink-0 ${isChildActive ? 'text-fd-blue' : ''}`} />
                 <span>{child.name}</span>
+                {child.badge && (
+                  <span className="ml-auto bg-fd-amber text-slate-950 text-[10px] font-bold font-mono px-1.5 py-0.5 rounded-[3px]">
+                    {child.badge}
+                  </span>
+                )}
               </Link>
             );
           })}
@@ -338,6 +346,7 @@ export default function Layout({ children }: LayoutProps) {
   const [logoutModalOpen, setLogoutModalOpen] = useState(false);
   const [logoutEmployeeId, setLogoutEmployeeId] = useState('');
   const [logoutError, setLogoutError] = useState('');
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
   const globalSearch = useGlobalSearch();
   const keyboardShortcuts = useKeyboardShortcutsContext();
   const isKiosk = isKioskMode(location.pathname, location.search) && user?.role === 'operator';
@@ -401,18 +410,59 @@ export default function Layout({ children }: LayoutProps) {
   }, [operatorDisplayName, user?.first_name, user?.last_name]);
 
   const visibleNavigation = useMemo(() => {
+    const withApprovalBadge = navigation.map((item) => {
+      if (item.name !== 'Administration' || !item.children) return item;
+
+      return {
+        ...item,
+        children: item.children.map((child) =>
+          child.name === 'User Approvals'
+            ? { ...child, badge: pendingApprovalCount > 0 ? pendingApprovalCount : undefined }
+            : child
+        ),
+      };
+    });
+
     if (isKiosk) {
-      return navigation.filter(item => item.name === 'Shop Floor');
+      return withApprovalBadge.filter(item => item.name === 'Shop Floor');
     }
 
     // Operators see a streamlined nav: Shop Floor, Quality, and Downtime
     if (isOperator) {
       const operatorAllowed = new Set(['Dashboard', 'Shop Floor', 'Quality', 'Maintenance']);
-      return navigation.filter(item => operatorAllowed.has(item.name));
+      return withApprovalBadge.filter(item => operatorAllowed.has(item.name));
     }
 
-    return navigation;
-  }, [isKiosk, isOperator]);
+    return withApprovalBadge;
+  }, [isKiosk, isOperator, pendingApprovalCount]);
+
+  useEffect(() => {
+    if (!isAdminUser) {
+      setPendingApprovalCount(0);
+      return;
+    }
+
+    let cancelled = false;
+    const loadPendingApprovalCount = async () => {
+      try {
+        const summary = await api.getPendingUserApprovalSummary();
+        if (!cancelled) {
+          setPendingApprovalCount(summary.count || 0);
+        }
+      } catch {
+        if (!cancelled) {
+          setPendingApprovalCount(0);
+        }
+      }
+    };
+
+    loadPendingApprovalCount();
+    const interval = setInterval(loadPendingApprovalCount, 60000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isAdminUser, location.pathname, location.search]);
 
   const handleLogoutConfirm = async () => {
     setLogoutError('');

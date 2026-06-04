@@ -7,6 +7,9 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from app.core.security import get_password_hash
+from app.models.user import User, UserRole
+
 
 @pytest.mark.api
 class TestUsersAPI:
@@ -32,6 +35,90 @@ class TestUsersAPI:
         response = client.get("/api/v1/users/", headers=operator_headers)
         # Either 403 or limited results
         assert response.status_code in [status.HTTP_403_FORBIDDEN, status.HTTP_200_OK]
+
+    def test_pending_approvals_only_inactive_viewers(self, client: TestClient, admin_headers, db_session):
+        """Pending approvals are inactive viewer accounts from public signup."""
+        pending = User(
+            email="pending-approval@werco.com",
+            employee_id="EMP-PENDING-001",
+            first_name="Pending",
+            last_name="Approval",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.VIEWER,
+            is_active=False,
+            company_id=1,
+        )
+        inactive_operator = User(
+            email="inactive-operator@werco.com",
+            employee_id="EMP-INACTIVE-OP",
+            first_name="Inactive",
+            last_name="Operator",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.OPERATOR,
+            is_active=False,
+            company_id=1,
+        )
+        db_session.add_all([pending, inactive_operator])
+        db_session.commit()
+
+        response = client.get("/api/v1/users/pending-approvals", headers=admin_headers)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert [user["email"] for user in data] == ["pending-approval@werco.com"]
+
+        summary_response = client.get("/api/v1/users/pending-approvals/summary", headers=admin_headers)
+        assert summary_response.status_code == status.HTTP_200_OK
+        assert summary_response.json()["count"] == 1
+
+    def test_approve_pending_user_assigns_role_and_activates(self, client: TestClient, admin_headers, db_session):
+        """Admin can approve a self-registered user in one action."""
+        pending = User(
+            email="approve-me@werco.com",
+            employee_id="EMP-APPROVE-001",
+            first_name="Approve",
+            last_name="Me",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.VIEWER,
+            is_active=False,
+            company_id=1,
+        )
+        db_session.add(pending)
+        db_session.commit()
+        db_session.refresh(pending)
+
+        response = client.post(
+            f"/api/v1/users/{pending.id}/approve",
+            headers=admin_headers,
+            json={"role": "quality", "department": "Quality"},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["is_active"] is True
+        assert data["role"] == "quality"
+        assert data["department"] == "Quality"
+
+    def test_approve_pending_user_forbidden_for_manager(self, client: TestClient, manager_headers, db_session):
+        """Managers can view users but cannot approve pending accounts."""
+        pending = User(
+            email="manager-cannot-approve@werco.com",
+            employee_id="EMP-MGR-NOAPPROVE",
+            first_name="No",
+            last_name="Approve",
+            hashed_password=get_password_hash("SecureP@ss123!"),
+            role=UserRole.VIEWER,
+            is_active=False,
+            company_id=1,
+        )
+        db_session.add(pending)
+        db_session.commit()
+        db_session.refresh(pending)
+
+        response = client.post(
+            f"/api/v1/users/{pending.id}/approve",
+            headers=manager_headers,
+            json={"role": "operator"},
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
 
     def test_get_user_by_id(self, client: TestClient, admin_headers, created_user):
         """Test getting user by ID."""

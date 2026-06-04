@@ -1443,6 +1443,16 @@ class ApiService {
     return response.data;
   }
 
+  async getPendingUserApprovals() {
+    const response = await this.api.get('/users/pending-approvals');
+    return response.data;
+  }
+
+  async getPendingUserApprovalSummary(): Promise<{ count: number }> {
+    const response = await this.api.get('/users/pending-approvals/summary');
+    return response.data;
+  }
+
   async createUser(data: any) {
     const response = await this.api.post('/users/', data);
     return response.data;
@@ -1463,6 +1473,11 @@ class ApiService {
 
   async updateUser(userId: number, data: any) {
     const response = await this.api.put(`/users/${userId}`, data);
+    return response.data;
+  }
+
+  async approveUser(userId: number, data: { role: string; department?: string }) {
+    const response = await this.api.post(`/users/${userId}/approve`, data);
     return response.data;
   }
 

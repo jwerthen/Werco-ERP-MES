@@ -38,6 +38,15 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class UserApproval(BaseModel):
+    role: UserRole = UserRole.OPERATOR
+    department: Optional[str] = None
+
+
+class PendingApprovalSummary(BaseModel):
+    count: int
+
+
 class PasswordReset(BaseModel):
     new_password: str
 
@@ -123,6 +132,34 @@ def list_users(
         query = query.filter(User.is_active == True)
     users = query.order_by(User.last_name, User.first_name).all()
     return users
+
+
+def _pending_approval_query(db: Session, company_id: int):
+    return db.query(User).filter(
+        User.company_id == company_id,
+        User.is_active == False,
+        User.role == UserRole.VIEWER,
+    )
+
+
+@router.get("/pending-approvals", response_model=List[UserResponse])
+def list_pending_approvals(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """List inactive self-registered accounts awaiting admin approval."""
+    return _pending_approval_query(db, company_id).order_by(User.created_at.desc()).all()
+
+
+@router.get("/pending-approvals/summary", response_model=PendingApprovalSummary)
+def pending_approval_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Return the number of self-registered accounts awaiting approval."""
+    return PendingApprovalSummary(count=_pending_approval_query(db, company_id).count())
 
 
 @router.get("/me", response_model=UserResponse)
@@ -383,6 +420,35 @@ def update_user(
     for field, value in update_data.items():
         setattr(user, field, value)
 
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.post("/{user_id}/approve", response_model=UserResponse)
+def approve_user(
+    user_id: int,
+    approval: UserApproval,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Approve a self-registered user and assign their operational role."""
+    if approval.role == UserRole.PLATFORM_ADMIN:
+        raise HTTPException(status_code=400, detail="Platform admin role cannot be assigned through approval")
+
+    user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.is_active:
+        raise HTTPException(status_code=400, detail="User is already active")
+    if user.role != UserRole.VIEWER:
+        raise HTTPException(status_code=400, detail="Only pending self-registered users can be approved")
+
+    user.role = approval.role
+    if approval.department is not None:
+        user.department = approval.department
+    user.is_active = True
     db.commit()
     db.refresh(user)
     return user
