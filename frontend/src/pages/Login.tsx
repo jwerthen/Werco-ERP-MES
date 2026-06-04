@@ -253,6 +253,7 @@ export default function Login() {
                       </div>
                       <input
                         id="email"
+                        name="email"
                         type="email"
                         required
                         value={email}
@@ -283,6 +284,7 @@ export default function Login() {
                       </div>
                       <input
                         id="password"
+                        name="password"
                         type={showPassword ? 'text' : 'password'}
                         required
                         value={password}
