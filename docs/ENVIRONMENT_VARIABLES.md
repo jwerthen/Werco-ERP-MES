@@ -159,6 +159,24 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 | `SENTRY_DSN` | No | - | Sentry DSN for error tracking |
 | `WEBHOOK_ENCRYPTION_KEY` | No | - | Key for encrypting webhook payloads |
 
+### Audit Log Retention / Archival (CMMC AU-3.3.8)
+
+Audit logs are immutable (database triggers block UPDATE/DELETE) and are **never row-deleted** by
+maintenance jobs. The monthly `archive_aged_audit_logs_job` worker cron exports audit rows past their
+retention window to cold storage instead. See `docs/AUDIT_LOG_RETENTION_RUNBOOK.md`.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AUDIT_ARCHIVE_ENABLED` | No | `true` | Master switch for the audit archival job. When `false`, the job archives nothing. |
+| `AUDIT_ARCHIVE_DIR` | No | `/var/lib/werco/audit-archive` | Cold-storage destination for exported audit segments (NDJSON). **In production point this at a mounted, backed-up volume** (or object-store mount); the worker must have write access. |
+| `AUDIT_RETENTION_DAYS_DEFAULT` | No | `1095` | Fallback retention window (days) used when a company has no active `security_audit_record` retention policy. 1095 = 3 years. |
+| `AUDIT_ARCHIVE_MAX_ROWS_PER_RUN` | No | `50000` | Safety cap on rows exported per company per run; large backlogs drain over successive runs. |
+
+**Note:** the retention window is normally driven by each company's `security_audit_record`
+`RetentionPolicy` (seeded by migration 030); `AUDIT_RETENTION_DAYS_DEFAULT` is only the fallback.
+Physical removal of aged rows from the online DB, if ever needed, is a deliberate DBA partition-drop —
+never an automated delete and never by disabling the immutability triggers.
+
 ## Frontend Configuration
 
 | Variable | Required | Default | Description |

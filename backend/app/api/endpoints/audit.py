@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, require_role
+from app.api.deps import get_current_company_id, require_platform_admin, require_role
 from app.db.database import get_db
 from app.models.audit_log import AuditLog
 from app.models.user import User, UserRole
@@ -181,12 +181,14 @@ def get_resource_types(
     summary="Get audit log integrity status",
     description="Quick status check of the audit log integrity chain (CMMC AU-3.3.8)",
 )
-def get_integrity_status(db: Session = Depends(get_db), current_user: User = Depends(require_role([UserRole.ADMIN]))):
+def get_integrity_status(db: Session = Depends(get_db), current_user: User = Depends(require_platform_admin)):
     """
     Get the current status of the audit log integrity chain.
 
     Returns basic statistics without performing full verification.
-    Admin access only.
+    Platform-admin access only: the hash chain is a single global sequence
+    interleaved across all tenants, so its stats cannot be scoped to one
+    company without leaking other tenants' record counts and sequence ranges.
 
     **CMMC Level 2 Control**: AU-3.3.8 - Protect audit information
     """
@@ -203,7 +205,7 @@ def verify_audit_integrity(
     start_sequence: Optional[int] = Query(None, description="Starting sequence number"),
     end_sequence: Optional[int] = Query(None, description="Ending sequence number"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    current_user: User = Depends(require_platform_admin),
 ):
     """
     Perform full verification of the audit log integrity chain.
@@ -213,7 +215,7 @@ def verify_audit_integrity(
     - Individual record hashes (content hasn't been modified)
     - Sequence gaps (no records have been deleted)
 
-    Admin access only.
+    Platform-admin access only (the chain spans all tenants).
 
     **CMMC Level 2 Control**: AU-3.3.8 - Protect audit information
 
@@ -233,7 +235,7 @@ def verify_audit_integrity(
 def verify_recent_audit_logs(
     count: int = Query(100, ge=1, le=1000, description="Number of recent records to verify"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    current_user: User = Depends(require_platform_admin),
 ):
     """
     Verify the integrity of the most recent audit log entries.
@@ -241,7 +243,7 @@ def verify_recent_audit_logs(
     This is a quick health check suitable for regular monitoring.
     For full compliance verification, use /integrity/verify.
 
-    Admin access only.
+    Platform-admin access only (the chain spans all tenants).
 
     **CMMC Level 2 Control**: AU-3.3.8 - Protect audit information
     """
@@ -262,11 +264,20 @@ def verify_single_record(
     Verify the integrity of a single audit log record.
 
     Returns the record details along with verification status.
-    Admin access only.
+    ADMIN access; a company-scoped admin may only inspect records belonging to
+    their active company, platform admins / superusers any record.
     """
     record = db.query(AuditLog).filter(AuditLog.sequence_number == sequence_number).first()
 
     if not record:
+        raise HTTPException(status_code=404, detail="Audit record not found")
+
+    # Tenant isolation: a company-scoped admin may only inspect their own
+    # company's records. Platform admins / superusers verify the global chain,
+    # which spans all tenants. Return 404 (not 403) so cross-tenant probing
+    # can't confirm that another company's record exists.
+    is_platform_admin = current_user.role == UserRole.PLATFORM_ADMIN or current_user.is_superuser
+    if not is_platform_admin and record.company_id != getattr(current_user, "_active_company_id", None):
         raise HTTPException(status_code=404, detail="Audit record not found")
 
     service = AuditIntegrityService(db)

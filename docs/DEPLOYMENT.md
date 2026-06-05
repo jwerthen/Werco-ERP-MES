@@ -61,7 +61,20 @@ REDIS_URL=redis://localhost:6379/0
 
 # LLM Integration (optional)
 ANTHROPIC_API_KEY=your_anthropic_key
+
+# Audit Log Retention / Archival (CMMC AU-3.3.8) — runs in the ARQ worker.
+# Audit logs are immutable and never deleted; aged rows are archived monthly to
+# this directory. Point it at a persistent, backed-up volume on the worker.
+# See docs/AUDIT_LOG_RETENTION_RUNBOOK.md.
+AUDIT_ARCHIVE_DIR=/var/lib/werco/audit-archive
 ```
+
+> **Background jobs run in the ARQ worker** (`arq app.worker.WorkerSettings`), separate from the API
+> process — make sure it is running. Its monthly `archive_aged_audit_logs_job` (1st of month, 03:00)
+> exports aged audit rows to `AUDIT_ARCHIVE_DIR`; provision that path as durable, backed-up storage so
+> archives survive restarts/rebuilds. The weekly `cleanup_old_logs_job` purges only ephemeral
+> job/notification logs — **not** audit logs. See `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` and the
+> Audit Log Retention / Archival section of `docs/ENVIRONMENT_VARIABLES.md`.
 
 ### Generate Secure Secret Key
 

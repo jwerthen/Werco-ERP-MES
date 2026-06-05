@@ -51,6 +51,22 @@ def compute_audit_hash(
 
     This creates a blockchain-like structure where tampering with
     any record breaks the chain from that point forward.
+
+    NOTE: ``company_id`` is intentionally NOT part of the hash input. It is
+    tenant-routing metadata derived from the authenticated session at write
+    time (see ``AuditService._resolve_company_id``), not user-supplied content.
+    Three reasons it stays out of the hash:
+      1. Audit rows are already immutable at the database level via the
+         ``tr_audit_log_no_update`` / ``tr_audit_log_no_delete`` triggers
+         (migration 008), so ``company_id`` cannot be altered post-insert.
+      2. Every row written before tenant tagging — including the rows that
+         migration 026 backfilled to ``company_id = 1`` — was hashed without
+         it. Adding it here would change the recomputed hash of every existing
+         record, failing verification and breaking the chain wholesale.
+      3. Keeping it out means ``company_id`` can be safely backfilled later
+         without invalidating any integrity hash.
+    Tenant isolation of audit data is therefore enforced at the query layer
+    (the retrieval endpoints filter by ``company_id``), not in the hash.
     """
     # Create deterministic string representation
     hash_input = {
@@ -136,12 +152,46 @@ class AuditService:
         "system": "system",
     }
 
-    def __init__(self, db: Session, user: Optional[User] = None, request: Optional[Request] = None):
+    def __init__(
+        self,
+        db: Session,
+        user: Optional[User] = None,
+        request: Optional[Request] = None,
+        company_id: Optional[int] = None,
+    ):
         self.db = db
         self.user = user
         self.request = request
+        # Tenant tag applied to every emitted audit row. Resolved once here so
+        # the ~25 call sites that build an AuditService need no changes.
+        self.company_id = self._resolve_company_id(user, company_id)
         self._ip_address = self._get_ip_address()
         self._user_agent = self._get_user_agent()
+
+    @staticmethod
+    def _resolve_company_id(user: Optional[User], explicit: Optional[int] = None) -> Optional[int]:
+        """
+        Determine which company an audit row should be tagged with.
+
+        Precedence:
+          1. An explicit ``company_id`` passed by the caller.
+          2. The active company context attached by ``get_current_user``
+             (``user._active_company_id``) — this is the company a platform
+             admin has switched into, and matches how every other write is
+             scoped via ``get_current_company_id``.
+          3. The user's home company, for code paths that construct a ``User``
+             outside the request dependencies (login, background jobs).
+        Returns ``None`` for unauthenticated/system events (e.g. a failed
+        login with no matching user), which cannot be attributed to a tenant.
+        """
+        if explicit is not None:
+            return explicit
+        if user is None:
+            return None
+        active = getattr(user, "_active_company_id", None)
+        if active is not None:
+            return active
+        return getattr(user, "company_id", None)
 
     def _get_ip_address(self) -> Optional[str]:
         """Extract IP address from request."""
@@ -232,6 +282,7 @@ class AuditService:
         success: bool = True,
         error_message: Optional[str] = None,
         extra_data: Optional[Dict] = None,
+        company_id: Optional[int] = None,
     ) -> AuditLog:
         """
         Create an immutable audit log entry with hash chain integrity.
@@ -240,6 +291,10 @@ class AuditService:
         - Each entry includes a SHA-256 hash of its content
         - Hash chain links each entry to the previous one
         - Sequence numbers enable gap detection
+
+        ``company_id`` tenant-tags the row so audit data can be retrieved per
+        tenant. It defaults to the company resolved at construction time and is
+        deliberately excluded from the integrity hash (see ``compute_audit_hash``).
         """
         try:
             # Include correlation ID for request tracing
@@ -253,6 +308,10 @@ class AuditService:
             user_email = self.user.email if self.user else None
             user_name = getattr(self.user, 'full_name', None) if self.user else None
             success_str = "true" if success else "false"
+
+            # Tenant tag for this row (per-call override falls back to the
+            # company resolved at construction). Not part of the hash input.
+            effective_company_id = company_id if company_id is not None else self.company_id
 
             # Get next sequence number and previous hash (for chain integrity)
             sequence_number, previous_hash = self._get_next_sequence_and_previous_hash()
@@ -284,6 +343,7 @@ class AuditService:
                 user_id=user_id,
                 user_email=user_email,
                 user_name=user_name,
+                company_id=effective_company_id,
                 action=action,
                 resource_type=resource_type,
                 resource_id=resource_id,

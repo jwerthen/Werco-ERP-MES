@@ -257,6 +257,43 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 |--------|----------|-------------|---------------|
 | GET | `/admin/settings` | Get system settings | Admin |
 | PUT | `/admin/settings` | Update system settings | Admin |
+| GET | `/admin/settings/audit-log` | Settings/quote-config change history (filterable, up to 1yr) | Admin |
+
+> **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
+> (admin / quote-config changes) and is **scoped to the caller's active company**
+> (`get_current_company_id`). Writes to this trail are tagged with that same active company, so a
+> platform admin's changes attribute to the company they have switched into — matching the
+> `/audit/*` (`AuditLog`) attribution. This is a separate trail from `/audit/*` and is **not** part
+> of the tamper-evident hash chain.
+
+### Audit Log
+
+Tamper-evident audit trail (CMMC Level 2 AU-3.3.8). Audit rows are **tenant-tagged** with
+`company_id`, so retrieval and the per-record lookup are **scoped to the caller's active
+company**. The integrity hash chain itself is a single global sequence interleaved across all
+tenants, so the aggregate chain-verification endpoints are **platform-admin only**.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/audit/` | List audit logs for the active company (filterable) | Admin / Manager |
+| GET | `/audit/summary` | Audit activity summary for the active company | Admin / Manager |
+| GET | `/audit/actions` | Distinct action types in the active company | Admin / Manager |
+| GET | `/audit/resource-types` | Distinct resource types in the active company | Admin / Manager |
+| GET | `/audit/integrity/status` | Global chain status (counts, sequence range) | Platform Admin |
+| GET | `/audit/integrity/verify` | Full hash-chain verification (optional range) | Platform Admin |
+| GET | `/audit/integrity/verify-recent` | Verify the N most recent records | Platform Admin |
+| GET | `/audit/integrity/record/{sequence_number}` | Verify a single record | Admin (own company only) |
+
+> **Tenancy:** the four retrieval endpoints filter by the active company (`get_current_company_id`),
+> returning only that tenant's audit data. `/integrity/record/{sequence_number}` lets a
+> company-scoped Admin verify one record **belonging to their active company**; a record from
+> another tenant returns **404** (not 403, so cross-tenant probing can't confirm the record
+> exists). Platform Admins / superusers may inspect any record.
+>
+> **Why the aggregate `/integrity/*` endpoints are Platform-Admin only:** the hash chain is one
+> global sequence spanning every tenant, so its stats/issues (record counts, sequence ranges,
+> record ids) can't be scoped to a single company without leaking other tenants' data. A company
+> Admin's "are my records intact?" need is served by the per-record endpoint above.
 
 ## Common Response Formats
 

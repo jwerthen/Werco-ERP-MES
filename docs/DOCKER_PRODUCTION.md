@@ -179,6 +179,49 @@ docker-compose -f docker-compose.prod.yml up -d --no-deps --build worker
 docker-compose -f docker-compose.prod.yml up -d --scale worker=3
 ```
 
+### Background Jobs (ARQ Worker)
+
+The `worker` service runs `arq app.worker.WorkerSettings` and executes the scheduled crons defined in
+`backend/app/worker.py`. Current schedule (UTC):
+
+| Job | Schedule |
+|-----|----------|
+| `send_daily_digest_job` | daily |
+| `check_calibrations_job` | daily |
+| `check_late_work_orders_job`, `check_low_stock_job`, `check_quote_expiring_job` | daily (mornings) |
+| `aggregate_ai_learning_job` | daily 05:30 |
+| `cleanup_old_logs_job` | Sundays 02:00 — purges ephemeral job/notification logs only (**not** audit logs) |
+| `archive_aged_audit_logs_job` | **1st of each month, 03:00** — exports aged audit rows to cold storage (CMMC AU-3.3.8) |
+
+#### Audit archival — provision cold storage
+
+`archive_aged_audit_logs_job` writes NDJSON archives of aged audit rows to `AUDIT_ARCHIVE_DIR`
+(default `/var/lib/werco/audit-archive`). Audit logs are immutable and are **never deleted**; this job
+is the retention path. See `docs/AUDIT_LOG_RETENTION_RUNBOOK.md`.
+
+**You must provision a persistent, backed-up volume for `AUDIT_ARCHIVE_DIR` on the worker** — the
+default compose `worker` service only mounts `backend_logs` and `uploads`, so without this the archive
+would land on the container's ephemeral filesystem and be lost on rebuild. Add a named volume (or host
+bind mount to durable, backed-up storage) and point `AUDIT_ARCHIVE_DIR` at it, e.g.:
+
+```yaml
+# docker-compose.prod.yml — worker service
+worker:
+  environment:
+    AUDIT_ARCHIVE_DIR: /var/lib/werco/audit-archive
+  volumes:
+    - backend_logs:/app/logs
+    - uploads:/app/uploads
+    - audit_archive:/var/lib/werco/audit-archive   # add this; back it up
+
+# volumes:
+#   audit_archive:
+```
+
+The other `AUDIT_*` settings (`AUDIT_ARCHIVE_ENABLED`, `AUDIT_RETENTION_DAYS_DEFAULT`,
+`AUDIT_ARCHIVE_MAX_ROWS_PER_RUN`) default sensibly; override only as needed. See
+`docs/ENVIRONMENT_VARIABLES.md`.
+
 ### Health Checks
 
 ```bash
@@ -257,6 +300,7 @@ deploy:
 | `ANTHROPIC_API_KEY` | No | AI features (optional) |
 | `SENTRY_DSN` | No | Error tracking (optional) |
 | `GUNICORN_WORKERS` | No | Backend workers (default: 4) |
+| `AUDIT_ARCHIVE_DIR` | No | Cold-storage path for archived audit logs on the **worker** (default `/var/lib/werco/audit-archive`); mount a persistent, backed-up volume. See audit archival section. |
 
 ## Resource Requirements
 
