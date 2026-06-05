@@ -47,7 +47,9 @@ def _require_material_type(part_type) -> None:
 def list_materials(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    search: Optional[str] = Query(None, description="Search in item number, name, description, or supplier/customer number"),
+    search: Optional[str] = Query(
+        None, description="Search in item number, name, description, or supplier/customer number"
+    ),
     part_type: Optional[PartType] = Query(None, description="Filter by material/supply type"),
     active_only: bool = Query(True),
     include_deleted: bool = Query(False, description="Include soft-deleted items (admin only)"),
@@ -104,10 +106,13 @@ def create_material(
     material = Part(**data, created_by=current_user.id)
     material.company_id = company_id
     db.add(material)
+    db.flush()  # assign PK without committing so the audit row carries resource_id
+
+    AuditService(db, current_user, request).log_create(
+        "material", material.id, material.part_number, new_values=material
+    )
     db.commit()
     db.refresh(material)
-
-    AuditService(db, current_user, request).log_create("material", material.id, material.part_number, new_values=material)
     return material
 
 
@@ -269,9 +274,9 @@ def update_material(
                 value = value.strip().lower()
         setattr(material, field, value)
 
+    audit.log_update("material", material.id, material.part_number, old_values=old_values, new_values=material)
     db.commit()
     db.refresh(material)
-    audit.log_update("material", material.id, material.part_number, old_values=old_values, new_values=material)
     return material
 
 
@@ -315,6 +320,6 @@ def delete_material(
     material.soft_delete(current_user.id)
     material.is_active = False
     material.status = "obsolete"
-    db.commit()
     audit.log_delete("material", material.id, material.part_number, soft_delete=True)
+    db.commit()
     return {"message": "Material marked as deleted (soft delete)", "can_restore": True}

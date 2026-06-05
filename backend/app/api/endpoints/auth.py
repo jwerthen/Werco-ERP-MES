@@ -89,14 +89,18 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
     user = _find_user_by_auth_email(db, form_data.username)
 
     if not user:
+        # Log the audit row, then commit so it persists before raising
+        # (the audit row is only flushed by AuditService; get_db never commits).
         log_auth_event(
             db, "LOGIN_FAILED", email=form_data.username, success=False, request=request, error="User not found"
         )
+        db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
     # Check if account is locked (CMMC requirement)
     if user.locked_until and user.locked_until > datetime.utcnow():
         log_auth_event(db, "LOGIN_BLOCKED", user=user, success=False, request=request, error="Account locked")
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Account is locked. Please contact administrator."
         )
@@ -109,27 +113,36 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         if user.failed_login_attempts >= 5:
             user.locked_until = datetime.utcnow() + timedelta(minutes=30)
 
-        db.commit()
+        # Log BEFORE the terminal commit so the audit row commits atomically
+        # with the failed-attempt increment.
         log_auth_event(db, "LOGIN_FAILED", user=user, success=False, request=request, error="Invalid password")
+        db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
     if not user.is_active:
         log_auth_event(db, "LOGIN_FAILED", user=user, success=False, request=request, error="Account disabled")
+        db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled")
 
     # Reset failed attempts on successful login
     user.failed_login_attempts = 0
     user.locked_until = None
+
+    # Repair any legacy reserved-domain email BEFORE the terminal commit so the
+    # email change, the reset of failed attempts, and the audit row all commit
+    # atomically (AuditService only flushes; get_db never commits).
+    _ensure_valid_auth_email(user, db)
+
+    # Log BEFORE the terminal commit so the LOGIN_SUCCESS audit row is persisted.
+    log_auth_event(db, "LOGIN_SUCCESS", user=user, success=True, request=request)
     db.commit()
+    db.refresh(user)
 
     # Create access token (short-lived) with company context
     access_token = create_access_token(subject=user.id, company_id=user.company_id)
 
     # Create refresh token (longer-lived, with rotation)
     refresh_token, session_id, _ = create_refresh_token(subject=user.id, company_id=user.company_id)
-
-    log_auth_event(db, "LOGIN_SUCCESS", user=user, success=True, request=request)
-    _ensure_valid_auth_email(user, db)
 
     return Token(
         access_token=access_token,
@@ -194,12 +207,14 @@ def _ensure_valid_auth_email(user: User, db: Session) -> None:
     """
     Patch legacy reserved-domain addresses so token response validation does not crash.
     This keeps logins working for users imported before the email-domain fix.
+
+    Mutates ``user.email`` in place but does NOT commit. The caller is responsible
+    for committing so the email repair commits atomically with the rest of the
+    login transaction (including the audit row).
     """
     email = (user.email or "").strip()
     if email.lower().endswith("@werco.local"):
         user.email = _build_repaired_email(user, db)
-        db.commit()
-        db.refresh(user)
 
 
 def _find_user_by_employee_id(db: Session, employee_id: str) -> Optional[User]:
@@ -258,31 +273,39 @@ def employee_login(request: Request, payload: EmployeeLoginRequest, db: Session 
     user = _find_user_by_employee_id(db, payload.employee_id)
 
     if not user:
+        # Log the audit row, then commit so it persists before raising
+        # (AuditService only flushes; get_db never commits).
         log_auth_event(
             db, "EMPLOYEE_LOGIN_FAILED", email=None, success=False, request=request, error="Employee ID not found"
         )
+        db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid employee ID")
 
     if user.locked_until and user.locked_until > datetime.utcnow():
         log_auth_event(db, "EMPLOYEE_LOGIN_BLOCKED", user=user, success=False, request=request, error="Account locked")
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Account is locked. Please contact administrator."
         )
 
     if not user.is_active:
         log_auth_event(db, "EMPLOYEE_LOGIN_FAILED", user=user, success=False, request=request, error="Account disabled")
+        db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled")
 
     # Reset failed attempts on successful login
     user.failed_login_attempts = 0
     user.locked_until = None
+
+    # Repair any legacy reserved-domain email and log BEFORE the terminal commit
+    # so the email change and the audit row commit atomically.
+    _ensure_valid_auth_email(user, db)
+    log_auth_event(db, "EMPLOYEE_LOGIN_SUCCESS", user=user, success=True, request=request)
     db.commit()
+    db.refresh(user)
 
     access_token = create_access_token(subject=user.id, company_id=user.company_id)
     refresh_token, _, _ = create_refresh_token(subject=user.id, company_id=user.company_id)
-
-    log_auth_event(db, "EMPLOYEE_LOGIN_SUCCESS", user=user, success=True, request=request)
-    _ensure_valid_auth_email(user, db)
 
     return Token(
         access_token=access_token,
@@ -303,7 +326,10 @@ def employee_logout(request: Request, payload: EmployeeLoginRequest, db: Session
     if not user:
         raise HTTPException(status_code=404, detail="Employee ID not found")
 
+    # AuditService only flushes; commit so the audit row persists before the
+    # request session closes.
     log_auth_event(db, "EMPLOYEE_LOGOUT", user=user, success=True, request=request)
+    db.commit()
     return {"message": "Logged out successfully"}
 
 
@@ -317,6 +343,8 @@ def refresh_token(request: Request, token_request: RefreshTokenRequest, db: Sess
     payload = verify_refresh_token(token_request.refresh_token)
 
     if not payload:
+        # Log the audit row, then commit so it persists before raising
+        # (AuditService only flushes; get_db never commits).
         log_auth_event(
             db,
             "TOKEN_REFRESH_FAILED",
@@ -325,6 +353,7 @@ def refresh_token(request: Request, token_request: RefreshTokenRequest, db: Sess
             request=request,
             error="Invalid or expired refresh token",
         )
+        db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
 
     # Get the user
@@ -359,7 +388,10 @@ def refresh_token(request: Request, token_request: RefreshTokenRequest, db: Sess
         read_only=token_read_only,
     )
 
+    # AuditService only flushes; commit so the audit row persists before the
+    # request session closes.
     log_auth_event(db, "TOKEN_REFRESHED", user=user, success=True, request=request)
+    db.commit()
 
     return TokenRefresh(
         access_token=new_access_token,
@@ -376,7 +408,10 @@ def logout(request: Request, db: Session = Depends(get_db), current_user: User =
     Note: With JWTs, true server-side invalidation requires a token blacklist (Redis).
     Client should discard tokens on logout.
     """
+    # AuditService only flushes; commit so the audit row persists before the
+    # request session closes.
     log_auth_event(db, "LOGOUT", user=current_user, success=True, request=request)
+    db.commit()
     return {"message": "Logged out successfully"}
 
 
@@ -409,10 +444,12 @@ def register(
     )
 
     db.add(user)
+    db.flush()  # assign the PK without committing so the audit row carries a real resource_id
+
+    # Log BEFORE the terminal commit so the audit row commits atomically with the new user.
+    log_auth_event(db, "USER_REGISTERED", user=user, success=True, request=request)
     db.commit()
     db.refresh(user)
-
-    log_auth_event(db, "USER_REGISTERED", user=user, success=True, request=request)
 
     return user
 
@@ -499,11 +536,14 @@ def register_public(
     )
 
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    db.flush()  # assign the PK without committing so the audit row carries a real resource_id
 
+    # Log BEFORE the terminal commit so the audit row commits atomically with the new
+    # user (and the initial company, if this is the first-user bootstrap).
     action = "FIRST_USER_REGISTERED" if is_first_user else "PUBLIC_REGISTRATION"
     log_auth_event(db, action, user=user, success=True, request=request)
+    db.commit()
+    db.refresh(user)
 
     if is_first_user:
         return {"message": "Admin account created successfully", "is_first_user": True}
@@ -530,7 +570,10 @@ def switch_company(
     access_token = create_access_token(subject=current_user.id, company_id=company.id, read_only=read_only)
     refresh_token, _, _ = create_refresh_token(subject=current_user.id, company_id=company.id, read_only=read_only)
 
+    # AuditService only flushes; commit so the audit row persists before the
+    # request session closes.
     log_auth_event(db, "COMPANY_SWITCH", user=current_user, success=True, request=request)
+    db.commit()
 
     return Token(
         access_token=access_token,

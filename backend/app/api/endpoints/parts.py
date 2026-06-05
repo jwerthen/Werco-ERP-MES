@@ -258,12 +258,14 @@ def create_part(
     part = Part(**data, created_by=current_user.id)
     part.company_id = company_id
     db.add(part)
-    db.commit()
-    db.refresh(part)
+    db.flush()  # assign PK without committing so the audit row carries resource_id
 
-    # Audit log
+    # Audit log (before the terminal commit so it persists atomically)
     audit = AuditService(db, current_user, request)
     audit.log_create("part", part.id, part.part_number, new_values=part)
+
+    db.commit()
+    db.refresh(part)
 
     return part
 
@@ -467,11 +469,11 @@ def update_part(
                 value = value.strip().lower()
         setattr(part, field, value)
 
+    # Audit log (before the terminal commit so it persists atomically)
+    audit.log_update("part", part.id, part.part_number, old_values=old_values, new_values=part)
+
     db.commit()
     db.refresh(part)
-
-    # Audit log
-    audit.log_update("part", part.id, part.part_number, old_values=old_values, new_values=part)
 
     return part
 
@@ -548,9 +550,11 @@ def delete_part(
     part.soft_delete(current_user.id)
     part.is_active = False
     part.status = "obsolete"
-    db.commit()
 
+    # Audit log (before the terminal commit so it persists atomically)
     audit.log_delete("part", part.id, part.part_number, soft_delete=True)
+
+    db.commit()
 
     return {"message": "Part marked as deleted (soft delete)", "can_restore": True}
 
@@ -582,8 +586,8 @@ def restore_part(
     part.restore()
     part.is_active = True
     part.status = "active"
-    db.commit()
 
+    # Audit log (before the terminal commit so it persists atomically)
     audit.log_update(
         "part",
         part.id,
@@ -592,5 +596,7 @@ def restore_part(
         new_values={"is_deleted": False, "status": "active"},
         action="restore",
     )
+
+    db.commit()
 
     return {"message": "Part restored successfully", "part_id": part.id}
