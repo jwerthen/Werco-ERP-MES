@@ -31,15 +31,30 @@ test.describe('Clock In/Out', () => {
   });
 
   test('shows clock in button when not clocked in', async ({ page }) => {
-    // Should see clock in or start button
-    const clockInBtn = page.locator('button').filter({ hasText: /clock.*in|start|begin/i }).first();
-    const isVisible = await clockInBtn.isVisible({ timeout: 5000 }).catch(() => false);
-    
-    // Either clock in is visible or user is already clocked in
-    if (!isVisible) {
-      // User might already be clocked in - look for clock out
-      await expect(page.locator('button').filter({ hasText: /clock.*out|stop|end/i }).first()).toBeVisible();
-    }
+    // The shop floor uses "Check In" (btn-primary) to clock onto an operation and
+    // "Check Out" (btn-success) when already clocked in. This test must be
+    // order-independent: an earlier test may have left the operator checked in,
+    // so accept either control as proof the actionable shop-floor UI rendered.
+
+    // Wait for the shop-floor screen to finish loading. Both a mobile and a desktop
+    // heading exist in the DOM (one hidden per breakpoint), so assert on the
+    // visible one rather than a positional .first().
+    await expect(
+      page.locator('h1', { hasText: /shop\s*floor/i }).filter({ visible: true })
+    ).toBeVisible({ timeout: 15000 });
+
+    // Accept either the check-in control or the check-out control as proof the
+    // actionable shop-floor UI rendered, independent of clocked-in state.
+    // Depending on state the operation control reads "START" (begin/clock onto an
+    // operation), "Check In"/"Check Out", or "STOP"/"END" — any visible one proves
+    // the actionable shop-floor UI rendered.
+    const actionableControl = page
+      .locator('button')
+      .filter({ hasText: /start|stop|end|check\s*in|check\s*out/i })
+      .filter({ visible: true })
+      .first();
+
+    await expect(actionableControl).toBeVisible({ timeout: 15000 });
   });
 
   test('can clock into an operation', async ({ page }) => {

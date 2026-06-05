@@ -59,7 +59,59 @@
 - [x] **AU-3.3.8 - Protect Audit Information** ✅ COMPLETE
   - Implemented: Immutable audit logs with hash chain integrity
   - Features: SHA-256 hashing, sequence numbers, database triggers prevent UPDATE/DELETE
-  - API: /audit/integrity/status, /audit/integrity/verify
+  - API: /audit/integrity/status, /audit/integrity/verify (Platform-Admin only — the chain is a
+    single global sequence across all tenants; per-record verification at
+    /audit/integrity/record/{sequence_number} is available to a company Admin for their own
+    company's records)
+
+  > **`company_id` is deliberately excluded from the AU-3.3.8 integrity hash — do not add it.**
+  > Audit rows now carry a `company_id` so audit *retrieval* can be tenant-scoped, but `company_id`
+  > is intentionally **not** part of the SHA-256 hash input (`compute_audit_hash`). Reasons:
+  > (a) audit rows are already immutable at the DB layer via the `tr_audit_log_no_update` /
+  > `tr_audit_log_no_delete` triggers (migration 008), so `company_id` cannot be altered
+  > post-insert; (b) every pre-existing row — including the rows migration 026 backfilled to
+  > `company_id = 1` — was hashed without it, so including it would change the recomputed hash of
+  > every historical record, failing verification and breaking the chain wholesale; (c) keeping it
+  > out means `company_id` can be safely backfilled in future without invalidating any integrity
+  > hash. Tenant isolation of audit data is enforced at the **query layer** (retrieval endpoints
+  > filter by `company_id`), not in the hash. No schema migration or backfill of existing
+  > NULL-`company_id` rows was performed for this change: historical rows are left as-is and new
+  > rows are stamped going forward.
+  >
+  > **Settings-audit trail parity.** The separate `SettingsAuditLog` table (admin / quote-config
+  > changes, written via `log_change` in `app/api/endpoints/admin_settings.py` and retrieved at
+  > `GET /admin/settings/audit-log`) is a `TenantMixin` table whose retrieval was already
+  > company-scoped. Its **write** path now tags each row with the **active** company
+  > (`current_user._active_company_id`, the company resolved by `get_current_company_id`), falling
+  > back to the user's home company on non-request paths — the same precedence as
+  > `AuditService._resolve_company_id`. Previously it always wrote `current_user.company_id`. This
+  > is a defense-in-depth correctness fix that brings settings-audit attribution to parity with the
+  > main `AuditLog`; it is **not** a fix for a live cross-tenant write, because a platform admin who
+  > switches into another company is placed in a **read-only** context (`switch_company` issues a
+  > `read_only` token and `get_current_user` rejects all non-safe-method requests with 403), so the
+  > admin-settings write endpoints are unreachable in that context.
+
+  > **Retention vs. immutability — reconciled by archive-never-delete.** Records-retention
+  > obligations do not override AU-3.3.8 immutability. Audit logs are **never row-deleted**: a missing
+  > `sequence_number` reads as a `sequence_gap` tamper indicator, so deleting an aged row would itself
+  > break verification. Reconciliation:
+  > - The maintenance cleanup job (`cleanup_old_logs_task`) **no longer deletes audit logs** (it
+  >   previously hard-deleted them after 90 days). It now purges only ephemeral, non-audit operational
+  >   data (completed background-job tracking rows and notification logs).
+  > - Aged audit rows are **archived to cold storage, not deleted**, by the monthly
+  >   `archive_aged_audit_logs_task` (`AuditArchivalService`). It verifies each row's integrity hash,
+  >   exports the segment to NDJSON, records the export in the governance `ExportEvent` ledger, and
+  >   writes an `EXPORT` audit entry. **Live rows stay in place, so the hash chain remains fully
+  >   verifiable.** Retention windows come from the per-company `security_audit_record`
+  >   `RetentionPolicy` (migration 030; default 1095 days / 3 years), falling back to
+  >   `AUDIT_RETENTION_DAYS_DEFAULT`.
+  > - **Partition-drop is the only physical-removal path.** If aged rows must ever be physically
+  >   removed from the online DB for storage, it is a deliberate, documented DBA partition-drop —
+  >   preconditioned on the segment being archived + sha256-verified to cold storage, no active
+  >   `LegalHold`, legal review where `requires_legal_review_before_purge` is set, and a **contiguous
+  >   range across all tenants** (the chain is one global sequence). It is **never** an automated row
+  >   delete and **never** done by disabling the `tr_audit_log_no_update` / `tr_audit_log_no_delete`
+  >   triggers. Full procedure: `docs/AUDIT_LOG_RETENTION_RUNBOOK.md`.
 - [ ] **AU-3.3.9 - Audit Log Backup**
   - Need: Audit logs backed up to separate system
   - Effort: 3-5 days
@@ -428,6 +480,9 @@ Backend:
 |------|--------|--------|
 | 2026-01-13 | Initial compliance roadmap created | System |
 | 2026-01-13 | AU-3.3.8 Audit Log Protection implemented | Droid |
+| 2026-06-05 | AU-3.3.8: audit rows tenant-tagged (`company_id`) for scoped retrieval; `company_id` documented as deliberately excluded from the integrity hash; integrity endpoints restricted to Platform Admin (per-record check stays Admin, own-company) | Droid |
+| 2026-06-05 | AU-3.3.8: settings-audit trail (`SettingsAuditLog`, `log_change`) now tags rows with the active company to match `AuditService._resolve_company_id`; defense-in-depth parity fix (cross-company switches are read-only, so no live cross-tenant write) | Droid |
+| 2026-06-05 | AU-3.3.8: audit-log retention reconciled with immutability — `cleanup_old_logs_task` no longer deletes audit logs; aged rows are archived to cold storage (never deleted) by `archive_aged_audit_logs_task` / `AuditArchivalService`; physical removal is a documented DBA partition-drop only. See `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` | Droid |
 | | | |
 
 ---

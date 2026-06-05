@@ -74,6 +74,13 @@ async def cleanup_old_logs_job(ctx):
     return await cleanup_old_logs_task()
 
 
+async def archive_aged_audit_logs_job(ctx):
+    """Export audit rows past their retention window to cold storage (CMMC AU-3.3.8)."""
+    from app.jobs.maintenance_jobs import archive_aged_audit_logs_task
+
+    return await archive_aged_audit_logs_task()
+
+
 async def check_late_work_orders_job(ctx):
     """Check for late work orders job"""
     from app.jobs.notification_jobs import check_late_work_orders_task
@@ -140,6 +147,7 @@ class WorkerSettings:
         send_daily_digest_job,
         check_calibrations_job,
         cleanup_old_logs_job,
+        archive_aged_audit_logs_job,
         check_late_work_orders_job,
         check_low_stock_job,
         check_quote_expiring_job,
@@ -156,6 +164,7 @@ class WorkerSettings:
         cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily
         cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily
         cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM
+        cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM
     ]
 
     # Lifecycle

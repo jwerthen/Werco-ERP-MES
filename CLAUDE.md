@@ -131,6 +131,8 @@ There are 37+ Alembic versions over live, multi-tenant data. When adding a migra
 - Never edit a migration that has already been applied; add a new one.
 - New tenant-scoped tables need a non-null `company_id` + index (the `TenantMixin` shape).
 - Autogenerate is a starting point — review the diff; SQLAlchemy doesn't always detect enum/constraint changes.
+- Autogenerate only sees tables registered on `Base.metadata` — every model module must be imported in `app/models/__init__.py` (`alembic/env.py` does `from app.models import *`). Adding a model file without wiring it in there makes autogenerate miss it or crash with `NoReferencedTableError`.
+- **Bootstrap is not `alembic upgrade head`.** On an empty Postgres the schema is created by `Base.metadata.create_all()` on first boot (not by an initial migration; `001` only adds indexes), so the path is `create_all` → `alembic stamp <baseline>` → incremental `upgrade`. A bare `upgrade head` on an empty DB fails (`002` does `ALTER TYPE workcentertype`). See `docs/DEVELOPMENT.md` → Database Migrations.
 
 ## Where to look for operational context
 

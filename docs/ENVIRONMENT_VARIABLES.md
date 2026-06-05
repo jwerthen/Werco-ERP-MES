@@ -84,7 +84,7 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `CORS_ORIGINS` | Yes* | `http://localhost:3000,...` | Comma-separated list of allowed origins |
+| `CORS_ORIGINS` | Yes* | `http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000` | Comma-separated list of allowed origins. Default includes `http://localhost:5173` (the Vite dev server) so the SPA works in local dev |
 | `CORS_ALLOW_CREDENTIALS` | No | `true` | Allow credentials in CORS requests |
 | `CORS_ALLOW_METHODS` | No | `GET,POST,PUT,PATCH,DELETE,OPTIONS` | Allowed HTTP methods |
 | `CORS_ALLOW_HEADERS` | No | `Authorization,Content-Type,...` | Allowed request headers |
@@ -159,6 +159,24 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 | `SENTRY_DSN` | No | - | Sentry DSN for error tracking |
 | `WEBHOOK_ENCRYPTION_KEY` | No | - | Key for encrypting webhook payloads |
 
+### Audit Log Retention / Archival (CMMC AU-3.3.8)
+
+Audit logs are immutable (database triggers block UPDATE/DELETE) and are **never row-deleted** by
+maintenance jobs. The monthly `archive_aged_audit_logs_job` worker cron exports audit rows past their
+retention window to cold storage instead. See `docs/AUDIT_LOG_RETENTION_RUNBOOK.md`.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AUDIT_ARCHIVE_ENABLED` | No | `true` | Master switch for the audit archival job. When `false`, the job archives nothing. |
+| `AUDIT_ARCHIVE_DIR` | No | `/var/lib/werco/audit-archive` | Cold-storage destination for exported audit segments (NDJSON). **In production point this at a mounted, backed-up volume** (or object-store mount); the worker must have write access. |
+| `AUDIT_RETENTION_DAYS_DEFAULT` | No | `1095` | Fallback retention window (days) used when a company has no active `security_audit_record` retention policy. 1095 = 3 years. |
+| `AUDIT_ARCHIVE_MAX_ROWS_PER_RUN` | No | `50000` | Safety cap on rows exported per company per run; large backlogs drain over successive runs. |
+
+**Note:** the retention window is normally driven by each company's `security_audit_record`
+`RetentionPolicy` (seeded by migration 030); `AUDIT_RETENTION_DAYS_DEFAULT` is only the fallback.
+Physical removal of aged rows from the online DB, if ever needed, is a deliberate DBA partition-drop —
+never an automated delete and never by disabling the immutability triggers.
+
 ## Frontend Configuration
 
 | Variable | Required | Default | Description |
@@ -166,7 +184,9 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 | `REACT_APP_API_URL` | Yes* | `http://localhost:8000/api/v1` | Backend API URL (include /api/v1 suffix) |
 | `NODE_ENV` | No | `development` | Environment: development, production, test |
 
-**Important:** All frontend environment variables must be prefixed with `REACT_APP_` to be accessible in the browser.
+**Important:** All frontend environment variables must be prefixed with `REACT_APP_` to be accessible in the browser. They are injected at build time via `vite.config.ts` (`define`).
+
+The Vite dev server runs on **http://localhost:5173** (`npm start` / `npm run dev`). `REACT_APP_API_URL` defaults to `http://localhost:8000/api/v1` when unset (see `src/services/api.ts`), so a plain `frontend/.env` is optional for local dev. The backend's default `CORS_ORIGINS` already allows `http://localhost:5173`.
 
 **Examples:**
 ```bash
@@ -179,16 +199,26 @@ REACT_APP_API_URL=https://api.werco.com/api/v1
 
 ## E2E Testing
 
-For Playwright E2E tests, set these variables:
+For Playwright E2E tests, set these in `frontend/.env` (see `frontend/.env.example`).
+The `E2E_*_EMAIL` / `E2E_*_SECRET` pairs must match **actual seeded users** from
+`backend/scripts/seed_data.py`, otherwise login-based tests fail:
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `E2E_ADMIN_EMAIL` | Yes* | - | Admin user email for tests |
-| `E2E_ADMIN_SECRET` | Yes* | - | Admin user password for tests |
-| `E2E_MANAGER_EMAIL` | No | - | Manager user email for tests |
-| `E2E_MANAGER_SECRET` | No | - | Manager user password for tests |
-| `E2E_OPERATOR_EMAIL` | No | - | Operator user email for tests |
-| `E2E_OPERATOR_SECRET` | No | - | Operator user password for tests |
+| Variable | Required | Default (seed) | Description |
+|----------|----------|----------------|-------------|
+| `E2E_BASE_URL` | No | `http://localhost:5173` | Base URL Playwright targets (Vite dev server) |
+| `E2E_ADMIN_EMAIL` | Yes* | `admin@werco.com` | Admin user email for tests |
+| `E2E_ADMIN_SECRET` | Yes* | `admin123` | Admin user password for tests |
+| `E2E_MANAGER_EMAIL` | No | `jsmith@werco.com` | Manager user email for tests |
+| `E2E_MANAGER_SECRET` | No | `password123` | Manager user password for tests |
+| `E2E_OPERATOR_EMAIL` | No | `bwilliams@werco.com` | Operator user email for tests |
+| `E2E_OPERATOR_SECRET` | No | `password123` | Operator user password for tests |
+
+**Notes:**
+- Run the suite with the backend rate limiter disabled — set `RATE_LIMIT_ENABLED=false`
+  on the API process. The suite logs in many times and otherwise trips the auth-login
+  limit (5/min) and gets `429`s.
+- `E2E_BASE_URL` defaults to `http://localhost:5173` (also wired into
+  `frontend/playwright.config.ts` `baseURL` and `webServer.url`).
 
 ## Docker Compose Variables
 

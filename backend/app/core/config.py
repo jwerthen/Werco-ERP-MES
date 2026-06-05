@@ -297,7 +297,7 @@ class Settings(BaseSettings):
 
     # CORS - Include localhost for dev; production origins must be set via env var
     CORS_ORIGINS: str = (
-        "http://localhost:3000,http://localhost:3001,http://localhost:8000"
+        "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"
     )
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: str = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
@@ -363,6 +363,24 @@ class Settings(BaseSettings):
 
     # Webhook Configuration
     WEBHOOK_ENCRYPTION_KEY: str = ""
+
+    # Audit Log Retention / Archival (CMMC AU-3.3.8 + AS9100D)
+    # Audit logs are immutable (DB triggers block UPDATE/DELETE) and must NOT be
+    # row-deleted by maintenance jobs. Aged rows are exported to cold storage by
+    # the archival job; physical removal from the online DB, if ever needed, is a
+    # deliberate DBA partition-drop, never an automated row delete. See
+    # docs/AUDIT_LOG_RETENTION_RUNBOOK.md.
+    AUDIT_ARCHIVE_ENABLED: bool = True
+    # Cold-storage destination for exported audit segments. In production point
+    # this at a mounted, backed-up volume or object-store mount.
+    AUDIT_ARCHIVE_DIR: str = "/var/lib/werco/audit-archive"
+    # Fallback retention window (days) when a company has no active
+    # security_audit_record RetentionPolicy row. 1095 = 3 years, matching the
+    # seeded security_audit_record policy minimum.
+    AUDIT_RETENTION_DAYS_DEFAULT: int = 1095
+    # Safety cap on rows exported per company per run (large backlogs drain over
+    # successive runs via the ExportEvent high-water mark).
+    AUDIT_ARCHIVE_MAX_ROWS_PER_RUN: int = 50000
 
     class Config:
         env_file = ".env"

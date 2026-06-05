@@ -118,9 +118,23 @@ class ApiService {
       (response) => response,
       async (error: AxiosError) => {
         const originalRequest = error.config as AxiosRequestConfig & { _retry?: boolean };
-        
+
+        // The login/refresh endpoints authenticate the request themselves, so a
+        // 401 from them means "bad credentials" / "expired refresh" — not an
+        // expired session. Let the caller surface that error instead of forcing a
+        // logout + hard redirect (which would swallow the login form's message).
+        const isAuthEndpoint =
+          !!originalRequest?.url &&
+          (originalRequest.url.includes('/auth/login') ||
+            originalRequest.url.includes('/auth/refresh'));
+
         // If 401 and we haven't already retried and have a refresh token
-        if (error.response?.status === 401 && !originalRequest._retry && this.refreshToken) {
+        if (
+          error.response?.status === 401 &&
+          !originalRequest._retry &&
+          this.refreshToken &&
+          !isAuthEndpoint
+        ) {
           if (this.isRefreshing) {
             // Wait for the ongoing refresh to complete
             return new Promise((resolve, reject) => {
@@ -150,7 +164,7 @@ class ApiService {
           }
         }
         
-        if (error.response?.status === 401) {
+        if (error.response?.status === 401 && !isAuthEndpoint) {
           this.logout();
           window.location.href = '/login';
         }
@@ -1233,26 +1247,6 @@ class ApiService {
 
   async addPOLine(poId: number, data: any) {
     const response = await this.api.post(`/purchasing/purchase-orders/${poId}/lines`, data);
-    return response.data;
-  }
-
-  async getReceivingQueue() {
-    const response = await this.api.get('/purchasing/receiving/queue');
-    return response.data;
-  }
-
-  async receiveMaterial(data: any) {
-    const response = await this.api.post('/purchasing/receiving', data);
-    return response.data;
-  }
-
-  async getPendingInspection() {
-    const response = await this.api.get('/purchasing/receiving/pending-inspection');
-    return response.data;
-  }
-
-  async inspectReceipt(receiptId: number, data: any) {
-    const response = await this.api.post(`/purchasing/receiving/${receiptId}/inspect`, data);
     return response.data;
   }
 

@@ -7,7 +7,7 @@ This guide covers development practices, testing, and contribution guidelines fo
 ### Prerequisites
 - Python 3.11+
 - Node.js 18+
-- PostgreSQL 15+
+- PostgreSQL 15+ (only for the Postgres/Supabase path; local dev defaults to SQLite)
 - Docker & Docker Compose (optional but recommended)
 - Git
 
@@ -41,27 +41,40 @@ This guide covers development practices, testing, and contribution guidelines fo
    ```
 
 5. **Database Setup**
-   ```bash
-   # Using Docker (recommended)
-   docker-compose up -d db
 
-   # Or use local PostgreSQL
-   # Update DATABASE_URL in .env
-   ```
+   You can develop against either local SQLite (default, zero-setup) or Postgres.
 
-6. **Run Migrations**
-   ```bash
-   cd backend
-   python -m alembic upgrade head
+   - **Local SQLite (default):** `backend/.env.example` ships with
+     `DATABASE_URL=sqlite:///./werco_dev.db` — no database server required.
+     Tables are created by the seed script (next step); `alembic upgrade head`
+     is **not** used on SQLite (the migrations are Postgres-targeted and query
+     `information_schema` / `table_schema='public'`, so they fail on SQLite).
+   - **Postgres / Supabase:** point `DATABASE_URL` at a Postgres instance and
+     use Alembic for schema management (see the next step and "Database Migrations" below).
+     ```bash
+     # Optional local Postgres via Docker
+     docker-compose up -d db
+     ```
 
-   # or for development (creates all tables)
-   python -c "from app.db.database import Base, engine; Base.metadata.create_all(bind=engine)"
-   ```
-
-7. **Seed Database (optional)**
-   ```bash
-   docker-compose exec backend python -m scripts.seed_data
-   ```
+6. **Create Schema**
+   - **Local SQLite:** run the seed script — it calls `Base.metadata.create_all`
+     and then seeds demo data (the test suite bootstraps the same way via
+     `tests/conftest.py`):
+     ```bash
+     cd backend
+     python -m scripts.seed_data
+     ```
+     Seeds the demo company with login users — `admin@werco.com / admin123`
+     (admin) and the remaining seeded users at `<email> / password123`
+     (e.g. `jsmith@werco.com` manager, `bwilliams@werco.com` operator).
+   - **Postgres / Supabase:** apply Alembic migrations instead of `create_all`:
+     ```bash
+     cd backend
+     python -m alembic upgrade head
+     # then optionally seed
+     python -m scripts.seed_data
+     # (or, inside the container) docker-compose exec backend python -m scripts.seed_data
+     ```
 
 ## Development Workflow
 
@@ -78,6 +91,12 @@ uvicorn app.main:app --reload --port 8000
 cd frontend
 npm start
 ```
+The Vite dev server runs on **http://localhost:5173**. It reads
+`REACT_APP_*`-prefixed env vars (injected via `vite.config.ts` `define`);
+set `REACT_APP_API_URL=http://localhost:8000/api/v1` in `frontend/.env`
+(the app also defaults to that when unset — see `src/services/api.ts`).
+The backend's default `CORS_ORIGINS` already includes `http://localhost:5173`,
+so the SPA can call the API in local dev without extra config.
 
 **Using Docker Compose**
 ```bash
@@ -230,11 +249,43 @@ Werco-ERP/
 
 ## Database Migrations
 
+> Postgres only. On local SQLite the schema comes from `create_all` (see "Create
+> Schema" above); the migrations are Postgres-targeted and are not run on SQLite.
+
+### Bootstrap order (new Postgres database)
+
+A bare `alembic upgrade head` against an **empty** database is **not** the
+supported path and will fail: the core tables are created by
+`Base.metadata.create_all()` on first app boot (`app/main.py`), not by an
+initial migration — `001` only adds indexes — and `002_add_laser_press_brake_types.py`
+runs `ALTER TYPE workcentertype ...`, which errors if the enum type doesn't exist yet.
+
+The supported bootstrap is:
+
+```bash
+# 1. Create the schema (first app boot, or explicitly):
+python -m scripts.seed_data            # calls create_all (+ seeds demo data)
+
+# 2. Mark the DB as already at the migration baseline:
+alembic stamp <baseline-revision>      # the latest revision create_all matches
+
+# 3. Apply migrations newer than the baseline going forward:
+alembic upgrade head
+```
+
+After bootstrap, normal incremental `alembic upgrade head` is the standard path.
+
 ### Create a new migration
 ```bash
 cd backend
 alembic revision --autogenerate -m "Description of changes"
 ```
+
+> `--autogenerate` only sees tables that are registered on `Base.metadata`, which
+> requires every model module to be imported in `app/models/__init__.py`
+> (`alembic/env.py` does `from app.models import *`). When you add a new model
+> file, wire it into `app/models/__init__.py` — otherwise autogenerate will miss
+> its tables, or crash with `NoReferencedTableError` if another model references them.
 
 ### Apply migrations
 ```bash
@@ -310,8 +361,8 @@ uvicorn app.main:app --reload --port 8000
 ## Common Issues
 
 ### Backend won't start
-- Check if PostgreSQL is running
-- Verify DATABASE_URL in .env
+- Verify DATABASE_URL in .env (local default is SQLite; if using Postgres, confirm the server is running)
+- For local SQLite, make sure the schema exists — run `python -m scripts.seed_data` (do not run `alembic upgrade head` against SQLite)
 - Check port 8000 is not in use
 
 ### Frontend build errors

@@ -172,12 +172,11 @@ From `Shop Floor > Operations`:
 
 ### Purchasing
 
-1. Tabs: orders, vendors, receiving queue, pending inspection.
+1. Tabs: orders, vendors.
 2. Create vendor and purchase order.
 3. Send PO to vendor.
-4. Receive material with lot/cert/packing slip metadata.
-5. Complete receiving inspection (accept/reject, notes).
-6. Upload/download vendor documents.
+4. Upload/download vendor documents.
+5. To receive material or complete receiving inspection, use the Receiving (Dedicated) workflow below.
 
 ### Receiving (Dedicated)
 
@@ -355,7 +354,7 @@ This map is for training completeness and references app function names as imple
 16. `PrintPackingSlip`: getShipment
 17. `PrintPurchaseOrder`: getPurchaseOrderPrintData
 18. `PrintTraveler`: getMaterialRequirements, getPart, getWorkOrder
-19. `Purchasing`: createPart, createPurchaseOrder, createVendor, deleteDocument, downloadDocument, getDocuments, getDocumentTypes, getInventoryLocations, getParts, getPendingInspection, getPurchaseOrders, getReceivingQueue, getVendors, inspectReceipt, receiveMaterial, sendPurchaseOrder, updateVendor, uploadDocument
+19. `Purchasing`: createPart, createPurchaseOrder, createVendor, deleteDocument, downloadDocument, getDocuments, getDocumentTypes, getInventoryLocations, getParts, getPurchaseOrders, getVendors, sendPurchaseOrder, updateVendor, uploadDocument
 20. `Quality`: createCAR, createFAI, createNCR, getCARs, getFAIs, getNCRs, getParts, getQualitySummary
 21. `QuoteCalculator`: analyzeDXF, calculateCNCQuote, calculateSheetMetalQuote, getQuoteFinishes, getQuoteMaterials, seedQuoteDefaults
 22. `Quotes`: convertQuote, createQuote, getParts, getQuotes, sendQuote

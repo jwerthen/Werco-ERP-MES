@@ -69,10 +69,16 @@ def log_change(
 ):
     """Log a settings change for audit purposes.
 
-    SettingsAuditLog has a NOT NULL company_id (TenantMixin), so the
-    user's company_id is always written from current_user — callers
-    cannot forget to pass it.
+    SettingsAuditLog has a NOT NULL company_id (TenantMixin). The row is tagged
+    with the *active* company — the one resolved by get_current_company_id, i.e.
+    the company a platform admin has switched into (``current_user._active_company_id``)
+    — falling back to the user's home company on non-request paths. This mirrors
+    ``AuditService._resolve_company_id`` so settings audits attribute to the same
+    tenant as every other write; using ``current_user.company_id`` here would
+    mis-attribute a platform admin's cross-company change to their home company.
     """
+    active_company_id = getattr(current_user, "_active_company_id", None)
+    company_id = active_company_id if active_company_id is not None else current_user.company_id
     audit = SettingsAuditLog(
         entity_type=entity_type,
         entity_id=entity_id,
@@ -83,7 +89,7 @@ def log_change(
         new_value=json.dumps(new_value) if new_value is not None else None,
         changed_by=current_user.id,
         ip_address=ip_address,
-        company_id=current_user.company_id,
+        company_id=company_id,
     )
     db.add(audit)
 

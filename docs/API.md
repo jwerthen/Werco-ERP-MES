@@ -200,6 +200,106 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | GET | `/quality/inspections/{id}` | Get inspection by ID | Yes |
 | POST | `/quality/inspections/{id}/approve` | Approve inspection | Quality |
 
+### QMS Standards & Audit Readiness
+
+Standards/clause/evidence management for AS9100D, ISO 9001, CMMC and similar quality systems, all
+under `/qms-standards`. Every endpoint is **tenant-scoped to the caller's active company**
+(`get_current_company_id`). Reads (list / get / detail) are available to **any authenticated user**
+in the tenant, while writes are **role-gated** — the read-broad / write-restricted model documented
+in `RBAC_PERMISSIONS.md`.
+
+**Standards**
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/qms-standards/` | List standards with compliance-summary counts (`active_only` filter) | Yes |
+| POST | `/qms-standards/` | Create standard | Admin / Manager / Quality |
+| POST | `/qms-standards/{standard_id}/upload-pdf` | AI clause extraction from an uploaded PDF | Admin / Manager / Quality |
+| GET | `/qms-standards/audit-readiness` | Audit-readiness dashboard summary across active standards | Yes |
+| GET | `/qms-standards/{standard_id}` | Get standard with all clauses and evidence | Yes |
+| PUT | `/qms-standards/{standard_id}` | Update standard | Admin / Manager / Quality |
+| DELETE | `/qms-standards/{standard_id}` | Delete standard and all its clauses/evidence | Admin |
+
+**Clauses**
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/qms-standards/{standard_id}/clauses` | List clauses for a standard (flat list) | Yes |
+| POST | `/qms-standards/{standard_id}/clauses` | Add a clause | Admin / Manager / Quality |
+| POST | `/qms-standards/{standard_id}/clauses/bulk` | Bulk-import clauses (e.g. from a parsed document) | Admin / Manager / Quality |
+| PUT | `/qms-standards/clauses/{clause_id}` | Update clause, incl. compliance-status assessment | Admin / Manager / Quality |
+| DELETE | `/qms-standards/clauses/{clause_id}` | Delete a clause and its evidence links | Admin / Manager |
+
+**Auto-evidence discovery**
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/qms-standards/clauses/{clause_id}/auto-evidence` | Discover live ERP/MES evidence for a single clause (read-only, nothing persisted) | Yes |
+| POST | `/qms-standards/{standard_id}/auto-link` | Auto-discover and persist evidence links for all clauses in a standard | Admin / Manager / Quality |
+
+**Evidence links**
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/qms-standards/clauses/{clause_id}/evidence` | Link evidence to a clause | Admin / Manager / Quality |
+| PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification | Admin / Manager / Quality |
+| DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link | Admin / Manager / Quality |
+
+> **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
+> PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
+> returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
+> against the standard.
+
+> **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
+> do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
+> from all reads (including the nested clauses/evidence on `GET /qms-standards/{standard_id}`), while
+> the record is retained for AS9100D traceability. All QMS create / update / delete operations — plus
+> a status-change entry when a clause's `compliance_status` changes — are captured in the tamper-evident
+> audit trail (`GET /api/v1/audit/`).
+
+#### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
+
+```json
+{
+  "total_standards": 2,
+  "total_clauses": 142,
+  "compliant": 120,
+  "partial": 8,
+  "non_compliant": 3,
+  "not_assessed": 9,
+  "not_applicable": 2,
+  "compliance_percentage": 85.7,
+  "total_evidence_links": 310,
+  "verified_evidence": 240,
+  "unverified_evidence": 70,
+  "clauses_needing_review": 4
+}
+```
+
+#### Clause Auto-Evidence Schema (`GET /qms-standards/clauses/{clause_id}/auto-evidence`)
+
+```json
+{
+  "clause_id": 42,
+  "clause_number": "8.5.2",
+  "discovered_evidence": [
+    {
+      "evidence_type": "ncr",
+      "title": "Non-Conformance Reports (NCR)",
+      "description": "12 NCRs processed in last 12 months, 2 currently open",
+      "module_reference": "/quality/ncr",
+      "total_count": 12,
+      "recent_count": 7,
+      "health_status": "healthy",
+      "health_detail": "All NCRs resolved within SLA",
+      "examples": [],
+      "suggested_compliance": "compliant"
+    }
+  ],
+  "overall_suggested_compliance": "compliant"
+}
+```
+
 ### Purchasing
 
 | Method | Endpoint | Description | Auth Required |
@@ -208,6 +308,25 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | POST | `/purchasing/pos/` | Create purchase order | Yes |
 | GET | `/purchasing/pos/{id}` | Get PO by ID | Yes |
 | POST | `/purchasing/po-upload` | Upload PO from PDF | Yes |
+
+> Material receiving and incoming inspection are **not** under `/purchasing`. They live under
+> `/receiving` (see below). The duplicate `/purchasing/receiving*` endpoints were removed.
+
+### Receiving & Inspection
+
+Canonical material-receiving and incoming-inspection endpoints, all under `/receiving`.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/receiving/open-pos` | List POs available for receiving (sent/partial) | Yes |
+| GET | `/receiving/po/{po_id}` | Get full PO detail for receiving | Yes |
+| POST | `/receiving/receive` | Receive material against a PO line | Admin / Manager / Supervisor |
+| GET | `/receiving/inspection-queue` | List receipts pending inspection | Yes |
+| GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
+| POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality |
+| GET | `/receiving/history` | Receiving history with inspection results | Yes |
+| GET | `/receiving/stats` | Receiving statistics for dashboard | Yes |
+| GET | `/receiving/locations` | Receivable inventory locations | Yes |
 
 ### Inventory
 
@@ -257,6 +376,43 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 |--------|----------|-------------|---------------|
 | GET | `/admin/settings` | Get system settings | Admin |
 | PUT | `/admin/settings` | Update system settings | Admin |
+| GET | `/admin/settings/audit-log` | Settings/quote-config change history (filterable, up to 1yr) | Admin |
+
+> **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
+> (admin / quote-config changes) and is **scoped to the caller's active company**
+> (`get_current_company_id`). Writes to this trail are tagged with that same active company, so a
+> platform admin's changes attribute to the company they have switched into — matching the
+> `/audit/*` (`AuditLog`) attribution. This is a separate trail from `/audit/*` and is **not** part
+> of the tamper-evident hash chain.
+
+### Audit Log
+
+Tamper-evident audit trail (CMMC Level 2 AU-3.3.8). Audit rows are **tenant-tagged** with
+`company_id`, so retrieval and the per-record lookup are **scoped to the caller's active
+company**. The integrity hash chain itself is a single global sequence interleaved across all
+tenants, so the aggregate chain-verification endpoints are **platform-admin only**.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/audit/` | List audit logs for the active company (filterable) | Admin / Manager |
+| GET | `/audit/summary` | Audit activity summary for the active company | Admin / Manager |
+| GET | `/audit/actions` | Distinct action types in the active company | Admin / Manager |
+| GET | `/audit/resource-types` | Distinct resource types in the active company | Admin / Manager |
+| GET | `/audit/integrity/status` | Global chain status (counts, sequence range) | Platform Admin |
+| GET | `/audit/integrity/verify` | Full hash-chain verification (optional range) | Platform Admin |
+| GET | `/audit/integrity/verify-recent` | Verify the N most recent records | Platform Admin |
+| GET | `/audit/integrity/record/{sequence_number}` | Verify a single record | Admin (own company only) |
+
+> **Tenancy:** the four retrieval endpoints filter by the active company (`get_current_company_id`),
+> returning only that tenant's audit data. `/integrity/record/{sequence_number}` lets a
+> company-scoped Admin verify one record **belonging to their active company**; a record from
+> another tenant returns **404** (not 403, so cross-tenant probing can't confirm the record
+> exists). Platform Admins / superusers may inspect any record.
+>
+> **Why the aggregate `/integrity/*` endpoints are Platform-Admin only:** the hash chain is one
+> global sequence spanning every tenant, so its stats/issues (record counts, sequence ranges,
+> record ids) can't be scoped to a single company without leaking other tenants' data. A company
+> Admin's "are my records intact?" need is served by the per-record endpoint above.
 
 ## Common Response Formats
 

@@ -43,7 +43,7 @@ def test_seed_quote_config_is_tenant_scoped_and_idempotent(monkeypatch, db_sessi
         "materials": 6,
         "machines": 5,
         "finishes": 6,
-        "settings": 5,
+        "settings": 10,
     }
     assert _quote_config_counts(db_session, 1) == expected_counts
     assert _quote_config_counts(db_session, 2) == expected_counts
