@@ -484,13 +484,14 @@ def get_clause_auto_evidence(
     clause_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Discover live ERP/MES evidence for a single clause."""
     clause = db.query(QMSClause).filter(QMSClause.id == clause_id).first()
     if not clause:
         raise HTTPException(status_code=404, detail="Clause not found")
 
-    results = discover_evidence_for_clause(db, clause)
+    results = discover_evidence_for_clause(db, clause, company_id)
     overall = compute_overall_compliance(results)
 
     # Strip internal _rule_id before returning
@@ -509,6 +510,7 @@ def auto_link_standard(
     standard_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Run auto-discovery for ALL clauses in a standard and persist evidence links.
@@ -527,7 +529,7 @@ def auto_link_standard(
     compliance_counts = {}
 
     for clause in clauses:
-        results = discover_evidence_for_clause(db, clause)
+        results = discover_evidence_for_clause(db, clause, company_id)
 
         if results:
             clauses_with_evidence += 1

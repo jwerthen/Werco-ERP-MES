@@ -49,23 +49,39 @@ def _recent_cutoff() -> datetime:
 # ---------------------------------------------------------------------------
 
 
-def _query_ncrs(db: Session) -> dict:
+def _query_ncrs(db: Session, company_id: int) -> dict:
     cutoff = _recent_cutoff()
-    total = db.query(func.count(NonConformanceReport.id)).scalar() or 0
+    total = (
+        db.query(func.count(NonConformanceReport.id)).filter(NonConformanceReport.company_id == company_id).scalar()
+        or 0
+    )
     recent = (
-        db.query(func.count(NonConformanceReport.id)).filter(NonConformanceReport.created_at >= cutoff).scalar() or 0
+        db.query(func.count(NonConformanceReport.id))
+        .filter(
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.created_at >= cutoff,
+        )
+        .scalar()
+        or 0
     )
     open_count = (
         db.query(func.count(NonConformanceReport.id))
         .filter(
-            NonConformanceReport.status.in_([NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION])
+            NonConformanceReport.company_id == company_id,
+            NonConformanceReport.status.in_([NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION]),
         )
         .scalar()
         or 0
     )
     closed = total - open_count
 
-    examples = db.query(NonConformanceReport).order_by(NonConformanceReport.created_at.desc()).limit(5).all()
+    examples = (
+        db.query(NonConformanceReport)
+        .filter(NonConformanceReport.company_id == company_id)
+        .order_by(NonConformanceReport.created_at.desc())
+        .limit(5)
+        .all()
+    )
 
     if total == 0:
         health = "no_data"
@@ -105,16 +121,27 @@ def _query_ncrs(db: Session) -> dict:
     )
 
 
-def _query_cars(db: Session) -> dict:
+def _query_cars(db: Session, company_id: int) -> dict:
     cutoff = _recent_cutoff()
-    total = db.query(func.count(CorrectiveActionRequest.id)).scalar() or 0
+    total = (
+        db.query(func.count(CorrectiveActionRequest.id))
+        .filter(CorrectiveActionRequest.company_id == company_id)
+        .scalar()
+        or 0
+    )
     recent = (
-        db.query(func.count(CorrectiveActionRequest.id)).filter(CorrectiveActionRequest.created_at >= cutoff).scalar()
+        db.query(func.count(CorrectiveActionRequest.id))
+        .filter(
+            CorrectiveActionRequest.company_id == company_id,
+            CorrectiveActionRequest.created_at >= cutoff,
+        )
+        .scalar()
         or 0
     )
     open_count = (
         db.query(func.count(CorrectiveActionRequest.id))
         .filter(
+            CorrectiveActionRequest.company_id == company_id,
             CorrectiveActionRequest.status.in_(
                 [
                     CARStatus.OPEN,
@@ -122,19 +149,28 @@ def _query_cars(db: Session) -> dict:
                     CARStatus.CORRECTIVE_ACTION,
                     CARStatus.VERIFICATION,
                 ]
-            )
+            ),
         )
         .scalar()
         or 0
     )
     verified = (
         db.query(func.count(CorrectiveActionRequest.id))
-        .filter(CorrectiveActionRequest.status == CARStatus.CLOSED)
+        .filter(
+            CorrectiveActionRequest.company_id == company_id,
+            CorrectiveActionRequest.status == CARStatus.CLOSED,
+        )
         .scalar()
         or 0
     )
 
-    examples = db.query(CorrectiveActionRequest).order_by(CorrectiveActionRequest.created_at.desc()).limit(5).all()
+    examples = (
+        db.query(CorrectiveActionRequest)
+        .filter(CorrectiveActionRequest.company_id == company_id)
+        .order_by(CorrectiveActionRequest.created_at.desc())
+        .limit(5)
+        .all()
+    )
 
     if total == 0:
         health = "no_data"
@@ -174,27 +210,47 @@ def _query_cars(db: Session) -> dict:
     )
 
 
-def _query_fais(db: Session) -> dict:
+def _query_fais(db: Session, company_id: int) -> dict:
     cutoff = _recent_cutoff()
-    total = db.query(func.count(FirstArticleInspection.id)).scalar() or 0
+    total = (
+        db.query(func.count(FirstArticleInspection.id)).filter(FirstArticleInspection.company_id == company_id).scalar()
+        or 0
+    )
     recent = (
-        db.query(func.count(FirstArticleInspection.id)).filter(FirstArticleInspection.created_at >= cutoff).scalar()
+        db.query(func.count(FirstArticleInspection.id))
+        .filter(
+            FirstArticleInspection.company_id == company_id,
+            FirstArticleInspection.created_at >= cutoff,
+        )
+        .scalar()
         or 0
     )
     passed = (
         db.query(func.count(FirstArticleInspection.id))
-        .filter(FirstArticleInspection.status == FAIStatus.PASSED)
+        .filter(
+            FirstArticleInspection.company_id == company_id,
+            FirstArticleInspection.status == FAIStatus.PASSED,
+        )
         .scalar()
         or 0
     )
     failed = (
         db.query(func.count(FirstArticleInspection.id))
-        .filter(FirstArticleInspection.status == FAIStatus.FAILED)
+        .filter(
+            FirstArticleInspection.company_id == company_id,
+            FirstArticleInspection.status == FAIStatus.FAILED,
+        )
         .scalar()
         or 0
     )
 
-    examples = db.query(FirstArticleInspection).order_by(FirstArticleInspection.created_at.desc()).limit(5).all()
+    examples = (
+        db.query(FirstArticleInspection)
+        .filter(FirstArticleInspection.company_id == company_id)
+        .order_by(FirstArticleInspection.created_at.desc())
+        .limit(5)
+        .all()
+    )
 
     if total == 0:
         health = "no_data"
@@ -238,11 +294,17 @@ def _query_fais(db: Session) -> dict:
     )
 
 
-def _query_calibration(db: Session) -> dict:
-    total_equip = db.query(func.count(Equipment.id)).filter(Equipment.is_active == True).scalar() or 0
+def _query_calibration(db: Session, company_id: int) -> dict:
+    total_equip = (
+        db.query(func.count(Equipment.id))
+        .filter(Equipment.company_id == company_id, Equipment.is_active == True)
+        .scalar()
+        or 0
+    )
     overdue = (
         db.query(func.count(Equipment.id))
         .filter(
+            Equipment.company_id == company_id,
             Equipment.is_active == True,
             Equipment.status == CalibrationStatus.OVERDUE,
         )
@@ -252,6 +314,7 @@ def _query_calibration(db: Session) -> dict:
     due_soon = (
         db.query(func.count(Equipment.id))
         .filter(
+            Equipment.company_id == company_id,
             Equipment.is_active == True,
             Equipment.status == CalibrationStatus.DUE,
         )
@@ -261,13 +324,18 @@ def _query_calibration(db: Session) -> dict:
 
     cutoff = _recent_cutoff()
     recent_cals = (
-        db.query(func.count(CalibrationRecord.id)).filter(CalibrationRecord.calibration_date >= cutoff.date()).scalar()
+        db.query(func.count(CalibrationRecord.id))
+        .filter(
+            CalibrationRecord.company_id == company_id,
+            CalibrationRecord.calibration_date >= cutoff.date(),
+        )
+        .scalar()
         or 0
     )
 
     examples_eq = (
         db.query(Equipment)
-        .filter(Equipment.is_active == True)
+        .filter(Equipment.company_id == company_id, Equipment.is_active == True)
         .order_by(Equipment.next_calibration_date.asc().nullslast())
         .limit(5)
         .all()
@@ -315,28 +383,40 @@ def _query_calibration(db: Session) -> dict:
     )
 
 
-def _query_documents(db: Session) -> dict:
+def _query_documents(db: Session, company_id: int) -> dict:
     procedures = (
         db.query(func.count(Document.id))
-        .filter(Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]))
+        .filter(
+            Document.company_id == company_id,
+            Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]),
+        )
         .scalar()
         or 0
     )
     approved = (
         db.query(func.count(Document.id))
         .filter(
+            Document.company_id == company_id,
             Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]),
             Document.status.in_(["approved", "released"]),
         )
         .scalar()
         or 0
     )
-    total = db.query(func.count(Document.id)).scalar() or 0
-    controlled = db.query(func.count(Document.id)).filter(Document.is_controlled == True).scalar() or 0
+    total = db.query(func.count(Document.id)).filter(Document.company_id == company_id).scalar() or 0
+    controlled = (
+        db.query(func.count(Document.id))
+        .filter(Document.company_id == company_id, Document.is_controlled == True)
+        .scalar()
+        or 0
+    )
 
     examples = (
         db.query(Document)
-        .filter(Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]))
+        .filter(
+            Document.company_id == company_id,
+            Document.document_type.in_([DocumentType.PROCEDURE, DocumentType.WORK_INSTRUCTION]),
+        )
         .order_by(Document.updated_at.desc().nullslast())
         .limit(5)
         .all()
@@ -381,19 +461,36 @@ def _query_documents(db: Session) -> dict:
     )
 
 
-def _query_complaints(db: Session) -> dict:
+def _query_complaints(db: Session, company_id: int) -> dict:
     cutoff = _recent_cutoff()
-    total = db.query(func.count(CustomerComplaint.id)).scalar() or 0
-    recent = db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.created_at >= cutoff).scalar() or 0
+    total = db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.company_id == company_id).scalar() or 0
+    recent = (
+        db.query(func.count(CustomerComplaint.id))
+        .filter(
+            CustomerComplaint.company_id == company_id,
+            CustomerComplaint.created_at >= cutoff,
+        )
+        .scalar()
+        or 0
+    )
     resolved = (
         db.query(func.count(CustomerComplaint.id))
-        .filter(CustomerComplaint.status.in_([ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED]))
+        .filter(
+            CustomerComplaint.company_id == company_id,
+            CustomerComplaint.status.in_([ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED]),
+        )
         .scalar()
         or 0
     )
     open_count = total - resolved
 
-    examples = db.query(CustomerComplaint).order_by(CustomerComplaint.created_at.desc()).limit(5).all()
+    examples = (
+        db.query(CustomerComplaint)
+        .filter(CustomerComplaint.company_id == company_id)
+        .order_by(CustomerComplaint.created_at.desc())
+        .limit(5)
+        .all()
+    )
 
     if total == 0:
         health = "healthy"
@@ -433,34 +530,56 @@ def _query_complaints(db: Session) -> dict:
     )
 
 
-def _query_training(db: Session) -> dict:
-    total_certs = db.query(func.count(OperatorCertification.id)).scalar() or 0
+def _query_training(db: Session, company_id: int) -> dict:
+    total_certs = (
+        db.query(func.count(OperatorCertification.id)).filter(OperatorCertification.company_id == company_id).scalar()
+        or 0
+    )
     active_certs = (
         db.query(func.count(OperatorCertification.id))
-        .filter(OperatorCertification.status == CertificationStatus.ACTIVE)
+        .filter(
+            OperatorCertification.company_id == company_id,
+            OperatorCertification.status == CertificationStatus.ACTIVE,
+        )
         .scalar()
         or 0
     )
     expired = (
         db.query(func.count(OperatorCertification.id))
-        .filter(OperatorCertification.status == CertificationStatus.EXPIRED)
+        .filter(
+            OperatorCertification.company_id == company_id,
+            OperatorCertification.status == CertificationStatus.EXPIRED,
+        )
         .scalar()
         or 0
     )
     expiring_soon = (
         db.query(func.count(OperatorCertification.id))
-        .filter(OperatorCertification.status == CertificationStatus.EXPIRING_SOON)
+        .filter(
+            OperatorCertification.company_id == company_id,
+            OperatorCertification.status == CertificationStatus.EXPIRING_SOON,
+        )
         .scalar()
         or 0
     )
 
     cutoff = _recent_cutoff()
     recent_training = (
-        db.query(func.count(TrainingRecord.id)).filter(TrainingRecord.training_date >= cutoff.date()).scalar() or 0
+        db.query(func.count(TrainingRecord.id))
+        .filter(
+            TrainingRecord.company_id == company_id,
+            TrainingRecord.training_date >= cutoff.date(),
+        )
+        .scalar()
+        or 0
     )
 
     examples = (
-        db.query(OperatorCertification).order_by(OperatorCertification.updated_at.desc().nullslast()).limit(5).all()
+        db.query(OperatorCertification)
+        .filter(OperatorCertification.company_id == company_id)
+        .order_by(OperatorCertification.updated_at.desc().nullslast())
+        .limit(5)
+        .all()
     )
 
     if total_certs == 0 and recent_training == 0:
@@ -505,18 +624,44 @@ def _query_training(db: Session) -> dict:
     )
 
 
-def _query_work_orders(db: Session) -> dict:
+def _query_work_orders(db: Session, company_id: int) -> dict:
     cutoff = _recent_cutoff()
-    total = db.query(func.count(WorkOrder.id)).scalar() or 0
-    recent = db.query(func.count(WorkOrder.id)).filter(WorkOrder.created_at >= cutoff).scalar() or 0
+    total = (
+        db.query(func.count(WorkOrder.id))
+        .filter(WorkOrder.company_id == company_id, WorkOrder.is_deleted == False)
+        .scalar()
+        or 0
+    )
+    recent = (
+        db.query(func.count(WorkOrder.id))
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,
+            WorkOrder.created_at >= cutoff,
+        )
+        .scalar()
+        or 0
+    )
     with_lot = (
-        db.query(func.count(WorkOrder.id)).filter(WorkOrder.lot_number != None, WorkOrder.lot_number != "").scalar()
+        db.query(func.count(WorkOrder.id))
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,
+            WorkOrder.lot_number != None,
+            WorkOrder.lot_number != "",
+        )
+        .scalar()
         or 0
     )
 
     examples = (
         db.query(WorkOrder)
-        .filter(WorkOrder.lot_number != None, WorkOrder.lot_number != "")
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,
+            WorkOrder.lot_number != None,
+            WorkOrder.lot_number != "",
+        )
         .order_by(WorkOrder.created_at.desc())
         .limit(5)
         .all()
@@ -561,19 +706,34 @@ def _query_work_orders(db: Session) -> dict:
     )
 
 
-def _query_spc(db: Session) -> dict:
-    total = db.query(func.count(SPCCharacteristic.id)).scalar() or 0
-    active = db.query(func.count(SPCCharacteristic.id)).filter(SPCCharacteristic.is_active == True).scalar() or 0
+def _query_spc(db: Session, company_id: int) -> dict:
+    total = db.query(func.count(SPCCharacteristic.id)).filter(SPCCharacteristic.company_id == company_id).scalar() or 0
+    active = (
+        db.query(func.count(SPCCharacteristic.id))
+        .filter(
+            SPCCharacteristic.company_id == company_id,
+            SPCCharacteristic.is_active == True,
+        )
+        .scalar()
+        or 0
+    )
     critical = (
         db.query(func.count(SPCCharacteristic.id))
-        .filter(SPCCharacteristic.is_critical == True, SPCCharacteristic.is_active == True)
+        .filter(
+            SPCCharacteristic.company_id == company_id,
+            SPCCharacteristic.is_critical == True,
+            SPCCharacteristic.is_active == True,
+        )
         .scalar()
         or 0
     )
 
     examples = (
         db.query(SPCCharacteristic)
-        .filter(SPCCharacteristic.is_active == True)
+        .filter(
+            SPCCharacteristic.company_id == company_id,
+            SPCCharacteristic.is_active == True,
+        )
         .order_by(SPCCharacteristic.updated_at.desc().nullslast())
         .limit(5)
         .all()
@@ -613,10 +773,15 @@ def _query_spc(db: Session) -> dict:
     )
 
 
-def _query_audit_log(db: Session) -> dict:
+def _query_audit_log(db: Session, company_id: int) -> dict:
     cutoff = _recent_cutoff()
-    total = db.query(func.count(AuditLog.id)).scalar() or 0
-    recent = db.query(func.count(AuditLog.id)).filter(AuditLog.timestamp >= cutoff).scalar() or 0
+    total = db.query(func.count(AuditLog.id)).filter(AuditLog.company_id == company_id).scalar() or 0
+    recent = (
+        db.query(func.count(AuditLog.id))
+        .filter(AuditLog.company_id == company_id, AuditLog.timestamp >= cutoff)
+        .scalar()
+        or 0
+    )
 
     if total == 0:
         health = "no_data"
@@ -641,24 +806,41 @@ def _query_audit_log(db: Session) -> dict:
     )
 
 
-def _query_maintenance(db: Session) -> dict:
-    total_schedules = db.query(func.count(MaintenanceSchedule.id)).scalar() or 0
+def _query_maintenance(db: Session, company_id: int) -> dict:
+    total_schedules = (
+        db.query(func.count(MaintenanceSchedule.id)).filter(MaintenanceSchedule.company_id == company_id).scalar() or 0
+    )
     _recent_cutoff()
-    total_wos = db.query(func.count(MaintenanceWorkOrder.id)).scalar() or 0
+    total_wos = (
+        db.query(func.count(MaintenanceWorkOrder.id)).filter(MaintenanceWorkOrder.company_id == company_id).scalar()
+        or 0
+    )
     completed = (
         db.query(func.count(MaintenanceWorkOrder.id))
-        .filter(MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED)
+        .filter(
+            MaintenanceWorkOrder.company_id == company_id,
+            MaintenanceWorkOrder.status == MaintenanceStatus.COMPLETED,
+        )
         .scalar()
         or 0
     )
     overdue = (
         db.query(func.count(MaintenanceWorkOrder.id))
-        .filter(MaintenanceWorkOrder.status == MaintenanceStatus.OVERDUE)
+        .filter(
+            MaintenanceWorkOrder.company_id == company_id,
+            MaintenanceWorkOrder.status == MaintenanceStatus.OVERDUE,
+        )
         .scalar()
         or 0
     )
 
-    examples = db.query(MaintenanceWorkOrder).order_by(MaintenanceWorkOrder.created_at.desc()).limit(5).all()
+    examples = (
+        db.query(MaintenanceWorkOrder)
+        .filter(MaintenanceWorkOrder.company_id == company_id)
+        .order_by(MaintenanceWorkOrder.created_at.desc())
+        .limit(5)
+        .all()
+    )
 
     if total_schedules == 0 and total_wos == 0:
         health = "no_data"
@@ -698,21 +880,38 @@ def _query_maintenance(db: Session) -> dict:
     )
 
 
-def _query_ecos(db: Session) -> dict:
-    total = db.query(func.count(EngineeringChangeOrder.id)).scalar() or 0
+def _query_ecos(db: Session, company_id: int) -> dict:
+    total = (
+        db.query(func.count(EngineeringChangeOrder.id)).filter(EngineeringChangeOrder.company_id == company_id).scalar()
+        or 0
+    )
     cutoff = _recent_cutoff()
     recent = (
-        db.query(func.count(EngineeringChangeOrder.id)).filter(EngineeringChangeOrder.created_at >= cutoff).scalar()
+        db.query(func.count(EngineeringChangeOrder.id))
+        .filter(
+            EngineeringChangeOrder.company_id == company_id,
+            EngineeringChangeOrder.created_at >= cutoff,
+        )
+        .scalar()
         or 0
     )
     implemented = (
         db.query(func.count(EngineeringChangeOrder.id))
-        .filter(EngineeringChangeOrder.status == ECOStatus.COMPLETED)
+        .filter(
+            EngineeringChangeOrder.company_id == company_id,
+            EngineeringChangeOrder.status == ECOStatus.COMPLETED,
+        )
         .scalar()
         or 0
     )
 
-    examples = db.query(EngineeringChangeOrder).order_by(EngineeringChangeOrder.created_at.desc()).limit(5).all()
+    examples = (
+        db.query(EngineeringChangeOrder)
+        .filter(EngineeringChangeOrder.company_id == company_id)
+        .order_by(EngineeringChangeOrder.created_at.desc())
+        .limit(5)
+        .all()
+    )
 
     if total == 0:
         health = "no_data"
@@ -748,12 +947,22 @@ def _query_ecos(db: Session) -> dict:
     )
 
 
-def _query_suppliers(db: Session) -> dict:
-    total_vendors = db.query(func.count(Vendor.id)).scalar() or 0
-    total_scorecards = db.query(func.count(SupplierScorecard.id)).scalar() or 0
-    approved = db.query(func.count(Vendor.id)).filter(Vendor.is_active == True).scalar() or 0
+def _query_suppliers(db: Session, company_id: int) -> dict:
+    total_vendors = db.query(func.count(Vendor.id)).filter(Vendor.company_id == company_id).scalar() or 0
+    total_scorecards = (
+        db.query(func.count(SupplierScorecard.id)).filter(SupplierScorecard.company_id == company_id).scalar() or 0
+    )
+    approved = (
+        db.query(func.count(Vendor.id)).filter(Vendor.company_id == company_id, Vendor.is_active == True).scalar() or 0
+    )
 
-    examples = db.query(SupplierScorecard).order_by(SupplierScorecard.period_end.desc()).limit(5).all()
+    examples = (
+        db.query(SupplierScorecard)
+        .filter(SupplierScorecard.company_id == company_id)
+        .order_by(SupplierScorecard.period_end.desc())
+        .limit(5)
+        .all()
+    )
 
     if total_vendors == 0:
         health = "no_data"
@@ -965,10 +1174,11 @@ def _match_rules(clause: QMSClause) -> List[dict]:
     return matched
 
 
-def discover_evidence_for_clause(db: Session, clause: QMSClause) -> List[dict]:
+def discover_evidence_for_clause(db: Session, clause: QMSClause, company_id: int) -> List[dict]:
     """
     Discover live ERP/MES evidence for a single QMS clause.
     Returns a list of AutoEvidenceResult-compatible dicts.
+    All evidence counts and examples are scoped to the given company.
     """
     matched_rules = _match_rules(clause)
     results = []
@@ -980,7 +1190,7 @@ def discover_evidence_for_clause(db: Session, clause: QMSClause) -> List[dict]:
             continue
         seen_ids.add(rule["id"])
         try:
-            result = rule["query_fn"](db)
+            result = rule["query_fn"](db, company_id)
             result["_rule_id"] = rule["id"]
             results.append(result)
         except Exception as e:
