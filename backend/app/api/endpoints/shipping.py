@@ -210,7 +210,11 @@ def create_shipment(
     company_id: int = Depends(get_current_company_id),
 ):
     """Create a new shipment"""
-    wo = db.query(WorkOrder).filter(WorkOrder.id == shipment_in.work_order_id, WorkOrder.company_id == company_id).first()
+    wo = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.id == shipment_in.work_order_id, WorkOrder.company_id == company_id)
+        .first()
+    )
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
 

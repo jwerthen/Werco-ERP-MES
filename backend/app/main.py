@@ -58,12 +58,7 @@ def seed_quote_config_if_needed():
 
     db = SessionLocal()
     try:
-        companies = (
-            db.query(Company)
-            .filter(Company.is_active == True)
-            .order_by(Company.id)
-            .all()
-        )
+        companies = db.query(Company).filter(Company.is_active == True).order_by(Company.id).all()
         if not companies:
             logger.info("Skipping quote config seed; no active companies found")
             return
@@ -73,12 +68,7 @@ def seed_quote_config_if_needed():
             acquire_generator_lock(db, "quote_config_seed", company_id)
 
             # Check if materials exist
-            if (
-                db.query(QuoteMaterial)
-                .filter(QuoteMaterial.company_id == company_id)
-                .count()
-                == 0
-            ):
+            if db.query(QuoteMaterial).filter(QuoteMaterial.company_id == company_id).count() == 0:
                 logger.info(f"Seeding quote materials for company {company_id}...")
 
                 def calc_sheet_pricing(price_per_lb, density):
@@ -161,17 +151,10 @@ def seed_quote_config_if_needed():
                 ]
                 for m in materials:
                     db.add(QuoteMaterial(company_id=company_id, **m))
-                logger.info(
-                    f"Seeded {len(materials)} materials for company {company_id}"
-                )
+                logger.info(f"Seeded {len(materials)} materials for company {company_id}")
 
             # Check if machines exist
-            if (
-                db.query(QuoteMachine)
-                .filter(QuoteMachine.company_id == company_id)
-                .count()
-                == 0
-            ):
+            if db.query(QuoteMachine).filter(QuoteMachine.company_id == company_id).count() == 0:
                 logger.info(f"Seeding quote machines for company {company_id}...")
                 laser_speeds = {
                     "steel": {
@@ -268,12 +251,7 @@ def seed_quote_config_if_needed():
                 logger.info(f"Seeded {len(machines)} machines for company {company_id}")
 
             # Check if finishes exist
-            if (
-                db.query(QuoteFinish)
-                .filter(QuoteFinish.company_id == company_id)
-                .count()
-                == 0
-            ):
+            if db.query(QuoteFinish).filter(QuoteFinish.company_id == company_id).count() == 0:
                 logger.info(f"Seeding quote finishes for company {company_id}...")
                 finishes = [
                     {
@@ -324,12 +302,7 @@ def seed_quote_config_if_needed():
                 logger.info(f"Seeded {len(finishes)} finishes for company {company_id}")
 
             # Check if settings exist
-            if (
-                db.query(QuoteSettings)
-                .filter(QuoteSettings.company_id == company_id)
-                .count()
-                == 0
-            ):
+            if db.query(QuoteSettings).filter(QuoteSettings.company_id == company_id).count() == 0:
                 logger.info(f"Seeding quote settings for company {company_id}...")
                 settings_data = [
                     {
@@ -385,9 +358,7 @@ def seed_quote_config_if_needed():
                 ]
                 for s in settings_data:
                     db.add(QuoteSettings(company_id=company_id, **s))
-                logger.info(
-                    f"Seeded {len(settings_data)} settings for company {company_id}"
-                )
+                logger.info(f"Seeded {len(settings_data)} settings for company {company_id}")
 
             db.commit()
     except Exception as e:
@@ -648,9 +619,7 @@ async def csrf_protection(request: Request, call_next):
                 # Allow if request has valid Authorization header (API clients)
                 auth_header = request.headers.get("authorization")
                 if not auth_header or not auth_header.startswith("Bearer "):
-                    logger.warning(
-                        f"CSRF: Missing X-Requested-With header for {request.url.path}"
-                    )
+                    logger.warning(f"CSRF: Missing X-Requested-With header for {request.url.path}")
                     response = JSONResponse(
                         status_code=403,
                         content={"detail": "Missing required security header"},
@@ -666,18 +635,12 @@ async def csrf_protection(request: Request, call_next):
             from urllib.parse import urlparse
 
             parsed = urlparse(check_origin)
-            origin_host = (
-                f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else None
-            )
+            origin_host = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else None
 
             # Check if origin is in allowed list
             if origin_host and origin_host not in settings.cors_origins_list:
-                logger.warning(
-                    f"CSRF: Blocked request from untrusted origin: {origin_host}"
-                )
-                response = JSONResponse(
-                    status_code=403, content={"detail": "Request origin not allowed"}
-                )
+                logger.warning(f"CSRF: Blocked request from untrusted origin: {origin_host}")
+                response = JSONResponse(status_code=403, content={"detail": "Request origin not allowed"})
                 return add_cors_headers(response, origin)
 
     return await call_next(request)
@@ -687,9 +650,9 @@ async def csrf_protection(request: Request, call_next):
 @app.middleware("http")
 async def sanitize_input(request: Request, call_next):
     # Only process JSON requests with body
-    if request.method in ("POST", "PUT", "PATCH") and request.headers.get(
-        "content-type", ""
-    ).startswith("application/json"):
+    if request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-type", "").startswith(
+        "application/json"
+    ):
         try:
             from app.core.sanitization import sanitize_dict
 
@@ -720,14 +683,10 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = (
-        "max-age=63072000; includeSubDomains; preload"
-    )
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
     # Content Security Policy - restrict resource loading (skip for API docs)
     if request.url.path not in ("/api/docs", "/api/redoc", "/api/openapi.json"):
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; frame-ancestors 'none'"
-        )
+        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
     return response
 
 
@@ -758,9 +717,7 @@ if settings.RATE_LIMIT_ENABLED:
 
         limiter = Limiter(
             key_func=get_remote_address,
-            default_limits=[
-                f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"
-            ],
+            default_limits=[f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"],
             storage_uri=settings.REDIS_URL if settings.REDIS_URL else "memory://",
         )
         app.state.limiter = limiter
@@ -769,9 +726,7 @@ if settings.RATE_LIMIT_ENABLED:
         # Custom rate limit handler with CORS headers
         async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
             detail = getattr(exc, "detail", str(exc))
-            response = JSONResponse(
-                status_code=429, content={"detail": f"Rate limit exceeded: {detail}"}
-            )
+            response = JSONResponse(status_code=429, content={"detail": f"Rate limit exceeded: {detail}"})
             origin = request.headers.get("origin")
             return add_cors_headers(response, origin)
 
@@ -809,9 +764,7 @@ async def global_exception_handler(request: Request, exc: Exception):
         import sentry_sdk
 
         sentry_sdk.capture_exception(exc)
-    response = JSONResponse(
-        status_code=500, content={"detail": "Internal server error"}
-    )
+    response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
     # Add CORS headers so browser doesn't mask the error as CORS failure
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
@@ -828,9 +781,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 # Validation error handler - ensures CORS headers on validation errors (422)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    response = JSONResponse(
-        status_code=422, content={"detail": jsonable_encoder(exc.errors())}
-    )
+    response = JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
 
@@ -987,11 +938,7 @@ async def detailed_health_check():
             "stats": cache.stats,
         }
 
-    overall_status = (
-        "healthy"
-        if checks.get("database", {}).get("status") == "healthy"
-        else "degraded"
-    )
+    overall_status = "healthy" if checks.get("database", {}).get("status") == "healthy" else "degraded"
 
     return {
         "status": overall_status,
@@ -1014,7 +961,7 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
+        host="0.0.0.0",  # nosec B104 - intentional bind for the containerized server (dev entrypoint)
         port=8000,
         reload=settings.DEBUG,
         log_level=settings.LOG_LEVEL.lower(),

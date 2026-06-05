@@ -112,10 +112,10 @@ async def check_late_work_orders_task():
             await notification_service.send_notification(
                 event_type=NotificationEvent.WO_LATE,
                 users=supervisors + managers,
-                    subject=(
-                        f"{'CRITICAL: ' if is_critical else ''}"
-                        f"Work Order {wo.work_order_number} is {days_late} days late"
-                    ),
+                subject=(
+                    f"{'CRITICAL: ' if is_critical else ''}"
+                    f"Work Order {wo.work_order_number} is {days_late} days late"
+                ),
                 context={"work_order": wo, "days_late": days_late, "critical": is_critical},
                 template="work_order_late",
                 related_type="WorkOrder",

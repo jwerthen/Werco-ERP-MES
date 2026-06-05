@@ -6,8 +6,8 @@ from app.models.rfq_quote import PriceSnapshot, RfqPackage
 from app.services.rfq_pricing_service import MaterialPriceService
 from app.services.sheet_metal_costing_service import (
     calc_bending_cost,
-    calc_dynamic_scrap_factor,
     calc_cutting_cost,
+    calc_dynamic_scrap_factor,
     calc_finishing_cost,
     calc_margin,
     calc_material_cost,

@@ -243,7 +243,7 @@ def _extract_doc_text(doc_path: str) -> DocumentExtractionResult:
 
     abs_path = str(Path(doc_path).resolve())
     # Ensure the resolved path is within the expected upload directory
-    allowed_dirs = ["/app/uploads", "/tmp"]
+    allowed_dirs = ["/app/uploads", "/tmp"]  # nosec B108 - allowlist for a path-traversal guard, not temp-file creation
     if not any(abs_path.startswith(d) for d in allowed_dirs):
         logger.error(f"[DOC] Path traversal attempt blocked: {abs_path}")
         return DocumentExtractionResult(text="", confidence="low", file_type="doc")

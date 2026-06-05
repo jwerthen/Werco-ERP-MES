@@ -271,7 +271,11 @@ def clock_in(
             "work_order_number": work_order.work_order_number,
             "operation_name": operation.name,
             "work_center_id": operation.work_center_id,
-            "entry_type": clock_in_data.entry_type.value if hasattr(clock_in_data.entry_type, "value") else clock_in_data.entry_type,
+            "entry_type": (
+                clock_in_data.entry_type.value
+                if hasattr(clock_in_data.entry_type, "value")
+                else clock_in_data.entry_type
+            ),
         },
     )
     db.commit()
@@ -857,7 +861,7 @@ def shop_floor_dashboard(
     }
 
     # Generate ETag from response data
-    etag = hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+    etag = hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode(), usedforsecurity=False).hexdigest()
     etag_header = f'"{etag}"'
 
     # Check If-None-Match header for conditional request

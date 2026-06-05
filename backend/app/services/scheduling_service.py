@@ -178,9 +178,7 @@ class SchedulingService:
             )
         )
         open_blocker_subquery = select(WorkOrderBlocker.operation_id).where(
-            WorkOrderBlocker.status.in_(
-                [WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]
-            ),
+            WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),
             WorkOrderBlocker.operation_id.isnot(None),
         )
         query = query.filter(WorkOrderOperation.id.notin_(open_blocker_subquery))

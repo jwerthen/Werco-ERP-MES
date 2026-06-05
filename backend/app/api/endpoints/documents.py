@@ -140,11 +140,7 @@ async def upload_document(
     normalized_vendor_id = vendor_id if vendor_id and vendor_id > 0 else None
 
     if normalized_part_id:
-        part = (
-            db.query(Part)
-            .filter(Part.id == normalized_part_id, Part.company_id == company_id)
-            .first()
-        )
+        part = db.query(Part).filter(Part.id == normalized_part_id, Part.company_id == company_id).first()
         if not part:
             raise HTTPException(status_code=404, detail="Part not found")
 
@@ -158,11 +154,7 @@ async def upload_document(
             raise HTTPException(status_code=404, detail="Work order not found")
 
     if normalized_vendor_id:
-        vendor = (
-            db.query(Vendor)
-            .filter(Vendor.id == normalized_vendor_id, Vendor.company_id == company_id)
-            .first()
-        )
+        vendor = db.query(Vendor).filter(Vendor.id == normalized_vendor_id, Vendor.company_id == company_id).first()
         if not vendor:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -254,9 +246,7 @@ def attach_document_to_work_order(
         raise HTTPException(status_code=404, detail="Document not found")
 
     work_order = (
-        db.query(WorkOrder)
-        .filter(WorkOrder.id == payload.work_order_id, WorkOrder.company_id == company_id)
-        .first()
+        db.query(WorkOrder).filter(WorkOrder.id == payload.work_order_id, WorkOrder.company_id == company_id).first()
     )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")

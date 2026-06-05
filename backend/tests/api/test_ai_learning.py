@@ -82,14 +82,16 @@ class TestAILearningAPI:
         assert data["status"] == "accepted"
         assert data["accepted_by"] is not None
 
-        event = db_session.query(AIInteractionEvent).filter(AIInteractionEvent.recommendation_id == recommendation.id).first()
+        event = (
+            db_session.query(AIInteractionEvent)
+            .filter(AIInteractionEvent.recommendation_id == recommendation.id)
+            .first()
+        )
         assert event is not None
         assert event.event_type == "accepted"
         assert event.event_payload["note"].startswith("Suggest-only")
 
-    def test_recommendations_are_company_scoped(
-        self, client: TestClient, admin_headers: dict, db_session: Session
-    ):
+    def test_recommendations_are_company_scoped(self, client: TestClient, admin_headers: dict, db_session: Session):
         other_company = Company(name="Other Co", slug="other-co", is_active=True)
         db_session.add(other_company)
         db_session.flush()

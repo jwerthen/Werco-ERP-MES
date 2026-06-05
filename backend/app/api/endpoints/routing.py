@@ -14,6 +14,7 @@ from app.models.routing import Routing, RoutingOperation
 from app.models.routing_learning import RoutingGenerationSession
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.schemas.ai_learning import AICorrectionCreate, AIInteractionEventCreate
 from app.schemas.routing import (
     PartSummary,
     RoutingCreate,
@@ -30,14 +31,13 @@ from app.schemas.routing_generation import (
     RoutingCreateFromGeneration,
     RoutingGenerationResult,
 )
-from app.schemas.ai_learning import AICorrectionCreate, AIInteractionEventCreate
 from app.services.ai_learning_service import AILearningService
-from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
 from app.services.routing_learning_service import (
     create_generation_session,
     get_learned_routing_context,
     learn_from_approved_generation,
 )
+from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,9 @@ def _routing_generation_corrections(
 
     for index, approved in enumerate(approved_operations):
         sequence = approved.get("sequence")
-        proposed = proposed_by_sequence.get(sequence) or (proposed_operations[index] if index < len(proposed_operations) else {})
+        proposed = proposed_by_sequence.get(sequence) or (
+            proposed_operations[index] if index < len(proposed_operations) else {}
+        )
         for proposed_field, approved_field in comparable_fields:
             proposed_value = proposed.get(proposed_field)
             approved_value = approved.get(approved_field)
@@ -208,7 +210,9 @@ async def generate_routing_from_drawing(
     active_work_center_types = list(work_centers_by_type.keys())
     allowed_work_center_types = active_work_center_types or configured_work_center_types
     if not active_work_center_types:
-        warnings.append("No active work centers were found. Proposed operations will require manual work center assignment.")
+        warnings.append(
+            "No active work centers were found. Proposed operations will require manual work center assignment."
+        )
 
     # Parse file based on type
     drawing_text = ""

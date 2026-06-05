@@ -162,7 +162,9 @@ def _parse_feature_count(text: str, feature_terms: Tuple[str, ...]) -> Optional[
     feature_pattern = "|".join(feature_terms)
     patterns = [
         re.compile(rf"\b(?:{feature_pattern})\s*(?:count|qty|quantity)?\s*[:#-]\s*(\d{{1,4}})\b", re.IGNORECASE),
-        re.compile(rf"\b(\d{{1,4}})\s*x?\s*(?:[oØø⌀]?\s*\d*\.?\d+\s*(?:in|mm|\")?\s*)?(?:{feature_pattern})\b", re.IGNORECASE),
+        re.compile(
+            rf"\b(\d{{1,4}})\s*x?\s*(?:[oØø⌀]?\s*\d*\.?\d+\s*(?:in|mm|\")?\s*)?(?:{feature_pattern})\b", re.IGNORECASE
+        ),
     ]
     candidates: List[int] = []
     for pattern in patterns:
@@ -307,7 +309,9 @@ def _extract_parts_list_rows(text: str) -> List[Dict[str, Any]]:
     if "PARTS LIST" not in text.upper():
         return []
     after = re.split(r"\bPARTS\s+LIST\b", text, flags=re.IGNORECASE, maxsplit=1)[-1]
-    before = re.split(r"\n\s*(?:ASSEMBLY|REFERENCE VIEW|STATE\s+\d+|PART\s+1\b)", after, flags=re.IGNORECASE, maxsplit=1)[0]
+    before = re.split(
+        r"\n\s*(?:ASSEMBLY|REFERENCE VIEW|STATE\s+\d+|PART\s+1\b)", after, flags=re.IGNORECASE, maxsplit=1
+    )[0]
     rows: List[Dict[str, Any]] = []
     for raw_line in before.splitlines():
         line = re.sub(r"\s+", " ", raw_line.strip())
@@ -400,7 +404,9 @@ def _extract_manufactured_detail_specs(
         for part_no in _part_numbers_from_phrase(match.group(1)):
             material_by_part[part_no] = material or "Aluminum"
             thickness_by_part[part_no] = thickness
-            notes_by_part.setdefault(part_no, []).append(f"Material from note: item {match.group(2)}, {raw_thickness} stock")
+            notes_by_part.setdefault(part_no, []).append(
+                f"Material from note: item {match.group(2)}, {raw_thickness} stock"
+            )
 
     for match in re.finditer(r"\bPART\s+(\d+):\s*(?!ITEM\b)(.+?)\s+([.\d]+)\s*STOCK", text, re.IGNORECASE | re.DOTALL):
         part_no = int(match.group(1))
@@ -426,7 +432,9 @@ def _extract_manufactured_detail_specs(
         for part_no in _part_numbers_from_phrase(match.group(1)):
             finish_by_part[part_no] = finish
             notes_by_part.setdefault(part_no, []).append(f"Finish from note: item {match.group(2)}")
-    for match in re.finditer(r"\bPART\s+(\d+):\s*([^.;]+(?:PLATE|PLATING|ANODIZE|FILM)[^.;]*)", finish_section, re.IGNORECASE):
+    for match in re.finditer(
+        r"\bPART\s+(\d+):\s*([^.;]+(?:PLATE|PLATING|ANODIZE|FILM)[^.;]*)", finish_section, re.IGNORECASE
+    ):
         part_no = int(match.group(1))
         finish = _clean_finish_name(match.group(2))
         finish_by_part[part_no] = finish
@@ -988,7 +996,12 @@ def build_normalized_part_specs(
             if only_part.get("sources", {}).get("bom"):
                 return only_part, "single-bom-part"
 
-        key_seed = payload.get("part_hint") or payload.get("drawing_number") or payload.get("file_name") or f"part-{len(parts)+1}"
+        key_seed = (
+            payload.get("part_hint")
+            or payload.get("drawing_number")
+            or payload.get("file_name")
+            or f"part-{len(parts)+1}"
+        )
         key_variants = _hint_variants(key_seed)
         key = key_variants[0] if key_variants else _clean_key(str(key_seed)) or f"part-{len(parts)+1}"
         part = ensure_part(key, str(payload.get("part_hint") or Path(str(payload.get("file_name") or key)).stem))
@@ -996,7 +1009,9 @@ def build_normalized_part_specs(
             part["part_id"] = str(payload["part_hint"])
         return part, f"created-from-{source_type}"
 
-    def append_cross_reference(part: Dict[str, Any], source_type: str, payload: Dict[str, Any], matched_by: str) -> None:
+    def append_cross_reference(
+        part: Dict[str, Any], source_type: str, payload: Dict[str, Any], matched_by: str
+    ) -> None:
         file_name = str(payload.get("file_name") or payload.get("part_hint") or "unknown-file")
         source_key = {
             "bom": "bom",
@@ -1042,7 +1057,9 @@ def build_normalized_part_specs(
         if unit_of_measure:
             part["unit_of_measure"] = unit_of_measure
 
-    def apply_assembly_child_payload(child: Dict[str, Any], parent_part_number: str, source_file: str) -> Dict[str, Any]:
+    def apply_assembly_child_payload(
+        child: Dict[str, Any], parent_part_number: str, source_file: str
+    ) -> Dict[str, Any]:
         key_seed = child.get("part_number") or child.get("part_name") or f"{parent_part_number}-item-{len(parts)+1}"
         key = _clean_key(str(key_seed)) or f"part-{len(parts)+1}"
         part = ensure_part(key, child.get("part_name") or str(key_seed))
@@ -1061,7 +1078,9 @@ def build_normalized_part_specs(
             quantity_per_assembly=child.get("quantity_per_assembly"),
             unit_of_measure=child.get("unit_of_measure"),
         )
-        append_cross_reference(part, "pdf", {"file_name": source_file, "part_hint": child.get("part_number")}, "assembly-bom")
+        append_cross_reference(
+            part, "pdf", {"file_name": source_file, "part_hint": child.get("part_number")}, "assembly-bom"
+        )
         for source_key, refs in (child.get("sources") or {}).items():
             _append_unique(part["sources"], source_key, refs)
         if child.get("material"):
@@ -1069,20 +1088,28 @@ def build_normalized_part_specs(
             part["confidence"]["material"] = max(
                 part["confidence"]["material"], child.get("confidence", {}).get("material", 0.72)
             )
-            _append_unique(part["sources"], "material", child.get("sources", {}).get("material", [f"{source_file}:assembly-note"]))
+            _append_unique(
+                part["sources"], "material", child.get("sources", {}).get("material", [f"{source_file}:assembly-note"])
+            )
         if child.get("thickness"):
             part["thickness"] = child["thickness"]
             part["thickness_in"] = child.get("thickness_in")
             part["confidence"]["thickness"] = max(
                 part["confidence"]["thickness"], child.get("confidence", {}).get("thickness", 0.7)
             )
-            _append_unique(part["sources"], "thickness", child.get("sources", {}).get("thickness", [f"{source_file}:assembly-note"]))
+            _append_unique(
+                part["sources"],
+                "thickness",
+                child.get("sources", {}).get("thickness", [f"{source_file}:assembly-note"]),
+            )
         if child.get("finish"):
             part["finish"] = child["finish"]
             part["confidence"]["finish"] = max(
                 part["confidence"]["finish"], child.get("confidence", {}).get("finish", 0.7)
             )
-            _append_unique(part["sources"], "finish", child.get("sources", {}).get("finish", [f"{source_file}:assembly-note"]))
+            _append_unique(
+                part["sources"], "finish", child.get("sources", {}).get("finish", [f"{source_file}:assembly-note"])
+            )
         return part
 
     for row in bom_parts:
@@ -1134,9 +1161,13 @@ def build_normalized_part_specs(
     for payload in pdf_specs:
         assembly_payload = payload.get("assembly") or {}
         if payload.get("document_kind") == "assembly" and assembly_payload:
-            parent_number = assembly_payload.get("part_number") or payload.get("drawing_number") or payload.get("part_hint")
+            parent_number = (
+                assembly_payload.get("part_number") or payload.get("drawing_number") or payload.get("part_hint")
+            )
             parent_key = _clean_key(str(parent_number or payload.get("file_name") or f"assembly-{len(parts)+1}"))
-            parent = ensure_part(parent_key or f"assembly-{len(parts)+1}", assembly_payload.get("part_name") or str(parent_number))
+            parent = ensure_part(
+                parent_key or f"assembly-{len(parts)+1}", assembly_payload.get("part_name") or str(parent_number)
+            )
             parent["part_id"] = parent_number or parent["part_id"]
             parent["part_name"] = assembly_payload.get("part_name") or parent["part_name"]
             parent["assembly_required"] = True
@@ -1175,7 +1206,9 @@ def build_normalized_part_specs(
                     "sources": {"bom": [f"{payload.get('file_name')}:parts-list-item-{row.get('item_number')}"]},
                     "confidence": {"material": 0.0, "thickness": 0.0, "geometry": 0.0, "finish": 0.0},
                 }
-                part = apply_assembly_child_payload(child, str(parent["part_id"]), payload.get("file_name") or "assembly-pdf")
+                part = apply_assembly_child_payload(
+                    child, str(parent["part_id"]), payload.get("file_name") or "assembly-pdf"
+                )
                 if line_type == "reference":
                     part["qty"] = 0
             continue

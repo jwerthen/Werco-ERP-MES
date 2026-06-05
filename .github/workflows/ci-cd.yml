@@ -14,7 +14,7 @@ on:
 
 env:
   PYTHON_VERSION: '3.11'
-  NODE_VERSION: '18'
+  NODE_VERSION: '20'
   RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
 
 jobs:
@@ -40,10 +40,10 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run Black
-        run: black --check --diff .
+        run: black --check --diff --config=.black app tests
 
       - name: Run isort
-        run: isort --check-only --diff .
+        run: isort --check-only --diff --settings-path=.isort.cfg app tests
 
       - name: Run Flake8
         run: flake8 app --max-line-length=120

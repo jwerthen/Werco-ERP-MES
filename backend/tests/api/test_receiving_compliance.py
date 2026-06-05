@@ -244,22 +244,16 @@ def test_receive_writes_audit_entries(client: TestClient, db_session: Session):
     logs = db_session.query(AuditLog).order_by(AuditLog.sequence_number).all()
 
     # CREATE for the receipt
-    receipt_creates = [
-        log for log in logs if log.resource_type == "receipt" and log.action == "CREATE"
-    ]
+    receipt_creates = [log for log in logs if log.resource_type == "receipt" and log.action == "CREATE"]
     assert len(receipt_creates) == 1
     assert receipt_creates[0].resource_id == receipt_id
 
     # CREATE or UPDATE for inventory (fresh lot -> CREATE)
-    inventory_logs = [
-        log for log in logs if log.resource_type == "inventory" and log.action in ("CREATE", "UPDATE")
-    ]
+    inventory_logs = [log for log in logs if log.resource_type == "inventory" and log.action in ("CREATE", "UPDATE")]
     assert len(inventory_logs) >= 1
 
     # STATUS_CHANGE for the purchase_order (SENT -> RECEIVED)
-    po_status_changes = [
-        log for log in logs if log.resource_type == "purchase_order" and log.action == "STATUS_CHANGE"
-    ]
+    po_status_changes = [log for log in logs if log.resource_type == "purchase_order" and log.action == "STATUS_CHANGE"]
     assert len(po_status_changes) == 1
     assert po_status_changes[0].old_values == {"status": "sent"}
     assert po_status_changes[0].new_values == {"status": "received"}
@@ -328,24 +322,18 @@ def test_inspect_writes_audit_entries(client: TestClient, db_session: Session):
     receipt_status_changes = [
         log
         for log in logs
-        if log.resource_type == "receipt"
-        and log.action == "STATUS_CHANGE"
-        and log.resource_id == receipt_id
+        if log.resource_type == "receipt" and log.action == "STATUS_CHANGE" and log.resource_id == receipt_id
     ]
     assert len(receipt_status_changes) == 1
     assert receipt_status_changes[0].old_values == {"status": ReceiptStatus.PENDING_INSPECTION.value}
     assert receipt_status_changes[0].new_values == {"status": ReceiptStatus.ACCEPTED.value}
 
     # 4b. At least one inventory row (CREATE for a fresh lot, or UPDATE) from the accepted qty.
-    inventory_logs = [
-        log for log in logs if log.resource_type == "inventory" and log.action in ("CREATE", "UPDATE")
-    ]
+    inventory_logs = [log for log in logs if log.resource_type == "inventory" and log.action in ("CREATE", "UPDATE")]
     assert len(inventory_logs) >= 1
 
     # 4c. NCR CREATE from the rejected qty, for the NCR returned by the endpoint.
-    ncr_creates = [
-        log for log in logs if log.resource_type == "ncr" and log.action == "CREATE"
-    ]
+    ncr_creates = [log for log in logs if log.resource_type == "ncr" and log.action == "CREATE"]
     assert len(ncr_creates) == 1
     assert ncr_creates[0].resource_id == ncr_id
 
@@ -423,11 +411,7 @@ def test_receive_stamps_company_id_on_writes(client: TestClient, db_session: Ses
     inv_item = db_session.query(InventoryItem).filter(InventoryItem.lot_number == "LOT-STAMP-1").one()
     assert inv_item.company_id == 1
 
-    txn = (
-        db_session.query(InventoryTransaction)
-        .filter(InventoryTransaction.inventory_item_id == inv_item.id)
-        .one()
-    )
+    txn = db_session.query(InventoryTransaction).filter(InventoryTransaction.inventory_item_id == inv_item.id).one()
     assert txn.company_id == 1
 
 

@@ -219,11 +219,14 @@ def reconcile_work_orders_from_completion_evidence(db: Session, work_orders: lis
         if scrapped_qty > float(operation.quantity_scrapped or 0):
             operation.quantity_scrapped = scrapped_qty
             changed = True
-        changed = _sync_operation_status_from_quantity(
-            operation,
-            latest_entry_by_operation.get(operation.id),
-            closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
-        ) or changed
+        changed = (
+            _sync_operation_status_from_quantity(
+                operation,
+                latest_entry_by_operation.get(operation.id),
+                closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
+            )
+            or changed
+        )
 
     for work_order in work_orders:
         changed = _copy_slot_completion_evidence(work_order) or changed

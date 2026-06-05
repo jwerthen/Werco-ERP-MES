@@ -20,7 +20,9 @@ class AIContextService:
     def work_order_context(self, *, company_id: int, work_order_id: int) -> Dict[str, Any]:
         work_order = (
             self.db.query(WorkOrder)
-            .options(joinedload(WorkOrder.part), joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.work_center))
+            .options(
+                joinedload(WorkOrder.part), joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.work_center)
+            )
             .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
             .first()
         )

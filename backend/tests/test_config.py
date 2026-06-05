@@ -89,9 +89,7 @@ class TestRefreshTokenSecretKeyValidation:
 
                 Settings()
 
-            assert "REFRESH_TOKEN_SECRET_KEY is set to an insecure value" in str(
-                exc_info.value
-            )
+            assert "REFRESH_TOKEN_SECRET_KEY is set to an insecure value" in str(exc_info.value)
 
     def test_short_refresh_key_rejected(self):
         """Test that a REFRESH_TOKEN_SECRET_KEY less than 32 characters is rejected."""
@@ -181,10 +179,7 @@ class TestSupabaseDatabaseConfiguration:
 
             assert settings.SQLALCHEMY_DATABASE_URL.startswith("postgresql+psycopg2://")
             assert "sslmode=require" in settings.SQLALCHEMY_DATABASE_URL
-            assert (
-                "application_name=werco_erp_supabase"
-                in settings.SQLALCHEMY_DATABASE_URL
-            )
+            assert "application_name=werco_erp_supabase" in settings.SQLALCHEMY_DATABASE_URL
             assert settings.database_provider == "supabase"
 
     def test_supabase_database_url_can_be_built_from_project_ref(self):
@@ -203,10 +198,7 @@ class TestSupabaseDatabaseConfiguration:
 
             settings = Settings()
 
-            assert (
-                "db.abc123.supabase.co:5432/postgres"
-                in settings.SQLALCHEMY_DATABASE_URL
-            )
+            assert "db.abc123.supabase.co:5432/postgres" in settings.SQLALCHEMY_DATABASE_URL
             assert settings.safe_database_host == "db.abc123.supabase.co"
 
     def test_supabase_pooler_url_uses_project_qualified_user(self):

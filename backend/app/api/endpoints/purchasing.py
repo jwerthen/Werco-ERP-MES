@@ -59,9 +59,7 @@ def _csv_row(raw_row: dict, header_map: dict) -> dict:
     for raw_key, raw_value in raw_row.items():
         if not raw_key:
             continue
-        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (
-            raw_value or ""
-        ).strip()
+        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
     return row
 
 
@@ -89,11 +87,7 @@ def _generate_vendor_code(db: Session, name: str, company_id: int) -> str:
     base = "".join(c for c in name.upper() if c.isalnum())[:3]
     if len(base) < 3:
         base = base.ljust(3, "X")
-    existing = (
-        db.query(Vendor)
-        .filter(Vendor.company_id == company_id, Vendor.code.like(f"{base}%"))
-        .count()
-    )
+    existing = db.query(Vendor).filter(Vendor.company_id == company_id, Vendor.code.like(f"{base}%")).count()
     return f"{base}{existing + 1:03d}"
 
 
@@ -123,11 +117,7 @@ def create_vendor(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    existing = (
-        db.query(Vendor)
-        .filter(Vendor.code == vendor_in.code, Vendor.company_id == company_id)
-        .first()
-    )
+    existing = db.query(Vendor).filter(Vendor.code == vendor_in.code, Vendor.company_id == company_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="Vendor code already exists")
 
@@ -167,15 +157,11 @@ async def import_vendors_csv(
 
     header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
     if "name" not in set(header_map.values()):
-        raise HTTPException(
-            status_code=400, detail="Missing required CSV columns: name"
-        )
+        raise HTTPException(status_code=400, detail="Missing required CSV columns: name")
 
     existing_codes = {
         (value or "").strip().upper()
-        for (value,) in db.query(Vendor.code)
-        .filter(Vendor.company_id == company_id)
-        .all()
+        for (value,) in db.query(Vendor.code).filter(Vendor.company_id == company_id).all()
     }
 
     errors: List[VendorCsvImportError] = []
@@ -212,16 +198,10 @@ async def import_vendors_csv(
                 postal_code=row.get("postal_code") or row.get("zip_code") or None,
                 country=row.get("country") or "US",
                 payment_terms=row.get("payment_terms") or None,
-                lead_time_days=_parse_int(
-                    row.get("lead_time_days", ""), "lead_time_days", 14
-                ),
+                lead_time_days=_parse_int(row.get("lead_time_days", ""), "lead_time_days", 14),
                 is_approved=_parse_bool(row.get("is_approved", ""), False),
-                is_as9100_certified=_parse_bool(
-                    row.get("is_as9100_certified", ""), False
-                ),
-                is_iso9001_certified=_parse_bool(
-                    row.get("is_iso9001_certified", ""), False
-                ),
+                is_as9100_certified=_parse_bool(row.get("is_as9100_certified", ""), False),
+                is_iso9001_certified=_parse_bool(row.get("is_iso9001_certified", ""), False),
                 notes=row.get("notes") or None,
             )
         except (ValueError, ValidationError) as exc:
@@ -246,11 +226,7 @@ async def import_vendors_csv(
             db.refresh(vendor)
         except Exception as exc:
             db.rollback()
-            errors.append(
-                VendorCsvImportError(
-                    row=row_number, code=code, name=name, reason=str(exc)
-                )
-            )
+            errors.append(VendorCsvImportError(row=row_number, code=code, name=name, reason=str(exc)))
             continue
 
         existing_codes.add(vendor.code.upper())
@@ -272,11 +248,7 @@ def get_vendor(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    vendor = (
-        db.query(Vendor)
-        .filter(Vendor.id == vendor_id, Vendor.company_id == company_id)
-        .first()
-    )
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     return vendor
@@ -290,11 +262,7 @@ def update_vendor(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    vendor = (
-        db.query(Vendor)
-        .filter(Vendor.id == vendor_id, Vendor.company_id == company_id)
-        .first()
-    )
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -357,9 +325,7 @@ def list_purchase_orders(
         query = query.filter(PurchaseOrder.status == status)
     else:
         # Default: exclude closed/cancelled
-        query = query.filter(
-            PurchaseOrder.status.not_in([POStatus.CLOSED, POStatus.CANCELLED])
-        )
+        query = query.filter(PurchaseOrder.status.not_in([POStatus.CLOSED, POStatus.CANCELLED]))
 
     if vendor_id:
         query = query.filter(PurchaseOrder.vendor_id == vendor_id)
@@ -389,17 +355,11 @@ def list_purchase_orders(
 def create_purchase_order(
     po_in: POCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
-    ),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
     # Verify vendor
-    vendor = (
-        db.query(Vendor)
-        .filter(Vendor.id == po_in.vendor_id, Vendor.company_id == company_id)
-        .first()
-    )
+    vendor = db.query(Vendor).filter(Vendor.id == po_in.vendor_id, Vendor.company_id == company_id).first()
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -422,15 +382,9 @@ def create_purchase_order(
     # Add lines
     subtotal = 0.0
     for idx, line_data in enumerate(po_in.lines, 1):
-        part = (
-            db.query(Part)
-            .filter(Part.id == line_data.part_id, Part.company_id == company_id)
-            .first()
-        )
+        part = db.query(Part).filter(Part.id == line_data.part_id, Part.company_id == company_id).first()
         if not part:
-            raise HTTPException(
-                status_code=404, detail=f"Part {line_data.part_id} not found"
-            )
+            raise HTTPException(status_code=404, detail=f"Part {line_data.part_id} not found")
 
         line_total = line_data.quantity_ordered * line_data.unit_price
         line = PurchaseOrderLine(
@@ -500,16 +454,10 @@ def update_purchase_order(
     po_id: int,
     po_in: POUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
-    ),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    po = (
-        db.query(PurchaseOrder)
-        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
-        .first()
-    )
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
@@ -531,14 +479,8 @@ def update_purchase_order(
         severity="info" if po.status == previous_status else "medium",
         event_payload={
             "po_number": po.po_number,
-            "changed_fields": [
-                field for field in update_data.keys() if field != "version"
-            ],
-            "previous_status": (
-                previous_status.value
-                if hasattr(previous_status, "value")
-                else previous_status
-            ),
+            "changed_fields": [field for field in update_data.keys() if field != "version"],
+            "previous_status": (previous_status.value if hasattr(previous_status, "value") else previous_status),
             "status": po.status.value if hasattr(po.status, "value") else po.status,
             "required_date": po.required_date.isoformat() if po.required_date else None,
             "expected_date": po.expected_date.isoformat() if po.expected_date else None,
@@ -556,18 +498,12 @@ def send_purchase_order(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    po = (
-        db.query(PurchaseOrder)
-        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
-        .first()
-    )
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
     if po.status not in [POStatus.DRAFT, POStatus.APPROVED]:
-        raise HTTPException(
-            status_code=400, detail="Can only send draft or approved POs"
-        )
+        raise HTTPException(status_code=400, detail="Can only send draft or approved POs")
 
     po.status = POStatus.SENT
     po.order_date = date.today()
@@ -596,35 +532,23 @@ def add_po_line(
     po_id: int,
     line_in: POLineCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
-    ),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    po = (
-        db.query(PurchaseOrder)
-        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
-        .first()
-    )
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
     if po.status not in [POStatus.DRAFT]:
         raise HTTPException(status_code=400, detail="Can only add lines to draft POs")
 
-    part = (
-        db.query(Part)
-        .filter(Part.id == line_in.part_id, Part.company_id == company_id)
-        .first()
-    )
+    part = db.query(Part).filter(Part.id == line_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
 
     # Get next line number
     max_line = (
-        db.query(func.max(PurchaseOrderLine.line_number))
-        .filter(PurchaseOrderLine.purchase_order_id == po_id)
-        .scalar()
+        db.query(func.max(PurchaseOrderLine.line_number)).filter(PurchaseOrderLine.purchase_order_id == po_id).scalar()
         or 0
     )
 
@@ -662,9 +586,7 @@ def add_po_line(
             "part_id": line.part_id,
             "quantity_ordered": float(line.quantity_ordered or 0),
             "unit_price": float(line.unit_price or 0),
-            "required_date": (
-                line.required_date.isoformat() if line.required_date else None
-            ),
+            "required_date": (line.required_date.isoformat() if line.required_date else None),
         },
     )
     db.commit()

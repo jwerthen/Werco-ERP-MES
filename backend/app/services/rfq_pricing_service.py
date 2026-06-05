@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from app.models.part import Part, PartType
 from app.models.quote_config import MaterialCategory, QuoteMaterial, QuoteSettings
 from app.models.rfq_quote import PriceSnapshot, RfqPackage
-from app.services.sheet_metal_costing_service import normalize_material, normalize_thickness_key, parse_thickness_to_inches
+from app.services.sheet_metal_costing_service import (
+    normalize_material,
+    normalize_thickness_key,
+    parse_thickness_to_inches,
+)
 
 DEFAULT_MATERIAL_PRICE_PER_LB = {
     "carbon_steel": 1.10,

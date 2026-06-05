@@ -14,6 +14,7 @@ from app.models.quality import (
     FAICharacteristic,
     FAIStatus,
     FirstArticleInspection,
+    NCRSource,
     NCRStatus,
     NonConformanceReport,
 )

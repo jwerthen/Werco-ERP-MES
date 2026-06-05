@@ -11,12 +11,36 @@ from app.services.mrp_service import MRPService
 @pytest.mark.requires_db
 def test_mrp_orders_material_supply_shortages_and_manufactures_engineering_parts(db_session: Session):
     parts = [
-        Part(part_number="MRP-MFG-001", name="Machined Part", part_type="manufactured", unit_of_measure="each", company_id=1),
+        Part(
+            part_number="MRP-MFG-001",
+            name="Machined Part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            company_id=1,
+        ),
         Part(part_number="MRP-ASM-001", name="Assembly", part_type="assembly", unit_of_measure="each", company_id=1),
-        Part(part_number="MRP-BUY-001", name="Purchased Item", part_type="purchased", unit_of_measure="each", company_id=1),
-        Part(part_number="MRP-RAW-001", name="Raw Sheet", part_type="raw_material", unit_of_measure="sheets", company_id=1),
+        Part(
+            part_number="MRP-BUY-001",
+            name="Purchased Item",
+            part_type="purchased",
+            unit_of_measure="each",
+            company_id=1,
+        ),
+        Part(
+            part_number="MRP-RAW-001",
+            name="Raw Sheet",
+            part_type="raw_material",
+            unit_of_measure="sheets",
+            company_id=1,
+        ),
         Part(part_number="MRP-HW-001", name="Hardware", part_type="hardware", unit_of_measure="each", company_id=1),
-        Part(part_number="MRP-CON-001", name="Consumable", part_type="consumable", unit_of_measure="gallons", company_id=1),
+        Part(
+            part_number="MRP-CON-001",
+            name="Consumable",
+            part_type="consumable",
+            unit_of_measure="gallons",
+            company_id=1,
+        ),
     ]
     db_session.add_all(parts)
     db_session.commit()

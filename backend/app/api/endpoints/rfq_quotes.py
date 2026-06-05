@@ -32,8 +32,8 @@ from app.services.rfq_pricing_service import MaterialPriceService
 from app.services.sheet_metal_costing_service import (
     SheetMetalCostConfig,
     calc_bending_cost,
-    calc_dynamic_scrap_factor,
     calc_cutting_cost,
+    calc_dynamic_scrap_factor,
     calc_finishing_cost,
     calc_margin,
     calc_material_cost,
@@ -339,7 +339,9 @@ def generate_estimate(
     if not parsed["parts"]:
         raise HTTPException(status_code=400, detail="No parsable part data found in RFQ files.")
 
-    manufactured_parts = [part for part in parsed["parts"] if str(part.get("line_type") or "manufactured") == "manufactured"]
+    manufactured_parts = [
+        part for part in parsed["parts"] if str(part.get("line_type") or "manufactured") == "manufactured"
+    ]
     geometry_ready_parts = [
         part
         for part in manufactured_parts

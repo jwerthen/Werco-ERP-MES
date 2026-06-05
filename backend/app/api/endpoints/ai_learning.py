@@ -73,7 +73,10 @@ def create_ai_recommendation(
     company_id: int = Depends(get_current_company_id),
 ):
     """Create a suggest-only recommendation. Intended for admin and service workflows."""
-    if current_user.role not in {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR} and not current_user.is_superuser:
+    if (
+        current_user.role not in {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR}
+        and not current_user.is_superuser
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     recommendation = AILearningService(db).create_recommendation(company_id=company_id, user=current_user, data=data)
@@ -185,7 +188,10 @@ def aggregate_ai_learning(
     company_id: int = Depends(get_current_company_id),
 ):
     """Run learning aggregation for the active tenant. Useful for admin verification."""
-    if current_user.role not in {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR} and not current_user.is_superuser:
+    if (
+        current_user.role not in {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR}
+        and not current_user.is_superuser
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     summary = AILearningService(db).aggregate_learning_signals(company_ids=[company_id])

@@ -37,9 +37,7 @@ checks.append({'name': 'Sentry configured', 'pass': 'sentry.io' in os.getenv('SE
 database_configured = bool(os.getenv('DATABASE_URL')) or bool(
     os.getenv('SUPABASE_PROJECT_REF') and os.getenv('SUPABASE_DB_PASSWORD')
 )
-checks.append(
-    {'name': 'Supabase database configured', 'pass': database_configured, 'critical': True}
-)
+checks.append({'name': 'Supabase database configured', 'pass': database_configured, 'critical': True})
 
 # Check 5: Environment set
 checks.append(

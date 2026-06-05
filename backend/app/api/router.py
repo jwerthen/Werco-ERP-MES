@@ -51,8 +51,8 @@ from app.api.endpoints import (
     tool_management,
     traceability,
     users,
-    work_order_blockers,
     work_centers,
+    work_order_blockers,
     work_orders,
 )
 
