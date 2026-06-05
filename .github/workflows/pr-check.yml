@@ -65,13 +65,13 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run Black (formatting)
-        run: black --check --diff app tests
+        run: black --check --diff --config=.black app tests
 
       - name: Run isort (imports)
-        run: isort --check-only --diff app tests
+        run: isort --check-only --diff --settings-path=.isort.cfg app tests
 
       - name: Run Flake8 (linting)
-        run: flake8 app --max-line-length=120 --ignore=E501,W503
+        run: flake8 app --max-line-length=120
 
       - name: Run Bandit (security)
         run: bandit -r app -s B101 -ll
