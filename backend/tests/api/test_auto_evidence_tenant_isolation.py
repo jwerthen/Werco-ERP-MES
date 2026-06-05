@@ -5,20 +5,22 @@ the live HTTP path that the fix on branch qa/full-pass-2026-06-04 hardened:
 
     GET /api/v1/qms-standards/clauses/{clause_id}/auto-evidence
 
-The endpoint injects ``company_id`` from ``get_current_company_id`` (the JWT's
-active-company claim) and passes it into ``discover_evidence_for_clause``.
-Headline invariant: the discovered-evidence counts a caller receives reflect
-ONLY their active company -- another company's rows must not leak in.
+The endpoint now scopes the clause lookup by ``company_id`` (from
+``get_current_company_id`` -- the JWT's active-company claim) AND passes that same
+``company_id`` into ``discover_evidence_for_clause``. Headline invariant: the
+discovered-evidence counts a caller receives reflect ONLY their active company --
+another company's rows must not leak in.
 
-The clause itself carries no ``company_id`` (qms_clauses is not tenant-scoped),
-so the same clause id is queried by both a company-A and a company-B caller;
-the only thing that differs is the token's company claim, and that alone must
-change the counts.
+``QMSClause`` is now tenant-scoped (NOT-NULL ``company_id`` via ``TenantMixin``),
+and the endpoint 404s on a clause that belongs to another company. So each test
+creates the clause under the caller's active company; the domain rows it counts
+(NCRs) are seeded per-company, and only the token's company claim selects which
+company's domain rows are reported.
 
-NOTE: the sibling ``POST /{standard_id}/auto-link`` endpoint is not exercised
-here -- it filters on ``QMSStandard.company_id``, a column the model/test schema
-does not define -- so the read endpoint is the API-level target. The persistence
-side of auto-link is covered structurally by the service-level suite.
+This file focuses on the auto-evidence *read* endpoint. Tenant isolation of the
+QMS standard/clause CRUD endpoints (including ``POST /{standard_id}/auto-link``,
+which now legitimately filters on the tenant-scoped ``QMSStandard.company_id``)
+is covered in ``tests/api/test_qms_standards_tenant_isolation.py``.
 """
 
 from datetime import datetime, timedelta
@@ -87,13 +89,21 @@ def _headers_for(user: User, *, active_company_id: int = None) -> dict:
     return {"Authorization": f"Bearer {token}", "X-Requested-With": "XMLHttpRequest"}
 
 
-def _make_ncr_clause(db: Session) -> QMSClause:
-    """A clause whose text routes to the NCR rule via keyword matching."""
-    standard = QMSStandard(name=f"STD-{_next()}", version="2015", is_active=True)
+def _make_ncr_clause(db: Session, *, company_id: int) -> QMSClause:
+    """A clause whose text routes to the NCR rule via keyword matching.
+
+    ``QMSStandard``/``QMSClause`` are tenant-scoped, and the auto-evidence
+    endpoint scopes its clause lookup by the caller's active company -- so the
+    clause MUST belong to ``company_id`` (the requesting user's active company)
+    or the endpoint returns 404.
+    """
+    _ensure_company(db, company_id)
+    standard = QMSStandard(name=f"STD-{_next()}", version="2015", is_active=True, company_id=company_id)
     db.add(standard)
     db.flush()
     clause = QMSClause(
         standard_id=standard.id,
+        company_id=company_id,
         clause_number="8.7",
         title="Control of nonconforming output",
         description="handling of nonconforming product",
@@ -140,7 +150,7 @@ def _ncr_evidence(body: dict) -> dict:
 def test_auto_evidence_endpoint_scoped_to_active_company(client: TestClient, db_session: Session):
     """Company A's caller sees only A's NCR count; B's larger population is absent."""
     seeded = _seed_ncrs(db_session)
-    clause = _make_ncr_clause(db_session)
+    clause = _make_ncr_clause(db_session, company_id=COMPANY_A)
     quality_a = _make_user(db_session, company_id=COMPANY_A, role=UserRole.QUALITY)
 
     resp = client.get(
@@ -163,7 +173,7 @@ def test_auto_evidence_endpoint_company_b_sees_only_b(client: TestClient, db_ses
     """Symmetric control: the SAME clause, queried with a company-B token,
     returns B's count -- proving the token's company claim is what scopes it."""
     seeded = _seed_ncrs(db_session)
-    clause = _make_ncr_clause(db_session)
+    clause = _make_ncr_clause(db_session, company_id=COMPANY_B)
     quality_b = _make_user(db_session, company_id=COMPANY_B, role=UserRole.QUALITY)
 
     resp = client.get(
@@ -179,9 +189,11 @@ def test_auto_evidence_endpoint_company_b_sees_only_b(client: TestClient, db_ses
 def test_auto_evidence_endpoint_platform_admin_switched_company(client: TestClient, db_session: Session):
     """A platform admin whose token is switched into company B sees B's count,
     even though the admin's home company is A -- exactly how
-    get_current_company_id scopes a context-switched request."""
+    get_current_company_id scopes a context-switched request. The clause lives in
+    company B (the switched-into company), so the company-B-scoped lookup finds
+    it; a company-A clause would 404 under this switched context."""
     seeded = _seed_ncrs(db_session)
-    clause = _make_ncr_clause(db_session)
+    clause = _make_ncr_clause(db_session, company_id=COMPANY_B)
     admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.PLATFORM_ADMIN)
 
     resp = client.get(

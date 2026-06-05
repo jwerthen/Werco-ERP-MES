@@ -93,19 +93,25 @@ def _make_user(db: Session, *, company_id: int, role: UserRole = UserRole.PLATFO
     return user
 
 
-def _make_clause(db: Session, *, title: str, description: str = "") -> QMSClause:
+def _make_clause(db: Session, *, title: str, description: str = "", company_id: int = COMPANY_A) -> QMSClause:
     """Create a throwaway QMSStandard + QMSClause.
 
     The clause is only used for keyword matching by the service; its text
-    selects which ``_query_*`` rule(s) fire. qms_standards/qms_clauses carry no
-    ``company_id`` in this schema, so no tenant is needed here.
+    selects which ``_query_*`` rule(s) fire. ``QMSStandard``/``QMSClause`` are
+    now tenant-scoped (NOT-NULL ``company_id`` via ``TenantMixin``), so both rows
+    are stamped here purely to satisfy that constraint -- the service scopes its
+    DOMAIN queries by the ``company_id`` passed to ``discover_evidence_for_clause``
+    (NOT by the clause's own ``company_id``), so any valid company works for these
+    service-level assertions. Defaults to ``COMPANY_A``.
     """
+    _ensure_company(db, company_id)
     n = _next()
-    standard = QMSStandard(name=f"STD-{n}", version="2015", is_active=True)
+    standard = QMSStandard(name=f"STD-{n}", version="2015", is_active=True, company_id=company_id)
     db.add(standard)
     db.flush()
     clause = QMSClause(
         standard_id=standard.id,
+        company_id=company_id,
         clause_number=f"{n}.0",
         title=title,
         description=description,
