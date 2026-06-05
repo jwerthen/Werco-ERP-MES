@@ -128,6 +128,10 @@ openssl rand -base64 32
    ```bash
    docker-compose -f docker-compose.prod.yml exec backend alembic upgrade head
    ```
+   > On a **brand-new, empty** database, `alembic upgrade head` alone will fail —
+   > follow the bootstrap order in [Database Setup](#database-setup) (create_all →
+   > `alembic stamp <baseline>` → incremental `upgrade head`) first. This step is
+   > the standard path only once the DB has been bootstrapped.
 
 ### Option 2: Systemd Services (Recommended for Production)
 
@@ -292,12 +296,29 @@ sudo certbot --nginx -d werco-erp.yourdomain.com
    CREATE DATABASE werco_erp OWNER werco_prod_user;
    ```
 
-2. **Run migrations:**
+2. **Bootstrap the schema (first time, empty database):**
+
+   A bare `alembic upgrade head` against an **empty** database is **not** the
+   supported path and will fail — the core tables are created by
+   `Base.metadata.create_all()` on first app boot (`001` only adds indexes), and
+   `002_add_laser_press_brake_types.py` runs `ALTER TYPE workcentertype ...`,
+   which errors if the enum type doesn't exist yet. Instead:
    ```bash
    cd /opt/werco-erp/backend
    source venv/bin/activate
+
+   # 1. Create the schema (first app boot creates it via create_all; or do it explicitly)
+   python -m scripts.seed_data            # calls create_all (+ seeds demo data)
+
+   # 2. Mark the DB as already at the migration baseline create_all matches
+   alembic stamp <baseline-revision>
+
+   # 3. Apply migrations newer than the baseline
    alembic upgrade head
    ```
+   See `docs/DEVELOPMENT.md` → "Database Migrations" → "Bootstrap order" for
+   details. After bootstrap, normal incremental `alembic upgrade head` is the
+   standard path.
 
 3. **Set up automatic backups:**
    ```bash
