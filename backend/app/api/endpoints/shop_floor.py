@@ -861,7 +861,7 @@ def shop_floor_dashboard(
     }
 
     # Generate ETag from response data
-    etag = hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+    etag = hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode(), usedforsecurity=False).hexdigest()
     etag_header = f'"{etag}"'
 
     # Check If-None-Match header for conditional request
