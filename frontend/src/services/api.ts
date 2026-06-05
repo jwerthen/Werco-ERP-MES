@@ -1250,26 +1250,6 @@ class ApiService {
     return response.data;
   }
 
-  async getReceivingQueue() {
-    const response = await this.api.get('/purchasing/receiving/queue');
-    return response.data;
-  }
-
-  async receiveMaterial(data: any) {
-    const response = await this.api.post('/purchasing/receiving', data);
-    return response.data;
-  }
-
-  async getPendingInspection() {
-    const response = await this.api.get('/purchasing/receiving/pending-inspection');
-    return response.data;
-  }
-
-  async inspectReceipt(receiptId: number, data: any) {
-    const response = await this.api.post(`/purchasing/receiving/${receiptId}/inspect`, data);
-    return response.data;
-  }
-
   async getPurchaseOrderPrintData(poId: number) {
     const response = await this.api.get(`/print/purchase-orders/${poId}/print-data`);
     return response.data;

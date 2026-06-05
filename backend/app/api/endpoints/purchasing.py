@@ -11,17 +11,11 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
-from app.models.inventory import InventoryItem, InventoryLocation, InventoryTransaction, TransactionType
 from app.models.part import Part
 from app.models.purchasing import (
-    DefectType,
-    InspectionMethod,
-    InspectionStatus,
-    POReceipt,
     POStatus,
     PurchaseOrder,
     PurchaseOrderLine,
-    ReceiptStatus,
     Vendor,
 )
 from app.models.user import User, UserRole
@@ -32,9 +26,6 @@ from app.schemas.purchasing import (
     POListResponse,
     POResponse,
     POUpdate,
-    ReceiptCreate,
-    ReceiptInspection,
-    ReceiptResponse,
     VendorCreate,
     VendorResponse,
     VendorUpdate,
@@ -68,7 +59,9 @@ def _csv_row(raw_row: dict, header_map: dict) -> dict:
     for raw_key, raw_value in raw_row.items():
         if not raw_key:
             continue
-        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
+        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (
+            raw_value or ""
+        ).strip()
     return row
 
 
@@ -96,7 +89,11 @@ def _generate_vendor_code(db: Session, name: str, company_id: int) -> str:
     base = "".join(c for c in name.upper() if c.isalnum())[:3]
     if len(base) < 3:
         base = base.ljust(3, "X")
-    existing = db.query(Vendor).filter(Vendor.company_id == company_id, Vendor.code.like(f"{base}%")).count()
+    existing = (
+        db.query(Vendor)
+        .filter(Vendor.company_id == company_id, Vendor.code.like(f"{base}%"))
+        .count()
+    )
     return f"{base}{existing + 1:03d}"
 
 
@@ -126,7 +123,11 @@ def create_vendor(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    existing = db.query(Vendor).filter(Vendor.code == vendor_in.code, Vendor.company_id == company_id).first()
+    existing = (
+        db.query(Vendor)
+        .filter(Vendor.code == vendor_in.code, Vendor.company_id == company_id)
+        .first()
+    )
     if existing:
         raise HTTPException(status_code=400, detail="Vendor code already exists")
 
@@ -166,11 +167,15 @@ async def import_vendors_csv(
 
     header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
     if "name" not in set(header_map.values()):
-        raise HTTPException(status_code=400, detail="Missing required CSV columns: name")
+        raise HTTPException(
+            status_code=400, detail="Missing required CSV columns: name"
+        )
 
     existing_codes = {
         (value or "").strip().upper()
-        for (value,) in db.query(Vendor.code).filter(Vendor.company_id == company_id).all()
+        for (value,) in db.query(Vendor.code)
+        .filter(Vendor.company_id == company_id)
+        .all()
     }
 
     errors: List[VendorCsvImportError] = []
@@ -207,14 +212,27 @@ async def import_vendors_csv(
                 postal_code=row.get("postal_code") or row.get("zip_code") or None,
                 country=row.get("country") or "US",
                 payment_terms=row.get("payment_terms") or None,
-                lead_time_days=_parse_int(row.get("lead_time_days", ""), "lead_time_days", 14),
+                lead_time_days=_parse_int(
+                    row.get("lead_time_days", ""), "lead_time_days", 14
+                ),
                 is_approved=_parse_bool(row.get("is_approved", ""), False),
-                is_as9100_certified=_parse_bool(row.get("is_as9100_certified", ""), False),
-                is_iso9001_certified=_parse_bool(row.get("is_iso9001_certified", ""), False),
+                is_as9100_certified=_parse_bool(
+                    row.get("is_as9100_certified", ""), False
+                ),
+                is_iso9001_certified=_parse_bool(
+                    row.get("is_iso9001_certified", ""), False
+                ),
                 notes=row.get("notes") or None,
             )
         except (ValueError, ValidationError) as exc:
-            errors.append(VendorCsvImportError(row=row_number, code=code or None, name=name or None, reason=str(exc)))
+            errors.append(
+                VendorCsvImportError(
+                    row=row_number,
+                    code=code or None,
+                    name=name or None,
+                    reason=str(exc),
+                )
+            )
             continue
 
         try:
@@ -228,7 +246,11 @@ async def import_vendors_csv(
             db.refresh(vendor)
         except Exception as exc:
             db.rollback()
-            errors.append(VendorCsvImportError(row=row_number, code=code, name=name, reason=str(exc)))
+            errors.append(
+                VendorCsvImportError(
+                    row=row_number, code=code, name=name, reason=str(exc)
+                )
+            )
             continue
 
         existing_codes.add(vendor.code.upper())
@@ -250,7 +272,11 @@ def get_vendor(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
+    vendor = (
+        db.query(Vendor)
+        .filter(Vendor.id == vendor_id, Vendor.company_id == company_id)
+        .first()
+    )
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     return vendor
@@ -264,7 +290,11 @@ def update_vendor(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    vendor = db.query(Vendor).filter(Vendor.id == vendor_id, Vendor.company_id == company_id).first()
+    vendor = (
+        db.query(Vendor)
+        .filter(Vendor.id == vendor_id, Vendor.company_id == company_id)
+        .first()
+    )
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -327,7 +357,9 @@ def list_purchase_orders(
         query = query.filter(PurchaseOrder.status == status)
     else:
         # Default: exclude closed/cancelled
-        query = query.filter(PurchaseOrder.status.not_in([POStatus.CLOSED, POStatus.CANCELLED]))
+        query = query.filter(
+            PurchaseOrder.status.not_in([POStatus.CLOSED, POStatus.CANCELLED])
+        )
 
     if vendor_id:
         query = query.filter(PurchaseOrder.vendor_id == vendor_id)
@@ -342,7 +374,7 @@ def list_purchase_orders(
                 po_number=po.po_number,
                 vendor_id=po.vendor_id,
                 vendor_name=po.vendor.name if po.vendor else None,
-                status=po.status.value if hasattr(po.status, 'value') else po.status,
+                status=po.status.value if hasattr(po.status, "value") else po.status,
                 order_date=po.order_date,
                 required_date=po.required_date,
                 total=po.total,
@@ -357,11 +389,17 @@ def list_purchase_orders(
 def create_purchase_order(
     po_in: POCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
+    ),
     company_id: int = Depends(get_current_company_id),
 ):
     # Verify vendor
-    vendor = db.query(Vendor).filter(Vendor.id == po_in.vendor_id, Vendor.company_id == company_id).first()
+    vendor = (
+        db.query(Vendor)
+        .filter(Vendor.id == po_in.vendor_id, Vendor.company_id == company_id)
+        .first()
+    )
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -384,9 +422,15 @@ def create_purchase_order(
     # Add lines
     subtotal = 0.0
     for idx, line_data in enumerate(po_in.lines, 1):
-        part = db.query(Part).filter(Part.id == line_data.part_id, Part.company_id == company_id).first()
+        part = (
+            db.query(Part)
+            .filter(Part.id == line_data.part_id, Part.company_id == company_id)
+            .first()
+        )
         if not part:
-            raise HTTPException(status_code=404, detail=f"Part {line_data.part_id} not found")
+            raise HTTPException(
+                status_code=404, detail=f"Part {line_data.part_id} not found"
+            )
 
         line_total = line_data.quantity_ordered * line_data.unit_price
         line = PurchaseOrderLine(
@@ -438,7 +482,10 @@ def get_purchase_order(
 ):
     po = (
         db.query(PurchaseOrder)
-        .options(joinedload(PurchaseOrder.vendor), joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part))
+        .options(
+            joinedload(PurchaseOrder.vendor),
+            joinedload(PurchaseOrder.lines).joinedload(PurchaseOrderLine.part),
+        )
         .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
         .first()
     )
@@ -453,10 +500,16 @@ def update_purchase_order(
     po_id: int,
     po_in: POUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
+    ),
     company_id: int = Depends(get_current_company_id),
 ):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
+    po = (
+        db.query(PurchaseOrder)
+        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
+        .first()
+    )
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
@@ -478,8 +531,14 @@ def update_purchase_order(
         severity="info" if po.status == previous_status else "medium",
         event_payload={
             "po_number": po.po_number,
-            "changed_fields": [field for field in update_data.keys() if field != "version"],
-            "previous_status": previous_status.value if hasattr(previous_status, "value") else previous_status,
+            "changed_fields": [
+                field for field in update_data.keys() if field != "version"
+            ],
+            "previous_status": (
+                previous_status.value
+                if hasattr(previous_status, "value")
+                else previous_status
+            ),
             "status": po.status.value if hasattr(po.status, "value") else po.status,
             "required_date": po.required_date.isoformat() if po.required_date else None,
             "expected_date": po.expected_date.isoformat() if po.expected_date else None,
@@ -497,12 +556,18 @@ def send_purchase_order(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
+    po = (
+        db.query(PurchaseOrder)
+        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
+        .first()
+    )
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
     if po.status not in [POStatus.DRAFT, POStatus.APPROVED]:
-        raise HTTPException(status_code=400, detail="Can only send draft or approved POs")
+        raise HTTPException(
+            status_code=400, detail="Can only send draft or approved POs"
+        )
 
     po.status = POStatus.SENT
     po.order_date = date.today()
@@ -531,23 +596,35 @@ def add_po_line(
     po_id: int,
     line_in: POLineCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
+    ),
     company_id: int = Depends(get_current_company_id),
 ):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id).first()
+    po = (
+        db.query(PurchaseOrder)
+        .filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id)
+        .first()
+    )
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
     if po.status not in [POStatus.DRAFT]:
         raise HTTPException(status_code=400, detail="Can only add lines to draft POs")
 
-    part = db.query(Part).filter(Part.id == line_in.part_id, Part.company_id == company_id).first()
+    part = (
+        db.query(Part)
+        .filter(Part.id == line_in.part_id, Part.company_id == company_id)
+        .first()
+    )
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
 
     # Get next line number
     max_line = (
-        db.query(func.max(PurchaseOrderLine.line_number)).filter(PurchaseOrderLine.purchase_order_id == po_id).scalar()
+        db.query(func.max(PurchaseOrderLine.line_number))
+        .filter(PurchaseOrderLine.purchase_order_id == po_id)
+        .scalar()
         or 0
     )
 
@@ -585,7 +662,9 @@ def add_po_line(
             "part_id": line.part_id,
             "quantity_ordered": float(line.quantity_ordered or 0),
             "unit_price": float(line.unit_price or 0),
-            "required_date": line.required_date.isoformat() if line.required_date else None,
+            "required_date": (
+                line.required_date.isoformat() if line.required_date else None
+            ),
         },
     )
     db.commit()
@@ -594,412 +673,6 @@ def add_po_line(
 
 
 # ============ RECEIVING ============
-
-
-def generate_receipt_number(db: Session, company_id: int = None) -> str:
-    """Generate next receipt number (RCV-YYYYMMDD-XXX).
-
-    Holds an advisory lock so concurrent creates can't collide.
-    """
-    acquire_generator_lock(db, "receipt_number", company_id)
-
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"RCV-{today}-"
-
-    query = db.query(POReceipt).filter(POReceipt.receipt_number.like(f"{prefix}%"))
-    if company_id is not None:
-        query = query.filter(POReceipt.company_id == company_id)
-    last = query.order_by(POReceipt.receipt_number.desc()).first()
-
-    if last:
-        last_num = int(last.receipt_number.split("-")[-1])
-        new_num = last_num + 1
-    else:
-        new_num = 1
-
-    return f"{prefix}{new_num:03d}"
-
-
-@router.get("/receiving/queue")
-def get_receiving_queue(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Get PO lines awaiting receipt"""
-    lines = (
-        db.query(PurchaseOrderLine)
-        .options(
-            joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
-            joinedload(PurchaseOrderLine.part),
-        )
-        .join(PurchaseOrder)
-        .filter(
-            PurchaseOrder.company_id == company_id,
-            PurchaseOrder.status.in_([POStatus.SENT, POStatus.PARTIAL]),
-            PurchaseOrderLine.is_closed == False,
-            PurchaseOrderLine.quantity_received < PurchaseOrderLine.quantity_ordered,
-        )
-        .order_by(PurchaseOrderLine.required_date)
-        .all()
-    )
-
-    result = []
-    for line in lines:
-        result.append(
-            {
-                "po_line_id": line.id,
-                "po_number": line.purchase_order.po_number,
-                "po_id": line.purchase_order.id,
-                "vendor_name": line.purchase_order.vendor.name if line.purchase_order.vendor else None,
-                "part_number": line.part.part_number if line.part else None,
-                "part_name": line.part.name if line.part else None,
-                "quantity_ordered": line.quantity_ordered,
-                "quantity_received": line.quantity_received,
-                "quantity_remaining": line.quantity_ordered - line.quantity_received,
-                "required_date": line.required_date,
-                "line_number": line.line_number,
-            }
-        )
-    return result
-
-
-@router.post("/receiving", response_model=ReceiptResponse)
-def receive_material(
-    receipt_in: ReceiptCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Receive material against a PO line"""
-    po_line = (
-        db.query(PurchaseOrderLine)
-        .options(joinedload(PurchaseOrderLine.purchase_order))
-        .filter(PurchaseOrderLine.id == receipt_in.po_line_id, PurchaseOrderLine.company_id == company_id)
-        .first()
-    )
-
-    if not po_line:
-        raise HTTPException(status_code=404, detail="PO line not found")
-
-    po = po_line.purchase_order
-    if po.status not in [POStatus.SENT, POStatus.PARTIAL]:
-        raise HTTPException(status_code=400, detail="PO must be in sent or partial status to receive")
-
-    # Validate location if provided
-    location = None
-    if receipt_in.location_id:
-        location = (
-            db.query(InventoryLocation)
-            .filter(InventoryLocation.id == receipt_in.location_id, InventoryLocation.company_id == company_id)
-            .first()
-        )
-        if not location:
-            raise HTTPException(status_code=404, detail="Location not found")
-
-    receipt_number = generate_receipt_number(db, company_id)
-
-    receipt = POReceipt(
-        receipt_number=receipt_number,
-        po_line_id=po_line.id,
-        quantity_received=receipt_in.quantity_received,
-        lot_number=receipt_in.lot_number,
-        serial_numbers=receipt_in.serial_numbers,
-        heat_number=receipt_in.heat_number,
-        cert_number=receipt_in.cert_number,
-        location_id=receipt_in.location_id,
-        requires_inspection=receipt_in.requires_inspection,
-        status=ReceiptStatus.PENDING_INSPECTION if receipt_in.requires_inspection else ReceiptStatus.ACCEPTED,
-        packing_slip_number=receipt_in.packing_slip_number,
-        carrier=receipt_in.carrier,
-        tracking_number=receipt_in.tracking_number,
-        received_by=current_user.id,
-        notes=receipt_in.notes,
-    )
-    receipt.company_id = company_id
-    db.add(receipt)
-
-    qty_received = float(receipt_in.quantity_received)
-    # Update PO line quantity received
-    po_line.quantity_received += qty_received
-    if po_line.quantity_received >= po_line.quantity_ordered:
-        po_line.is_closed = True
-
-    # Update PO status
-    all_lines = db.query(PurchaseOrderLine).filter(PurchaseOrderLine.purchase_order_id == po.id).all()
-    all_closed = all(line.is_closed for line in all_lines)
-    any_received = any(line.quantity_received > 0 for line in all_lines)
-
-    if all_closed:
-        po.status = POStatus.RECEIVED
-    elif any_received:
-        po.status = POStatus.PARTIAL
-
-    # If not requiring inspection, auto-accept and add to inventory
-    if not receipt_in.requires_inspection:
-        receipt.quantity_accepted = receipt_in.quantity_received
-        receipt.status = ReceiptStatus.ACCEPTED
-        receipt.inspection_status = InspectionStatus.PASSED
-
-        # Add to inventory
-        _add_to_inventory(
-            db,
-            po_line.part_id,
-            receipt_in.quantity_received,
-            location.code if location else "RECV-01",
-            receipt_in.lot_number,
-            current_user.id,
-            receipt_number,
-            company_id,
-        )
-
-    db.flush()
-    OperationalEventService(db).emit(
-        company_id=company_id,
-        event_type="purchase_order_received",
-        source_module="purchasing",
-        entity_type="po_receipt",
-        entity_id=receipt.id,
-        user_id=current_user.id,
-        severity="info" if receipt.status == ReceiptStatus.ACCEPTED else "medium",
-        event_payload={
-            "receipt_number": receipt.receipt_number,
-            "po_id": po.id,
-            "po_number": po.po_number,
-            "po_line_id": po_line.id,
-            "part_id": po_line.part_id,
-            "quantity_received": qty_received,
-            "requires_inspection": receipt.requires_inspection,
-            "status": receipt.status.value if hasattr(receipt.status, "value") else receipt.status,
-        },
-    )
-    db.commit()
-    db.refresh(receipt)
-    return receipt
-
-
-@router.get("/receiving/pending-inspection")
-def get_pending_inspection(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Get receipts pending inspection"""
-    receipts = (
-        db.query(POReceipt)
-        .options(
-            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
-            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
-            joinedload(POReceipt.location),
-        )
-        .filter(POReceipt.company_id == company_id, POReceipt.status == ReceiptStatus.PENDING_INSPECTION)
-        .order_by(POReceipt.received_at)
-        .all()
-    )
-
-    result = []
-    for r in receipts:
-        result.append(
-            {
-                "receipt_id": r.id,
-                "receipt_number": r.receipt_number,
-                "po_number": r.po_line.purchase_order.po_number,
-                "vendor_name": r.po_line.purchase_order.vendor.name if r.po_line.purchase_order.vendor else None,
-                "part_number": r.po_line.part.part_number if r.po_line.part else None,
-                "part_name": r.po_line.part.name if r.po_line.part else None,
-                "quantity_received": r.quantity_received,
-                "lot_number": r.lot_number,
-                "cert_number": r.cert_number,
-                "received_at": r.received_at,
-                "location": r.location.code if r.location else None,
-            }
-        )
-    return result
-
-
-@router.post("/receiving/{receipt_id}/inspect", response_model=ReceiptResponse)
-def inspect_receipt(
-    receipt_id: int,
-    inspection: ReceiptInspection,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Complete inspection of a receipt"""
-    receipt = (
-        db.query(POReceipt)
-        .options(joinedload(POReceipt.po_line), joinedload(POReceipt.location))
-        .filter(POReceipt.id == receipt_id, POReceipt.company_id == company_id)
-        .first()
-    )
-
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Receipt not found")
-
-    if receipt.status != ReceiptStatus.PENDING_INSPECTION:
-        raise HTTPException(status_code=400, detail="Receipt is not pending inspection")
-
-    # Validate quantities
-    if inspection.quantity_accepted + inspection.quantity_rejected > receipt.quantity_received:
-        raise HTTPException(status_code=400, detail="Accepted + rejected cannot exceed received quantity")
-    if inspection.quantity_rejected > 0:
-        if not inspection.defect_type:
-            raise HTTPException(status_code=400, detail="Defect type is required when rejecting material")
-        if not inspection.inspection_notes:
-            raise HTTPException(status_code=400, detail="Inspection notes are required when rejecting material")
-
-    receipt.quantity_accepted = inspection.quantity_accepted
-    receipt.quantity_rejected = inspection.quantity_rejected
-    receipt.inspection_method = InspectionMethod(inspection.inspection_method)
-    receipt.defect_type = DefectType(inspection.defect_type) if inspection.defect_type else None
-    receipt.inspected_by = current_user.id
-    receipt.inspected_at = datetime.utcnow()
-    receipt.inspection_notes = inspection.inspection_notes
-
-    if inspection.quantity_accepted == receipt.quantity_received:
-        receipt.inspection_status = InspectionStatus.PASSED
-        receipt.status = ReceiptStatus.ACCEPTED
-    elif inspection.quantity_rejected == receipt.quantity_received:
-        receipt.inspection_status = InspectionStatus.FAILED
-        receipt.status = ReceiptStatus.REJECTED
-    else:
-        receipt.inspection_status = InspectionStatus.PARTIAL
-        receipt.status = ReceiptStatus.ACCEPTED
-
-    # If any quantity was accepted, add it to inventory.
-    if inspection.quantity_accepted > 0:
-        location_code = receipt.location.code if receipt.location else "RECV-01"
-        _add_to_inventory(
-            db,
-            receipt.po_line.part_id,
-            inspection.quantity_accepted,
-            location_code,
-            receipt.lot_number,
-            current_user.id,
-            receipt.receipt_number,
-            company_id,
-        )
-
-    OperationalEventService(db).emit(
-        company_id=company_id,
-        event_type="purchase_receipt_inspected",
-        source_module="purchasing",
-        entity_type="po_receipt",
-        entity_id=receipt.id,
-        user_id=current_user.id,
-        severity="high" if inspection.quantity_rejected > 0 else "info",
-        event_payload={
-            "receipt_number": receipt.receipt_number,
-            "po_line_id": receipt.po_line_id,
-            "part_id": receipt.po_line.part_id if receipt.po_line else None,
-            "quantity_received": float(receipt.quantity_received),
-            "quantity_accepted": float(inspection.quantity_accepted),
-            "quantity_rejected": float(inspection.quantity_rejected),
-            "status": receipt.status.value if hasattr(receipt.status, "value") else receipt.status,
-            "inspection_method": inspection.inspection_method,
-            "defect_type": inspection.defect_type,
-        },
-    )
-    db.commit()
-    db.refresh(receipt)
-    return receipt
-
-
-def _add_to_inventory(
-    db: Session,
-    part_id: int,
-    quantity: float,
-    location: str,
-    lot_number: str,
-    user_id: int,
-    reference: str,
-    company_id: int,
-):
-    """Helper to add received material to inventory"""
-    # Check for existing inventory at location with same lot
-    existing = (
-        db.query(InventoryItem)
-        .filter(
-            InventoryItem.company_id == company_id,
-            InventoryItem.part_id == part_id,
-            InventoryItem.location == location,
-            InventoryItem.lot_number == lot_number,
-        )
-        .first()
-    )
-
-    if existing:
-        existing.quantity_on_hand += quantity
-        existing.quantity_available = existing.quantity_on_hand - existing.quantity_allocated
-    else:
-        inv_item = InventoryItem(
-            part_id=part_id,
-            location=location,
-            lot_number=lot_number,
-            quantity_on_hand=quantity,
-            quantity_allocated=0,
-            quantity_available=quantity,
-            is_active=True,
-        )
-        inv_item.company_id = company_id
-        db.add(inv_item)
-
-    # Create transaction record
-    txn = InventoryTransaction(
-        part_id=part_id,
-        transaction_type=TransactionType.RECEIVE,
-        quantity=quantity,
-        to_location=location,
-        lot_number=lot_number,
-        reference_type="po_receipt",
-        reference_number=reference,
-        created_by=user_id,
-        notes=f"Received from {reference}",
-    )
-    txn.company_id = company_id
-    db.add(txn)
-
-
-@router.get("/receiving/history")
-def get_receiving_history(
-    days: int = 30,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    """Get recent receiving history"""
-    from datetime import timedelta
-
-    cutoff = datetime.utcnow() - timedelta(days=days)
-
-    receipts = (
-        db.query(POReceipt)
-        .options(
-            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
-            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
-        )
-        .filter(POReceipt.company_id == company_id, POReceipt.received_at >= cutoff)
-        .order_by(POReceipt.received_at.desc())
-        .limit(100)
-        .all()
-    )
-
-    result = []
-    for r in receipts:
-        result.append(
-            {
-                "receipt_id": r.id,
-                "receipt_number": r.receipt_number,
-                "po_number": r.po_line.purchase_order.po_number,
-                "vendor_name": r.po_line.purchase_order.vendor.name if r.po_line.purchase_order.vendor else None,
-                "part_number": r.po_line.part.part_number if r.po_line.part else None,
-                "part_name": r.po_line.part.name if r.po_line.part else None,
-                "quantity_received": r.quantity_received,
-                "quantity_accepted": r.quantity_accepted,
-                "quantity_rejected": r.quantity_rejected,
-                "status": r.status.value if hasattr(r.status, 'value') else r.status,
-                "lot_number": r.lot_number,
-                "received_at": r.received_at,
-            }
-        )
-    return result
+# The receiving / inspection endpoints live in app/api/endpoints/receiving.py
+# (mounted at /api/v1/receiving). The duplicate copies that previously lived here
+# were removed; purchasing.py now owns only vendor and purchase-order endpoints.

@@ -1,12 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { useSearchParams } from 'react-router-dom';
-import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
+import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
-  TruckIcon,
   CheckCircleIcon,
-  ClipboardDocumentCheckIcon,
   BuildingOfficeIcon,
 } from '@heroicons/react/24/outline';
 
@@ -44,42 +42,9 @@ interface PurchaseOrder {
   line_count: number;
 }
 
-interface ReceivingQueueItem {
-  po_line_id: number;
-  po_number: string;
-  po_id: number;
-  vendor_name: string;
-  part_number: string;
-  part_name: string;
-  quantity_ordered: number;
-  quantity_received: number;
-  quantity_remaining: number;
-  required_date?: string;
-  line_number: number;
-}
-
-interface PendingInspection {
-  receipt_id: number;
-  receipt_number: string;
-  po_number: string;
-  vendor_name: string;
-  part_number: string;
-  part_name: string;
-  quantity_received: number;
-  lot_number?: string;
-  cert_number?: string;
-  received_at: string;
-}
-
 interface Part {
   id: number;
   part_number: string;
-  name: string;
-}
-
-interface Location {
-  id: number;
-  code: string;
   name: string;
 }
 
@@ -101,7 +66,7 @@ interface DocumentType {
   label: string;
 }
 
-type TabType = 'receiving' | 'orders' | 'vendors' | 'inspection';
+type TabType = 'orders' | 'vendors';
 
 const statusColors: Record<string, string> = {
   draft: 'bg-slate-800/50 text-slate-100',
@@ -119,22 +84,15 @@ export default function Purchasing() {
   const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
-  const [receivingQueue, setReceivingQueue] = useState<ReceivingQueueItem[]>([]);
-  const [pendingInspection, setPendingInspection] = useState<PendingInspection[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
-  const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
   const [poSearch, setPoSearch] = useState('');
 
   const [showPOModal, setShowPOModal] = useState(false);
   const [showVendorModal, setShowVendorModal] = useState(false);
   const [showEditVendorModal, setShowEditVendorModal] = useState(false);
-  const [showReceiveModal, setShowReceiveModal] = useState(false);
-  const [showInspectModal, setShowInspectModal] = useState(false);
   const [showAddPartModal, setShowAddPartModal] = useState(false);
   const [addPartForLineIndex, setAddPartForLineIndex] = useState<number | null>(null);
-  const [selectedReceiveItem, setSelectedReceiveItem] = useState<ReceivingQueueItem | null>(null);
-  const [selectedInspectItem, setSelectedInspectItem] = useState<PendingInspection | null>(null);
   const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
   const [vendorDocuments, setVendorDocuments] = useState<VendorDocument[]>([]);
   const [documentTypes, setDocumentTypes] = useState<DocumentType[]>([]);
@@ -176,16 +134,6 @@ export default function Purchasing() {
     notes: ''
   });
 
-  const [receiveForm, setReceiveForm] = useState({
-    quantity_received: 0,
-    lot_number: '',
-    cert_number: '',
-    location_id: 0,
-    requires_inspection: true,
-    packing_slip_number: '',
-    notes: ''
-  });
-
   const [newPart, setNewPart] = useState({
     part_number: '',
     name: '',
@@ -195,13 +143,6 @@ export default function Purchasing() {
     unit_cost: 0
   });
 
-  const [inspectForm, setInspectForm] = useState({
-    quantity_accepted: 0,
-    quantity_rejected: 0,
-    status: 'accepted',
-    inspection_notes: ''
-  });
-
   const [vendorDocForm, setVendorDocForm] = useState({
     title: '',
     document_type: 'certificate',
@@ -209,10 +150,6 @@ export default function Purchasing() {
     revision: 'A',
     file: null as File | null
   });
-
-  const isPartialReceivingItem = (item: ReceivingQueueItem) => (
-    item.quantity_received > 0 && item.quantity_remaining > 0
-  );
 
   useEffect(() => {
     loadData();
@@ -241,20 +178,14 @@ export default function Purchasing() {
 
   const loadData = async () => {
     try {
-      const [vendorsRes, posRes, queueRes, inspectRes, partsRes, locsRes] = await Promise.all([
+      const [vendorsRes, posRes, partsRes] = await Promise.all([
         api.getVendors(),
         api.getPurchaseOrders(),
-        api.getReceivingQueue(),
-        api.getPendingInspection(),
-        api.getParts({ active_only: true, item_group: 'all' }),
-        api.getInventoryLocations()
+        api.getParts({ active_only: true, item_group: 'all' })
       ]);
       setVendors(vendorsRes);
       setPurchaseOrders(posRes);
-      setReceivingQueue(queueRes);
-      setPendingInspection(inspectRes);
       setParts(partsRes);
-      setLocations(locsRes);
     } catch (err) {
       console.error('Failed to load purchasing data:', err);
     } finally {
@@ -479,76 +410,6 @@ export default function Purchasing() {
     }
   };
 
-  const openReceiveModal = (item: ReceivingQueueItem) => {
-    setSelectedReceiveItem(item);
-    setReceiveForm({
-      quantity_received: item.quantity_remaining,
-      lot_number: '',
-      cert_number: '',
-      location_id: 0,
-      requires_inspection: true,
-      packing_slip_number: '',
-      notes: ''
-    });
-    setShowReceiveModal(true);
-  };
-
-  const handleReceive = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedReceiveItem) return;
-    const receivedQty = receiveForm.quantity_received;
-    const selectedLineId = selectedReceiveItem.po_line_id;
-    try {
-      await api.receiveMaterial({
-        po_line_id: selectedReceiveItem.po_line_id,
-        ...receiveForm,
-        location_id: receiveForm.location_id || null
-      });
-      setReceivingQueue((prev) => prev
-        .map((item) => {
-          if (item.po_line_id !== selectedLineId) {
-            return item;
-          }
-          const newReceived = item.quantity_received + receivedQty;
-          const newRemaining = Math.max(item.quantity_remaining - receivedQty, 0);
-          return {
-            ...item,
-            quantity_received: newReceived,
-            quantity_remaining: newRemaining,
-          };
-        })
-        .filter((item) => item.quantity_remaining > 0)
-      );
-      setShowReceiveModal(false);
-      loadData();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to receive material');
-    }
-  };
-
-  const openInspectModal = (item: PendingInspection) => {
-    setSelectedInspectItem(item);
-    setInspectForm({
-      quantity_accepted: item.quantity_received,
-      quantity_rejected: 0,
-      status: 'accepted',
-      inspection_notes: ''
-    });
-    setShowInspectModal(true);
-  };
-
-  const handleInspect = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedInspectItem) return;
-    try {
-      await api.inspectReceipt(selectedInspectItem.receipt_id, inspectForm);
-      setShowInspectModal(false);
-      loadData();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to complete inspection');
-    }
-  };
-
   const addPOLine = () => {
     setNewPO({
       ...newPO,
@@ -591,25 +452,7 @@ export default function Purchasing() {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="card bg-blue-500/10 border-blue-500/30">
-          <div className="flex items-center">
-            <TruckIcon className="h-8 w-8 text-blue-600 mr-3" />
-            <div>
-              <p className="text-sm text-blue-600">Awaiting Receipt</p>
-              <p className="text-2xl font-bold text-blue-300">{receivingQueue.length}</p>
-            </div>
-          </div>
-        </div>
-        <div className="card bg-yellow-500/10 border-yellow-500/30">
-          <div className="flex items-center">
-            <ClipboardDocumentCheckIcon className="h-8 w-8 text-yellow-600 mr-3" />
-            <div>
-              <p className="text-sm text-yellow-600">Pending Inspection</p>
-              <p className="text-2xl font-bold text-yellow-300">{pendingInspection.length}</p>
-            </div>
-          </div>
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="card bg-indigo-50 border-indigo-200">
           <div className="flex items-center">
             <div className="h-8 w-8 bg-indigo-600 rounded-full flex items-center justify-center text-white font-bold mr-3">
@@ -636,8 +479,6 @@ export default function Purchasing() {
       <div className="border-b border-slate-700">
         <nav className="flex space-x-8">
           {[
-            { id: 'receiving', label: 'Receiving Queue', count: receivingQueue.length },
-            { id: 'inspection', label: 'Pending Inspection', count: pendingInspection.length },
             { id: 'orders', label: 'Purchase Orders', count: purchaseOrders.length },
             { id: 'vendors', label: 'Vendors', count: vendors.length }
           ].map(tab => (
@@ -662,124 +503,6 @@ export default function Purchasing() {
           ))}
         </nav>
       </div>
-
-      {/* Receiving Queue Tab */}
-      {activeTab === 'receiving' && (
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Material Awaiting Receipt</h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-800">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Ordered</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Received</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Remaining</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                {receivingQueue.map((item) => (
-                  <tr
-                    key={item.po_line_id}
-                    className={`${
-                      isPartialReceivingItem(item)
-                        ? 'bg-amber-500/10 hover:bg-amber-500/20'
-                        : 'hover:bg-slate-800'
-                    }`}
-                  >
-                    <td className="px-4 py-3 font-medium text-werco-primary">{item.po_number}</td>
-                    <td className="px-4 py-3">{item.vendor_name}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <div className="font-medium">{item.part_number}</div>
-                        {isPartialReceivingItem(item) && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-200 text-amber-300">
-                            Partial
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-sm text-slate-400">{item.part_name}</div>
-                    </td>
-                    <td className="px-4 py-3 text-right">{item.quantity_ordered}</td>
-                    <td className="px-4 py-3 text-right">{item.quantity_received}</td>
-                    <td className="px-4 py-3 text-right font-medium text-orange-600">{item.quantity_remaining}</td>
-                    <td className="px-4 py-3">
-                      {item.required_date ? formatCentralDate(item.required_date, { year: undefined }) : '-'}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <button
-                        onClick={() => openReceiveModal(item)}
-                        className="btn-primary text-sm px-3 py-1"
-                      >
-                        Receive
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {receivingQueue.length === 0 && (
-              <p className="text-center text-slate-400 py-8">No material awaiting receipt</p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Pending Inspection Tab */}
-      {activeTab === 'inspection' && (
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Pending Receiving Inspection</h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-800">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Receipt #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Lot #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Received</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                {pendingInspection.map((item) => (
-                  <tr key={item.receipt_id} className="hover:bg-slate-800">
-                    <td className="px-4 py-3 font-mono">{item.receipt_number}</td>
-                    <td className="px-4 py-3">{item.po_number}</td>
-                    <td className="px-4 py-3">{item.vendor_name}</td>
-                    <td className="px-4 py-3">
-                      <div className="font-medium">{item.part_number}</div>
-                      <div className="text-sm text-slate-400">{item.part_name}</div>
-                    </td>
-                    <td className="px-4 py-3 text-right font-medium">{item.quantity_received}</td>
-                    <td className="px-4 py-3 font-mono text-sm">{item.lot_number || '-'}</td>
-                    <td className="px-4 py-3 text-sm">
-                      {formatCentralDateTime(item.received_at, { year: undefined })}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <button
-                        onClick={() => openInspectModal(item)}
-                        className="btn-primary text-sm px-3 py-1"
-                      >
-                        Inspect
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {pendingInspection.length === 0 && (
-              <p className="text-center text-slate-400 py-8">No receipts pending inspection</p>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Purchase Orders Tab */}
       {activeTab === 'orders' && (
@@ -1431,171 +1154,6 @@ export default function Purchasing() {
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Receive Material Modal */}
-      {showReceiveModal && selectedReceiveItem && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Receive Material</h3>
-            <div className="bg-slate-800 rounded p-3 mb-4">
-              <p className="font-medium">{selectedReceiveItem.part_number}</p>
-              <p className="text-sm text-slate-400">{selectedReceiveItem.part_name}</p>
-              <p className="text-sm text-slate-400 mt-1">
-                PO: {selectedReceiveItem.po_number} | Remaining: {selectedReceiveItem.quantity_remaining}
-              </p>
-            </div>
-            <form onSubmit={handleReceive} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Quantity Received *</label>
-                  <input
-                    type="number"
-                    value={receiveForm.quantity_received}
-                    onChange={(e) => setReceiveForm({ ...receiveForm, quantity_received: parseFloat(e.target.value) })}
-                    className="input"
-                    min={0.01}
-                    max={selectedReceiveItem.quantity_remaining}
-                    step={0.01}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Location</label>
-                  <select
-                    value={receiveForm.location_id}
-                    onChange={(e) => setReceiveForm({ ...receiveForm, location_id: parseInt(e.target.value) })}
-                    className="input"
-                  >
-                    <option value={0}>Default (RECV-01)</option>
-                    {locations.map(loc => (
-                      <option key={loc.id} value={loc.id}>{loc.code} - {loc.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Lot Number</label>
-                  <input
-                    type="text"
-                    value={receiveForm.lot_number}
-                    onChange={(e) => setReceiveForm({ ...receiveForm, lot_number: e.target.value })}
-                    className="input"
-                    placeholder="For traceability"
-                  />
-                </div>
-                <div>
-                  <label className="label">Cert Number</label>
-                  <input
-                    type="text"
-                    value={receiveForm.cert_number}
-                    onChange={(e) => setReceiveForm({ ...receiveForm, cert_number: e.target.value })}
-                    className="input"
-                    placeholder="CoC #"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="label">Packing Slip #</label>
-                <input
-                  type="text"
-                  value={receiveForm.packing_slip_number}
-                  onChange={(e) => setReceiveForm({ ...receiveForm, packing_slip_number: e.target.value })}
-                  className="input"
-                />
-              </div>
-              <div>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    checked={receiveForm.requires_inspection}
-                    onChange={(e) => setReceiveForm({ ...receiveForm, requires_inspection: e.target.checked })}
-                    className="mr-2"
-                  />
-                  <span>Requires Receiving Inspection</span>
-                </label>
-                <p className="text-xs text-slate-400 ml-6">
-                  If unchecked, material will be added directly to inventory
-                </p>
-              </div>
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowReceiveModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Receive</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Inspection Modal */}
-      {showInspectModal && selectedInspectItem && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Complete Inspection</h3>
-            <div className="bg-slate-800 rounded p-3 mb-4">
-              <p className="font-medium">{selectedInspectItem.part_number}</p>
-              <p className="text-sm text-slate-400">{selectedInspectItem.part_name}</p>
-              <p className="text-sm text-slate-400 mt-1">
-                Receipt: {selectedInspectItem.receipt_number} | Qty: {selectedInspectItem.quantity_received}
-                {selectedInspectItem.lot_number && ` | Lot: ${selectedInspectItem.lot_number}`}
-              </p>
-            </div>
-            <form onSubmit={handleInspect} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Qty Accepted</label>
-                  <input
-                    type="number"
-                    value={inspectForm.quantity_accepted}
-                    onChange={(e) => setInspectForm({ ...inspectForm, quantity_accepted: parseFloat(e.target.value) })}
-                    className="input"
-                    min={0}
-                    max={selectedInspectItem.quantity_received}
-                    step={0.01}
-                  />
-                </div>
-                <div>
-                  <label className="label">Qty Rejected</label>
-                  <input
-                    type="number"
-                    value={inspectForm.quantity_rejected}
-                    onChange={(e) => setInspectForm({ ...inspectForm, quantity_rejected: parseFloat(e.target.value) })}
-                    className="input"
-                    min={0}
-                    max={selectedInspectItem.quantity_received}
-                    step={0.01}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="label">Disposition</label>
-                <select
-                  value={inspectForm.status}
-                  onChange={(e) => setInspectForm({ ...inspectForm, status: e.target.value })}
-                  className="input"
-                >
-                  <option value="accepted">Accept - Add to Inventory</option>
-                  <option value="rejected">Reject - Return to Vendor</option>
-                  <option value="quarantine">Quarantine - Hold for Review</option>
-                </select>
-              </div>
-              <div>
-                <label className="label">Inspection Notes</label>
-                <textarea
-                  value={inspectForm.inspection_notes}
-                  onChange={(e) => setInspectForm({ ...inspectForm, inspection_notes: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowInspectModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Complete Inspection</button>
-              </div>
-            </form>
           </div>
         </div>
       )}

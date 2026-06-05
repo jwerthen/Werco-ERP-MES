@@ -209,6 +209,25 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | GET | `/purchasing/pos/{id}` | Get PO by ID | Yes |
 | POST | `/purchasing/po-upload` | Upload PO from PDF | Yes |
 
+> Material receiving and incoming inspection are **not** under `/purchasing`. They live under
+> `/receiving` (see below). The duplicate `/purchasing/receiving*` endpoints were removed.
+
+### Receiving & Inspection
+
+Canonical material-receiving and incoming-inspection endpoints, all under `/receiving`.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/receiving/open-pos` | List POs available for receiving (sent/partial) | Yes |
+| GET | `/receiving/po/{po_id}` | Get full PO detail for receiving | Yes |
+| POST | `/receiving/receive` | Receive material against a PO line | Admin / Manager / Supervisor |
+| GET | `/receiving/inspection-queue` | List receipts pending inspection | Yes |
+| GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
+| POST | `/receiving/inspect/{receipt_id}` | Complete inspection (accept/reject, auto-NCR on rejection) | Admin / Manager / Quality |
+| GET | `/receiving/history` | Receiving history with inspection results | Yes |
+| GET | `/receiving/stats` | Receiving statistics for dashboard | Yes |
+| GET | `/receiving/locations` | Receivable inventory locations | Yes |
+
 ### Inventory
 
 | Method | Endpoint | Description | Auth Required |
