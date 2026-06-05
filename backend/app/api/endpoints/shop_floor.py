@@ -1554,10 +1554,18 @@ def get_operation_details(
     if reconcile_work_orders_from_completion_evidence(db, [wo]):
         db.commit()
 
-    # Get recent history (audit logs)
+    # Get recent history (audit logs). The operation is already tenant-validated
+    # above; the company_id filter is defense-in-depth now that audit rows are
+    # tenant-tagged.
     history = (
         db.query(AuditLog)
-        .filter(and_(AuditLog.resource_type == "work_order_operation", AuditLog.resource_id == operation_id))
+        .filter(
+            and_(
+                AuditLog.resource_type == "work_order_operation",
+                AuditLog.resource_id == operation_id,
+                AuditLog.company_id == company_id,
+            )
+        )
         .order_by(AuditLog.timestamp.desc())
         .limit(10)
         .all()
