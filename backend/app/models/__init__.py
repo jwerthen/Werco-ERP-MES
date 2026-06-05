@@ -1,8 +1,11 @@
 from .ai_learning import AICorrection, AIInteractionEvent, AIOutcome, AIRecommendation
+from .analytics import ReportTemplate
 from .audit_log import AuditLog
 from .bom import BOM, BOMItem, BOMItemType
+from .calibration import CalibrationRecord, CalibrationStatus, Equipment
 from .company import Company
 from .custom_field import CustomFieldDefinition, CustomFieldValue, EntityType, FieldType
+from .customer import Customer
 from .customer_complaint import (
     ComplaintSeverity,
     ComplaintStatus,
@@ -64,8 +67,46 @@ from .operator_certification import (
     TrainingRecord,
 )
 from .part import Part, PartType, UnitOfMeasure
+from .purchasing import (
+    DefectType,
+    InspectionMethod,
+    InspectionStatus,
+    POReceipt,
+    POStatus,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    ReceiptStatus,
+    Vendor,
+)
 from .qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
+from .quality import (
+    CARStatus,
+    CARType,
+    CorrectiveActionRequest,
+    FAICharacteristic,
+    FAIStatus,
+    FirstArticleInspection,
+    NCRDisposition,
+    NCRSource,
+    NCRStatus,
+    NonConformanceReport,
+)
+from .quote import Quote, QuoteLine, QuoteStatus
+from .quote_config import (
+    CostUnit,
+    LaborRate,
+    MachineType,
+    MaterialCategory,
+    OutsideService,
+    ProcessType,
+    QuoteFinish,
+    QuoteMachine,
+    QuoteMaterial,
+    QuoteSettings,
+    SettingsAuditLog,
+)
 from .rfq_quote import PriceSnapshot, QuoteEstimate, QuoteLineSummary, RfqPackage, RfqPackageFile
+from .role_permission import RolePermission
 from .routing import Routing, RoutingOperation
 from .routing_learning import (
     RoutingGenerationSession,
@@ -73,20 +114,22 @@ from .routing_learning import (
     RoutingOperationPattern,
     RoutingWorkCenterPreference,
 )
+from .shipping import Shipment, ShipmentStatus
 from .spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
+from .supplier_part import SupplierPartMapping
 from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from .time_entry import TimeEntry
 from .tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsageLog
 from .user import User, UserRole
 from .webhook import Webhook, WebhookDelivery
 from .work_center import WorkCenter
+from .work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from .work_order_blocker import (
     WorkOrderBlocker,
     WorkOrderBlockerCategory,
     WorkOrderBlockerSeverity,
     WorkOrderBlockerStatus,
 )
-from .work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 
 __all__ = [
     "Company",
@@ -213,4 +256,46 @@ __all__ = [
     "QMSStandard",
     "QMSClause",
     "QMSClauseEvidence",
+    "ReportTemplate",
+    "Equipment",
+    "CalibrationRecord",
+    "CalibrationStatus",
+    "Customer",
+    "Vendor",
+    "PurchaseOrder",
+    "PurchaseOrderLine",
+    "POReceipt",
+    "POStatus",
+    "InspectionStatus",
+    "DefectType",
+    "InspectionMethod",
+    "ReceiptStatus",
+    "NonConformanceReport",
+    "CorrectiveActionRequest",
+    "FirstArticleInspection",
+    "FAICharacteristic",
+    "NCRStatus",
+    "NCRDisposition",
+    "NCRSource",
+    "CARStatus",
+    "CARType",
+    "FAIStatus",
+    "Quote",
+    "QuoteLine",
+    "QuoteStatus",
+    "QuoteMaterial",
+    "QuoteMachine",
+    "QuoteFinish",
+    "QuoteSettings",
+    "LaborRate",
+    "OutsideService",
+    "SettingsAuditLog",
+    "ProcessType",
+    "CostUnit",
+    "MaterialCategory",
+    "MachineType",
+    "RolePermission",
+    "Shipment",
+    "ShipmentStatus",
+    "SupplierPartMapping",
 ]

@@ -15,6 +15,7 @@ This repo ships a team of specialized subagents in `.claude/agents/`. Route work
 - **database-migration-specialist** — any Alembic migration (schema/enum/constraint change).
 - **ai-integration-specialist** — Anthropic-powered RFQ parsing / quoting / learning.
 - **devops-engineer** — Docker, CI/CD, Railway/Vercel, workers, env/secrets.
+- **github-manager** — PRs, issues, releases/tags, labels, branch protection, CODEOWNERS; drives merge-when-green via `gh` (waits on the review gates; doesn't edit the Actions YAML — that's devops-engineer).
 - **compliance-auditor** — review for tenant isolation, audit logging, RBAC, soft-delete, traceability.
 - **code-reviewer** — diff review for correctness + cleanups, runs the lint/type/security gate.
 - **test-engineer** — pytest / Jest / Playwright coverage.
@@ -130,6 +131,8 @@ There are 37+ Alembic versions over live, multi-tenant data. When adding a migra
 - Never edit a migration that has already been applied; add a new one.
 - New tenant-scoped tables need a non-null `company_id` + index (the `TenantMixin` shape).
 - Autogenerate is a starting point — review the diff; SQLAlchemy doesn't always detect enum/constraint changes.
+- Autogenerate only sees tables registered on `Base.metadata` — every model module must be imported in `app/models/__init__.py` (`alembic/env.py` does `from app.models import *`). Adding a model file without wiring it in there makes autogenerate miss it or crash with `NoReferencedTableError`.
+- **Bootstrap is not `alembic upgrade head`.** On an empty Postgres the schema is created by `Base.metadata.create_all()` on first boot (not by an initial migration; `001` only adds indexes), so the path is `create_all` → `alembic stamp <baseline>` → incremental `upgrade`. A bare `upgrade head` on an empty DB fails (`002` does `ALTER TYPE workcentertype`). See `docs/DEVELOPMENT.md` → Database Migrations.
 
 ## Where to look for operational context
 

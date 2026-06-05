@@ -249,11 +249,43 @@ Werco-ERP/
 
 ## Database Migrations
 
+> Postgres only. On local SQLite the schema comes from `create_all` (see "Create
+> Schema" above); the migrations are Postgres-targeted and are not run on SQLite.
+
+### Bootstrap order (new Postgres database)
+
+A bare `alembic upgrade head` against an **empty** database is **not** the
+supported path and will fail: the core tables are created by
+`Base.metadata.create_all()` on first app boot (`app/main.py`), not by an
+initial migration — `001` only adds indexes — and `002_add_laser_press_brake_types.py`
+runs `ALTER TYPE workcentertype ...`, which errors if the enum type doesn't exist yet.
+
+The supported bootstrap is:
+
+```bash
+# 1. Create the schema (first app boot, or explicitly):
+python -m scripts.seed_data            # calls create_all (+ seeds demo data)
+
+# 2. Mark the DB as already at the migration baseline:
+alembic stamp <baseline-revision>      # the latest revision create_all matches
+
+# 3. Apply migrations newer than the baseline going forward:
+alembic upgrade head
+```
+
+After bootstrap, normal incremental `alembic upgrade head` is the standard path.
+
 ### Create a new migration
 ```bash
 cd backend
 alembic revision --autogenerate -m "Description of changes"
 ```
+
+> `--autogenerate` only sees tables that are registered on `Base.metadata`, which
+> requires every model module to be imported in `app/models/__init__.py`
+> (`alembic/env.py` does `from app.models import *`). When you add a new model
+> file, wire it into `app/models/__init__.py` — otherwise autogenerate will miss
+> its tables, or crash with `NoReferencedTableError` if another model references them.
 
 ### Apply migrations
 ```bash
