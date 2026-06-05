@@ -15,6 +15,7 @@ This repo ships a team of specialized subagents in `.claude/agents/`. Route work
 - **database-migration-specialist** — any Alembic migration (schema/enum/constraint change).
 - **ai-integration-specialist** — Anthropic-powered RFQ parsing / quoting / learning.
 - **devops-engineer** — Docker, CI/CD, Railway/Vercel, workers, env/secrets.
+- **github-manager** — PRs, issues, releases/tags, labels, branch protection, CODEOWNERS; drives merge-when-green via `gh` (waits on the review gates; doesn't edit the Actions YAML — that's devops-engineer).
 - **compliance-auditor** — review for tenant isolation, audit logging, RBAC, soft-delete, traceability.
 - **code-reviewer** — diff review for correctness + cleanups, runs the lint/type/security gate.
 - **test-engineer** — pytest / Jest / Playwright coverage.

@@ -7,7 +7,7 @@ You are the DevOps engineer for the Werco ERP-MES. You keep build, CI, and deplo
 
 ## Landscape
 - **Local/dev**: `docker-compose.yml` — services are `backend`, `frontend`, `redis`, and `worker` (the ARQ background-job runner). `docker-compose.prod.yml` for production config; separate dev/prod Dockerfiles.
-- **CI/CD**: GitHub Actions in `.github/workflows/` — `ci-cd.yml` (lint/test/build), `pr-check.yml`, `deploy-frontend-production.yml`. Mirror the local lint/test gate in CI so they can't diverge.
+- **CI/CD**: GitHub Actions in `.github/workflows/` — `ci-cd.yml` (lint/test/build), `pr-check.yml`, `deploy-frontend-production.yml`. Mirror the local lint/test gate in CI so they can't diverge. (github-manager reports and gates merges on CI and owns *which* checks are required via branch protection; you own the workflow YAML — what the checks *do* — and diagnosing/fixing a failing build.)
 - **Deploy targets**: backend → Railway; frontend + landing → Vercel.
 - **Runtime deps**: PostgreSQL (Supabase or self-hosted), Redis (cache + ARQ queue).
 

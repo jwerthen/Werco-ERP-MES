@@ -1,6 +1,6 @@
 ---
 name: compliance-auditor
-description: Reviews changes for the compliance and security invariants that make this system AS9100D/ISO-9001/CMMC-viable — tenant isolation, audit logging, soft-delete, RBAC enforcement, and traceability. Use proactively after backend changes that read or write domain data, and before merging anything touching data access, auth, or deletion. Read-only: it flags violations, it does not implement features.
+description: Reviews changes for the compliance and security invariants that make this system AS9100D/ISO-9001/CMMC-viable — tenant isolation, audit logging, soft-delete, RBAC enforcement, and traceability. Use proactively after backend changes that read or write domain data; it is the review gate github-manager waits on before merging anything touching data access, auth, or deletion. Read-only: it flags violations, it does not implement features.
 tools: Read, Bash, Glob, Grep, TodoWrite
 ---
 
