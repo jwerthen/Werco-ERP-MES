@@ -64,10 +64,6 @@ def test_role_permissions_are_scoped_to_current_company(
         .first()
         is None
     )
-    assert (
-        db_session.query(RolePermission)
-        .filter(RolePermission.company_id == 2, RolePermission.role == UserRole.MANAGER)
-        .one()
-        .permissions
-        == ["admin:system"]
-    )
+    assert db_session.query(RolePermission).filter(
+        RolePermission.company_id == 2, RolePermission.role == UserRole.MANAGER
+    ).one().permissions == ["admin:system"]

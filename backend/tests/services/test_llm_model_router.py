@@ -9,9 +9,7 @@ def test_short_clean_po_uses_fast_tier(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_MODEL_SELECTION", raising=False)
     monkeypatch.delenv("ANTHROPIC_PO_MODEL", raising=False)
 
-    decision = select_anthropic_model(
-        LLMTaskContext(task="po_extraction", input_chars=1200, is_ocr=False)
-    )
+    decision = select_anthropic_model(LLMTaskContext(task="po_extraction", input_chars=1200, is_ocr=False))
 
     assert decision.tier == LLMModelTier.FAST
     assert decision.model == "claude-haiku-4-5-20251001"
@@ -57,9 +55,7 @@ def test_task_override_wins(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_MODEL_SELECTION", raising=False)
     monkeypatch.setenv("ANTHROPIC_ROUTING_MODEL", "claude-sonnet-4-6")
 
-    decision = select_anthropic_model(
-        LLMTaskContext(task="routing_generation", input_chars=100_000, is_ocr=True)
-    )
+    decision = select_anthropic_model(LLMTaskContext(task="routing_generation", input_chars=100_000, is_ocr=True))
 
     assert decision.model == "claude-sonnet-4-6"
     assert decision.reason == "routing_generation override"
@@ -68,9 +64,7 @@ def test_task_override_wins(monkeypatch):
 def test_global_tier_override_wins(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_MODEL_SELECTION", "reasoning")
 
-    decision = select_anthropic_model(
-        LLMTaskContext(task="po_extraction", input_chars=1200, is_ocr=False)
-    )
+    decision = select_anthropic_model(LLMTaskContext(task="po_extraction", input_chars=1200, is_ocr=False))
 
     assert decision.tier == LLMModelTier.REASONING
     assert decision.model == "claude-opus-4-8"

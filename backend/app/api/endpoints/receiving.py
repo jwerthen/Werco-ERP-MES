@@ -197,9 +197,7 @@ def get_purchase_order_for_receiving(
                     "receipt_number": r.receipt_number,
                     "quantity_received": r.quantity_received,
                     "lot_number": r.lot_number,
-                    "status": (
-                        r.status.value if hasattr(r.status, "value") else r.status
-                    ),
+                    "status": (r.status.value if hasattr(r.status, "value") else r.status),
                     "received_at": r.received_at,
                 }
             )
@@ -241,9 +239,7 @@ def get_purchase_order_for_receiving(
 def receive_material(
     receipt_in: ReceiptCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
-    ),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
@@ -254,9 +250,7 @@ def receive_material(
     po_line = (
         db.query(PurchaseOrderLine)
         .options(
-            joinedload(PurchaseOrderLine.purchase_order).joinedload(
-                PurchaseOrder.vendor
-            ),
+            joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(PurchaseOrderLine.part),
         )
         .filter(
@@ -271,18 +265,14 @@ def receive_material(
 
     po = po_line.purchase_order
     if po.status not in [POStatus.SENT, POStatus.PARTIAL]:
-        raise HTTPException(
-            status_code=400, detail="PO must be in sent or partial status to receive"
-        )
+        raise HTTPException(status_code=400, detail="PO must be in sent or partial status to receive")
 
     if po_line.is_closed:
         raise HTTPException(status_code=400, detail="PO line is already closed")
 
     # Lot number is required for AS9100D compliance
     if not receipt_in.lot_number or not receipt_in.lot_number.strip():
-        raise HTTPException(
-            status_code=400, detail="Lot number is required for traceability (AS9100D)"
-        )
+        raise HTTPException(status_code=400, detail="Lot number is required for traceability (AS9100D)")
 
     qty_received = float(receipt_in.quantity_received)
     # Check for over-receiving
@@ -321,23 +311,13 @@ def receive_material(
         coc_attached=receipt_in.coc_attached,
         location_id=receipt_in.location_id,
         requires_inspection=receipt_in.requires_inspection,
-        status=(
-            ReceiptStatus.PENDING_INSPECTION
-            if receipt_in.requires_inspection
-            else ReceiptStatus.ACCEPTED
-        ),
-        inspection_status=(
-            InspectionStatus.PENDING
-            if receipt_in.requires_inspection
-            else InspectionStatus.PASSED
-        ),
+        status=(ReceiptStatus.PENDING_INSPECTION if receipt_in.requires_inspection else ReceiptStatus.ACCEPTED),
+        inspection_status=(InspectionStatus.PENDING if receipt_in.requires_inspection else InspectionStatus.PASSED),
         packing_slip_number=receipt_in.packing_slip_number,
         carrier=receipt_in.carrier,
         tracking_number=receipt_in.tracking_number,
         over_receive_approved=receipt_in.over_receive_approved,
-        over_receive_approved_by=(
-            current_user.id if receipt_in.over_receive_approved else None
-        ),
+        over_receive_approved_by=(current_user.id if receipt_in.over_receive_approved else None),
         received_by=current_user.id,
         notes=receipt_in.notes,
     )
@@ -429,11 +409,7 @@ def receive_material(
             "part_id": po_line.part_id,
             "quantity_received": qty_received,
             "requires_inspection": receipt.requires_inspection,
-            "status": (
-                receipt.status.value
-                if hasattr(receipt.status, "value")
-                else receipt.status
-            ),
+            "status": (receipt.status.value if hasattr(receipt.status, "value") else receipt.status),
         },
     )
 
@@ -456,9 +432,7 @@ def get_inspection_queue(
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
-            joinedload(POReceipt.po_line)
-            .joinedload(PurchaseOrderLine.purchase_order)
-            .joinedload(PurchaseOrder.vendor),
+            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.location),
             joinedload(POReceipt.receiver),
         )
@@ -481,11 +455,7 @@ def get_inspection_queue(
                 receipt_number=r.receipt_number,
                 po_number=r.po_line.purchase_order.po_number,
                 po_id=r.po_line.purchase_order.id,
-                vendor_name=(
-                    r.po_line.purchase_order.vendor.name
-                    if r.po_line.purchase_order.vendor
-                    else None
-                ),
+                vendor_name=(r.po_line.purchase_order.vendor.name if r.po_line.purchase_order.vendor else None),
                 part_id=r.po_line.part_id,
                 part_number=r.po_line.part.part_number if r.po_line.part else None,
                 part_name=r.po_line.part.name if r.po_line.part else None,
@@ -515,9 +485,7 @@ def get_receipt_detail(
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
-            joinedload(POReceipt.po_line)
-            .joinedload(PurchaseOrderLine.purchase_order)
-            .joinedload(PurchaseOrder.vendor),
+            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.location),
             joinedload(POReceipt.receiver),
             joinedload(POReceipt.inspector),
@@ -534,29 +502,15 @@ def get_receipt_detail(
         "receipt_number": receipt.receipt_number,
         "po_number": receipt.po_line.purchase_order.po_number,
         "po_id": receipt.po_line.purchase_order.id,
-        "vendor_name": (
-            receipt.po_line.purchase_order.vendor.name
-            if receipt.po_line.purchase_order.vendor
-            else None
-        ),
-        "vendor_code": (
-            receipt.po_line.purchase_order.vendor.code
-            if receipt.po_line.purchase_order.vendor
-            else None
-        ),
+        "vendor_name": (receipt.po_line.purchase_order.vendor.name if receipt.po_line.purchase_order.vendor else None),
+        "vendor_code": (receipt.po_line.purchase_order.vendor.code if receipt.po_line.purchase_order.vendor else None),
         "is_approved_vendor": (
-            receipt.po_line.purchase_order.vendor.is_approved
-            if receipt.po_line.purchase_order.vendor
-            else False
+            receipt.po_line.purchase_order.vendor.is_approved if receipt.po_line.purchase_order.vendor else False
         ),
         "part_id": receipt.po_line.part_id,
-        "part_number": (
-            receipt.po_line.part.part_number if receipt.po_line.part else None
-        ),
+        "part_number": (receipt.po_line.part.part_number if receipt.po_line.part else None),
         "part_name": receipt.po_line.part.name if receipt.po_line.part else None,
-        "part_description": (
-            receipt.po_line.part.description if receipt.po_line.part else None
-        ),
+        "part_description": (receipt.po_line.part.description if receipt.po_line.part else None),
         "quantity_received": receipt.quantity_received,
         "quantity_accepted": receipt.quantity_accepted,
         "quantity_rejected": receipt.quantity_rejected,
@@ -565,17 +519,13 @@ def get_receipt_detail(
         "heat_number": receipt.heat_number,
         "cert_number": receipt.cert_number,
         "coc_attached": receipt.coc_attached,
-        "status": (
-            receipt.status.value if hasattr(receipt.status, "value") else receipt.status
-        ),
+        "status": (receipt.status.value if hasattr(receipt.status, "value") else receipt.status),
         "inspection_status": (
             receipt.inspection_status.value
             if hasattr(receipt.inspection_status, "value")
             else receipt.inspection_status
         ),
-        "inspection_method": (
-            receipt.inspection_method.value if receipt.inspection_method else None
-        ),
+        "inspection_method": (receipt.inspection_method.value if receipt.inspection_method else None),
         "defect_type": receipt.defect_type.value if receipt.defect_type else None,
         "inspection_notes": receipt.inspection_notes,
         "packing_slip_number": receipt.packing_slip_number,
@@ -595,9 +545,7 @@ def inspect_receipt(
     receipt_id: int,
     inspection: ReceiptInspection,
     db: Session = Depends(get_db),
-    current_user: User = Depends(
-        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])
-    ),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
@@ -611,9 +559,7 @@ def inspect_receipt(
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
-            joinedload(POReceipt.po_line)
-            .joinedload(PurchaseOrderLine.purchase_order)
-            .joinedload(PurchaseOrder.vendor),
+            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.location),
         )
         .filter(POReceipt.id == receipt_id, POReceipt.company_id == company_id)
@@ -658,9 +604,7 @@ def inspect_receipt(
     receipt.quantity_accepted = qty_accepted
     receipt.quantity_rejected = qty_rejected
     receipt.inspection_method = InspectionMethod(inspection.inspection_method)
-    receipt.defect_type = (
-        DefectType(inspection.defect_type) if inspection.defect_type else None
-    )
+    receipt.defect_type = DefectType(inspection.defect_type) if inspection.defect_type else None
     receipt.inspection_notes = inspection.inspection_notes
     receipt.inspected_by = current_user.id
     receipt.inspected_at = datetime.utcnow()
@@ -751,11 +695,7 @@ def inspect_receipt(
             "quantity_received": float(receipt.quantity_received),
             "quantity_accepted": float(inspection.quantity_accepted),
             "quantity_rejected": float(inspection.quantity_rejected),
-            "status": (
-                receipt.status.value
-                if hasattr(receipt.status, "value")
-                else receipt.status
-            ),
+            "status": (receipt.status.value if hasattr(receipt.status, "value") else receipt.status),
             "inspection_method": inspection.inspection_method,
             "defect_type": inspection.defect_type,
         },
@@ -800,9 +740,7 @@ def _add_to_inventory(
             "quantity_available": existing.quantity_available,
         }
         existing.quantity_on_hand += quantity
-        existing.quantity_available = (
-            existing.quantity_on_hand - existing.quantity_allocated
-        )
+        existing.quantity_available = existing.quantity_on_hand - existing.quantity_allocated
         inv_item = existing
         audit.log_update(
             "inventory",
@@ -839,9 +777,7 @@ def _add_to_inventory(
             inv_item.id,
             f"{part_id}/{lot_number}@{location}",
             new_values=inv_item,
-            description=(
-                f"Received {quantity} of part {part_id} lot {lot_number} at {location} via {reference}"
-            ),
+            description=(f"Received {quantity} of part {part_id} lot {lot_number} at {location} via {reference}"),
         )
 
     # Create transaction record for audit trail
@@ -946,9 +882,7 @@ def get_receiving_history(
         db.query(POReceipt)
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.part),
-            joinedload(POReceipt.po_line)
-            .joinedload(PurchaseOrderLine.purchase_order)
-            .joinedload(PurchaseOrder.vendor),
+            joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor),
             joinedload(POReceipt.receiver),
             joinedload(POReceipt.inspector),
         )
@@ -967,11 +901,7 @@ def get_receiving_history(
                 "receipt_id": r.id,
                 "receipt_number": r.receipt_number,
                 "po_number": r.po_line.purchase_order.po_number,
-                "vendor_name": (
-                    r.po_line.purchase_order.vendor.name
-                    if r.po_line.purchase_order.vendor
-                    else None
-                ),
+                "vendor_name": (r.po_line.purchase_order.vendor.name if r.po_line.purchase_order.vendor else None),
                 "part_number": r.po_line.part.part_number if r.po_line.part else None,
                 "part_name": r.po_line.part.name if r.po_line.part else None,
                 "quantity_received": r.quantity_received,
@@ -980,13 +910,9 @@ def get_receiving_history(
                 "lot_number": r.lot_number,
                 "status": r.status.value if hasattr(r.status, "value") else r.status,
                 "inspection_status": (
-                    r.inspection_status.value
-                    if hasattr(r.inspection_status, "value")
-                    else r.inspection_status
+                    r.inspection_status.value if hasattr(r.inspection_status, "value") else r.inspection_status
                 ),
-                "inspection_method": (
-                    r.inspection_method.value if r.inspection_method else None
-                ),
+                "inspection_method": (r.inspection_method.value if r.inspection_method else None),
                 "defect_type": r.defect_type.value if r.defect_type else None,
                 "received_at": r.received_at,
                 "received_by_name": r.receiver.full_name if r.receiver else None,

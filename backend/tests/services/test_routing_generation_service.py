@@ -1,6 +1,6 @@
 from app.models.company import Company
-from app.models.quote_config import QuoteSettings
 from app.models.part import Part
+from app.models.quote_config import QuoteSettings
 from app.models.routing import Routing
 from app.models.routing_learning import RoutingLearnedAlias, RoutingOperationPattern, RoutingWorkCenterPreference
 from app.models.work_center import WorkCenter

@@ -31,8 +31,7 @@ from app.models.quote import Quote
 from app.models.routing import Routing
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.models.work_order import WorkOrder
-from app.models.work_order import WorkOrderOperation, WorkOrderStatus
+from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerStatus
 
 router = APIRouter()

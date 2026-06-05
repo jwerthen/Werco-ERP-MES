@@ -1809,7 +1809,9 @@ class TestWorkOrdersAPI:
 
         shop_floor_response = client.get("/api/v1/shop-floor/operations", headers=operator_headers)
         assert shop_floor_response.status_code == status.HTTP_200_OK
-        returned_operation = next(item for item in shop_floor_response.json()["operations"] if item["id"] == operation.id)
+        returned_operation = next(
+            item for item in shop_floor_response.json()["operations"] if item["id"] == operation.id
+        )
         assert returned_operation["status"] == "in_progress"
         assert returned_operation["quantity_complete"] == 5
 

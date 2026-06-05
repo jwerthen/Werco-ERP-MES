@@ -17,7 +17,6 @@ from app.schemas.ai_learning import (
     AIRecommendationFeedbackRequest,
 )
 
-
 SENSITIVE_KEY_PARTS = {
     "authorization",
     "bearer",
@@ -296,7 +295,9 @@ class AILearningService:
         self.db.flush()
 
         if data.recommendation_id and data.metric_value is not None and data.baseline_value is not None:
-            self._nudge_recommendation_confidence(data.recommendation_id, company_id, data.metric_value, data.baseline_value)
+            self._nudge_recommendation_confidence(
+                data.recommendation_id, company_id, data.metric_value, data.baseline_value
+            )
 
         return outcome
 
@@ -396,7 +397,9 @@ class AILearningService:
 
         created = 0
         for source_module, event_count in rows:
-            if self._pending_recommendation_exists(company_id, "workflow_friction", source_module, "source_module", None):
+            if self._pending_recommendation_exists(
+                company_id, "workflow_friction", source_module, "source_module", None
+            ):
                 continue
             priority = "high" if event_count >= 10 else "medium"
             self.db.add(
@@ -446,7 +449,9 @@ class AILearningService:
         created = 0
         for source_module, field_path, correction_count in rows:
             target_key = f"{source_module}:{field_path}"
-            if self._pending_recommendation_exists(company_id, "correction_pattern", source_module, "field_path", None, target_key):
+            if self._pending_recommendation_exists(
+                company_id, "correction_pattern", source_module, "field_path", None, target_key
+            ):
                 continue
             self.db.add(
                 AIRecommendation(

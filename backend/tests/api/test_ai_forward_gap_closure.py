@@ -103,9 +103,7 @@ class TestAIForwardGapClosure:
             == 1
         )
         assert (
-            db_session.query(OperationalEvent)
-            .filter_by(event_type="work_order_blocker_created", company_id=1)
-            .count()
+            db_session.query(OperationalEvent).filter_by(event_type="work_order_blocker_created", company_id=1).count()
             == 1
         )
 
@@ -161,12 +159,8 @@ class TestAIForwardGapClosure:
         db_session.add(work_center)
         db_session.commit()
 
-        high_wo, high_op = _make_released_work_order(
-            db_session, number="WO-PRI-1", work_center=work_center, priority=1
-        )
-        low_wo, low_op = _make_released_work_order(
-            db_session, number="WO-PRI-9", work_center=work_center, priority=9
-        )
+        high_wo, high_op = _make_released_work_order(db_session, number="WO-PRI-1", work_center=work_center, priority=1)
+        low_wo, low_op = _make_released_work_order(db_session, number="WO-PRI-9", work_center=work_center, priority=9)
         blocked_wo, blocked_op = _make_released_work_order(
             db_session, number="WO-BLOCKED-HIGH", work_center=work_center, priority=1
         )

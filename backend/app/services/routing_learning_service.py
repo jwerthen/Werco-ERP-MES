@@ -17,7 +17,6 @@ from app.models.routing_learning import (
 from app.models.work_center import WorkCenter
 from app.services.routing_generation_service import _infer_part_info_from_drawing, normalize_work_center_type
 
-
 STOP_ALIAS_WORDS = {
     "and",
     "assembly",
@@ -71,7 +70,9 @@ def build_feature_signature(
     drawing_text: str = "",
 ) -> Dict[str, Any]:
     """Build a stable signature used to retrieve similar learned routings."""
-    inferred = _infer_part_info_from_drawing(drawing_text, geometry, is_assembly=_enum_value(part.part_type) == "assembly")
+    inferred = _infer_part_info_from_drawing(
+        drawing_text, geometry, is_assembly=_enum_value(part.part_type) == "assembly"
+    )
     info = {**inferred, **(drawing_info or {})}
     geometry = geometry or {}
 
@@ -150,7 +151,9 @@ def get_learned_routing_context(
                 RoutingWorkCenterPreference.company_id == company_id,
                 RoutingWorkCenterPreference.part_type == signature["part_type"],
             )
-            .order_by(RoutingWorkCenterPreference.usage_count.desc(), RoutingWorkCenterPreference.confidence_score.desc())
+            .order_by(
+                RoutingWorkCenterPreference.usage_count.desc(), RoutingWorkCenterPreference.confidence_score.desc()
+            )
             .limit(20)
             .all()
         )
@@ -259,11 +262,11 @@ def learn_from_approved_generation(
     company_id: int,
 ) -> Dict[str, Any]:
     """Record the approved edits and update learned routing artifacts."""
-    work_center_ids = [operation.get("work_center_id") for operation in approved_operations if operation.get("work_center_id")]
+    work_center_ids = [
+        operation.get("work_center_id") for operation in approved_operations if operation.get("work_center_id")
+    ]
     work_centers = (
-        db.query(WorkCenter)
-        .filter(WorkCenter.company_id == company_id, WorkCenter.id.in_(work_center_ids))
-        .all()
+        db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.id.in_(work_center_ids)).all()
         if work_center_ids
         else []
     )

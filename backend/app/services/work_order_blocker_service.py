@@ -192,7 +192,9 @@ class WorkOrderBlockerService:
             ),
         )
 
-    def stale_open_blockers(self, *, company_id: Optional[int] = None, older_than_hours: int = 24) -> List[WorkOrderBlocker]:
+    def stale_open_blockers(
+        self, *, company_id: Optional[int] = None, older_than_hours: int = 24
+    ) -> List[WorkOrderBlocker]:
         cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
         query = self.db.query(WorkOrderBlocker).filter(
             WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),

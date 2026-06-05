@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from app.models.operational_event import OperationalEvent
 from app.models.work_order import WorkOrder, WorkOrderOperation
 
-
 SENSITIVE_EVENT_KEYS = {
     "authorization",
     "bearer",

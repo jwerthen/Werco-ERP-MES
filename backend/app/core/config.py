@@ -64,9 +64,7 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 10  # Max additional connections when pool is exhausted
     DB_POOL_TIMEOUT: int = 30  # Seconds to wait for connection from pool
     DB_POOL_RECYCLE: int = 1800  # Recycle connections after 30 minutes
-    DB_POOL_PRE_PING: bool = (
-        True  # Test connections before use (handles stale connections)
-    )
+    DB_POOL_PRE_PING: bool = True  # Test connections before use (handles stale connections)
 
     # Security - MUST be overridden via environment variables (no defaults - app fails fast if missing)
     SECRET_KEY: str
@@ -117,9 +115,7 @@ class Settings(BaseSettings):
             if not self.CORS_ORIGINS:
                 raise ValueError("CORS_ORIGINS must be set in production.")
             if "localhost" in self.CORS_ORIGINS:
-                raise ValueError(
-                    "CORS_ORIGINS must not include localhost in production."
-                )
+                raise ValueError("CORS_ORIGINS must not include localhost in production.")
             if not self.ALLOW_NON_SUPABASE_DATABASE and not self.is_supabase_database:
                 raise ValueError(
                     "Production must use Supabase as the backend database. "
@@ -153,11 +149,7 @@ class Settings(BaseSettings):
     def is_supabase_database(self) -> bool:
         parsed = urlparse(self.SQLALCHEMY_DATABASE_URL)
         host = parsed.hostname or ""
-        return (
-            host.endswith(".supabase.co")
-            or host.endswith(".pooler.supabase.com")
-            or "supabase.com" in host
-        )
+        return host.endswith(".supabase.co") or host.endswith(".pooler.supabase.com") or "supabase.com" in host
 
     @property
     def safe_database_host(self) -> str:
@@ -166,18 +158,14 @@ class Settings(BaseSettings):
 
     def _build_supabase_database_url(self) -> str:
         project_ref = self.SUPABASE_PROJECT_REF or self._project_ref_from_supabase_url()
-        host = self.SUPABASE_DB_HOST or (
-            f"db.{project_ref}.supabase.co" if project_ref else None
-        )
+        host = self.SUPABASE_DB_HOST or (f"db.{project_ref}.supabase.co" if project_ref else None)
         password = self.SUPABASE_DB_PASSWORD or self.DB_PASSWORD
         if not host or not password:
             raise ValueError(
                 "DATABASE_URL is not set. Configure the Supabase database with either DATABASE_URL "
                 "or SUPABASE_PROJECT_REF/SUPABASE_DB_PASSWORD."
             )
-        user = self.SUPABASE_DB_USER or self._default_supabase_db_user(
-            host, project_ref
-        )
+        user = self.SUPABASE_DB_USER or self._default_supabase_db_user(host, project_ref)
         return (
             f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{self.SUPABASE_DB_PORT}/"
             f"{quote(self.SUPABASE_DB_NAME, safe='')}"
@@ -215,9 +203,7 @@ class Settings(BaseSettings):
 
     def _can_build_supabase_database_url(self) -> bool:
         project_ref = self.SUPABASE_PROJECT_REF or self._project_ref_from_supabase_url()
-        host = self.SUPABASE_DB_HOST or (
-            f"db.{project_ref}.supabase.co" if project_ref else None
-        )
+        host = self.SUPABASE_DB_HOST or (f"db.{project_ref}.supabase.co" if project_ref else None)
         password = self.SUPABASE_DB_PASSWORD or self.DB_PASSWORD
         return bool(host and password)
 
@@ -279,11 +265,7 @@ class Settings(BaseSettings):
         return self._host_is_supabase(host) or self.ENVIRONMENT == "production"
 
     def _host_is_supabase(self, host: str) -> bool:
-        return (
-            host.endswith(".supabase.co")
-            or host.endswith(".pooler.supabase.com")
-            or "supabase.com" in host
-        )
+        return host.endswith(".supabase.co") or host.endswith(".pooler.supabase.com") or "supabase.com" in host
 
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
@@ -296,32 +278,22 @@ class Settings(BaseSettings):
         return [path.strip() for path in self.RATE_LIMIT_EXEMPT_PATHS.split(",")]
 
     # CORS - Include localhost for dev; production origins must be set via env var
-    CORS_ORIGINS: str = (
-        "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"
-    )
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: str = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-    CORS_ALLOW_HEADERS: str = (
-        "Authorization,Content-Type,X-Requested-With,Accept,Origin,If-None-Match,If-Match"
-    )
+    CORS_ALLOW_HEADERS: str = "Authorization,Content-Type,X-Requested-With,Accept,Origin,If-None-Match,If-Match"
 
     @property
     def cors_origins_list(self) -> List[str]:
-        origins = [
-            origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()
-        ]
+        origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
         validated = []
         for origin in origins:
             # Reject wildcard origins
             if origin == "*":
-                raise ValueError(
-                    "Wildcard '*' CORS origin is not allowed. Specify explicit origins."
-                )
+                raise ValueError("Wildcard '*' CORS origin is not allowed. Specify explicit origins.")
             # Require http:// or https:// scheme
             if not origin.startswith("http://") and not origin.startswith("https://"):
-                raise ValueError(
-                    f"CORS origin must start with http:// or https://: {origin}"
-                )
+                raise ValueError(f"CORS origin must start with http:// or https://: {origin}")
             validated.append(origin)
         return validated
 

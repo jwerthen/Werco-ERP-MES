@@ -513,14 +513,15 @@ def _infer_part_info_from_drawing(
     }
 
 
-def _operation_family_present(operations: List[Dict[str, Any]], family_types: List[str], family_words: List[str]) -> bool:
+def _operation_family_present(
+    operations: List[Dict[str, Any]], family_types: List[str], family_words: List[str]
+) -> bool:
     for operation in operations:
         op_type = normalize_work_center_type(operation.get("work_center_type") or "")
         if any(_types_match(family_type, op_type) for family_type in family_types):
             return True
         searchable = " ".join(
-            str(operation.get(field) or "")
-            for field in ("operation_name", "description", "tooling_requirements")
+            str(operation.get(field) or "") for field in ("operation_name", "description", "tooling_requirements")
         )
         if _drawing_mentions(searchable, family_words):
             return True
@@ -585,7 +586,9 @@ def infer_operations_from_drawing(
     cut_required = bool(geometry and geometry.get("cut_length")) or _drawing_mentions(
         text, ["laser", "waterjet", "plasma", "cut", "flat pattern", "profile", "blank"]
     )
-    holes_required = bool(geometry and geometry.get("hole_count")) or _drawing_mentions(text, ["hole", "drill", "pierce"])
+    holes_required = bool(geometry and geometry.get("hole_count")) or _drawing_mentions(
+        text, ["hole", "drill", "pierce"]
+    )
     bends_required = bool(geometry and geometry.get("bend_count")) or _drawing_mentions(
         text, ["bend", "forming", "form", "press brake", "brake"]
     )
@@ -893,7 +896,9 @@ def generate_draft_routing(
     Returns the full routing proposal.
     """
     active_work_center_types = dedupe_work_center_types(list(work_centers_by_type.keys()))
-    available_types = dedupe_work_center_types(work_center_types) or active_work_center_types or DEFAULT_WORK_CENTER_TYPES
+    available_types = (
+        dedupe_work_center_types(work_center_types) or active_work_center_types or DEFAULT_WORK_CENTER_TYPES
+    )
     automatic_types = active_work_center_types or available_types
     drawing_context_text = "\n".join(part for part in [part_context or "", drawing_text or ""] if part)
 
@@ -940,7 +945,10 @@ def generate_draft_routing(
         }
 
     proposed_ops = llm_result.get("operations", [])
-    part_info = {**_infer_part_info_from_drawing(drawing_context_text, geometry, is_assembly=is_assembly), **llm_result.get("part_info", {})}
+    part_info = {
+        **_infer_part_info_from_drawing(drawing_context_text, geometry, is_assembly=is_assembly),
+        **llm_result.get("part_info", {}),
+    }
     if is_assembly:
         part_info["assembly_required"] = True
     if not proposed_ops:
@@ -956,7 +964,9 @@ def generate_draft_routing(
             is_assembly=is_assembly,
         )
         if proposed_ops:
-            warnings.append("No operations were extracted, so a rules-based routing was generated from current work centers.")
+            warnings.append(
+                "No operations were extracted, so a rules-based routing was generated from current work centers."
+            )
 
     proposed_ops = ensure_current_work_center_completion_steps(
         proposed_ops,

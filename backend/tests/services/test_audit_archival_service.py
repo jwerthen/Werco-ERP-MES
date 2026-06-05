@@ -23,7 +23,8 @@ monkeypatches ``settings.AUDIT_ARCHIVE_DIR`` to a ``tmp_path`` and forces
 
 import hashlib
 import json
-from contextlib import contextmanager, nullcontext as _nullcontext
+from contextlib import contextmanager
+from contextlib import nullcontext as _nullcontext
 from datetime import datetime, timedelta
 from unittest import mock
 

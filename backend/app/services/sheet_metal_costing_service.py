@@ -1,8 +1,8 @@
 """Deterministic sheet-metal costing and lead-time estimation helpers."""
 
+import re
 from dataclasses import dataclass
 from math import ceil
-import re
 from typing import Dict, Optional
 
 DEFAULT_DENSITY_LB_PER_IN3: Dict[str, float] = {

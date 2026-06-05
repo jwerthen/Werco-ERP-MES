@@ -116,7 +116,9 @@ def create_work_order_blocker(
     """Let an operator report why a job is blocked, including missing material."""
     service = WorkOrderBlockerService(db)
     try:
-        blocker = service.create_blocker(company_id=company_id, user=current_user, work_order_id=work_order_id, data=data)
+        blocker = service.create_blocker(
+            company_id=company_id, user=current_user, work_order_id=work_order_id, data=data
+        )
         db.commit()
         db.refresh(blocker)
         _broadcast_blocker(blocker, "work_order_blocker_created")

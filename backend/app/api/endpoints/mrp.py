@@ -233,6 +233,7 @@ def get_mrp_actions(
 
     return result
 
+
 @router.get("/shortages")
 def get_current_shortages(
     db: Session = Depends(get_db),

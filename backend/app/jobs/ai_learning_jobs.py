@@ -31,7 +31,9 @@ async def aggregate_ai_learning_task():
             )
             if existing:
                 continue
-            work_order_number = blocker.work_order.work_order_number if blocker.work_order else f"WO #{blocker.work_order_id}"
+            work_order_number = (
+                blocker.work_order.work_order_number if blocker.work_order else f"WO #{blocker.work_order_id}"
+            )
             db.add(
                 AIRecommendation(
                     company_id=blocker.company_id,

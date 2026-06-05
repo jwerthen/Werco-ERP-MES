@@ -271,7 +271,11 @@ def clock_in(
             "work_order_number": work_order.work_order_number,
             "operation_name": operation.name,
             "work_center_id": operation.work_center_id,
-            "entry_type": clock_in_data.entry_type.value if hasattr(clock_in_data.entry_type, "value") else clock_in_data.entry_type,
+            "entry_type": (
+                clock_in_data.entry_type.value
+                if hasattr(clock_in_data.entry_type, "value")
+                else clock_in_data.entry_type
+            ),
         },
     )
     db.commit()

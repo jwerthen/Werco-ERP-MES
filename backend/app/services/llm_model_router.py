@@ -97,9 +97,7 @@ def select_anthropic_model(context: LLMTaskContext) -> LLMModelDecision:
     complexity_score = _complexity_score(context)
 
     if task == "qms_clause_extraction":
-        if context.input_chars >= 85_000 or (
-            context.input_chars >= 50_000 and context.max_output_tokens >= 16_000
-        ):
+        if context.input_chars >= 85_000 or (context.input_chars >= 50_000 and context.max_output_tokens >= 16_000):
             return model_decision_for_tier(LLMModelTier.REASONING, "large QMS extraction")
         return model_decision_for_tier(LLMModelTier.DEFAULT, "QMS extraction needs complete clause coverage")
 

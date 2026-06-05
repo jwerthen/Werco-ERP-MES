@@ -97,11 +97,46 @@ class TestPartsAPI:
     def test_parts_default_to_engineering_items(self, client: TestClient, auth_headers: dict, db_session: Session):
         """The engineering parts list excludes materials and supplies by default."""
         rows = [
-            Part(part_number="ENG-001", name="Machined Bracket", part_type="manufactured", unit_of_measure="each", is_active=True, company_id=1),
-            Part(part_number="ASM-001", name="Top Assembly", part_type="assembly", unit_of_measure="each", is_active=True, company_id=1),
-            Part(part_number="RAW-001", name="Steel Sheet", part_type="raw_material", unit_of_measure="sheets", is_active=True, company_id=1),
-            Part(part_number="HW-001", name="Hex Bolt", part_type="hardware", unit_of_measure="each", is_active=True, company_id=1),
-            Part(part_number="BUY-001", name="Purchased Motor", part_type="purchased", unit_of_measure="each", is_active=True, company_id=1),
+            Part(
+                part_number="ENG-001",
+                name="Machined Bracket",
+                part_type="manufactured",
+                unit_of_measure="each",
+                is_active=True,
+                company_id=1,
+            ),
+            Part(
+                part_number="ASM-001",
+                name="Top Assembly",
+                part_type="assembly",
+                unit_of_measure="each",
+                is_active=True,
+                company_id=1,
+            ),
+            Part(
+                part_number="RAW-001",
+                name="Steel Sheet",
+                part_type="raw_material",
+                unit_of_measure="sheets",
+                is_active=True,
+                company_id=1,
+            ),
+            Part(
+                part_number="HW-001",
+                name="Hex Bolt",
+                part_type="hardware",
+                unit_of_measure="each",
+                is_active=True,
+                company_id=1,
+            ),
+            Part(
+                part_number="BUY-001",
+                name="Purchased Motor",
+                part_type="purchased",
+                unit_of_measure="each",
+                is_active=True,
+                company_id=1,
+            ),
         ]
         db_session.add_all(rows)
         db_session.commit()
@@ -199,11 +234,46 @@ class TestMaterialsAPI:
 
     def test_list_materials_only(self, client: TestClient, auth_headers: dict, db_session: Session):
         rows = [
-            Part(part_number="ENG-MAT-001", name="Machined Bracket", part_type="manufactured", unit_of_measure="each", is_active=True, company_id=1),
-            Part(part_number="RAW-MAT-001", name="Aluminum Sheet", part_type="raw_material", unit_of_measure="sheets", is_active=True, company_id=1),
-            Part(part_number="HW-MAT-001", name="Washer", part_type="hardware", unit_of_measure="each", is_active=True, company_id=1),
-            Part(part_number="CON-MAT-001", name="Primer", part_type="consumable", unit_of_measure="gallons", is_active=True, company_id=1),
-            Part(part_number="BUY-MAT-001", name="Purchased Pump", part_type="purchased", unit_of_measure="each", is_active=True, company_id=1),
+            Part(
+                part_number="ENG-MAT-001",
+                name="Machined Bracket",
+                part_type="manufactured",
+                unit_of_measure="each",
+                is_active=True,
+                company_id=1,
+            ),
+            Part(
+                part_number="RAW-MAT-001",
+                name="Aluminum Sheet",
+                part_type="raw_material",
+                unit_of_measure="sheets",
+                is_active=True,
+                company_id=1,
+            ),
+            Part(
+                part_number="HW-MAT-001",
+                name="Washer",
+                part_type="hardware",
+                unit_of_measure="each",
+                is_active=True,
+                company_id=1,
+            ),
+            Part(
+                part_number="CON-MAT-001",
+                name="Primer",
+                part_type="consumable",
+                unit_of_measure="gallons",
+                is_active=True,
+                company_id=1,
+            ),
+            Part(
+                part_number="BUY-MAT-001",
+                name="Purchased Pump",
+                part_type="purchased",
+                unit_of_measure="each",
+                is_active=True,
+                company_id=1,
+            ),
         ]
         db_session.add_all(rows)
         db_session.commit()
@@ -226,7 +296,9 @@ class TestMaterialsAPI:
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
-    def test_update_material_rejects_engineering_types(self, client: TestClient, auth_headers: dict, db_session: Session):
+    def test_update_material_rejects_engineering_types(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
         material = Part(
             part_number="RAW-UPD-001",
             name="Steel Sheet",
