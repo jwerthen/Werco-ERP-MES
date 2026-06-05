@@ -200,6 +200,106 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | GET | `/quality/inspections/{id}` | Get inspection by ID | Yes |
 | POST | `/quality/inspections/{id}/approve` | Approve inspection | Quality |
 
+### QMS Standards & Audit Readiness
+
+Standards/clause/evidence management for AS9100D, ISO 9001, CMMC and similar quality systems, all
+under `/qms-standards`. Every endpoint is **tenant-scoped to the caller's active company**
+(`get_current_company_id`). Reads (list / get / detail) are available to **any authenticated user**
+in the tenant, while writes are **role-gated** — the read-broad / write-restricted model documented
+in `RBAC_PERMISSIONS.md`.
+
+**Standards**
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/qms-standards/` | List standards with compliance-summary counts (`active_only` filter) | Yes |
+| POST | `/qms-standards/` | Create standard | Admin / Manager / Quality |
+| POST | `/qms-standards/{standard_id}/upload-pdf` | AI clause extraction from an uploaded PDF | Admin / Manager / Quality |
+| GET | `/qms-standards/audit-readiness` | Audit-readiness dashboard summary across active standards | Yes |
+| GET | `/qms-standards/{standard_id}` | Get standard with all clauses and evidence | Yes |
+| PUT | `/qms-standards/{standard_id}` | Update standard | Admin / Manager / Quality |
+| DELETE | `/qms-standards/{standard_id}` | Delete standard and all its clauses/evidence | Admin |
+
+**Clauses**
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/qms-standards/{standard_id}/clauses` | List clauses for a standard (flat list) | Yes |
+| POST | `/qms-standards/{standard_id}/clauses` | Add a clause | Admin / Manager / Quality |
+| POST | `/qms-standards/{standard_id}/clauses/bulk` | Bulk-import clauses (e.g. from a parsed document) | Admin / Manager / Quality |
+| PUT | `/qms-standards/clauses/{clause_id}` | Update clause, incl. compliance-status assessment | Admin / Manager / Quality |
+| DELETE | `/qms-standards/clauses/{clause_id}` | Delete a clause and its evidence links | Admin / Manager |
+
+**Auto-evidence discovery**
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/qms-standards/clauses/{clause_id}/auto-evidence` | Discover live ERP/MES evidence for a single clause (read-only, nothing persisted) | Yes |
+| POST | `/qms-standards/{standard_id}/auto-link` | Auto-discover and persist evidence links for all clauses in a standard | Admin / Manager / Quality |
+
+**Evidence links**
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/qms-standards/clauses/{clause_id}/evidence` | Link evidence to a clause | Admin / Manager / Quality |
+| PUT | `/qms-standards/evidence/{evidence_id}` | Update evidence, incl. verification | Admin / Manager / Quality |
+| DELETE | `/qms-standards/evidence/{evidence_id}` | Remove an evidence link | Admin / Manager / Quality |
+
+> **PDF clause extraction:** `POST /qms-standards/{standard_id}/upload-pdf` requires a text-based
+> PDF (≤ 20 MB; scanned/image-only PDFs are rejected) and a configured `ANTHROPIC_API_KEY` — it
+> returns **500** if the key is missing. Claude extracts the numbered clauses and persists them
+> against the standard.
+
+> **Deletes are soft (records retained):** the three `DELETE` endpoints above return **204** but
+> do not physically remove rows — the standard / clause / evidence is marked deleted and disappears
+> from all reads (including the nested clauses/evidence on `GET /qms-standards/{standard_id}`), while
+> the record is retained for AS9100D traceability. All QMS create / update / delete operations — plus
+> a status-change entry when a clause's `compliance_status` changes — are captured in the tamper-evident
+> audit trail (`GET /api/v1/audit/`).
+
+#### Audit-Readiness Summary Schema (`GET /qms-standards/audit-readiness`)
+
+```json
+{
+  "total_standards": 2,
+  "total_clauses": 142,
+  "compliant": 120,
+  "partial": 8,
+  "non_compliant": 3,
+  "not_assessed": 9,
+  "not_applicable": 2,
+  "compliance_percentage": 85.7,
+  "total_evidence_links": 310,
+  "verified_evidence": 240,
+  "unverified_evidence": 70,
+  "clauses_needing_review": 4
+}
+```
+
+#### Clause Auto-Evidence Schema (`GET /qms-standards/clauses/{clause_id}/auto-evidence`)
+
+```json
+{
+  "clause_id": 42,
+  "clause_number": "8.5.2",
+  "discovered_evidence": [
+    {
+      "evidence_type": "ncr",
+      "title": "Non-Conformance Reports (NCR)",
+      "description": "12 NCRs processed in last 12 months, 2 currently open",
+      "module_reference": "/quality/ncr",
+      "total_count": 12,
+      "recent_count": 7,
+      "health_status": "healthy",
+      "health_detail": "All NCRs resolved within SLA",
+      "examples": [],
+      "suggested_compliance": "compliant"
+    }
+  ],
+  "overall_suggested_compliance": "compliant"
+}
+```
+
 ### Purchasing
 
 | Method | Endpoint | Description | Auth Required |
