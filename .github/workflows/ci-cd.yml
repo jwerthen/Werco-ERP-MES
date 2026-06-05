@@ -173,12 +173,21 @@ jobs:
           docker build -t werco-erp-backend:latest ./backend
 
       - name: Build frontend image
+        env:
+          REACT_APP_API_URL: http://localhost:8000/api/v1
         run: |
-          docker build -t werco-erp-frontend:${{ github.sha }} ./frontend
-          docker build -t werco-erp-frontend:latest ./frontend
+          docker build --build-arg REACT_APP_API_URL="$REACT_APP_API_URL" -t werco-erp-frontend:${{ github.sha }} ./frontend
+          docker build --build-arg REACT_APP_API_URL="$REACT_APP_API_URL" -t werco-erp-frontend:latest ./frontend
 
       - name: Test Docker Compose
-        run: docker-compose config
+        # docker-compose.yml uses required-variable interpolation (e.g. ${DATABASE_URL:?...}).
+        # These placeholders only satisfy `config`'s static interpolation check; they are not
+        # real secrets and are never used to start a container.
+        env:
+          DATABASE_URL: postgresql://ci_validation:ci_validation@localhost:5432/ci_validation
+          SECRET_KEY: ci-config-validation-placeholder-not-a-secret
+          REFRESH_TOKEN_SECRET_KEY: ci-config-validation-placeholder-not-secret
+        run: docker compose config -q
 
   security-scan:
     name: Security Scanning
@@ -214,9 +223,15 @@ jobs:
 
       - name: Run safety check (Backend)
         working-directory: ./backend
+        # Suppressed advisories (no upstream fix available; documented in
+        # docs/SECURITY_ADVISORY_SUPPRESSIONS.md):
+        #   64459 / 64396 - ecdsa Minerva timing side-channel. Pulled in transitively by
+        #   python-jose[cryptography]; only used by the ES* JWT algorithms. This app signs/verifies
+        #   JWTs with HS256 (HMAC) exclusively (ALGORITHM="HS256"), so the vulnerable ECDSA code
+        #   path is never exercised. ecdsa has no fixed release (Affected spec: >=0).
         run: |
           pip install safety
-          safety check
+          safety check -i 64459 -i 64396
 
   deploy-staging:
     name: Deploy to Staging
