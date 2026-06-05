@@ -509,6 +509,8 @@ def delete_customer(
                 detail=f"Cannot hard delete: Customer has {part_count} associated parts",
             )
 
+        # Log BEFORE the terminal commit so the audit row commits atomically
+        # with the delete (AuditService.log only flushes; get_db never commits).
         audit.log_delete("customer", customer.id, customer.name)
         db.delete(customer)
         db.commit()
@@ -517,9 +519,9 @@ def delete_customer(
     # Soft delete
     customer.soft_delete(current_user.id)
     customer.is_active = False
-    db.commit()
-
+    # Log BEFORE the terminal commit so the audit row persists atomically.
     audit.log_delete("customer", customer.id, customer.name, soft_delete=True)
+    db.commit()
     return {"message": "Customer marked as deleted (soft delete)", "can_restore": True}
 
 
@@ -543,8 +545,9 @@ def restore_customer(
 
     customer.restore()
     customer.is_active = True
-    db.commit()
 
+    # Log BEFORE the terminal commit so the audit row commits atomically with
+    # the restore (AuditService.log only flushes; get_db never commits).
     audit.log_update(
         "customer",
         customer.id,
@@ -553,5 +556,6 @@ def restore_customer(
         new_values={"is_deleted": False},
         action="restore",
     )
+    db.commit()
 
     return {"message": f"Customer {customer.name} restored"}

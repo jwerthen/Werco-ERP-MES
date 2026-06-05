@@ -34,6 +34,7 @@ from app.schemas.work_order import (
     WorkOrderSummary,
     WorkOrderUpdate,
 )
+from app.services.audit_service import AuditService
 from app.services.laser_nest_service import (
     build_laser_nest_child_work_order,
     copy_laser_nest_folder,
@@ -42,16 +43,15 @@ from app.services.laser_nest_service import (
     parse_laser_nest_zip,
     sync_laser_nest_from_operation,
 )
-from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_state_service import (
     WorkOrderStateError,
     has_incomplete_predecessors,
     operation_target_quantity,
+    reconcile_work_orders_from_completion_evidence,
     release_first_ready_operation,
     release_next_ready_operation,
-    reconcile_work_orders_from_completion_evidence,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
     work_order_operation_progress,
@@ -762,13 +762,14 @@ def create_work_order(
         .filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id)
         .first()
     )
-    if _reconcile_operation_component_quantities(db, work_order, company_id):
-        db.commit()
-    if reconcile_work_orders_from_completion_evidence(db, [work_order]):
-        db.commit()
-    _enrich_work_order_operations(work_order)
+    _reconcile_operation_component_quantities(db, work_order, company_id)
+    reconcile_work_orders_from_completion_evidence(db, [work_order])
 
-    # Audit log for work order creation
+    # Audit log for work order creation. Logged BEFORE the terminal commit so the audit
+    # row commits atomically with the work order — AuditService.log() only flushes, and
+    # the request session never commits on teardown, so an audit call placed after the
+    # final commit would be silently discarded.
+    db.flush()  # ensure work_order (and any reconciled changes) are flushed; PK is real
     audit.log_create(
         resource_type="work_order",
         resource_id=work_order.id,
@@ -781,6 +782,8 @@ def create_work_order(
             "operation_count": len(work_order.operations),
         },
     )
+    db.commit()
+    _enrich_work_order_operations(work_order)
 
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1157,10 +1160,11 @@ def update_work_order(
         event_type="work_order_updated",
         payload={"updated_fields": list(update_data.keys())},
     )
-    db.commit()
-    db.refresh(work_order)
 
-    # Audit log for update
+    # Audit log for update. Logged BEFORE the terminal commit so the audit row commits
+    # atomically with the change — AuditService.log() only flushes and the request
+    # session never commits on teardown.
+    db.flush()
     audit.log_update(
         resource_type="work_order",
         resource_id=work_order.id,
@@ -1168,6 +1172,8 @@ def update_work_order(
         old_values=old_values,
         new_values=work_order,
     )
+    db.commit()
+    db.refresh(work_order)
 
     safe_broadcast(
         broadcast_work_order_update,
@@ -1325,9 +1331,11 @@ def delete_work_order(
             db.delete(op)
 
         db.delete(work_order)
-        db.commit()
 
+        # Audit BEFORE the terminal commit so the audit row commits atomically with the
+        # delete — AuditService.log() only flushes and the session never commits on teardown.
         audit.log_delete("work_order", wo_id, wo_number)
+        db.commit()
         safe_broadcast(
             broadcast_dashboard_update,
             {
@@ -1348,9 +1356,11 @@ def delete_work_order(
 
     # Soft delete - allowed for any status
     work_order.soft_delete(current_user.id)
-    db.commit()
 
+    # Audit BEFORE the terminal commit so the audit row commits atomically with the
+    # soft delete — AuditService.log() only flushes and the session never commits on teardown.
     audit.log_delete("work_order", wo_id, wo_number, soft_delete=True)
+    db.commit()
     safe_broadcast(
         broadcast_dashboard_update,
         {
@@ -1389,8 +1399,10 @@ def restore_work_order(
     audit = AuditService(db, current_user, request)
 
     work_order.restore()
-    db.commit()
 
+    # Audit BEFORE the terminal commit so the audit row commits atomically with the
+    # restore — AuditService.log() only flushes and the session never commits on teardown.
+    db.flush()
     audit.log_update(
         "work_order",
         work_order.id,
@@ -1399,6 +1411,7 @@ def restore_work_order(
         new_values={"is_deleted": False},
         action="restore",
     )
+    db.commit()
 
     return {"message": f"Work order {work_order.work_order_number} restored"}
 
@@ -1443,14 +1456,10 @@ def release_work_order(
         payload={"old_status": old_status, "new_status": WorkOrderStatus.RELEASED.value},
     )
 
-    db.commit()
-
-    work_center_ids = list({op.work_center_id for op in work_order.operations if op.work_center_id})
-    SchedulingService(db).run_scheduling(
-        work_center_ids=work_center_ids or None, horizon_days=90, optimize_setup=False, work_order_ids=[work_order.id]
-    )
-
-    # Audit log for status change
+    # Audit log for status change. Logged BEFORE the terminal commit so the audit row
+    # commits atomically with the status change — AuditService.log() only flushes and the
+    # request session never commits on teardown.
+    db.flush()
     audit = AuditService(db, current_user, request)
     audit.log_status_change(
         resource_type="work_order",
@@ -1458,6 +1467,13 @@ def release_work_order(
         resource_identifier=work_order.work_order_number,
         old_status=old_status,
         new_status="released",
+    )
+
+    db.commit()
+
+    work_center_ids = list({op.work_center_id for op in work_order.operations if op.work_center_id})
+    SchedulingService(db).run_scheduling(
+        work_center_ids=work_center_ids or None, horizon_days=90, optimize_setup=False, work_order_ids=[work_order.id]
     )
 
     db.refresh(work_order)
