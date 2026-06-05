@@ -5,9 +5,9 @@ from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
 from app.models.user import User, UserRole
@@ -27,6 +27,7 @@ from app.schemas.qms_standard import (
     QMSStandardResponse,
     QMSStandardUpdate,
 )
+from app.services.audit_service import AuditService
 from app.services.auto_evidence_service import (
     compute_overall_compliance,
     discover_evidence_for_clause,
@@ -48,14 +49,22 @@ def list_standards(
     company_id: int = Depends(get_current_company_id),
 ):
     """List all QMS standards with compliance summary counts."""
-    query = db.query(QMSStandard).filter(QMSStandard.company_id == company_id)
+    query = db.query(QMSStandard).filter(QMSStandard.company_id == company_id, QMSStandard.is_deleted == False)
     if active_only:
         query = query.filter(QMSStandard.is_active == True)
 
     standards = query.order_by(QMSStandard.name).all()
     results = []
     for std in standards:
-        clauses = db.query(QMSClause).filter(QMSClause.standard_id == std.id, QMSClause.company_id == company_id).all()
+        clauses = (
+            db.query(QMSClause)
+            .filter(
+                QMSClause.standard_id == std.id,
+                QMSClause.company_id == company_id,
+                QMSClause.is_deleted == False,
+            )
+            .all()
+        )
         statuses = [c.compliance_status for c in clauses]
         results.append(
             QMSStandardListResponse(
@@ -82,6 +91,7 @@ def create_standard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Create a new QMS standard."""
     standard = QMSStandard(
@@ -90,6 +100,9 @@ def create_standard(
     )
     standard.company_id = company_id
     db.add(standard)
+    db.flush()  # assign PK without committing so the audit row carries resource_id
+
+    audit.log_create("qms_standard", standard.id, standard.name, new_values=standard)
     db.commit()
     db.refresh(standard)
     return standard
@@ -102,12 +115,21 @@ async def upload_pdf_and_extract_clauses(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Upload a QMS standard PDF (quality manual, AS9100D, ISO 9001, etc.)
     and automatically extract all clauses using AI.
     """
-    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id).first()
+    standard = (
+        db.query(QMSStandard)
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
@@ -241,6 +263,15 @@ Return ONLY a valid JSON array. No markdown, no explanations."""
         db.add(clause)
         clauses.append(clause)
 
+    db.flush()  # assign clause PKs without committing
+
+    audit.log_create(
+        "qms_standard",
+        standard.id,
+        standard.name,
+        description=f"Extracted {len(clauses)} clauses from PDF",
+    )
+
     db.commit()
     for c in clauses:
         db.refresh(c)
@@ -263,13 +294,24 @@ def get_audit_readiness(
 ):
     """Get audit readiness summary across all active standards."""
     active_standards = (
-        db.query(QMSStandard).filter(QMSStandard.is_active == True, QMSStandard.company_id == company_id).count()
+        db.query(QMSStandard)
+        .filter(
+            QMSStandard.is_active == True,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .count()
     )
 
     clauses = (
         db.query(QMSClause)
         .join(QMSStandard)
-        .filter(QMSStandard.is_active == True, QMSClause.company_id == company_id)
+        .filter(
+            QMSStandard.is_active == True,
+            QMSStandard.is_deleted == False,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+        )
         .all()
     )
 
@@ -288,7 +330,13 @@ def get_audit_readiness(
         db.query(QMSClauseEvidence)
         .join(QMSClause)
         .join(QMSStandard)
-        .filter(QMSStandard.is_active == True, QMSClauseEvidence.company_id == company_id)
+        .filter(
+            QMSStandard.is_active == True,
+            QMSStandard.is_deleted == False,
+            QMSClause.is_deleted == False,
+            QMSClauseEvidence.company_id == company_id,
+            QMSClauseEvidence.is_deleted == False,
+        )
         .count()
     )
     verified_evidence = (
@@ -297,7 +345,10 @@ def get_audit_readiness(
         .join(QMSStandard)
         .filter(
             QMSStandard.is_active == True,
+            QMSStandard.is_deleted == False,
+            QMSClause.is_deleted == False,
             QMSClauseEvidence.company_id == company_id,
+            QMSClauseEvidence.is_deleted == False,
             QMSClauseEvidence.is_verified == True,
         )
         .count()
@@ -309,7 +360,9 @@ def get_audit_readiness(
         .join(QMSStandard)
         .filter(
             QMSStandard.is_active == True,
+            QMSStandard.is_deleted == False,
             QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
             QMSClause.next_review_date != None,
             QMSClause.next_review_date < now,
         )
@@ -342,8 +395,17 @@ def get_standard(
     """Get a QMS standard with all its clauses and evidence."""
     standard = (
         db.query(QMSStandard)
-        .options(joinedload(QMSStandard.clauses).joinedload(QMSClause.evidence_links))
-        .filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id)
+        .options(
+            joinedload(QMSStandard.clauses).joinedload(QMSClause.evidence_links),
+            # Exclude soft-deleted clauses/evidence from the eager-loaded nested payload.
+            with_loader_criteria(QMSClause, QMSClause.is_deleted == False),
+            with_loader_criteria(QMSClauseEvidence, QMSClauseEvidence.is_deleted == False),
+        )
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
         .first()
     )
     if not standard:
@@ -358,15 +420,27 @@ def update_standard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update a QMS standard."""
-    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id).first()
+    standard = (
+        db.query(QMSStandard)
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
+
+    old_values = {c.key: getattr(standard, c.key) for c in standard.__table__.columns}
 
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(standard, key, value)
 
+    audit.log_update("qms_standard", standard.id, standard.name, old_values=old_values, new_values=standard)
     db.commit()
     db.refresh(standard)
     return standard
@@ -378,12 +452,23 @@ def delete_standard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Delete a QMS standard and all its clauses/evidence (Admin only)."""
-    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id).first()
+    standard = (
+        db.query(QMSStandard)
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
-    db.delete(standard)
+
+    audit.log_delete("qms_standard", standard.id, standard.name, old_values=standard, soft_delete=True)
+    standard.soft_delete(current_user.id)
     db.commit()
 
 
@@ -400,8 +485,19 @@ def list_clauses(
     """List all clauses for a standard (flat list, use parent_clause_id for tree)."""
     clauses = (
         db.query(QMSClause)
-        .options(joinedload(QMSClause.evidence_links))
-        .filter(QMSClause.standard_id == standard_id, QMSClause.company_id == company_id)
+        .options(
+            joinedload(QMSClause.evidence_links),
+            # Exclude soft-deleted evidence and nested sub-clauses from the payload.
+            # QMSClauseResponse serializes the self-referential `sub_clauses` backref,
+            # which would otherwise lazy-load soft-deleted child clauses unfiltered.
+            with_loader_criteria(QMSClause, QMSClause.is_deleted == False),
+            with_loader_criteria(QMSClauseEvidence, QMSClauseEvidence.is_deleted == False),
+        )
+        .filter(
+            QMSClause.standard_id == standard_id,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+        )
         .order_by(QMSClause.sort_order, QMSClause.clause_number)
         .all()
     )
@@ -415,14 +511,26 @@ def create_clause(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Add a clause to a standard."""
-    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id).first()
+    standard = (
+        db.query(QMSStandard)
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
     clause = QMSClause(standard_id=standard_id, company_id=company_id, **data.model_dump())
     db.add(clause)
+    db.flush()  # assign PK without committing so the audit row carries resource_id
+
+    audit.log_create("qms_clause", clause.id, clause.clause_number, new_values=clause)
     db.commit()
     db.refresh(clause)
     return clause
@@ -435,9 +543,18 @@ def bulk_create_clauses(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Bulk-import clauses for a standard (e.g., from a parsed document)."""
-    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id).first()
+    standard = (
+        db.query(QMSStandard)
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
@@ -452,6 +569,15 @@ def bulk_create_clauses(
         db.add(clause)
         clauses.append(clause)
 
+    db.flush()  # assign clause PKs without committing
+
+    audit.log_create(
+        "qms_standard",
+        standard.id,
+        standard.name,
+        description=f"Bulk-imported {len(clauses)} clauses",
+    )
+
     db.commit()
     for c in clauses:
         db.refresh(c)
@@ -465,11 +591,23 @@ def update_clause(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update a clause, including compliance status assessment."""
-    clause = db.query(QMSClause).filter(QMSClause.id == clause_id, QMSClause.company_id == company_id).first()
+    clause = (
+        db.query(QMSClause)
+        .filter(
+            QMSClause.id == clause_id,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+        )
+        .first()
+    )
     if not clause:
         raise HTTPException(status_code=404, detail="Clause not found")
+
+    old_values = {c.key: getattr(clause, c.key) for c in clause.__table__.columns}
+    old_status = clause.compliance_status
 
     update_data = data.model_dump(exclude_unset=True)
 
@@ -480,6 +618,10 @@ def update_clause(
 
     for key, value in update_data.items():
         setattr(clause, key, value)
+
+    audit.log_update("qms_clause", clause.id, clause.clause_number, old_values=old_values, new_values=clause)
+    if "compliance_status" in update_data and clause.compliance_status != old_status:
+        audit.log_status_change("qms_clause", clause.id, clause.clause_number, old_status, clause.compliance_status)
 
     db.commit()
     db.refresh(clause)
@@ -492,12 +634,23 @@ def delete_clause(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Delete a clause and its evidence links."""
-    clause = db.query(QMSClause).filter(QMSClause.id == clause_id, QMSClause.company_id == company_id).first()
+    clause = (
+        db.query(QMSClause)
+        .filter(
+            QMSClause.id == clause_id,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+        )
+        .first()
+    )
     if not clause:
         raise HTTPException(status_code=404, detail="Clause not found")
-    db.delete(clause)
+
+    audit.log_delete("qms_clause", clause.id, clause.clause_number, old_values=clause, soft_delete=True)
+    clause.soft_delete(current_user.id)
     db.commit()
 
 
@@ -512,7 +665,15 @@ def get_clause_auto_evidence(
     company_id: int = Depends(get_current_company_id),
 ):
     """Discover live ERP/MES evidence for a single clause."""
-    clause = db.query(QMSClause).filter(QMSClause.id == clause_id, QMSClause.company_id == company_id).first()
+    clause = (
+        db.query(QMSClause)
+        .filter(
+            QMSClause.id == clause_id,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+        )
+        .first()
+    )
     if not clause:
         raise HTTPException(status_code=404, detail="Clause not found")
 
@@ -536,16 +697,33 @@ def auto_link_standard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Run auto-discovery for ALL clauses in a standard and persist evidence links.
     Creates or updates QMSClauseEvidence records with is_auto_linked=True.
     """
-    standard = db.query(QMSStandard).filter(QMSStandard.id == standard_id, QMSStandard.company_id == company_id).first()
+    standard = (
+        db.query(QMSStandard)
+        .filter(
+            QMSStandard.id == standard_id,
+            QMSStandard.company_id == company_id,
+            QMSStandard.is_deleted == False,
+        )
+        .first()
+    )
     if not standard:
         raise HTTPException(status_code=404, detail="QMS standard not found")
 
-    clauses = db.query(QMSClause).filter(QMSClause.standard_id == standard_id, QMSClause.company_id == company_id).all()
+    clauses = (
+        db.query(QMSClause)
+        .filter(
+            QMSClause.standard_id == standard_id,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+        )
+        .all()
+    )
 
     now = datetime.utcnow()
     total_created = 0
@@ -571,6 +749,7 @@ def auto_link_standard(
                 .filter(
                     QMSClauseEvidence.clause_id == clause.id,
                     QMSClauseEvidence.company_id == company_id,
+                    QMSClauseEvidence.is_deleted == False,
                     QMSClauseEvidence.is_auto_linked == True,
                     QMSClauseEvidence.auto_link_query == rule_id,
                 )
@@ -604,6 +783,15 @@ def auto_link_standard(
                 db.add(evidence)
                 total_created += 1
 
+    db.flush()  # assign any new evidence PKs without committing
+
+    audit.log_create(
+        "qms_standard",
+        standard.id,
+        standard.name,
+        description=f"Auto-linked evidence: {total_created} created, {total_updated} updated",
+    )
+
     db.commit()
 
     logger.info(
@@ -634,9 +822,18 @@ def add_evidence(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Link evidence to a clause."""
-    clause = db.query(QMSClause).filter(QMSClause.id == clause_id, QMSClause.company_id == company_id).first()
+    clause = (
+        db.query(QMSClause)
+        .filter(
+            QMSClause.id == clause_id,
+            QMSClause.company_id == company_id,
+            QMSClause.is_deleted == False,
+        )
+        .first()
+    )
     if not clause:
         raise HTTPException(status_code=404, detail="Clause not found")
 
@@ -647,6 +844,9 @@ def add_evidence(
         created_by=current_user.id,
     )
     db.add(evidence)
+    db.flush()  # assign PK without committing so the audit row carries resource_id
+
+    audit.log_create("qms_clause_evidence", evidence.id, evidence.title, new_values=evidence)
     db.commit()
     db.refresh(evidence)
     return evidence
@@ -659,15 +859,22 @@ def update_evidence(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update evidence, including verification."""
     evidence = (
         db.query(QMSClauseEvidence)
-        .filter(QMSClauseEvidence.id == evidence_id, QMSClauseEvidence.company_id == company_id)
+        .filter(
+            QMSClauseEvidence.id == evidence_id,
+            QMSClauseEvidence.company_id == company_id,
+            QMSClauseEvidence.is_deleted == False,
+        )
         .first()
     )
     if not evidence:
         raise HTTPException(status_code=404, detail="Evidence not found")
+
+    old_values = {c.key: getattr(evidence, c.key) for c in evidence.__table__.columns}
 
     update_data = data.model_dump(exclude_unset=True)
 
@@ -679,6 +886,7 @@ def update_evidence(
     for key, value in update_data.items():
         setattr(evidence, key, value)
 
+    audit.log_update("qms_clause_evidence", evidence.id, evidence.title, old_values=old_values, new_values=evidence)
     db.commit()
     db.refresh(evidence)
     return evidence
@@ -690,14 +898,21 @@ def delete_evidence(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Remove an evidence link."""
     evidence = (
         db.query(QMSClauseEvidence)
-        .filter(QMSClauseEvidence.id == evidence_id, QMSClauseEvidence.company_id == company_id)
+        .filter(
+            QMSClauseEvidence.id == evidence_id,
+            QMSClauseEvidence.company_id == company_id,
+            QMSClauseEvidence.is_deleted == False,
+        )
         .first()
     )
     if not evidence:
         raise HTTPException(status_code=404, detail="Evidence not found")
-    db.delete(evidence)
+
+    audit.log_delete("qms_clause_evidence", evidence.id, evidence.title, old_values=evidence, soft_delete=True)
+    evidence.soft_delete(current_user.id)
     db.commit()

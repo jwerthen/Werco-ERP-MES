@@ -4,10 +4,10 @@ from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, T
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
-from app.db.mixins import TenantMixin
+from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
-class QMSStandard(Base, TenantMixin):
+class QMSStandard(Base, SoftDeleteMixin, TenantMixin):
     """
     QMS Standard document (e.g., AS9100D, ISO 9001:2015, internal Quality Manual).
     Stores the top-level standard with its clauses for audit readiness mapping.
@@ -39,7 +39,7 @@ class QMSStandard(Base, TenantMixin):
     document = relationship("Document")
 
 
-class QMSClause(Base, TenantMixin):
+class QMSClause(Base, SoftDeleteMixin, TenantMixin):
     """
     Individual clause/requirement within a QMS standard.
     Hierarchical structure supports sub-clauses (e.g., 8.5, 8.5.1, 8.5.2).
@@ -75,7 +75,7 @@ class QMSClause(Base, TenantMixin):
     evidence_links = relationship("QMSClauseEvidence", back_populates="clause", cascade="all, delete-orphan")
 
 
-class QMSClauseEvidence(Base, TenantMixin):
+class QMSClauseEvidence(Base, SoftDeleteMixin, TenantMixin):
     """
     Links a QMS clause to evidence within the system (documents, modules, records).
     This is the key table that makes audit preparation seamless — it maps each
