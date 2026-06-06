@@ -25,7 +25,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
-from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
