@@ -32,7 +32,7 @@ Triggered on: Push to `main` or `develop`
 | Frontend Lint | ESLint, TypeScript | - |
 | Frontend Tests | Jest tests | - |
 | Build | Docker images | All lint/test jobs |
-| Security Scan | Trivy, npm audit, safety | Build |
+| Security Scan | Trivy, npm audit, pip-audit | Build |
 | Deploy Staging | Railway deployment | Security (develop branch) |
 | Deploy Production | Railway deployment | Security (main branch) |
 
@@ -188,7 +188,7 @@ npm run build
 
 Security scans may show warnings that don't fail the build:
 - `npm audit` warnings for dev dependencies
-- `safety check` for Python packages
+- `pip-audit -r requirements.txt -r requirements-dev.txt` for Python packages (scoped to the app's dependency set)
 
 Review these periodically and update dependencies.
 

@@ -15,7 +15,7 @@ mypy==1.19.1
 flake8==7.3.0
 isort==7.0.0
 bandit==1.9.3
-safety==3.7.0
+pip-audit==2.10.0  # dependency CVE scan (PyPA/OSV); replaces deprecated `safety check`
 
 # Pre-commit Hooks
 pre-commit==4.5.1

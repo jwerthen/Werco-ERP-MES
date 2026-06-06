@@ -228,17 +228,31 @@ jobs:
         working-directory: ./frontend
         run: npm audit --audit-level=high
 
-      - name: Run safety check (Backend)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+        # No `cache: 'pip'` here: this job has no defaults.working-directory, so
+        # setup-python would resolve the pip-cache hash glob from the repo root
+        # (no requirements file there) and fail the step. The step only installs
+        # pip-audit anyway, so a pip cache buys nothing.
+
+      - name: Run pip-audit (Backend dependency scan)
         working-directory: ./backend
-        # Advisory only (continue-on-error): the free `safety` advisory DB is a
+        # Scans the APP's resolved dependency tree (`-r` requirements files), not
+        # the runner's ambient system Python. The previous `safety check` (no -r)
+        # scanned the runner image's pre-installed packages + safety's own deps,
+        # producing dozens of phantom advisories unrelated to this app.
+        #
+        # Advisory only (continue-on-error): the public advisory DB is a
         # daily-moving target, so this gate is informational rather than blocking
         # (a hard gate would flap red on every unrelated PR). Backend dependency
-        # CVEs are remediated as ongoing security hygiene under a dedicated task.
+        # CVEs are remediated as ongoing security hygiene.
         # See docs/SECURITY_ADVISORY_SUPPRESSIONS.md.
         continue-on-error: true
         run: |
-          pip install safety
-          safety check
+          pip install pip-audit==2.10.0
+          pip-audit -r requirements.txt -r requirements-dev.txt
 
   deploy-staging:
     name: Deploy to Staging
