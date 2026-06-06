@@ -10,7 +10,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies (production only for smaller build)
-RUN npm ci --legacy-peer-deps
+RUN npm ci
 
 # Force the build layer to refresh when deployment caching gets sticky.
 ARG CACHEBUST=20260304-live-dashboard-1
