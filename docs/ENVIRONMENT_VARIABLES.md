@@ -94,6 +94,39 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 CORS_ORIGINS=https://erp.werco.com,https://api.werco.com
 ```
 
+### Trusted Hosts (HTTP Host header)
+
+`TrustedHostMiddleware` validates the incoming HTTP `Host` header against an allowlist
+and rejects anything else with **HTTP 400** — defense-in-depth against Host-header
+poisoning (the Starlette CVE-2026-48710 class), which matters here because middleware
+keys security decisions off `request.url.path` (CSRF exemptions, rate-limit selection,
+the read-only platform-admin write guard).
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ALLOWED_HOSTS` | Yes** | `*` | Comma-separated allowlist of `Host` values the API serves. `*` allows any host (validation **disabled** — dev only). Supports exact hosts (`api.werco.com`) and wildcard subdomains (`*.werco.com`); a port in the request `Host` is ignored when matching |
+
+> **\*\* Production:** the default `*` disables Host validation (the app logs a startup
+> warning when `ENVIRONMENT=production` and `ALLOWED_HOSTS=*`). **Set `ALLOWED_HOSTS` to
+> the API's real hostnames in production** to enable it. A wildcard subdomain matches
+> subdomains only, not the apex (`*.werco.com` does not match `werco.com`). `ALLOWED_HOSTS`
+> also governs **WebSocket** upgrades, so the public host the SPA connects to must be listed
+> or real-time updates silently fail. A missing/empty `Host` is also rejected with `400`.
+>
+> **⚠️ When you lock it down, you MUST also include the health-check probe hosts — otherwise
+> the deploy's own health checks return `400`, the container is marked unhealthy, and the
+> new release never goes live:**
+> - **`localhost`** — the container `HEALTHCHECK` (`Dockerfile`, `Dockerfile.prod`, `docker-compose.prod.yml`) probes `http://localhost:8000/health…`, sending `Host: localhost`.
+> - **`healthcheck.railway.app`** — Railway's health-check probe (the backend sets `healthcheckPath="/health"` in `railway.toml`). It is **not** covered by `*.up.railway.app` (different domain) — list it explicitly, or the deploy fails its health check.
+> - The Railway public domain (`*.up.railway.app`) and/or your mapped custom domain — how clients actually reach the API.
+>
+> (The nginx `/health` location forwards the real client `Host`, so the `backend` upstream name does **not** need allowlisting.)
+
+**Production Example (Railway):**
+```bash
+ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.app,localhost
+```
+
 ### Application
 
 | Variable | Required | Default | Description |
@@ -241,6 +274,7 @@ Set these manually in Railway dashboard:
 - `SECRET_KEY` - Generate a secure random key
 - `REFRESH_TOKEN_SECRET_KEY` - Different secure random key
 - `CORS_ORIGINS` - Your frontend URL(s)
+- `ALLOWED_HOSTS` - Comma-separated hostnames the API serves (enables Host-header validation; see [Trusted Hosts](#trusted-hosts-http-host-header)). On Railway you **must** include `healthcheck.railway.app` and `localhost` (the health-check probes) alongside your public domain / `*.up.railway.app`, or the deploy's health check returns `400` and the release never goes live
 - `REACT_APP_API_URL` - Your backend URL (for frontend service)
 
 ## Security Best Practices
@@ -251,6 +285,7 @@ Set these manually in Railway dashboard:
 4. **Rotate secrets periodically** - Especially after team member departures
 5. **Use environment-specific CORS** - Don't use `*` in production
 6. **Disable DEBUG in production** - Set `DEBUG=false`
+7. **Set `ALLOWED_HOSTS` in production** - Lock the Host-header allowlist to your real hostnames; don't leave it at `*`
 
 ## Generating Secrets
 

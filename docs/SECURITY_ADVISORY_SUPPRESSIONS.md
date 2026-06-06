@@ -55,6 +55,14 @@ database had missed; both are fixed:
   required bumping **FastAPI 0.128.4 → 0.136.3**, because FastAPI only dropped its
   `starlette<1.0.0` cap at 0.133.0 (0.134.0+ requires `starlette>=0.46.0`).
   `starlette==1.2.1` is now pinned explicitly in `requirements.txt`.
+  - **Application-level defense-in-depth (added on top of the upgrade):**
+    `TrustedHostMiddleware` is registered **outermost** in `app/main.py` with an
+    explicit `Host`-header allowlist via the `ALLOWED_HOSTS` setting (default `*`
+    = validation disabled for dev; set explicit hosts in production). A request
+    whose `Host` is not allowlisted is rejected with **HTTP 400** before any
+    path-based security logic (CSRF exemptions, rate-limit selection, the
+    read-only platform-admin write guard) runs. See
+    [Trusted Hosts](ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header).
 
 Validation: full backend suite **388 passed**, mypy clean (194 files), app boots,
 and `pip-audit` on the resolved environment reports **"No known vulnerabilities

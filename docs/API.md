@@ -503,6 +503,13 @@ Cross-Origin Resource Sharing is configured to allow requests from:
 - Development: `http://localhost:3000`, `http://localhost:8000`
 - Production: Your configured frontend domain
 
+## Trusted Hosts
+
+When `ALLOWED_HOSTS` is configured (production), a request whose HTTP `Host`
+header is not on the allowlist is rejected with **HTTP 400** before any route
+runs. The default `*` allows any host (validation disabled — dev). See
+[Trusted Hosts](ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header).
+
 ## Health Check
 
 ```http
@@ -526,7 +533,7 @@ Response:
 | 200 | Success |
 | 201 | Created |
 | 204 | No Content |
-| 400 | Bad Request |
+| 400 | Bad Request (also returned for a `Host` header not on the `ALLOWED_HOSTS` allowlist) |
 | 401 | Unauthorized |
 | 403 | Forbidden |
 | 404 | Not Found |

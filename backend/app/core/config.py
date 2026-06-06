@@ -297,6 +297,23 @@ class Settings(BaseSettings):
             validated.append(origin)
         return validated
 
+    # Trusted Hosts (HTTP Host-header allowlist) — defense-in-depth against Host-header
+    # poisoning (the Starlette CVE-2026-48710 class). Default "*" allows any Host for dev
+    # convenience; LOCK THIS DOWN IN PRODUCTION to the API's real hostnames. When you do,
+    # you MUST also include the health-check probe hosts or the deploy's health checks get a
+    # 400: "localhost" (container HEALTHCHECK) and, on Railway, "healthcheck.railway.app".
+    # e.g. ALLOWED_HOSTS="api.werco.com,erp.werco.com,localhost,healthcheck.railway.app".
+    # An unexpected Host is otherwise only mitigated by Starlette's URL parsing; an explicit
+    # allowlist rejects it with HTTP 400. Supports exact hosts and "*.example.com" wildcard
+    # subdomains (a wildcard does NOT match the apex). Enforced by TrustedHostMiddleware in
+    # app/main.py. See docs/ENVIRONMENT_VARIABLES.md.
+    ALLOWED_HOSTS: str = "*"
+
+    @property
+    def allowed_hosts_list(self) -> List[str]:
+        hosts = [h.strip() for h in self.ALLOWED_HOSTS.split(",") if h.strip()]
+        return hosts or ["*"]
+
     # File Storage
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""

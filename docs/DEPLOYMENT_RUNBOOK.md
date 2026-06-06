@@ -53,6 +53,7 @@ curl https://werco-api-production.up.railway.app/health/ready
 | `SECRET_KEY` | JWT signing key (64+ chars) | Yes |
 | `DATABASE_URL` | PostgreSQL connection | Auto (Railway) |
 | `CORS_ORIGINS` | Frontend URL(s) | Yes |
+| `ALLOWED_HOSTS` | HTTP `Host`-header allowlist. Default `*` disables validation; lock to your real hostnames in prod. On Railway **must** include `healthcheck.railway.app` and `localhost` (health-check probes) or the deploy fails its health check — see [Trusted Hosts](ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header) | Recommended |
 | `ENVIRONMENT` | production/staging/development | Yes |
 | `SENTRY_DSN` | Error tracking | Recommended |
 
@@ -526,6 +527,10 @@ REFRESH_TOKEN_SECRET_KEY=<64-char-random-string>
 ACCESS_TOKEN_EXPIRE_MINUTES=15
 REFRESH_TOKEN_EXPIRE_DAYS=7
 SESSION_ABSOLUTE_TIMEOUT_HOURS=24
+# Host-header allowlist; default "*" disables validation. Must include the
+# health-check probe hosts (healthcheck.railway.app, localhost) or the deploy
+# fails its health check. See docs/ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header
+ALLOWED_HOSTS=werco-api-production.up.railway.app,*.up.railway.app,healthcheck.railway.app,localhost
 
 # Rate Limiting
 RATE_LIMIT_ENABLED=true
