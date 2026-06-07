@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.core.realtime import safe_broadcast
@@ -58,6 +59,29 @@ from app.services.work_order_state_service import (
 )
 
 router = APIRouter()
+
+
+def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder]) -> None:
+    """Reconcile operation rows from completion evidence and commit, tolerating
+    a concurrent-write conflict on a READ/list path.
+
+    ``reconcile_work_orders_from_completion_evidence`` mutates version-mapped
+    operation rows; committing that mutation can now raise ``StaleDataError``
+    when another transaction bumped the same rows' version first. On a read,
+    that conflict is BENIGN -- the reconcile is idempotent and the other writer
+    already persisted the truth -- so we roll the reconcile back (NOT a 409) and
+    let the caller serve the read against the freshest committed state. The read
+    must still return 200; never let this turn a GET into a 500.
+    """
+    try:
+        if reconcile_work_orders_from_completion_evidence(db, work_orders):
+            db.commit()
+    except StaleDataError:
+        # Another writer won the race and already committed the reconciled
+        # truth. Drop our redundant mutation and serve the read with the
+        # freshest data; expire so subsequent reads reload from the DB.
+        db.rollback()
+        db.expire_all()
 
 
 class WorkOrderPriorityUpdate(BaseModel):
@@ -445,8 +469,10 @@ def list_work_orders(
         )
 
     work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date).offset(skip).limit(limit).all()
-    if reconcile_work_orders_from_completion_evidence(db, work_orders):
-        db.commit()
+    # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
+    # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
+    # so it must NOT 500 the list -- _reconcile_and_commit swallows StaleDataError.
+    _reconcile_and_commit(db, work_orders)
 
     result = []
     for wo in work_orders:
@@ -762,8 +788,33 @@ def create_work_order(
         .filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id)
         .first()
     )
-    _reconcile_operation_component_quantities(db, work_order, company_id)
-    reconcile_work_orders_from_completion_evidence(db, [work_order])
+    # The WORK ORDER itself is already durably committed above. The reconcile
+    # below mutates version-mapped operation rows and could (in theory) hit a
+    # concurrent-version conflict on its commit; guard it in its OWN commit so a
+    # StaleDataError rolls back ONLY the reconcile -- it must NOT drop the
+    # creation audit row, which is committed atomically in the separate terminal
+    # commit below. (For a brand-new WO the completion-evidence reconcile is a
+    # no-op; this guard is defensive and keeps the POST off the 500 path.)
+    try:
+        _reconcile_operation_component_quantities(db, work_order, company_id)
+        # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
+        reconcile_work_orders_from_completion_evidence(db, [work_order])
+        db.commit()
+    except StaleDataError:
+        db.rollback()
+        db.expire_all()
+        # Re-load the freshest committed state for the audit snapshot below.
+        work_order = (
+            db.query(WorkOrder)
+            .options(
+                joinedload(WorkOrder.part),
+                selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
+                selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
+                selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
+            )
+            .filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id)
+            .first()
+        )
 
     # Audit log for work order creation. Logged BEFORE the terminal commit so the audit
     # row commits atomically with the work order — AuditService.log() only flushes, and
@@ -792,6 +843,7 @@ def create_work_order(
             "work_order_id": work_order.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
 
     return work_order
@@ -1045,6 +1097,7 @@ async def import_laser_nest_package(
             "event": "laser_nest_package_imported",
             "status": child_work_order.status.value,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1053,6 +1106,7 @@ async def import_laser_nest_package(
             "work_order_id": child_work_order.id,
             "parent_work_order_id": parent_work_order.id,
         },
+        company_id=company_id,
     )
 
     return {
@@ -1080,7 +1134,11 @@ def get_work_order(
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
         )
-        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
 
@@ -1095,10 +1153,18 @@ def get_work_order(
     work_order.estimated_cost = work_order.estimated_cost or 0
     work_order.actual_cost = work_order.actual_cost or 0
 
-    if _reconcile_operation_component_quantities(db, work_order, company_id):
-        db.commit()
-    if reconcile_work_orders_from_completion_evidence(db, [work_order]):
-        db.commit()
+    # Both reconcile-on-read commits below mutate version-mapped operation rows;
+    # a concurrent-write conflict is benign on a GET (idempotent), so swallow
+    # StaleDataError and serve the read against the freshest committed state
+    # rather than 500'ing.
+    try:
+        if _reconcile_operation_component_quantities(db, work_order, company_id):
+            db.commit()
+    except StaleDataError:
+        db.rollback()
+        db.expire_all()
+    # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
+    _reconcile_and_commit(db, [work_order])
     _enrich_work_order_operations(work_order)
 
     return work_order
@@ -1182,6 +1248,7 @@ def update_work_order(
             "event": "work_order_updated",
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1190,6 +1257,7 @@ def update_work_order(
             "work_order_id": work_order.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
 
     return work_order
@@ -1255,6 +1323,7 @@ def update_work_order_priority(
             "priority": work_order.priority,
             "reason": reason,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1264,6 +1333,7 @@ def update_work_order_priority(
             "priority": work_order.priority,
             "reason": reason,
         },
+        company_id=company_id,
     )
 
     work_center_ids = list(
@@ -1283,6 +1353,7 @@ def update_work_order_priority(
                 "priority": work_order.priority,
                 "reason": reason,
             },
+            company_id=company_id,
         )
 
     return {
@@ -1343,6 +1414,7 @@ def delete_work_order(
                 "work_order_id": wo_id,
                 "status": "deleted",
             },
+            company_id=company_id,
         )
         safe_broadcast(
             broadcast_work_order_update,
@@ -1351,6 +1423,7 @@ def delete_work_order(
                 "event": "work_order_deleted",
                 "status": "deleted",
             },
+            company_id=company_id,
         )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -1368,6 +1441,7 @@ def delete_work_order(
             "work_order_id": wo_id,
             "status": "deleted",
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_work_order_update,
@@ -1376,6 +1450,7 @@ def delete_work_order(
             "event": "work_order_deleted",
             "status": "deleted",
         },
+        company_id=company_id,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -1484,6 +1559,7 @@ def release_work_order(
             "event": "work_order_released",
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1492,6 +1568,7 @@ def release_work_order(
             "work_order_id": work_order.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
     for wc_id in work_center_ids:
         safe_broadcast(
@@ -1501,6 +1578,7 @@ def release_work_order(
                 "event": "work_order_released",
                 "work_order_id": work_order.id,
             },
+            company_id=company_id,
         )
     return work_order
 
@@ -1508,6 +1586,7 @@ def release_work_order(
 @router.post("/{work_order_id}/start")
 def start_work_order(
     work_order_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -1520,6 +1599,7 @@ def start_work_order(
     if work_order.status not in [WorkOrderStatus.RELEASED, WorkOrderStatus.ON_HOLD]:
         raise HTTPException(status_code=400, detail="Work order must be released or on-hold to start")
 
+    old_status = work_order.status.value if work_order.status else None
     work_order.status = WorkOrderStatus.IN_PROGRESS
     if not work_order.actual_start:
         work_order.actual_start = datetime.utcnow()
@@ -1532,6 +1612,17 @@ def start_work_order(
         event_type="work_order_started",
         payload={"actual_start": work_order.actual_start.isoformat() if work_order.actual_start else None},
     )
+
+    # Audit the status transition on the tamper-evident chain. Logged BEFORE the
+    # terminal commit so the audit row commits atomically with the status change.
+    db.flush()
+    AuditService(db, current_user, request).log_status_change(
+        resource_type="work_order",
+        resource_id=work_order.id,
+        resource_identifier=work_order.work_order_number,
+        old_status=old_status,
+        new_status=WorkOrderStatus.IN_PROGRESS.value,
+    )
     db.commit()
     safe_broadcast(
         broadcast_work_order_update,
@@ -1540,6 +1631,7 @@ def start_work_order(
             "event": "work_order_started",
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1548,6 +1640,7 @@ def start_work_order(
             "work_order_id": work_order.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
     return {"message": "Work order started"}
 
@@ -1626,6 +1719,7 @@ def get_material_requirements(
 @router.post("/{work_order_id}/complete")
 def complete_work_order(
     work_order_id: int,
+    request: Request,
     quantity_complete: float,
     quantity_scrapped: float = 0,
     db: Session = Depends(get_db),
@@ -1635,9 +1729,21 @@ def complete_work_order(
     company_id: int = Depends(get_current_company_id),
 ):
     """Complete a work order"""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
+    # SFI-1 / LOCK-1: lock the WO row before this privileged manual read-modify
+    # so two concurrent completers serialize instead of losing each other's
+    # quantity writes. Re-fetch under the lock, scoped to the active company.
+    work_order = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .with_for_update()
+        .first()
+    )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
+
+    old_status = work_order.status.value if work_order.status else None
+    old_quantity_complete = float(work_order.quantity_complete or 0)
+    old_quantity_scrapped = float(work_order.quantity_scrapped or 0)
 
     work_order.status = WorkOrderStatus.COMPLETE
     work_order.quantity_complete = quantity_complete
@@ -1652,7 +1758,38 @@ def complete_work_order(
         event_type="work_order_completed",
         payload={"quantity_complete": quantity_complete, "quantity_scrapped": quantity_scrapped},
     )
-    db.commit()
+
+    # Audit this privileged manual completion (status change + the quantities it set)
+    # on the tamper-evident chain. Logged BEFORE the terminal commit so the audit rows
+    # commit atomically with the status change.
+    db.flush()
+    audit = AuditService(db, current_user, request)
+    audit.log_status_change(
+        resource_type="work_order",
+        resource_id=work_order.id,
+        resource_identifier=work_order.work_order_number,
+        old_status=old_status,
+        new_status=WorkOrderStatus.COMPLETE.value,
+        description=f"Manually completed work order {work_order.work_order_number}",
+    )
+    audit.log_update(
+        resource_type="work_order",
+        resource_id=work_order.id,
+        resource_identifier=work_order.work_order_number,
+        old_values={"quantity_complete": old_quantity_complete, "quantity_scrapped": old_quantity_scrapped},
+        new_values={"quantity_complete": quantity_complete, "quantity_scrapped": quantity_scrapped},
+        description=f"Recorded completion quantities for work order {work_order.work_order_number}",
+    )
+    try:
+        db.commit()
+    except StaleDataError as exc:
+        # A concurrent completer committed a newer version of this WO between our
+        # locked read and this commit (version_id_col mismatch).
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This work order was modified concurrently. Refresh and retry the completion.",
+        ) from exc
     safe_broadcast(
         broadcast_work_order_update,
         work_order.id,
@@ -1660,6 +1797,7 @@ def complete_work_order(
             "event": "work_order_completed",
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1668,6 +1806,7 @@ def complete_work_order(
             "work_order_id": work_order.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
     return {"message": "Work order completed"}
 
@@ -1679,9 +1818,10 @@ def add_operation(
     operation_in: WorkOrderOperationCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Add an operation to a work order"""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
@@ -1700,9 +1840,14 @@ def update_operation(
     operation_in: WorkOrderOperationUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an operation"""
-    operation = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == operation_id).first()
+    operation = (
+        db.query(WorkOrderOperation)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
+        .first()
+    )
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
 
@@ -1717,12 +1862,18 @@ def update_operation(
 
 
 @router.post("/operations/{operation_id}/start")
-def start_operation(operation_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def start_operation(
+    operation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Start an operation"""
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
-        .filter(WorkOrderOperation.id == operation_id)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
         .first()
     )
     if not operation:
@@ -1742,16 +1893,51 @@ def start_operation(operation_id: int, db: Session = Depends(get_db), current_us
     ):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
 
+    old_operation_status = operation.status.value if operation.status else None
+    old_work_order_status = work_order.status.value if work_order.status else None
+
     operation.status = OperationStatus.IN_PROGRESS
     operation.actual_start = datetime.utcnow()
     operation.started_by = current_user.id
 
     # Also update work order status if needed
+    work_order_started = False
     if work_order.status == WorkOrderStatus.RELEASED:
         work_order.status = WorkOrderStatus.IN_PROGRESS
         work_order.actual_start = datetime.utcnow()
+        work_order_started = True
 
-    db.commit()
+    # Audit the status transitions on the tamper-evident chain. Logged BEFORE the
+    # terminal commit so the audit rows commit atomically with the status change.
+    db.flush()
+    audit = AuditService(db, current_user, request)
+    audit.log_status_change(
+        resource_type="work_order_operation",
+        resource_id=operation.id,
+        resource_identifier=operation.operation_number,
+        old_status=old_operation_status,
+        new_status=OperationStatus.IN_PROGRESS.value,
+        description=(f"Started operation {operation.operation_number} on WO {work_order.work_order_number}"),
+    )
+    if work_order_started:
+        audit.log_status_change(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            old_status=old_work_order_status,
+            new_status=WorkOrderStatus.IN_PROGRESS.value,
+        )
+
+    try:
+        db.commit()
+    except StaleDataError as exc:
+        # A concurrent writer bumped the operation/WO version between read and
+        # commit (version_id_col mismatch). Surface a clean 409, not a 500.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This operation was modified concurrently. Refresh and retry.",
+        ) from exc
     safe_broadcast(
         broadcast_work_order_update,
         work_order.id,
@@ -1760,6 +1946,7 @@ def start_operation(operation_id: int, db: Session = Depends(get_db), current_us
             "operation_id": operation.id,
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1768,6 +1955,7 @@ def start_operation(operation_id: int, db: Session = Depends(get_db), current_us
             "work_order_id": work_order.id,
             "operation_id": operation.id,
         },
+        company_id=company_id,
     )
     if operation.work_center_id:
         safe_broadcast(
@@ -1778,6 +1966,7 @@ def start_operation(operation_id: int, db: Session = Depends(get_db), current_us
                 "work_order_id": work_order.id,
                 "operation_id": operation.id,
             },
+            company_id=company_id,
         )
     return {"message": "Operation started"}
 
@@ -1785,22 +1974,54 @@ def start_operation(operation_id: int, db: Session = Depends(get_db), current_us
 @router.post("/operations/{operation_id}/complete")
 def complete_operation(
     operation_id: int,
+    request: Request,
     quantity_complete: float,
     quantity_scrapped: float = 0,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Complete an operation"""
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
-        .filter(WorkOrderOperation.id == operation_id)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
         .first()
     )
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
 
-    work_order = operation.work_order
+    # SFI-1: serialize concurrent completers on the office/admin op-complete path
+    # the same way the shop_floor twin does. Re-fetch the operation and its parent
+    # work order under SELECT ... FOR UPDATE (consistent lock order: OPERATION
+    # first, then WORK ORDER) so the over-completion guard AND the remaining-ops
+    # "WO COMPLETE" decision below run against the freshest committed rows. Both
+    # re-fetches stay scoped to the active company.
+    operation = (
+        db.query(WorkOrderOperation)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
+        .with_for_update()
+        .first()
+    )
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+
+    # Re-fetch the parent WO under a row lock, scoped to the active company and
+    # excluding soft-deleted WOs -- matching the shop_floor complete_operation
+    # twin (the safer default: never complete operations against a deleted WO).
+    work_order = None
+    if operation.work_order_id is not None:
+        work_order = (
+            db.query(WorkOrder)
+            .filter(
+                WorkOrder.id == operation.work_order_id,
+                WorkOrder.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+            )
+            .with_for_update()
+            .first()
+        )
+
     if work_order and has_incomplete_predecessors(
         db,
         operation.work_order_id,
@@ -1817,8 +2038,16 @@ def complete_operation(
     except WorkOrderStateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Re-checked under the lock so a concurrent completer that already flipped
+    # this op to COMPLETE is rejected here rather than losing its update.
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Operation is already complete")
+
+    # Capture pre-mutation statuses/quantities so transitions can be audited below.
+    old_operation_status = operation.status.value if operation.status else None
+    old_work_order_status = work_order.status.value if work_order and work_order.status else None
+    old_quantity_complete = float(operation.quantity_complete or 0)
+    work_order_completed = False
 
     if operation.status != OperationStatus.IN_PROGRESS:
         operation.status = OperationStatus.IN_PROGRESS
@@ -1841,7 +2070,8 @@ def complete_operation(
         operation.actual_end = datetime.utcnow()
         operation.completed_by = current_user.id
 
-    work_order = operation.work_order
+    # work_order is the row already locked above; don't re-derive it from the
+    # (unlocked, unscoped) relationship.
     affected_work_centers = {operation.work_center_id}
     if work_order and is_fully_complete:
         remaining_ops = (
@@ -1857,6 +2087,7 @@ def complete_operation(
         if remaining_ops == 0:
             work_order.status = WorkOrderStatus.COMPLETE
             work_order.actual_end = datetime.utcnow()
+            work_order_completed = True
             sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
         else:
             release_next_ready_operation(db, work_order, operation)
@@ -1882,7 +2113,52 @@ def complete_operation(
             work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
         )
 
-    db.commit()
+    # Audit completion transitions on the tamper-evident chain. This office/admin
+    # op-complete path previously emitted neither an OperationalEvent nor an audit
+    # row, unlike its shop_floor twin. Logged BEFORE the terminal commit so the
+    # audit rows commit atomically with the status change.
+    db.flush()
+    audit = AuditService(db, current_user, request)
+    if is_fully_complete:
+        audit.log_status_change(
+            resource_type="work_order_operation",
+            resource_id=operation.id,
+            resource_identifier=operation.operation_number,
+            old_status=old_operation_status,
+            new_status=OperationStatus.COMPLETE.value,
+            description=(
+                f"Completed operation {operation.operation_number}"
+                + (f" on WO {work_order.work_order_number}" if work_order else "")
+            ),
+        )
+    else:
+        audit.log_update(
+            resource_type="work_order_operation",
+            resource_id=operation.id,
+            resource_identifier=operation.operation_number,
+            old_values={"quantity_complete": old_quantity_complete},
+            new_values={"quantity_complete": quantity_complete, "quantity_scrapped": quantity_scrapped},
+            description=f"Updated operation {operation.operation_number} progress",
+        )
+    if work_order_completed and work_order:
+        audit.log_status_change(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            old_status=old_work_order_status,
+            new_status=WorkOrderStatus.COMPLETE.value,
+        )
+
+    try:
+        db.commit()
+    except StaleDataError as exc:
+        # A concurrent completer committed a newer version of the operation/WO
+        # between our locked read and this commit (version_id_col mismatch).
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This operation was modified concurrently. Refresh and retry the completion.",
+        ) from exc
     safe_broadcast(
         broadcast_work_order_update,
         work_order.id,
@@ -1892,6 +2168,7 @@ def complete_operation(
             "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
             "is_fully_complete": is_fully_complete,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -1901,6 +2178,7 @@ def complete_operation(
             "operation_id": operation.id,
             "is_fully_complete": is_fully_complete,
         },
+        company_id=company_id,
     )
     if operation.work_center_id:
         safe_broadcast(
@@ -1912,5 +2190,6 @@ def complete_operation(
                 "operation_id": operation.id,
                 "is_fully_complete": is_fully_complete,
             },
+            company_id=company_id,
         )
     return {"message": "Operation completed" if is_fully_complete else "Progress updated"}

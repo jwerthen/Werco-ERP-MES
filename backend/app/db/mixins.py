@@ -52,15 +52,21 @@ class SoftDeleteMixin:
 
 class OptimisticLockMixin:
     """
-    Mixin that adds optimistic locking support via version column.
+    Mixin that adds a ``version`` column for optimistic locking.
 
     Usage:
         class MyModel(Base, OptimisticLockMixin):
             __tablename__ = "my_table"
             ...
 
-    The version column auto-increments on each update when using
-    OptimisticLockService.update_with_lock()
+    NOTE: this mixin only declares the column; it intentionally does NOT set
+    ``__mapper_args__={'version_id_col': version}``. Enabling SQLAlchemy's native
+    version_id_col globally here would change commit behavior (StaleDataError on
+    concurrent writes) for every model that uses this mixin. Optimistic locking
+    is instead enabled per-model on the contended completion write path —
+    ``WorkOrderOperation`` and ``TimeEntry`` map ``version_id_col`` directly (see
+    those models). Other consumers of this mixin keep the column for
+    application-managed comparisons without SQLAlchemy enforcement.
     """
 
     @declared_attr

@@ -52,6 +52,29 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
 | POST | `/work-orders/{id}/complete` | Complete work order | Yes |
+| POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation | Yes |
+| POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
+| POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress) | Yes |
+
+> **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
+> endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
+> `/operations/{id}/complete`, `/operations`) and their shop-floor counterparts (see below) scope
+> every work-order / operation lookup to the caller's **active company** (`get_current_company_id`).
+> An id belonging to another tenant returns **404 before any mutation** (not 403, so a guessed id
+> can't be used to drive another company's operation or work order). State transitions on these
+> paths — operation/WO **start** and **complete**, manual `/work-orders/{id}/complete` (status +
+> the quantities it sets), and shipment-close — are recorded in the tamper-evident audit trail
+> (`GET /audit/`) in addition to the existing real-time operational events.
+>
+> **Concurrency on completion endpoints.** Operation/work-order **start** and **complete**
+> (`/operations/{id}/start`, `/operations/{id}/complete`, `/operations/{id}` update, and
+> `/work-orders/{id}/complete`) now enforce optimistic locking on the underlying operation / work
+> order row. A concurrent stale update returns **409 Conflict**
+> (`{"detail": "This … was modified concurrently. Refresh and retry…"}`) instead of silently losing
+> the update; the client should re-fetch and retry. The server also takes a row lock
+> (`SELECT … FOR UPDATE`) around the over-completion check so two simultaneous completions cannot
+> double-count quantity.
 
 #### Work Order Schema
 
@@ -177,7 +200,33 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | GET | `/shop-floor/my-active-job` | Get current user's active job | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation | Yes |
 | POST | `/shop-floor/clock-out/{id}` | Clock out with production data | Yes |
+| POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
+| POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
+| POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue | Yes |
+
+> **Tenant isolation on clock/operation endpoints.** Clock-in, clock-out, and the shop-floor
+> operation start/complete endpoints scope every operation, work-order, and `TimeEntry` lookup to
+> the caller's **active company** (`get_current_company_id`). A `time_entry_id` / `operation_id`
+> belonging to another tenant returns **404 before any mutation** — a guessed foreign id can no
+> longer drive another company's operation or work order to IN_PROGRESS / COMPLETE. When a
+> clock-out (or an operation/WO start or completion) flips an operation or work order to a terminal
+> status, that transition is written to the tamper-evident audit trail (`GET /audit/`) as well as
+> the existing real-time operational event.
+>
+> **Concurrency on clock/completion endpoints.** Clock-out, production, and operation start/complete
+> (`/clock-out/{id}`, `/operations/{id}/production`, `/operations/{id}/start`,
+> `/operations/{id}/complete`) take a row lock (`SELECT … FOR UPDATE`) around the over-completion
+> read-modify-write and enforce optimistic locking on the operation / time-entry row. A concurrent
+> stale update returns **409 Conflict** ("This … was modified concurrently. Refresh and retry…")
+> rather than losing the update.
+>
+> **Duplicate open clock-in is DB-enforced.** `/clock-in` (and operation `/start`, which opens a
+> time entry) is backed by a partial unique index
+> (`uq_open_time_entry ON time_entries(user_id, operation_id) WHERE clock_out IS NULL`): at most one
+> open time entry can exist per user + operation. A racing double clock-in is rejected with
+> **400 Bad Request** (`"You are already clocked in to this operation."`) instead of creating a
+> second open entry that would double-count production.
 
 #### Clock Out Schema
 
@@ -333,8 +382,18 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/inventory/` | List inventory items | Yes |
-| POST | `/inventory/adjust` | Adjust inventory | Yes |
+| POST | `/inventory/receive` | Receive inventory into stock | Yes |
+| POST | `/inventory/issue` | Issue inventory to a work order | Yes |
+| POST | `/inventory/transfer` | Transfer inventory between locations | Yes |
+| POST | `/inventory/adjust` | Adjust inventory | Admin / Manager / Supervisor |
 | GET | `/inventory/{part_id}` | Get inventory for part | Yes |
+
+> **Stock movements are audited.** Each of `/receive`, `/issue`, `/transfer`, and `/adjust` writes
+> tamper-evident audit rows (`GET /audit/`) — one for the `InventoryTransaction` and one per
+> stock-level change it produces (a transfer logs both the source decrement and the destination
+> increment) — flushed inside the same atomic transaction as the inventory write so the audit row
+> commits with the movement. The new `InventoryTransaction` rows are tenant-tagged with the active
+> `company_id`.
 
 ### Shipping
 
@@ -343,6 +402,10 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/shipping/orders/` | List shipping orders | Yes |
 | POST | `/shipping/orders/` | Create shipping order | Yes |
 | POST | `/shipping/orders/{id}/ship` | Mark as shipped | Yes |
+
+> **Shipment-close is audited.** Marking a shipment shipped closes its work order
+> (status → `CLOSED`); that terminal status change is recorded in the tamper-evident audit trail
+> (`GET /audit/`), flushed so the audit row commits atomically with the closure.
 
 ### Reports
 
@@ -413,6 +476,26 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > global sequence spanning every tenant, so its stats/issues (record counts, sequence ranges,
 > record ids) can't be scoped to a single company without leaking other tenants' data. A company
 > Admin's "are my records intact?" need is served by the per-record endpoint above.
+
+## Real-time Updates (WebSocket)
+
+Real-time work-order, dashboard, and shop-floor updates are delivered over WebSocket. **All three
+endpoints require a valid JWT**, passed as a `token` query parameter (the frontend's API client
+already attaches it). An unauthenticated or invalid-token connection is rejected with WebSocket
+close code **1008** (policy violation).
+
+| Endpoint | Purpose |
+|----------|---------|
+| `WS /ws/updates?token=<jwt>` | Dashboard and system-wide updates |
+| `WS /ws/shop-floor/{work_center_id}?token=<jwt>` | Shop-floor updates for one work center |
+| `WS /ws/work-orders/{work_order_id}?token=<jwt>` | Status updates for one work order |
+
+> **Tenant-scoped broadcasts.** Each connection is bound at connect time to the caller's **active
+> company** (resolved the same way as `get_current_company_id` — via the token's `cid` claim, with
+> a fallback to the user's own company for legacy tokens). Work-order / dashboard / shop-floor
+> completion broadcasts are delivered **only to that company's connections**, never globally, so a
+> client never sees another tenant's events. `/ws/updates` previously accepted unauthenticated
+> connections for general updates; that is no longer permitted (tenant isolation).
 
 ## Common Response Formats
 
@@ -537,6 +620,7 @@ Response:
 | 401 | Unauthorized |
 | 403 | Forbidden |
 | 404 | Not Found |
+| 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry) |
 | 422 | Validation Error |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error |

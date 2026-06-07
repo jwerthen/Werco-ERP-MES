@@ -275,6 +275,14 @@ alembic upgrade head
 
 After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 
+> **Keep new revision ids ≤ 32 characters.** On the `create_all → stamp → upgrade` bootstrap path
+> the `alembic_version.version_num` column is `varchar(32)`. Migration `014b_widen_alembic_version`
+> widens it (to `varchar(128)`), but `014b` is *stamped over*, not *run*, when the stamped baseline
+> is newer than it — so on a freshly bootstrapped DB the column stays `varchar(32)` and a revision id
+> longer than 32 chars fails to record (`value too long for type character varying(32)`). Until the
+> baseline is at or past `014b` on every target, keep revision ids to ≤ 32 chars (e.g.
+> `038_optimistic_lock_backfill`, `039_uq_open_time_entry`).
+
 ### Create a new migration
 ```bash
 cd backend
@@ -301,6 +309,33 @@ alembic downgrade -1
 ```bash
 alembic history
 ```
+
+### Concurrency-safety migrations (Batch 2 — completion-path hardening)
+
+Two migrations back the work-order-completion concurrency fixes (see
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 5 / Batch 2):
+
+- **`038_optimistic_lock_backfill`** — makes the `version` column on `work_order_operations` and
+  `time_entries` safe for the now-mapped `version_id_col` optimistic locking. It backfills
+  `version = 1 WHERE version IS NULL` (no data destroyed) and re-asserts `NOT NULL` +
+  `server_default '1'`. The column itself is owned by `004_add_optimistic_locking`; this migration
+  only normalizes data, so its `downgrade` is a deliberate no-op (it does not drop the column).
+  Idempotent and safe to re-run. Plain transactional DDL/DML — intentionally split from `039` so it
+  can run inside a transaction.
+
+- **`039_uq_open_time_entry`** — adds the partial unique index
+  `uq_open_time_entry ON time_entries (user_id, operation_id) WHERE clock_out IS NULL` (at most one
+  open clock-in per user + operation). Before building the index it runs a **non-destructive
+  pre-flight dedupe**: within each `(user_id, operation_id)` group of open rows it keeps the most
+  recent (`clock_in DESC, id DESC`) and **closes** the older ones by setting `clock_out = clock_in`
+  and `duration_hours = 0`. `quantity_produced` and the rows themselves are **preserved** (only the
+  duplicated *time* is zeroed; the parts were really made). The closed-row ids are printed to the
+  migration/deploy output (timestamped by the deploy) for AS9100D labor traceability — deliberately
+  **not** written to the tamper-evident `audit_log`. The index is built with
+  `CREATE INDEX CONCURRENTLY` inside an autocommit block (so it can't run in a transaction — hence
+  the split from `038`), and the `downgrade` drops it `CONCURRENTLY` too. Idempotent
+  (`IF NOT EXISTS` / inspector guard); Postgres-only (skipped on SQLite, where the app-level guard
+  still applies).
 
 ## API Documentation
 

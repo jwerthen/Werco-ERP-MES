@@ -106,6 +106,19 @@ class WorkOrderOperation(Base, TenantMixin):
     __tablename__ = "work_order_operations"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # Optimistic locking (Batch 2 / SFI-2 / LOCK-1). The ``version`` column was
+    # added at the DB level by migration ``004_add_optimistic_locking`` but was
+    # never mapped, leaving locking inert. We map it here (scoped to this
+    # completion-path model rather than the shared OptimisticLockMixin) so
+    # SQLAlchemy enforces ``version_id_col`` on UPDATE: a concurrent stale write
+    # to the same operation row raises StaleDataError, which the endpoint layer
+    # translates to HTTP 409. Requires every row to have a non-null version;
+    # migration 004 set server_default='1' and the Batch 2 migration backfills
+    # any residual NULLs and re-asserts NOT NULL + server_default.
+    version = Column(Integer, nullable=False, server_default="1", default=1)
+    __mapper_args__ = {"version_id_col": version}
+
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False)
     work_center_id = Column(Integer, ForeignKey("work_centers.id"), nullable=False)
 
