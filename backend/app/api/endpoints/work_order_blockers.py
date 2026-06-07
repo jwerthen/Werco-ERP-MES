@@ -3,7 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.realtime import safe_broadcast
 from app.core.websocket import broadcast_dashboard_update, broadcast_shop_floor_update, broadcast_work_order_update
 from app.db.database import get_db
@@ -15,6 +15,7 @@ from app.schemas.work_order_blocker import (
     WorkOrderBlockerResponse,
     WorkOrderBlockerUpdate,
 )
+from app.services.audit_service import AuditService
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 
 router = APIRouter()
@@ -112,12 +113,13 @@ def create_work_order_blocker(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Let an operator report why a job is blocked, including missing material."""
     service = WorkOrderBlockerService(db)
     try:
         blocker = service.create_blocker(
-            company_id=company_id, user=current_user, work_order_id=work_order_id, data=data
+            company_id=company_id, user=current_user, work_order_id=work_order_id, data=data, audit=audit
         )
         db.commit()
         db.refresh(blocker)
@@ -135,11 +137,14 @@ def update_work_order_blocker(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Acknowledge, assign, dismiss, or update a blocker without losing the original operator signal."""
     service = WorkOrderBlockerService(db)
     try:
-        blocker = service.update_blocker(company_id=company_id, user=current_user, blocker_id=blocker_id, data=data)
+        blocker = service.update_blocker(
+            company_id=company_id, user=current_user, blocker_id=blocker_id, data=data, audit=audit
+        )
         db.commit()
         db.refresh(blocker)
         _broadcast_blocker(blocker, "work_order_blocker_updated")
@@ -156,6 +161,7 @@ def resolve_work_order_blocker(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Resolve a blocker and release its operation if no other blockers remain."""
     service = WorkOrderBlockerService(db)
@@ -165,6 +171,7 @@ def resolve_work_order_blocker(
             user=current_user,
             blocker_id=blocker_id,
             resolution_note=data.resolution_note,
+            audit=audit,
         )
         db.commit()
         db.refresh(blocker)

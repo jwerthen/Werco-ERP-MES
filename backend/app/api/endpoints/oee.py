@@ -284,7 +284,11 @@ def create_oee_record(
 ):
     """Create a new OEE record with auto-calculated OEE metrics."""
     # Verify work center exists
-    wc = db.query(WorkCenter).filter(WorkCenter.id == record_in.work_center_id).first()
+    wc = (
+        db.query(WorkCenter)
+        .filter(WorkCenter.id == record_in.work_center_id, WorkCenter.company_id == company_id)
+        .first()
+    )
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
@@ -383,6 +387,7 @@ def auto_calculate_oee(
     shift: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Auto-calculate OEE for a work center on a given date from existing data.
 
@@ -392,7 +397,7 @@ def auto_calculate_oee(
     if record_date is None:
         record_date = date.today()
 
-    wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id).first()
+    wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
@@ -405,6 +410,7 @@ def auto_calculate_oee(
     time_entries = (
         db.query(TimeEntry)
         .filter(
+            TimeEntry.company_id == company_id,
             TimeEntry.work_center_id == work_center_id,
             func.date(TimeEntry.start_time) == record_date,
         )
@@ -445,6 +451,7 @@ def auto_calculate_oee(
     existing = (
         db.query(OEERecord)
         .filter(
+            OEERecord.company_id == company_id,
             OEERecord.work_center_id == work_center_id,
             OEERecord.record_date == record_date,
             OEERecord.shift == shift,
@@ -486,12 +493,18 @@ def auto_calculate_oee(
             **oee_calcs,
             created_by=current_user.id,
         )
+        record.company_id = company_id
         db.add(record)
         db.commit()
         db.refresh(record)
 
     # Reload with relationship
-    record = db.query(OEERecord).options(joinedload(OEERecord.work_center)).filter(OEERecord.id == record.id).first()
+    record = (
+        db.query(OEERecord)
+        .options(joinedload(OEERecord.work_center))
+        .filter(OEERecord.id == record.id, OEERecord.company_id == company_id)
+        .first()
+    )
 
     return _record_to_response(record)
 
@@ -504,12 +517,13 @@ def get_oee_dashboard(
     period: str = "30d",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get OEE dashboard: current OEE per work center, plant-wide OEE, and targets."""
     start_date = _parse_period(period)
 
     # Get all active work centers
-    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+    work_centers = db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True).all()
 
     # Get latest OEE record per work center within period
     work_center_oee = []
@@ -519,6 +533,7 @@ def get_oee_dashboard(
         latest = (
             db.query(OEERecord)
             .filter(
+                OEERecord.company_id == company_id,
                 OEERecord.work_center_id == wc.id,
                 OEERecord.record_date >= start_date,
             )
@@ -527,7 +542,9 @@ def get_oee_dashboard(
         )
 
         # Get target for this work center
-        target = db.query(OEETarget).filter(OEETarget.work_center_id == wc.id).first()
+        target = (
+            db.query(OEETarget).filter(OEETarget.company_id == company_id, OEETarget.work_center_id == wc.id).first()
+        )
 
         oee_data = {
             "work_center_id": wc.id,
@@ -556,13 +573,16 @@ def get_oee_dashboard(
         avg = (
             db.query(func.avg(OEERecord.oee_pct))
             .filter(
+                OEERecord.company_id == company_id,
                 OEERecord.work_center_id == wc.id,
                 OEERecord.record_date >= start_date,
             )
             .scalar()
         )
 
-        target = db.query(OEETarget).filter(OEETarget.work_center_id == wc.id).first()
+        target = (
+            db.query(OEETarget).filter(OEETarget.company_id == company_id, OEETarget.work_center_id == wc.id).first()
+        )
 
         comparison.append(
             {
@@ -590,11 +610,16 @@ def get_oee_trends(
     period: str = "30d",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get OEE trend data over time for charts."""
     start_date = _parse_period(period)
 
-    query = db.query(OEERecord).options(joinedload(OEERecord.work_center)).filter(OEERecord.record_date >= start_date)
+    query = (
+        db.query(OEERecord)
+        .options(joinedload(OEERecord.work_center))
+        .filter(OEERecord.company_id == company_id, OEERecord.record_date >= start_date)
+    )
 
     if work_center_id:
         query = query.filter(OEERecord.work_center_id == work_center_id)
@@ -604,7 +629,11 @@ def get_oee_trends(
     # Get target
     target = None
     if work_center_id:
-        target = db.query(OEETarget).filter(OEETarget.work_center_id == work_center_id).first()
+        target = (
+            db.query(OEETarget)
+            .filter(OEETarget.company_id == company_id, OEETarget.work_center_id == work_center_id)
+            .first()
+        )
 
     time_series = []
     for r in records:
@@ -642,17 +671,19 @@ def get_six_big_losses(
     period: str = "30d",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get breakdown of the six big losses for a work center."""
     start_date = _parse_period(period)
 
-    wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id).first()
+    wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
     records = (
         db.query(OEERecord)
         .filter(
+            OEERecord.company_id == company_id,
             OEERecord.work_center_id == work_center_id,
             OEERecord.record_date >= start_date,
         )
@@ -763,12 +794,20 @@ def create_oee_target(
     company_id: int = Depends(get_current_company_id),
 ):
     """Create or update an OEE target for a work center."""
-    wc = db.query(WorkCenter).filter(WorkCenter.id == target_in.work_center_id).first()
+    wc = (
+        db.query(WorkCenter)
+        .filter(WorkCenter.id == target_in.work_center_id, WorkCenter.company_id == company_id)
+        .first()
+    )
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
     # Check if target already exists for this work center
-    existing = db.query(OEETarget).filter(OEETarget.work_center_id == target_in.work_center_id).first()
+    existing = (
+        db.query(OEETarget)
+        .filter(OEETarget.company_id == company_id, OEETarget.work_center_id == target_in.work_center_id)
+        .first()
+    )
 
     if existing:
         # Update existing
@@ -807,9 +846,10 @@ def update_oee_target(
     target_in: OEETargetUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update an OEE target."""
-    target = db.query(OEETarget).filter(OEETarget.id == target_id).first()
+    target = db.query(OEETarget).filter(OEETarget.id == target_id, OEETarget.company_id == company_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="OEE target not found")
 
@@ -821,7 +861,12 @@ def update_oee_target(
     db.refresh(target)
 
     # Reload with relationship
-    target = db.query(OEETarget).options(joinedload(OEETarget.work_center)).filter(OEETarget.id == target.id).first()
+    target = (
+        db.query(OEETarget)
+        .options(joinedload(OEETarget.work_center))
+        .filter(OEETarget.id == target.id, OEETarget.company_id == company_id)
+        .first()
+    )
 
     return {
         "id": target.id,
@@ -841,9 +886,10 @@ def delete_oee_target(
     target_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Delete an OEE target."""
-    target = db.query(OEETarget).filter(OEETarget.id == target_id).first()
+    target = db.query(OEETarget).filter(OEETarget.id == target_id, OEETarget.company_id == company_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="OEE target not found")
 

@@ -5,11 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user
 from app.db.database import get_db
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
@@ -286,6 +287,7 @@ def mark_shipped(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Mark shipment as shipped"""
     shipment = db.query(Shipment).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
@@ -298,9 +300,11 @@ def mark_shipped(
     if tracking_number:
         shipment.tracking_number = tracking_number
 
-    # Close work order
+    # Close work order (terminal compliance status change)
     wo = shipment.work_order
+    wo_previous_status = None
     if wo:
+        wo_previous_status = wo.status.value if hasattr(wo.status, "value") else wo.status
         wo.status = WorkOrderStatus.CLOSED
 
     OperationalEventService(db).emit(
@@ -320,6 +324,21 @@ def mark_shipped(
             "ship_date": shipment.ship_date.isoformat() if shipment.ship_date else None,
         },
     )
+
+    # Tamper-evident audit trail (hash chain) for the terminal WO closure on
+    # shipment. Flushed (not committed) so the audit row commits atomically with
+    # the status change via the db.commit() below.
+    if wo and wo_previous_status is not None:
+        new_status = wo.status.value if hasattr(wo.status, "value") else wo.status
+        audit.log_status_change(
+            "work_order",
+            wo.id,
+            wo.work_order_number,
+            wo_previous_status,
+            new_status,
+            description=(f"Work order {wo.work_order_number} closed on shipment {shipment.shipment_number}"),
+        )
+
     db.commit()
 
     return {"message": "Shipment marked as shipped", "shipment_number": shipment.shipment_number}

@@ -97,8 +97,9 @@ def get_prior_period(start: date, end: date) -> Tuple[date, date]:
 
 
 class AnalyticsService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
         self.db = db
+        self.company_id = company_id
 
     # ============ KPI CALCULATIONS ============
 
@@ -177,7 +178,12 @@ class AnalyticsService:
             func.coalesce(
                 func.sum(case((TimeEntry.entry_type == TimeEntryType.RUN, TimeEntry.quantity_scrapped), else_=0)), 0
             ).label('scrapped_units'),
-        ).filter(TimeEntry.clock_in >= start_dt, TimeEntry.clock_in <= end_dt, TimeEntry.clock_out.isnot(None))
+        ).filter(
+            TimeEntry.company_id == self.company_id,
+            TimeEntry.clock_in >= start_dt,
+            TimeEntry.clock_in <= end_dt,
+            TimeEntry.clock_out.isnot(None),
+        )
 
         if work_center_id:
             time_entry_stats = time_entry_stats.filter(TimeEntry.work_center_id == work_center_id)
@@ -198,7 +204,8 @@ class AnalyticsService:
         # Get planned capacity from work centers (single query with aggregation)
         days_in_period = (end - start).days + 1
         capacity_query = self.db.query(func.coalesce(func.sum(WorkCenter.capacity_hours_per_day), 0)).filter(
-            WorkCenter.is_active == True
+            WorkCenter.company_id == self.company_id,
+            WorkCenter.is_active == True,
         )
 
         if work_center_id:
@@ -234,6 +241,7 @@ class AnalyticsService:
         query = self.db.query(
             func.sum(TimeEntry.quantity_produced) - func.coalesce(func.sum(TimeEntry.quantity_scrapped), 0)
         ).filter(
+            TimeEntry.company_id == self.company_id,
             TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
             TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
             TimeEntry.entry_type == TimeEntryType.RUN,
@@ -252,6 +260,7 @@ class AnalyticsService:
             self.db.query(func.sum(TimeEntry.quantity_produced * WorkOrderOperation.run_time_per_piece))
             .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
             .filter(
+                TimeEntry.company_id == self.company_id,
                 TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
                 TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
                 TimeEntry.entry_type == TimeEntryType.RUN,
@@ -306,7 +315,12 @@ class AnalyticsService:
                     func.sum(case((TimeEntry.entry_type == TimeEntryType.RUN, TimeEntry.quantity_scrapped), else_=0)), 0
                 ).label('scrapped_units'),
             )
-            .filter(TimeEntry.clock_in >= start_dt, TimeEntry.clock_in <= end_dt, TimeEntry.clock_out.isnot(None))
+            .filter(
+                TimeEntry.company_id == self.company_id,
+                TimeEntry.clock_in >= start_dt,
+                TimeEntry.clock_in <= end_dt,
+                TimeEntry.clock_out.isnot(None),
+            )
             .group_by(cast(TimeEntry.clock_in, Date))
             .order_by(cast(TimeEntry.clock_in, Date))
         )
@@ -321,7 +335,8 @@ class AnalyticsService:
 
         # Get daily capacity (same for all days)
         capacity_query = self.db.query(func.coalesce(func.sum(WorkCenter.capacity_hours_per_day), 8.0)).filter(
-            WorkCenter.is_active == True
+            WorkCenter.company_id == self.company_id,
+            WorkCenter.is_active == True,
         )
 
         if work_center_id:
@@ -385,6 +400,7 @@ class AnalyticsService:
         completed = (
             self.db.query(WorkOrder)
             .filter(
+                WorkOrder.company_id == self.company_id,
                 WorkOrder.status == WorkOrderStatus.COMPLETE,
                 WorkOrder.actual_end >= datetime.combine(start, datetime.min.time()),
                 WorkOrder.actual_end <= datetime.combine(end, datetime.max.time()),
@@ -435,6 +451,7 @@ class AnalyticsService:
                 func.sum(TimeEntry.quantity_scrapped).label('scrapped'),
             )
             .filter(
+                TimeEntry.company_id == self.company_id,
                 TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
                 TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
                 TimeEntry.entry_type == TimeEntryType.RUN,
@@ -449,6 +466,7 @@ class AnalyticsService:
         rework = (
             self.db.query(func.sum(TimeEntry.quantity_produced))
             .filter(
+                TimeEntry.company_id == self.company_id,
                 TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
                 TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
                 TimeEntry.entry_type == TimeEntryType.REWORK,
@@ -492,6 +510,7 @@ class AnalyticsService:
                 func.sum(TimeEntry.quantity_scrapped).label('scrapped'),
             )
             .filter(
+                TimeEntry.company_id == self.company_id,
                 TimeEntry.clock_in >= datetime.combine(start, datetime.min.time()),
                 TimeEntry.clock_in <= datetime.combine(end, datetime.max.time()),
                 TimeEntry.entry_type == TimeEntryType.RUN,
@@ -512,7 +531,10 @@ class AnalyticsService:
         current_ncrs = (
             self.db.query(func.count(NonConformanceReport.id))
             .filter(
-                NonConformanceReport.status.in_([NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION])
+                NonConformanceReport.company_id == self.company_id,
+                NonConformanceReport.status.in_(
+                    [NCRStatus.OPEN, NCRStatus.UNDER_REVIEW, NCRStatus.PENDING_DISPOSITION]
+                ),
             )
             .scalar()
             or 0
@@ -522,6 +544,7 @@ class AnalyticsService:
         prior_ncrs = (
             self.db.query(func.count(NonConformanceReport.id))
             .filter(
+                NonConformanceReport.company_id == self.company_id,
                 NonConformanceReport.created_at <= datetime.combine(prior_end, datetime.max.time()),
                 or_(NonConformanceReport.closed_date.is_(None), NonConformanceReport.closed_date > prior_end),
             )
@@ -567,6 +590,7 @@ class AnalyticsService:
         total = (
             self.db.query(func.count(Quote.id))
             .filter(
+                Quote.company_id == self.company_id,
                 Quote.updated_at >= datetime.combine(start, datetime.min.time()),
                 Quote.updated_at <= datetime.combine(end, datetime.max.time()),
                 Quote.status.in_([QuoteStatus.ACCEPTED, QuoteStatus.REJECTED, QuoteStatus.CONVERTED]),
@@ -578,6 +602,7 @@ class AnalyticsService:
         won = (
             self.db.query(func.count(Quote.id))
             .filter(
+                Quote.company_id == self.company_id,
                 Quote.updated_at >= datetime.combine(start, datetime.min.time()),
                 Quote.updated_at <= datetime.combine(end, datetime.max.time()),
                 Quote.status.in_([QuoteStatus.ACCEPTED, QuoteStatus.CONVERTED]),
@@ -595,7 +620,10 @@ class AnalyticsService:
         """Calculate current backlog hours."""
         backlog = (
             self.db.query(func.sum(WorkOrder.estimated_hours))
-            .filter(WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]))
+            .filter(
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
+            )
             .scalar()
             or 0
         )
@@ -631,6 +659,7 @@ class AnalyticsService:
         cogs = (
             self.db.query(func.sum(func.abs(InventoryTransaction.total_cost)))
             .filter(
+                InventoryTransaction.company_id == self.company_id,
                 InventoryTransaction.transaction_type == TransactionType.ISSUE,
                 InventoryTransaction.created_at >= datetime.combine(start, datetime.min.time()),
                 InventoryTransaction.created_at <= datetime.combine(end, datetime.max.time()),
@@ -642,7 +671,7 @@ class AnalyticsService:
         # Average inventory value
         avg_inventory = (
             self.db.query(func.avg(InventoryItem.quantity_on_hand * InventoryItem.unit_cost))
-            .filter(InventoryItem.is_active == True)
+            .filter(InventoryItem.company_id == self.company_id, InventoryItem.is_active == True)
             .scalar()
             or 1
         )  # Avoid division by zero
@@ -709,7 +738,11 @@ class AnalyticsService:
 
         # By work center
         by_work_center = []
-        work_centers = self.db.query(WorkCenter).filter(WorkCenter.is_active == True).all()
+        work_centers = (
+            self.db.query(WorkCenter)
+            .filter(WorkCenter.company_id == self.company_id, WorkCenter.is_active == True)
+            .all()
+        )
         for wc in work_centers:
             oee_val = self._get_oee_value(start_date, end_date, wc.id)
             by_work_center.append(
@@ -751,6 +784,7 @@ class AnalyticsService:
             func.sum(TimeEntry.quantity_scrapped).label('units_scrapped'),
             func.sum(TimeEntry.duration_hours).label('total_hours'),
         ).filter(
+            TimeEntry.company_id == self.company_id,
             TimeEntry.clock_in >= datetime.combine(start_date, datetime.min.time()),
             TimeEntry.clock_in <= datetime.combine(end_date, datetime.max.time()),
             TimeEntry.entry_type == TimeEntryType.RUN,
@@ -780,6 +814,7 @@ class AnalyticsService:
                 and_(TimeEntry.operation_id == WorkOrderOperation.id, TimeEntry.entry_type == TimeEntryType.RUN),
             )
             .filter(
+                WorkOrderOperation.company_id == self.company_id,
                 WorkOrderOperation.actual_end.isnot(None),
                 WorkOrderOperation.actual_end >= datetime.combine(start_date, datetime.min.time()),
                 WorkOrderOperation.actual_end <= datetime.combine(end_date, datetime.max.time()),
@@ -856,7 +891,8 @@ class AnalyticsService:
     ) -> CostAnalysisResponse:
         """Get cost analysis for jobs."""
         query = self.db.query(WorkOrder).filter(
-            WorkOrder.status.in_([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED])
+            WorkOrder.company_id == self.company_id,
+            WorkOrder.status.in_([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED]),
         )
 
         if work_order_id:
@@ -922,6 +958,7 @@ class AnalyticsService:
         defect_counts = (
             self.db.query(NonConformanceReport.disposition, func.count(NonConformanceReport.id).label('count'))
             .filter(
+                NonConformanceReport.company_id == self.company_id,
                 NonConformanceReport.created_at >= datetime.combine(start_date, datetime.min.time()),
                 NonConformanceReport.created_at <= datetime.combine(end_date, datetime.max.time()),
             )
@@ -956,6 +993,8 @@ class AnalyticsService:
             )
             .join(POReceipt, POReceipt.po_line.has(purchase_order=Vendor.purchase_orders))
             .filter(
+                Vendor.company_id == self.company_id,
+                POReceipt.company_id == self.company_id,
                 POReceipt.received_at >= datetime.combine(start_date, datetime.min.time()),
                 POReceipt.received_at <= datetime.combine(end_date, datetime.max.time()),
             )
@@ -1019,6 +1058,7 @@ class AnalyticsService:
                 InventoryTransaction.part_id, func.sum(func.abs(InventoryTransaction.total_cost)).label('cogs')
             )
             .filter(
+                InventoryTransaction.company_id == self.company_id,
                 InventoryTransaction.transaction_type == TransactionType.ISSUE,
                 InventoryTransaction.created_at >= datetime.combine(start_date, datetime.min.time()),
                 InventoryTransaction.created_at <= datetime.combine(end_date, datetime.max.time()),
@@ -1036,7 +1076,7 @@ class AnalyticsService:
                 InventoryItem.part_id,
                 func.avg(InventoryItem.quantity_on_hand * InventoryItem.unit_cost).label('avg_inv'),
             )
-            .filter(InventoryItem.is_active == True)
+            .filter(InventoryItem.company_id == self.company_id, InventoryItem.is_active == True)
             .group_by(InventoryItem.part_id)
             .all()
         )
@@ -1045,7 +1085,7 @@ class AnalyticsService:
         avg_inv_map = {row.part_id: float(row.avg_inv or 1) for row in avg_inv_by_part}
 
         # Get parts (single query)
-        parts = self.db.query(Part).filter(Part.is_active == True).limit(50).all()
+        parts = self.db.query(Part).filter(Part.company_id == self.company_id, Part.is_active == True).limit(50).all()
 
         # Calculate turnover using pre-fetched data (no additional queries)
         days = (end_date - start_date).days + 1
@@ -1079,7 +1119,7 @@ class AnalyticsService:
         # Calculate total inventory value (single query)
         total_inventory_value = (
             self.db.query(func.sum(InventoryItem.quantity_on_hand * InventoryItem.unit_cost))
-            .filter(InventoryItem.is_active == True)
+            .filter(InventoryItem.company_id == self.company_id, InventoryItem.is_active == True)
             .scalar()
             or 0
         )

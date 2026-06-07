@@ -21,8 +21,14 @@ from app.models.work_order import WorkOrder, WorkOrderStatus
 
 
 class MRPService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
+        """Create an MRP service scoped to a single tenant.
+
+        All reads (work orders, inventory) and all writes
+        (MRPRun/MRPRequirement/MRPAction) are confined to ``company_id``.
+        """
         self.db = db
+        self.company_id = company_id
 
     def generate_run_number(self) -> str:
         """Generate unique MRP run number"""
@@ -54,20 +60,27 @@ class MRPService:
 
     def get_inventory_summary(self, part_id: int) -> Tuple[float, float, float]:
         """Get inventory quantities for a part: (on_hand, allocated, on_order)"""
-        # On hand from inventory
+        # On hand from inventory (scoped to this tenant)
         on_hand_result = (
             self.db.query(func.sum(InventoryItem.quantity_on_hand))
             .filter(
-                InventoryItem.part_id == part_id, InventoryItem.is_active == True, InventoryItem.status == "available"
+                InventoryItem.company_id == self.company_id,
+                InventoryItem.part_id == part_id,
+                InventoryItem.is_active == True,
+                InventoryItem.status == "available",
             )
             .scalar()
             or 0.0
         )
 
-        # Allocated from inventory
+        # Allocated from inventory (scoped to this tenant)
         allocated_result = (
             self.db.query(func.sum(InventoryItem.quantity_allocated))
-            .filter(InventoryItem.part_id == part_id, InventoryItem.is_active == True)
+            .filter(
+                InventoryItem.company_id == self.company_id,
+                InventoryItem.part_id == part_id,
+                InventoryItem.is_active == True,
+            )
             .scalar()
             or 0.0
         )
@@ -82,10 +95,11 @@ class MRPService:
         """Get material requirements from work orders"""
         requirements = []
 
-        # Get active work orders within planning horizon
+        # Get active work orders within planning horizon (scoped to this tenant)
         work_orders = (
             self.db.query(WorkOrder)
             .filter(
+                WorkOrder.company_id == self.company_id,
                 WorkOrder.status.in_([WorkOrderStatus.DRAFT, WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
                 WorkOrder.due_date <= horizon_end,
             )
@@ -93,8 +107,12 @@ class MRPService:
         )
 
         for wo in work_orders:
-            # Get the BOM for this work order's part
-            bom = self.db.query(BOM).filter(BOM.part_id == wo.part_id, BOM.is_active == True).first()
+            # Get the BOM for this work order's part (scoped to this tenant)
+            bom = (
+                self.db.query(BOM)
+                .filter(BOM.company_id == self.company_id, BOM.part_id == wo.part_id, BOM.is_active == True)
+                .first()
+            )
 
             if not bom:
                 continue
@@ -130,7 +148,7 @@ class MRPService:
         visited.add(bom_id)
         requirements = []
 
-        bom = self.db.query(BOM).filter(BOM.id == bom_id).first()
+        bom = self.db.query(BOM).filter(BOM.id == bom_id, BOM.company_id == self.company_id).first()
         if not bom:
             return requirements
 
@@ -164,9 +182,13 @@ class MRPService:
                 }
             )
 
-            # If this is a MAKE item, recurse into its BOM
+            # If this is a MAKE item, recurse into its BOM (scoped to this tenant)
             if self._enum_value(item.item_type) == BOMItemType.MAKE.value:
-                child_bom = self.db.query(BOM).filter(BOM.part_id == part.id, BOM.is_active == True).first()
+                child_bom = (
+                    self.db.query(BOM)
+                    .filter(BOM.company_id == self.company_id, BOM.part_id == part.id, BOM.is_active == True)
+                    .first()
+                )
 
                 if child_bom:
                     child_requirements = self.explode_bom_for_mrp(
@@ -228,7 +250,7 @@ class MRPService:
         actions_list = []
 
         for part_id, data in aggregated.items():
-            part = self.db.query(Part).filter(Part.id == part_id).first()
+            part = self.db.query(Part).filter(Part.id == part_id, Part.company_id == self.company_id).first()
             if not part:
                 continue
 
@@ -248,8 +270,9 @@ class MRPService:
                 # Calculate shortage
                 shortage = max(0, qty_required + safety_stock - running_available)
 
-                # Create requirement record
+                # Create requirement record (scoped to this tenant)
                 req = MRPRequirement(
+                    company_id=self.company_id,
                     part_id=part_id,
                     required_date=req_date,
                     quantity_required=qty_required,
@@ -280,6 +303,7 @@ class MRPService:
                         order_date = date.today()
 
                     action = MRPAction(
+                        company_id=self.company_id,
                         part_id=part_id,
                         action_type=action_type,
                         priority=1 if action_type == PlanningAction.EXPEDITE else 5,
@@ -304,8 +328,9 @@ class MRPService:
     ) -> MRPRun:
         """Execute a full MRP run"""
 
-        # Create MRP run record
+        # Create MRP run record (scoped to this tenant)
         mrp_run = MRPRun(
+            company_id=self.company_id,
             run_number=self.generate_run_number(),
             planning_horizon_days=planning_horizon_days,
             include_safety_stock=include_safety_stock,

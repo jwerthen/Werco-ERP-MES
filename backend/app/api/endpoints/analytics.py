@@ -47,10 +47,11 @@ def get_kpi_dashboard(
     work_center_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get all KPIs for the executive dashboard."""
     start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db)
+    service = AnalyticsService(db, company_id)
     return service.get_kpi_dashboard(start, end, work_center_id)
 
 
@@ -66,10 +67,11 @@ def get_oee_details(
     granularity: DateGranularity = DateGranularity.DAY,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get detailed OEE breakdown with time series."""
     start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db)
+    service = AnalyticsService(db, company_id)
     return service.get_oee_details(start, end, work_center_id, granularity)
 
 
@@ -85,10 +87,11 @@ def get_production_trends(
     granularity: DateGranularity = DateGranularity.DAY,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get production trend data for charts."""
     start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db)
+    service = AnalyticsService(db, company_id)
     return service.get_production_trends(start, end, group_by, granularity)
 
 
@@ -103,10 +106,11 @@ def get_cost_analysis(
     work_order_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get cost analysis for completed jobs."""
     start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db)
+    service = AnalyticsService(db, company_id)
     return service.get_cost_analysis(start, end, work_order_id)
 
 
@@ -123,10 +127,11 @@ def get_quality_metrics(
     current_user: User = Depends(
         require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
     ),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get quality metrics and Pareto data."""
     start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db)
+    service = AnalyticsService(db, company_id)
     return service.get_quality_metrics(start, end, metric_type)
 
 
@@ -141,10 +146,11 @@ def get_inventory_analytics(
     category: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get inventory turnover and analytics."""
     start, end = get_date_range(period, start_date, end_date)
-    service = AnalyticsService(db)
+    service = AnalyticsService(db, company_id)
     return service.get_inventory_analytics(start, end, category)
 
 

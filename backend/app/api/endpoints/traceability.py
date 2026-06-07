@@ -74,7 +74,7 @@ def trace_lot(
     inv_items = (
         db.query(InventoryItem)
         .options(joinedload(InventoryItem.part))
-        .filter(InventoryItem.lot_number == lot_number)
+        .filter(InventoryItem.lot_number == lot_number, InventoryItem.company_id == company_id)
         .all()
     )
 
@@ -103,7 +103,7 @@ def trace_lot(
     transactions = (
         db.query(InventoryTransaction)
         .options(joinedload(InventoryTransaction.user), joinedload(InventoryTransaction.part))
-        .filter(InventoryTransaction.lot_number == lot_number)
+        .filter(InventoryTransaction.lot_number == lot_number, InventoryTransaction.company_id == company_id)
         .order_by(InventoryTransaction.created_at)
         .all()
     )
@@ -142,7 +142,7 @@ def trace_lot(
         .options(
             joinedload(POReceipt.po_line).joinedload(PurchaseOrderLine.purchase_order).joinedload(PurchaseOrder.vendor)
         )
-        .filter(POReceipt.lot_number == lot_number)
+        .filter(POReceipt.lot_number == lot_number, POReceipt.company_id == company_id)
         .all()
     )
 
@@ -170,7 +170,14 @@ def trace_lot(
         )
 
     # Check NCRs with this lot
-    ncrs = db.query(NonConformanceReport).filter(NonConformanceReport.lot_number == lot_number).all()
+    ncrs = (
+        db.query(NonConformanceReport)
+        .filter(
+            NonConformanceReport.lot_number == lot_number,
+            NonConformanceReport.company_id == company_id,
+        )
+        .all()
+    )
 
     for ncr in ncrs:
         ncrs_list.add(ncr.ncr_number)
@@ -222,7 +229,7 @@ def trace_serial(
     inv_item = (
         db.query(InventoryItem)
         .options(joinedload(InventoryItem.part))
-        .filter(InventoryItem.serial_number == serial_number)
+        .filter(InventoryItem.serial_number == serial_number, InventoryItem.company_id == company_id)
         .first()
     )
 
@@ -232,7 +239,7 @@ def trace_serial(
     transactions = (
         db.query(InventoryTransaction)
         .options(joinedload(InventoryTransaction.user))
-        .filter(InventoryTransaction.serial_number == serial_number)
+        .filter(InventoryTransaction.serial_number == serial_number, InventoryTransaction.company_id == company_id)
         .order_by(InventoryTransaction.created_at)
         .all()
     )
@@ -278,12 +285,13 @@ def search_lots(
         db.query(InventoryItem)
         .options(joinedload(InventoryItem.part))
         .filter(
+            InventoryItem.company_id == company_id,
             or_(
                 InventoryItem.lot_number.ilike(f"%{q}%"),
                 InventoryItem.serial_number.ilike(f"%{q}%"),
                 InventoryItem.cert_number.ilike(f"%{q}%"),
                 InventoryItem.heat_lot.ilike(f"%{q}%"),
-            )
+            ),
         )
         .limit(50)
         .all()

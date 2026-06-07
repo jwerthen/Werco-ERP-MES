@@ -32,11 +32,15 @@ async def send_webhook_job(ctx, webhook_id: int, event: str, payload: dict):
     return await send_webhook_task(webhook_id, event, payload)
 
 
-async def run_mrp_job(ctx, mode: str = "REVIEW"):
-    """Run MRP calculation job"""
+async def run_mrp_job(ctx, mode: str = "REVIEW", company_id: int = None):
+    """Run MRP calculation job.
+
+    ``company_id`` confines the run to one tenant; ``None`` (the cron default)
+    fans out over every active company, one isolated MRP pass per tenant.
+    """
     from app.jobs.mrp_jobs import run_mrp_task
 
-    return await run_mrp_task(mode)
+    return await run_mrp_task(mode, company_id=company_id)
 
 
 async def generate_report_job(ctx, report_type: str, filters: dict = None):
@@ -46,11 +50,23 @@ async def generate_report_job(ctx, report_type: str, filters: dict = None):
     return await generate_report_task(report_type, filters)
 
 
-async def run_scheduling_job(ctx):
-    """Run constraint-based scheduling job"""
+async def run_scheduling_job(
+    ctx, work_center_ids: list = None, horizon_days: int = 90, optimize_setup: bool = False, company_id: int = None
+):
+    """Run constraint-based scheduling job.
+
+    ``company_id`` confines the run to one tenant (the API ``/run-background``
+    entry point passes the caller's company); ``None`` fans out over every
+    active company, one isolated scheduling pass per tenant.
+    """
     from app.jobs.scheduling_jobs import run_scheduling_task
 
-    return await run_scheduling_task()
+    return await run_scheduling_task(
+        work_center_ids=work_center_ids,
+        horizon_days=horizon_days,
+        optimize_setup=optimize_setup,
+        company_id=company_id,
+    )
 
 
 async def send_daily_digest_job(ctx):
