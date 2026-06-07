@@ -6,11 +6,14 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user
+from app.core.realtime import safe_broadcast
+from app.core.websocket import broadcast_dashboard_update, broadcast_work_order_update
 from app.db.database import get_db
 from app.models.shipping import Shipment, ShipmentStatus
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.completion_signal_service import enqueue_work_order_completion_signals
 from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
@@ -294,6 +297,21 @@ def mark_shipped(
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
 
+    # Idempotency guard (EVT-1 / e2): a re-submitted ship must not re-run the terminal
+    # close. Without this, calling /ship twice re-flips the WO to CLOSED, writes a
+    # second CLOSED->CLOSED audit row on the tamper-evident chain, re-emits the
+    # work_order_closed event, and re-enqueues the CLOSED completion signal. If the
+    # shipment is already SHIPPED (or its WO already CLOSED), the close already
+    # happened on the first call -- return the current state as a clean no-op so the
+    # close/audit/event/enqueue block below fires exactly ONCE per real transition.
+    wo_already_closed = bool(shipment.work_order and shipment.work_order.status == WorkOrderStatus.CLOSED)
+    if shipment.status == ShipmentStatus.SHIPPED or wo_already_closed:
+        return {
+            "message": "Shipment already marked as shipped",
+            "shipment_number": shipment.shipment_number,
+            "already_shipped": True,
+        }
+
     shipment.status = ShipmentStatus.SHIPPED
     shipment.ship_date = date.today()
     shipment.shipped_by = current_user.id
@@ -325,6 +343,31 @@ def mark_shipped(
         },
     )
 
+    # EVT-1: the WO CLOSED transition is a distinct, terminal completion signal --
+    # emit a dedicated work_order_closed OperationalEvent (NOT just the shipment-scoped
+    # event above) so AI/realtime consumers see the closure of the work order, uniform
+    # with operation_completed / work_order_completed on the other completion paths.
+    # Tenant-scoped (the WO belongs to company_id) and best-effort.
+    if wo and wo_previous_status is not None:
+        try:
+            OperationalEventService(db).emit(
+                company_id=company_id,
+                event_type="work_order_closed",
+                source_module="shipping",
+                entity_type="work_order",
+                entity_id=wo.id,
+                work_order_id=wo.id,
+                user_id=current_user.id,
+                severity="info",
+                event_payload={
+                    "work_order_number": wo.work_order_number,
+                    "status": wo.status.value if hasattr(wo.status, "value") else wo.status,
+                    "shipment_number": shipment.shipment_number,
+                },
+            )
+        except Exception:  # pragma: no cover - signal failure must not fail the close
+            pass
+
     # Tamper-evident audit trail (hash chain) for the terminal WO closure on
     # shipment. Flushed (not committed) so the audit row commits atomically with
     # the status change via the db.commit() below.
@@ -340,6 +383,25 @@ def mark_shipped(
         )
 
     db.commit()
+
+    # EVT-1: realtime + outbound signals for the closure. After commit (so we never
+    # signal a rolled-back close) and best-effort. Broadcasts are tenant-scoped to the
+    # originating company (rank 3). The notification/webhook dispatch is enqueued to
+    # the ARQ worker with status="CLOSED" -> work_order.closed webhook event.
+    if wo and wo_previous_status is not None:
+        wo_status = wo.status.value if hasattr(wo.status, "value") else wo.status
+        safe_broadcast(
+            broadcast_work_order_update,
+            wo.id,
+            {"event": "work_order_closed", "status": wo_status},
+            company_id=company_id,
+        )
+        safe_broadcast(
+            broadcast_dashboard_update,
+            {"event": "work_order_closed", "work_order_id": wo.id, "status": wo_status},
+            company_id=company_id,
+        )
+        enqueue_work_order_completion_signals(work_order_id=wo.id, company_id=company_id, status="CLOSED")
 
     return {"message": "Shipment marked as shipped", "shipment_number": shipment.shipment_number}
 

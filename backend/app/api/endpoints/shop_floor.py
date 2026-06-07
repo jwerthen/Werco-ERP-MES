@@ -36,6 +36,11 @@ from app.models.work_order_blocker import (
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
+from app.services.completion_signal_service import (
+    emit_operation_completed_event,
+    emit_work_order_completed_event,
+    enqueue_work_order_completion_signals,
+)
 from app.services.laser_nest_service import sync_laser_nest_from_operation
 from app.services.operational_event_service import OperationalEventService
 from app.services.quality_gate_service import (
@@ -90,6 +95,77 @@ class OperationInspectionRequest(BaseModel):
 
 
 router = APIRouter()
+
+
+def _emit_reconcile_events(
+    db: Session,
+    company_id: int,
+    current_user: User,
+    transitions: list[StatusTransition],
+) -> None:
+    """Emit the in-process completion OperationalEvent for each reconcile transition.
+
+    EVT-4: reconcile-on-read materializes operation/WO completions from durable
+    TimeEntry evidence. Those transitions must produce the SAME in-process signal as
+    the live completion paths -- ``operation_completed`` / ``work_order_completed`` --
+    so AI/realtime consumers aren't blind to reconcile-driven completions. This is
+    intentionally IN-PROCESS ONLY: we do NOT fire outbound notifications/webhooks from
+    a GET/reconcile path (a read must not have outbound side-effects; rank 12 will move
+    reconcile to a debounced ARQ job, at which point the outbound dispatch can move with
+    it). Best-effort and tenant-scoped (``emit`` validates the WO/op belong to
+    ``company_id``); a signal failure must never 500 a read, so this is wrapped.
+    """
+    if not transitions:
+        return
+    try:
+        event_service = OperationalEventService(db)
+        for tr in transitions:
+            event_type = "operation_completed" if tr.resource_type == "work_order_operation" else "work_order_completed"
+            try:
+                event_service.emit(
+                    company_id=company_id,
+                    event_type=event_type,
+                    source_module="reconcile_on_read",
+                    entity_type=tr.resource_type,
+                    entity_id=tr.resource_id,
+                    work_order_id=tr.work_order_id,
+                    operation_id=tr.resource_id if tr.resource_type == "work_order_operation" else None,
+                    user_id=current_user.id,
+                    severity="info",
+                    event_payload={
+                        "work_order_number": tr.work_order_number,
+                        "source": "reconcile_on_read",
+                        "time_entry_ids": tr.time_entry_ids,
+                    },
+                )
+            except ValueError:
+                # emit() raises ValueError if the WO/op isn't in this company; a
+                # reconcile transition for another tenant must be skipped, not 500.
+                continue
+    except Exception:  # pragma: no cover - reads must never 500 on event-emit failure
+        pass
+
+
+def _refresh_reconcile_scheduling(db: Session, company_id: int, transitions: list[StatusTransition]) -> None:
+    """Refresh cached work-center availability for reconcile-driven WO completions (MS-2).
+
+    A reconcile-on-read WO -> COMPLETE drops its ops out of the scheduled-load query,
+    so the persisted ``work_center.availability_rate`` would otherwise stay understated.
+    ``StatusTransition.work_center_ids`` carries the affected WCs for each WO transition.
+    Tenant-scoped (``SchedulingService(db, company_id)``); ``commit=False`` so the
+    refresh joins THIS read's unit of work and is committed/rolled back atomically by
+    the caller (it must not commit independently on a read path). Best-effort: a
+    scheduling-refresh failure must never 500 a GET.
+    """
+    work_center_ids = sorted({wc for tr in transitions for wc in tr.work_center_ids if wc})
+    if not work_center_ids:
+        return
+    try:
+        SchedulingService(db, company_id).update_availability_rates(
+            work_center_ids=work_center_ids, horizon_days=90, commit=False
+        )
+    except Exception:  # pragma: no cover - reads must never 500 on scheduling refresh
+        pass
 
 
 def _audit_reconcile_transitions(
@@ -147,7 +223,7 @@ def _audit_reconcile_transitions(
         pass
 
 
-def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_user: User) -> None:
+def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_user: User, company_id: int) -> None:
     """Reconcile operation rows from completion evidence and commit, tolerating
     ANY failure of that best-effort write on a READ/dashboard path.
 
@@ -177,6 +253,12 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
     try:
         if reconcile_work_orders_from_completion_evidence(db, work_orders, transitions):
             _audit_reconcile_transitions(db, current_user, transitions)
+            # EVT-4: emit the in-process completion events for the materialized
+            # transitions (NO outbound notify/webhook on a read -- see helper).
+            _emit_reconcile_events(db, company_id, current_user, transitions)
+            # MS-2: refresh cached work-center availability for reconcile-driven WO
+            # completions, joined to this read's unit of work (commit=False).
+            _refresh_reconcile_scheduling(db, company_id, transitions)
             db.commit()
     except SQLAlchemyError:
         # Best-effort reconcile lost a version race OR its commit failed on a
@@ -651,7 +733,7 @@ def clock_out(
 
             affected_work_centers = finalize_operation_completion(db, work_order, operation)
             work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
-            SchedulingService(db).update_availability_rates(
+            SchedulingService(db, company_id).update_availability_rates(
                 work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
             )
         else:
@@ -690,6 +772,27 @@ def clock_out(
                 old_status=old_work_order_status,
                 new_status=WorkOrderStatus.COMPLETE.value,
                 description=f"Completed work order {work_order.work_order_number} via clock-out",
+            )
+        # EVT-2: emit the uniform completion OperationalEvents in-process (before the
+        # terminal commit so they land atomically with the status change). The
+        # labor_clock_out event above is a labor signal, NOT a completion signal --
+        # AI/realtime consumers need operation_completed/work_order_completed too.
+        if operation_completed and operation:
+            emit_operation_completed_event(
+                db,
+                company_id=company_id,
+                work_order=work_order,
+                operation=operation,
+                user_id=current_user.id,
+                source_module="shop_floor",
+            )
+        if work_order_completed:
+            emit_work_order_completed_event(
+                db,
+                company_id=company_id,
+                work_order=work_order,
+                user_id=current_user.id,
+                source_module="shop_floor",
             )
         # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record. Completion has already
         # mutated state and is about to commit -- evaluate the (read-only, locked-row)
@@ -751,6 +854,13 @@ def clock_out(
         },
         company_id=company_id,
     )
+
+    # EVT-3: on WO COMPLETE, enqueue the outbound notification + webhook dispatch
+    # (tenant-scoped, in the ARQ worker). Enqueued AFTER the commit so we never fire
+    # signals for a completion that rolled back, and best-effort so a Redis/enqueue
+    # failure can't fail an already-committed completion.
+    if work_order_completed:
+        enqueue_work_order_completion_signals(work_order_id=work_order.id, company_id=company_id, status="COMPLETE")
 
     # Surface the warn-and-record quality exceptions on the response (QG-4 / schema).
     # Attached AFTER db.refresh(time_entry) so the ORM refresh can't clobber it; the
@@ -848,7 +958,7 @@ def shop_floor_dashboard(
     # so it must NOT 500 the dashboard -- _reconcile_and_commit swallows StaleDataError.
     # AUD-3: terminal reconcile-driven transitions are audited, attributed to the
     # requesting user, without failing the read if the audit write fails.
-    _reconcile_and_commit(db, work_orders_to_reconcile, current_user)
+    _reconcile_and_commit(db, work_orders_to_reconcile, current_user, company_id)
 
     # Active work orders
     active_wos = (
@@ -1263,7 +1373,7 @@ def get_all_operations(
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the list -- _reconcile_and_commit swallows StaleDataError.
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
-    _reconcile_and_commit(db, work_orders, current_user)
+    _reconcile_and_commit(db, work_orders, current_user, company_id)
     if not status:
         operations = [op for op in operations if op.status != OperationStatus.COMPLETE]
 
@@ -1794,6 +1904,7 @@ def complete_operation(
 
     # Check if fully complete (against the resolved, evidence-floored quantity).
     is_fully_complete = resolved_quantity >= ordered_qty
+    work_order_completed = False
 
     if is_fully_complete:
         operation.status = OperationStatus.COMPLETE
@@ -1804,7 +1915,8 @@ def complete_operation(
         # COMPLETE-vs-release, actual_start/actual_end stamping, qty sync,
         # current_operation_id. Returns the WCs whose capacity to refresh.
         affected_work_centers = finalize_operation_completion(db, work_order, operation)
-        SchedulingService(db).update_availability_rates(
+        work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
+        SchedulingService(db, company_id).update_availability_rates(
             work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
         )
     else:
@@ -1852,6 +1964,27 @@ def complete_operation(
         ),
     )
 
+    # EVT-2: emit the uniform completion OperationalEvents in-process (before the
+    # terminal commit so they land atomically with the status change). This scan/
+    # shop-floor complete_operation path previously emitted NO OperationalEvent.
+    if is_fully_complete:
+        emit_operation_completed_event(
+            db,
+            company_id=company_id,
+            work_order=work_order,
+            operation=operation,
+            user_id=current_user.id,
+            source_module="shop_floor",
+        )
+    if work_order_completed:
+        emit_work_order_completed_event(
+            db,
+            company_id=company_id,
+            work_order=work_order,
+            user_id=current_user.id,
+            source_module="shop_floor",
+        )
+
     # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record on a true completion only.
     # Read-only evaluation against the locked op + WO; each unsatisfied gate gets a
     # tamper-evident audit row + warning event committed atomically below. Never blocks.
@@ -1876,6 +2009,12 @@ def complete_operation(
             detail="This operation was modified concurrently. Refresh and retry the completion.",
         ) from exc
     db.refresh(operation)
+
+    # EVT-3: on WO COMPLETE, enqueue the tenant-scoped notification + webhook
+    # dispatch in the ARQ worker. After commit + best-effort so it can never fail
+    # the already-committed completion.
+    if work_order_completed:
+        enqueue_work_order_completion_signals(work_order_id=work_order.id, company_id=company_id, status="COMPLETE")
 
     if operation.work_center_id:
         safe_broadcast(
@@ -1972,7 +2111,7 @@ def get_operation_details(
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the details read -- _reconcile_and_commit swallows StaleDataError.
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
-    _reconcile_and_commit(db, [wo], current_user)
+    _reconcile_and_commit(db, [wo], current_user, company_id)
 
     # Get recent history (audit logs). The operation is already tenant-validated
     # above; the company_id filter is defense-in-depth now that audit rows are

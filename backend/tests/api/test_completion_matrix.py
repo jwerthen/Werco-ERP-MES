@@ -63,6 +63,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
+from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
@@ -857,3 +858,149 @@ def test_reconcile_on_read_poisoned_commit_integrityerror_still_returns_200(
         .all()
     )
     assert not rows, "rolled-back reconcile leaves no orphaned audit row"
+
+
+# ===========================================================================
+# 9. Batch 5 / rank 8 (EVT-1/EVT-2/EVT-4): uniform completion OperationalEvents
+# ===========================================================================
+
+
+def _events(db: Session, *, event_type: str, work_order_id: int) -> list[OperationalEvent]:
+    db.expire_all()
+    return (
+        db.query(OperationalEvent)
+        .filter(
+            OperationalEvent.event_type == event_type,
+            OperationalEvent.work_order_id == work_order_id,
+            OperationalEvent.company_id == COMPANY_A,
+        )
+        .all()
+    )
+
+
+def test_office_complete_emits_operation_and_work_order_completed_events(client: TestClient, db_session: Session):
+    """EVT-2: the office complete_operation path emits operation_completed and, when
+    it rolls the WO to COMPLETE, work_order_completed (previously emitted neither)."""
+    admin = make_user(db_session)
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
+    wc = make_work_center(db_session)
+    op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=10",
+        headers=headers_for(admin),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    assert len(_events(db_session, event_type="operation_completed", work_order_id=wo.id)) == 1
+    assert len(_events(db_session, event_type="work_order_completed", work_order_id=wo.id)) == 1
+
+
+def test_shop_floor_complete_emits_completion_events(client: TestClient, db_session: Session):
+    """EVT-2: the shop-floor complete_operation path (previously emitted no event)
+    now emits operation_completed + work_order_completed on a full completion."""
+    admin = make_user(db_session)
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
+    wc = make_work_center(db_session)
+    op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/v1/shop-floor/operations/{op.id}/complete",
+        headers=headers_for(admin),
+        json={"quantity_complete": 10},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    assert len(_events(db_session, event_type="operation_completed", work_order_id=wo.id)) == 1
+    assert len(_events(db_session, event_type="work_order_completed", work_order_id=wo.id)) == 1
+
+
+def test_clock_out_completion_emits_completion_events(client: TestClient, db_session: Session):
+    """EVT-2: clock_out is the primary floor completion path; on a completing
+    clock-out it now emits operation_completed + work_order_completed (in addition to
+    the labor_clock_out labor event)."""
+    operator = make_user(db_session, role=UserRole.OPERATOR)
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=4)
+    wc = make_work_center(db_session)
+    op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS, quantity_complete=0)
+    entry = make_open_time_entry(db_session, user=operator, wo=wo, op=op, wc=wc)
+
+    resp = client.post(
+        f"/api/v1/shop-floor/clock-out/{entry.id}",
+        headers=headers_for(operator),
+        json={"quantity_produced": 4, "quantity_scrapped": 0},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    assert len(_events(db_session, event_type="operation_completed", work_order_id=wo.id)) == 1
+    assert len(_events(db_session, event_type="work_order_completed", work_order_id=wo.id)) == 1
+
+
+def test_partial_clock_out_emits_no_completion_event(client: TestClient, db_session: Session):
+    """A partial clock-out (op not finished) must NOT emit a completion event -- the
+    uniform signal fires once per real transition, not on every production report."""
+    operator = make_user(db_session, role=UserRole.OPERATOR)
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
+    wc = make_work_center(db_session)
+    op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS, quantity_complete=0)
+    entry = make_open_time_entry(db_session, user=operator, wo=wo, op=op, wc=wc)
+
+    resp = client.post(
+        f"/api/v1/shop-floor/clock-out/{entry.id}",
+        headers=headers_for(operator),
+        json={"quantity_produced": 3, "quantity_scrapped": 0},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    assert not _events(db_session, event_type="operation_completed", work_order_id=wo.id)
+    assert not _events(db_session, event_type="work_order_completed", work_order_id=wo.id)
+
+
+def test_complete_work_order_emits_operation_and_wo_events(client: TestClient, db_session: Session):
+    """EVT-2: the privileged complete_work_order override emits one operation_completed
+    per force-completed op plus the work_order_completed event."""
+    admin = make_user(db_session)
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
+    wc = make_work_center(db_session)
+    make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
+    make_op(db_session, wo, wc, sequence=20, status_=OperationStatus.PENDING)
+    db_session.commit()
+
+    resp = client.post(
+        f"/api/v1/work-orders/{wo.id}/complete?quantity_complete=10",
+        headers=headers_for(admin),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    # Two open operations were force-completed -> two operation_completed events.
+    assert len(_events(db_session, event_type="operation_completed", work_order_id=wo.id)) == 2
+    assert len(_events(db_session, event_type="work_order_completed", work_order_id=wo.id)) >= 1
+
+
+def test_reconcile_on_read_emits_in_process_completion_events(client: TestClient, db_session: Session):
+    """EVT-4: a reconcile-on-read that drives an op (and its WO) to COMPLETE from
+    durable evidence emits in-process operation_completed/work_order_completed events
+    tagged source_module='reconcile_on_read'. The read stays a GET (no outbound
+    notify/webhook is asserted here; only the in-process event is emitted)."""
+    admin = make_user(db_session)
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=4)
+    wc = make_work_center(db_session)
+    op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS, quantity_complete=0)
+    # Durable closed evidence = full ordered qty, but the op row was never flipped.
+    make_closed_time_entry(db_session, user=admin, wo=wo, op=op, wc=wc, quantity_produced=4)
+
+    resp = client.get(f"/api/v1/work-orders/{wo.id}", headers=headers_for(admin))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    op_events = _events(db_session, event_type="operation_completed", work_order_id=wo.id)
+    wo_events = _events(db_session, event_type="work_order_completed", work_order_id=wo.id)
+    assert len(op_events) == 1, "reconcile emits one operation_completed event"
+    assert len(wo_events) == 1, "reconcile emits one work_order_completed event"
+    assert op_events[0].source_module == "reconcile_on_read"
+    assert wo_events[0].source_module == "reconcile_on_read"
+
+    # The op was genuinely materialized COMPLETE (the event tracks a real transition).
+    refreshed_op = _reload(db_session, WorkOrderOperation, op.id)
+    assert refreshed_op.status == OperationStatus.COMPLETE

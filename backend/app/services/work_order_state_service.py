@@ -39,7 +39,17 @@ class StatusTransition:
     old_status: Optional[str]
     new_status: str
     work_order_number: Optional[str] = None
+    # EVT-4: the owning work order's id, so a read handler can emit the reconcile
+    # OperationalEvent with the same ``work_order_id`` the live completion paths use
+    # (an operation_completed event must be queryable by work order). For a
+    # work_order transition this equals ``resource_id``.
+    work_order_id: Optional[int] = None
     time_entry_ids: list[int] = field(default_factory=list)
+    # MS-2: for a work_order -> COMPLETE transition, the work_center_ids whose
+    # capacity the read handler must refresh (a COMPLETE op drops out of the
+    # scheduled-load query, so the persisted availability_rate would otherwise stay
+    # understated). Empty for operation transitions and non-completion transitions.
+    work_center_ids: list[int] = field(default_factory=list)
 
 
 def operation_target_quantity(
@@ -516,6 +526,7 @@ def reconcile_work_orders_from_completion_evidence(
                 old_status=old_op_status,
                 new_status=OperationStatus.COMPLETE.value,
                 work_order_number=operation.work_order.work_order_number if operation.work_order else None,
+                work_order_id=operation.work_order_id,
                 time_entry_ids=entry_ids_by_operation.get(operation.id, []),
             )
         changed = op_changed or changed
@@ -536,6 +547,7 @@ def _record_transition(
     old_status: Optional[str],
     new_status: str,
     work_order_number: Optional[str] = None,
+    work_order_id: Optional[int] = None,
     time_entry_ids: Optional[list[int]] = None,
 ) -> None:
     if transitions is None or resource_id is None:
@@ -548,6 +560,7 @@ def _record_transition(
             old_status=old_status,
             new_status=new_status,
             work_order_number=work_order_number,
+            work_order_id=work_order_id,
             time_entry_ids=list(time_entry_ids or []),
         )
     )
@@ -656,6 +669,7 @@ def _copy_slot_completion_evidence(
                     old_status=old_op_status,
                     new_status=OperationStatus.COMPLETE.value,
                     work_order_number=work_order.work_order_number,
+                    work_order_id=work_order.id,
                     time_entry_ids=(entry_ids_by_operation or {}).get(operation.id, []),
                 )
             if not operation.actual_end and completed_source.actual_end:
@@ -750,15 +764,24 @@ def _record_wo_complete_transition(
     entry_ids: list[int] = []
     for operation in operations:
         entry_ids.extend((entry_ids_by_operation or {}).get(operation.id, []))
-    _record_transition(
-        transitions,
-        resource_type="work_order",
-        resource_id=work_order.id,
-        resource_identifier=work_order.work_order_number,
-        old_status=old_status,
-        new_status=WorkOrderStatus.COMPLETE.value,
-        work_order_number=work_order.work_order_number,
-        time_entry_ids=entry_ids,
+    # MS-2: capture the affected work centers so the read handler can refresh their
+    # cached availability_rate (a reconcile-driven WO completion otherwise leaves
+    # capacity looking consumed).
+    work_center_ids = sorted({op.work_center_id for op in operations if op.work_center_id})
+    if transitions is None or work_order.id is None:
+        return
+    transitions.append(
+        StatusTransition(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            old_status=old_status,
+            new_status=WorkOrderStatus.COMPLETE.value,
+            work_order_number=work_order.work_order_number,
+            work_order_id=work_order.id,
+            time_entry_ids=entry_ids,
+            work_center_ids=work_center_ids,
+        )
     )
 
 

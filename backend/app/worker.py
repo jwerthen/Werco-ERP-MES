@@ -25,11 +25,11 @@ async def send_email_job(ctx, to: str, subject: str, body: str, template: str = 
     return await send_email_task(to, subject, body, template, context)
 
 
-async def send_webhook_job(ctx, webhook_id: int, event: str, payload: dict):
+async def send_webhook_job(ctx, webhook_id: int, event: str, payload: dict, company_id: int = None):
     """Send webhook job"""
     from app.jobs.webhook_jobs import send_webhook_task
 
-    return await send_webhook_task(webhook_id, event, payload)
+    return await send_webhook_task(webhook_id, event, payload, company_id=company_id)
 
 
 async def run_mrp_job(ctx, mode: str = "REVIEW", company_id: int = None):
@@ -125,6 +125,17 @@ async def aggregate_ai_learning_job(ctx):
     return await aggregate_ai_learning_task()
 
 
+async def dispatch_work_order_completion_signals_job(ctx, work_order_id: int, company_id: int, status: str):
+    """Send outbound completion signals (notification + webhook) for a finished WO.
+
+    Batch 5 / rank 8 (EVT-3): enqueued from the completion request handlers so the
+    email/webhook path runs off the request thread, tenant-scoped to ``company_id``.
+    """
+    from app.jobs.completion_signal_jobs import dispatch_work_order_completion_signals_task
+
+    return await dispatch_work_order_completion_signals_task(work_order_id, company_id, status)
+
+
 # ============================================================================
 # STARTUP/SHUTDOWN
 # ============================================================================
@@ -168,6 +179,7 @@ class WorkerSettings:
         check_low_stock_job,
         check_quote_expiring_job,
         aggregate_ai_learning_job,
+        dispatch_work_order_completion_signals_job,
     ]
 
     # Cron jobs (scheduled tasks)

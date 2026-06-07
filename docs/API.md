@@ -92,6 +92,18 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > responses carry a `quality_exceptions` array (default `[]`) listing any unsatisfied **quality gates**
 > — see "Quality gates on completion are warn-and-record" under Shop Floor; these warn, they do **not**
 > block the completion.
+>
+> **Completion signals.** When a work order reaches **COMPLETE** (operation/WO completion paths) or
+> **CLOSED** (shipment close), the system fires a uniform signal set: an internal `WO_COMPLETED`
+> notification to the tenant's recipients (supervisors, managers, and the WO creator) and an outbound
+> `work_order.completed` / `work_order.closed` **webhook** to the company's registered endpoints — see
+> [Webhooks](#webhooks). Both are dispatched asynchronously **after commit** and best-effort: a signal
+> failure never fails the completion, and nothing fires for a rolled-back completion.
+>
+> **Idempotent completion.** `/work-orders/{id}/complete` (and shipment `/{id}/ship`) are idempotent:
+> re-invoking on an already-terminal work order/shipment returns the current state
+> (`{"already_completed": true}` / `{"already_shipped": true}`) and fires no second audit row, event,
+> notification, or webhook.
 
 #### Work Order Schema
 
@@ -630,6 +642,52 @@ Response:
   "pages": 5
 }
 ```
+
+## Webhooks
+
+The platform can POST outbound webhooks to per-tenant registered endpoints when a work order is
+completed or closed. Webhooks are **tenant-scoped**: a company only ever receives events for its own
+work orders, delivered only to endpoints registered under that company.
+
+> Webhook endpoints are currently provisioned via the backend service (seeded through
+> `WebhookService`); there is no self-service webhook-admin REST endpoint yet.
+
+### Events
+
+| Event | Fires when |
+|-------|------------|
+| `work_order.completed` | A work order reaches **COMPLETE** (operation/WO completion paths) |
+| `work_order.closed` | A work order reaches **CLOSED** (shipment is marked shipped) |
+
+### Payload
+
+The outbound payload is **intentionally minimal and redacted** — it carries only the structured
+identifiers a subscriber needs to react and then re-fetch full detail via the authenticated API
+(keyed on `work_order_id`). Free-text and customer-identifying fields are **deliberately excluded**:
+
+```json
+{
+  "work_order_id": 1,
+  "work_order_number": "WO-10001",
+  "part_id": 123,
+  "status": "COMPLETE",
+  "quantity_complete": 100.0,
+  "quantity_scrapped": 2.0,
+  "company_id": 42,
+  "completed_at": "2026-06-07T14:30:00"
+}
+```
+
+- `status` is the terminal work-order status: `"COMPLETE"` (for `work_order.completed`) or `"CLOSED"`
+  (for `work_order.closed`).
+- `customer_name` and any notes/free-text are **not** included by design (CUI minimization for an
+  egressing payload). To obtain customer or other detail, re-fetch the work order via
+  `GET /work-orders/{work_order_id}` with an authenticated request.
+
+Delivery is asynchronous (ARQ background worker), enqueued after the completion commits and
+best-effort — a webhook failure never affects the work-order completion. Note that the **internal**
+`WO_COMPLETED` notification (email to the tenant's own users) may carry richer context than the
+egressing webhook payload above.
 
 ## Rate Limiting
 

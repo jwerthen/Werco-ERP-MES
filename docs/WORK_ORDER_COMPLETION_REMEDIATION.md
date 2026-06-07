@@ -21,7 +21,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **2** ☑ | 5 | Concurrency: row locks + version + partial unique index | **yes** | 409 on stale write |
 | **3** ☑ | 6 | Shared completion finalizer (consolidation) | no | quantity semantics documented; ON_HOLD completion → 409 |
 | **4** ☑ | 7 | Quality gates on completion (warn-and-record) | no | records a tamper-evident exception, does not block |
-| **5** | 8 | Uniform completion signal set (events/notify/webhook/sched) | no | new outbound signals |
+| **5** ☑ | 8 | Uniform completion signal set (events/notify/webhook/sched) | no | new outbound signals |
 | **6** | 9 | FG receipt + backflush + as-built genealogy | maybe (genealogy table) | inventory now moves |
 | **7** | 10 | Labor-hour + job/actual-cost rollup | maybe (drop cols) | cost reports populate |
 | **8** | 11 | OEE/OTD metric correctness + dead auto-OEE endpoint | no | **KPI values move** |
@@ -246,9 +246,79 @@ Findings: QG-1, QG-2, QG-3, QG-4, QG-5, BLK-1, BLK-2, BLK-4.
 >    re-deriving it from the caller's active company; harden it to self-scope so a future caller can't
 >    record against the wrong tenant.
 
-### Rank 8 — Uniform completion signal set from the finalizer ☐ (Batch 5)
+### Rank 8 — Uniform completion signal set from the finalizer ☑ (Batch 5)
 Emit `operation_completed`/`work_order_completed`/`work_order_closed` events; tenant-scoped broadcasts; enqueue ARQ → `NotificationService.WO_COMPLETED` + `WebhookService.dispatch_event('work_order.completed')` (scope `get_webhooks_for_event` first); refresh scheduling on `complete_work_order`+reconcile; reconcile returns transitions so read handlers emit events/audit.
 Findings: EVT-1, EVT-2, EVT-3, EVT-4, EVT-5, MS-2.
+
+> **Batch 5 status (2026-06-07, rank 8 landed).** Completion now emits a **uniform signal set**
+> across every completion path, split into in-process events (always) and outbound dispatch
+> (live paths only).
+>
+> **In-process `OperationalEvent`s (EVT-1/EVT-2/EVT-4).** Every completion path emits a tenant-scoped,
+> best-effort event via the helpers in `app/services/completion_signal_service.py`
+> (`emit_operation_completed_event` / `emit_work_order_completed_event`) and, for closure, an inline
+> `OperationalEventService.emit` in `shipping.py`:
+> - `operation_completed` — on op COMPLETE (`source_module = "shop_floor"` / live completion path);
+> - `work_order_completed` — on WO COMPLETE;
+> - `work_order_closed` — on the shipping close (`mark_shipped`, distinct from the existing
+>   `shipment_shipped` event so AI/realtime consumers see the WO closure itself).
+>
+> Reconcile-on-read (`_emit_reconcile_events` in `shop_floor.py`) emits the **same** in-process
+> `operation_completed` / `work_order_completed` events with `source_module = "reconcile_on_read"`, so
+> reconcile-driven completions are not invisible to consumers — but it does **NOT** fire outbound
+> notifications/webhooks (a read must not have outbound side-effects).
+>
+> **Outbound notifications + webhooks (EVT-3) on WO COMPLETE / CLOSED.** The live completion handlers
+> call `enqueue_work_order_completion_signals(...)` (`completion_signal_service.py`) **after commit,
+> best-effort**, which enqueues the ARQ job `dispatch_work_order_completion_signals_job`
+> (`app/worker.py` → `dispatch_work_order_completion_signals_task` in
+> `app/jobs/completion_signal_jobs.py`). A signal failure never fails a completion, and nothing fires
+> for a rolled-back completion (enqueue is past the `db.commit()`). In the worker, with its own DB
+> session:
+> - `NotificationService.send_notification(WO_COMPLETED, …)` to the tenant's recipients
+>   (SUPERVISOR + MANAGER in the active company, plus the WO creator) — every recipient query is
+>   company-scoped, so a completion in one tenant never notifies another tenant's users; and
+> - `WebhookService.dispatch_event("work_order.completed" | "work_order.closed", …, company_id=…)`.
+>
+> **Tenant-scoped, CUI-minimized webhooks (EVT-3).** `get_webhooks_for_event` / `dispatch_event` /
+> `create_webhook` are all company-scoped (`app/services/webhook_service.py`); `dispatch_event` now
+> **requires** `company_id` and raises if called unscoped, so a tenant only ever dispatches to its OWN
+> registered endpoints and `WebhookDelivery` rows are tenant-stamped (invariant #1). The outbound
+> webhook payload is the **minimal, redacted** set — `work_order_id`, `work_order_number`, `part_id`,
+> `status`, `quantity_complete`, `quantity_scrapped`, `company_id`, `completed_at` — run through
+> `redact_event_payload` as a belt-and-suspenders pass. It **intentionally OMITS** `customer_name` and
+> free-text/notes (CUI minimization, since the payload egresses to a subscriber-controlled URL);
+> subscribers re-fetch detail via the authenticated API keyed on `work_order_id`. The *internal*
+> notification payload stays inside the tenant (email to the company's own users) and may carry richer
+> context like `customer_name`.
+>
+> **Idempotency (EVT-1/EVT-3).** `mark_shipped` and `complete_work_order` are now idempotent: a
+> re-invocation on an already-terminal shipment/WO returns `already_shipped` / `already_completed` and
+> fires **no** second close/audit/event/signal — the close/audit/event/enqueue block runs exactly once
+> per real transition.
+>
+> **Scheduling refresh (MS-2).** `complete_work_order` and the reconcile-driven WO completion
+> (`_refresh_reconcile_scheduling` in `shop_floor.py`/`work_orders.py`) now refresh cached work-center
+> availability (`SchedulingService.update_availability_rates`) for the affected work centers, so a
+> completed WO's capacity is released rather than left stranded.
+>
+> **Follow-ups (tracked, not fixed in Batch 5):**
+> 1. **Reconcile outbound notify/webhook deferred to rank 12 (Batch 9).** Reconcile-on-read emits the
+>    in-process events but deliberately fires no outbound notification/webhook (no outbound I/O on a
+>    read). When rank 12 moves reconcile to a debounced ARQ job, the outbound dispatch can move with it
+>    — and at that point the signal must be **re-attributed to a system actor** (reconcile has no
+>    requesting user under a background job), mirroring the AUD-3 re-attribution follow-up.
+> 2. **Richer webhook payload is an explicit opt-in / data-classification decision.** The minimized
+>    payload is the default by design; adding `customer_name` or any free-text field to an egressing
+>    webhook must be a deliberate classification call, not a quiet default.
+> 3. **No webhook-admin HTTP endpoint yet.** Webhooks are created/registered via `WebhookService`
+>    (seeded through the service), not through a tenant-facing REST endpoint — there is no
+>    `POST /api/v1/webhooks` route. Subscribers cannot yet self-register; track a CRUD endpoint
+>    (RBAC-gated) separately.
+> 4. **Pre-existing: `mark_shipped` has no `require_role`.** `POST /shipping/{shipment_id}/ship`
+>    depends only on `get_current_user` + `get_current_company_id` — any authenticated user in the
+>    tenant can close a WO by shipping it. This pre-dates Batch 5 (not introduced here) and is raised
+>    separately for an RBAC gate.
 
 ### Rank 9 — FG receipt + backflush + as-built genealogy on completion ☐ (Batch 6 · data-sensitive)
 In finalizer on WO COMPLETE: assign FG lot/serial; create/increment FG `InventoryItem` + RECEIVE txn; backflush components (ISSUE txns carrying consumed lot, apply `scrap_factor`, per-part flag); route through `get_audit_service`. **Idempotent** (reconcile re-enters). Mirror trace into `trace_serial`; populate MRP `on_order`.
