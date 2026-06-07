@@ -88,7 +88,10 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > rejected with **409 Conflict** (`{"detail": "Operation is on hold and cannot be completed"}`);
 > `/work-orders/{id}/complete` likewise returns **409** if any open operation is on hold
 > (`"…is on hold; resolve the hold first"`) — resolve the hold before completing. A work order that
-> reaches `complete` always carries both an `actual_start` and an `actual_end`.
+> reaches `complete` always carries both an `actual_start` and an `actual_end`. Successful completion
+> responses carry a `quality_exceptions` array (default `[]`) listing any unsatisfied **quality gates**
+> — see "Quality gates on completion are warn-and-record" under Shop Floor; these warn, they do **not**
+> block the completion.
 
 #### Work Order Schema
 
@@ -217,6 +220,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
 | POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
+| POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue | Yes |
 
 > **Tenant isolation on clock/operation endpoints.** Clock-in, clock-out, and the shop-floor
@@ -254,6 +258,39 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > evidence, that status change is now written to the tamper-evident audit trail (`GET /audit/`),
 > attributed to the requesting user and tagged `source = "reconcile_on_read"`. This reconcile is
 > best-effort: if its write fails it is rolled back silently and the read still returns **200**.
+
+> **Quality gates on completion are warn-and-record, not blocking.** Completing an operation or work
+> order while a quality gate is unsatisfied still **succeeds (200)** — the gates do not block. Instead,
+> the completion response carries a `quality_exceptions` array describing each unsatisfied gate, and
+> the system records a tamper-evident `audit_log` row (action `COMPLETED_WITH_QUALITY_EXCEPTION`) plus
+> a warning operational event for each. The gates are: `inspection_incomplete` (operation requires
+> inspection but `inspection_complete` is not set), `open_ncr` (an unresolved NCR on the work order),
+> `fai_not_passed` (a First Article Inspection on the work order that is not `PASSED`), and
+> `open_blocker` (an open/acknowledged work-order blocker). This applies to both
+> `/work-orders/operations/{id}/complete` and `/shop-floor/operations/{id}/complete`,
+> `/work-orders/{id}/complete`, and `/shop-floor/clock-out/{id}` when it completes an operation or work
+> order (the field rides on that endpoint's `TimeEntryResponse`). Each entry is
+> `{ "code", "message", "reference_type", "reference_id", "severity" }`; the field defaults to `[]`, so
+> an all-clear completion is shape-compatible with the pre-existing response.
+>
+> _Limitation:_ on the **reconcile-on-read** path only `inspection_incomplete` is recorded (the
+> NCR/FAI/blocker gates are evaluated on the next live completion). And `fai_not_passed` only fires
+> when an FAI **exists** and is not passed — a required-but-missing FAI is not detectable (no
+> "FAI required" flag in the data model).
+
+#### Inspection Schema
+
+`POST /shop-floor/operations/{id}/inspection` records an operation's inspection as complete. It sets
+`inspection_complete = True` (clearing the `inspection_incomplete` gate above), records who/when in a
+tamper-evident audit row, and is **tenant-scoped** + role-gated to **Admin / Manager / Supervisor /
+Quality** (there is no separate Inspector role). Both fields are optional:
+
+```json
+{
+  "inspection_type": "final",
+  "notes": "All critical characteristics within tolerance"
+}
+```
 
 #### Clock Out Schema
 

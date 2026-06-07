@@ -46,6 +46,14 @@ from app.services.laser_nest_service import (
     sync_laser_nest_from_operation,
 )
 from app.services.operational_event_service import OperationalEventService
+from app.services.quality_gate_service import (
+    QualityException,
+    evaluate_and_record_completion_quality_exceptions,
+    evaluate_completion_quality_exceptions,
+    evaluate_inspection_exception,
+    record_completion_quality_exceptions,
+    record_reconcile_inspection_exception,
+)
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_state_service import (
     StatusTransition,
@@ -102,6 +110,12 @@ def _audit_reconcile_transitions(
                     "time_entry_ids": tr.time_entry_ids,
                 },
             )
+            # QG-4 (partial): a completion can happen on a GET via reconcile. Record
+            # at minimum the inspection_incomplete exception (cheapest gate, no extra
+            # query). NCR/FAI/blocker gates are evaluated on the live completion path,
+            # not the read path -- documented partial coverage.
+            if tr.resource_type == "work_order_operation":
+                record_reconcile_inspection_exception(db, operation_id=tr.resource_id, audit=audit, user=current_user)
     except Exception:  # pragma: no cover - reads must never 500 on audit failure
         pass
 
@@ -1963,6 +1977,32 @@ def complete_work_order(
         },
         description=f"Recorded completion quantities for work order {work_order.work_order_number}",
     )
+
+    # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record for the privileged manual
+    # completion. This force-completes EVERY open operation, so gather the gates at
+    # the WO grain (NCR / FAI / open-blocker -- evaluated once with operation=None)
+    # PLUS one inspection_incomplete per operation that still requires inspection.
+    # Each unsatisfied gate gets a tamper-evident audit row + warning event that
+    # commit atomically below. Warn-only: completion already succeeded above.
+    quality_exceptions: list[QualityException] = list(
+        evaluate_completion_quality_exceptions(db, work_order, None, company_id)
+    )
+    for operation in operations:
+        inspection_exc = evaluate_inspection_exception(operation)
+        if inspection_exc is not None:
+            quality_exceptions.append(inspection_exc)
+    if quality_exceptions:
+        record_completion_quality_exceptions(
+            db,
+            company_id=company_id,
+            work_order=work_order,
+            operation=None,
+            exceptions=quality_exceptions,
+            audit=audit,
+            user=current_user,
+            source="complete_work_order",
+        )
+
     try:
         db.commit()
     except StaleDataError as exc:
@@ -1991,7 +2031,11 @@ def complete_work_order(
         },
         company_id=company_id,
     )
-    return {"message": "Work order completed"}
+    return {
+        "message": "Work order completed",
+        # Warn-and-record (Batch 4 / rank 7): unsatisfied quality gates at completion.
+        "quality_exceptions": [exc.as_dict() for exc in quality_exceptions],
+    }
 
 
 # Operation endpoints
@@ -2346,6 +2390,21 @@ def complete_operation(
             new_status=WorkOrderStatus.COMPLETE.value,
         )
 
+    # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record on a true completion only.
+    # Read-only evaluation against the locked op + WO; each unsatisfied gate gets a
+    # tamper-evident audit row + warning event committed atomically below. Never blocks.
+    quality_exceptions: list[QualityException] = []
+    if is_fully_complete and work_order:
+        quality_exceptions = evaluate_and_record_completion_quality_exceptions(
+            db,
+            company_id=company_id,
+            work_order=work_order,
+            operation=operation,
+            audit=audit,
+            user=current_user,
+            source="complete_operation",
+        )
+
     try:
         db.commit()
     except StaleDataError as exc:
@@ -2389,4 +2448,8 @@ def complete_operation(
             },
             company_id=company_id,
         )
-    return {"message": "Operation completed" if is_fully_complete else "Progress updated"}
+    return {
+        "message": "Operation completed" if is_fully_complete else "Progress updated",
+        # Warn-and-record (Batch 4 / rank 7): unsatisfied quality gates at completion.
+        "quality_exceptions": [exc.as_dict() for exc in quality_exceptions],
+    }

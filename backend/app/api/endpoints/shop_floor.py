@@ -6,13 +6,13 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
 from app.core.websocket import (
@@ -24,15 +24,25 @@ from app.core.websocket import (
 from app.db.database import get_db
 from app.models.audit_log import AuditLog
 from app.models.time_entry import TimeEntry, TimeEntryType
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
-from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlockerSeverity
+from app.models.work_order_blocker import (
+    WorkOrderBlocker,
+    WorkOrderBlockerCategory,
+    WorkOrderBlockerSeverity,
+    WorkOrderBlockerStatus,
+)
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
 from app.services.laser_nest_service import sync_laser_nest_from_operation
 from app.services.operational_event_service import OperationalEventService
+from app.services.quality_gate_service import (
+    QualityException,
+    evaluate_and_record_completion_quality_exceptions,
+    record_reconcile_inspection_exception,
+)
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 from app.services.work_order_state_service import (
@@ -65,6 +75,18 @@ class OperationHoldRequest(BaseModel):
     category: WorkOrderBlockerCategory = WorkOrderBlockerCategory.OTHER
     severity: WorkOrderBlockerSeverity = WorkOrderBlockerSeverity.MEDIUM
     note: Optional[str] = None
+
+
+class OperationInspectionRequest(BaseModel):
+    """Record an operation as inspected (QG-2 writer).
+
+    ``inspection_type`` optionally records WHICH inspection cleared the gate
+    (first_article / in_process / final); ``notes`` carries inspector commentary.
+    Both land in the audit row so the inspection sign-off is traceable.
+    """
+
+    inspection_type: Optional[str] = Field(default=None, max_length=100)
+    notes: Optional[str] = Field(default=None, max_length=2000)
 
 
 router = APIRouter()
@@ -108,6 +130,16 @@ def _audit_reconcile_transitions(
                     "time_entry_ids": tr.time_entry_ids,
                 },
             )
+            # QG-4: a completion can happen on a GET via reconcile. The same
+            # warn-and-record gate must flag it. To keep the read path cheap and
+            # 500-safe we record at MINIMUM the inspection_incomplete exception
+            # (no extra query -- the operation row is already loaded in-session).
+            # PARTIAL COVERAGE by design: the NCR/FAI/open-blocker gates (which
+            # need extra queries) are NOT evaluated on the read path; they are
+            # caught on the next live completion / WO-complete. Flagged in the
+            # report and the module docstring.
+            if tr.resource_type == "work_order_operation":
+                record_reconcile_inspection_exception(db, operation_id=tr.resource_id, audit=audit, user=current_user)
     except Exception:  # pragma: no cover - reads must never 500 on audit failure
         # Reads must still succeed even if the audit chain write fails. The
         # status mutation itself is already committed by the caller; losing the
@@ -634,6 +666,7 @@ def clock_out(
     # primary floor completion path; the OperationalEvent above is an AI/realtime
     # signal, not the audit_log hash chain. Logged BEFORE the terminal commit so
     # the audit rows commit atomically with the status change.
+    quality_exceptions: list[QualityException] = []
     if operation_completed or work_order_completed:
         db.flush()
         audit = AuditService(db, current_user)
@@ -657,6 +690,21 @@ def clock_out(
                 old_status=old_work_order_status,
                 new_status=WorkOrderStatus.COMPLETE.value,
                 description=f"Completed work order {work_order.work_order_number} via clock-out",
+            )
+        # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record. Completion has already
+        # mutated state and is about to commit -- evaluate the (read-only, locked-row)
+        # quality gates and, for each unsatisfied one, leave a tamper-evident audit
+        # row + a warning OperationalEvent that commit ATOMICALLY with this clock-out.
+        # Never blocks the completion. Runs against the already-loaded/locked op + WO.
+        if operation:
+            quality_exceptions = evaluate_and_record_completion_quality_exceptions(
+                db,
+                company_id=company_id,
+                work_order=work_order,
+                operation=operation,
+                audit=audit,
+                user=current_user,
+                source="clock_out",
             )
 
     try:
@@ -703,6 +751,11 @@ def clock_out(
         },
         company_id=company_id,
     )
+
+    # Surface the warn-and-record quality exceptions on the response (QG-4 / schema).
+    # Attached AFTER db.refresh(time_entry) so the ORM refresh can't clobber it; the
+    # TimeEntryResponse schema reads this attribute (default empty list otherwise).
+    time_entry.quality_exceptions = [exc.as_dict() for exc in quality_exceptions]
 
     return time_entry
 
@@ -1787,7 +1840,8 @@ def complete_operation(
             open_entries[0].quantity_produced = float(open_entries[0].quantity_produced or 0) + completion_delta
 
     # Create audit log
-    AuditService(db, current_user).log(
+    audit = AuditService(db, current_user)
+    audit.log(
         action="COMPLETE_OPERATION" if is_fully_complete else "UPDATE_OPERATION_PROGRESS",
         resource_type="work_order_operation",
         resource_id=operation_id,
@@ -1797,6 +1851,21 @@ def complete_operation(
             + (f". Notes: {completion_data.notes}" if completion_data.notes else "")
         ),
     )
+
+    # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record on a true completion only.
+    # Read-only evaluation against the locked op + WO; each unsatisfied gate gets a
+    # tamper-evident audit row + warning event committed atomically below. Never blocks.
+    quality_exceptions: list[QualityException] = []
+    if is_fully_complete:
+        quality_exceptions = evaluate_and_record_completion_quality_exceptions(
+            db,
+            company_id=company_id,
+            work_order=work_order,
+            operation=operation,
+            audit=audit,
+            user=current_user,
+            source="complete_operation",
+        )
 
     try:
         db.commit()
@@ -1857,6 +1926,8 @@ def complete_operation(
             "quantity_complete": work_order.quantity_complete,
         },
         "is_fully_complete": is_fully_complete,
+        # Warn-and-record (Batch 4 / rank 7): unsatisfied quality gates at completion.
+        "quality_exceptions": [exc.as_dict() for exc in quality_exceptions],
     }
 
 
@@ -2143,16 +2214,32 @@ def resume_operation(
     if operation.status != OperationStatus.ON_HOLD:
         raise HTTPException(status_code=400, detail="Operation is not on hold")
 
+    # BLK-4 (warn-and-record): resuming an op does NOT resolve the blocker(s) that
+    # put it on hold (resolution stays owned by the blocker resolve/dismiss flow), so
+    # surface any still-open blocker on the response so the operator/dashboard is
+    # warned that operation status and blocker status are about to diverge. Read-only.
+    open_blockers = (
+        db.query(WorkOrderBlocker)
+        .filter(
+            WorkOrderBlocker.company_id == company_id,
+            WorkOrderBlocker.operation_id == operation.id,
+            WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),
+        )
+        .all()
+    )
+
     # Resume to previous state
     operation.status = OperationStatus.IN_PROGRESS if operation.actual_start else OperationStatus.READY
     operation.updated_at = datetime.utcnow()
 
-    # Create audit log
+    # Create audit log. BLK-4: note any still-open blocker so the audit row records
+    # that the op was resumed while its blocker(s) remained open.
     AuditService(db, current_user).log(
         action="RESUME_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
         description=f"Resumed operation {operation.operation_number}",
+        extra_data=({"open_blocker_ids": [b.id for b in open_blockers]} if open_blockers else None),
     )
     if operation.work_order:
         OperationalEventService(db).emit(
@@ -2206,4 +2293,124 @@ def resume_operation(
             company_id=company_id,
         )
 
-    return {"message": "Operation resumed", "status": operation.status.value}
+    return {
+        "message": "Operation resumed",
+        "status": operation.status.value,
+        # BLK-4: warn that these blockers are still open even though the op resumed.
+        "open_blockers": [
+            {
+                "id": b.id,
+                "title": b.title,
+                "category": b.category,
+                "severity": b.severity,
+                "status": b.status,
+            }
+            for b in open_blockers
+        ],
+    }
+
+
+@router.post("/operations/{operation_id}/inspection")
+def mark_operation_inspected(
+    operation_id: int,
+    inspection_data: OperationInspectionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
+    ),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Record an operation's inspection as complete (QG-2 writer).
+
+    Before Batch 4 NOTHING set ``WorkOrderOperation.inspection_complete = True``, so
+    the inspection quality gate (QG-1) could warn but never CLEAR -- the warning was
+    not actionable. This audited writer closes that loop: it flips
+    ``inspection_complete`` true, records who/when, and writes a tamper-evident
+    ``audit_log`` row, so a subsequent completion stops raising the
+    ``inspection_incomplete`` exception.
+
+    Tenant-scoped (operation must belong to the active company) and RBAC-gated to
+    ADMIN / MANAGER / SUPERVISOR / QUALITY -- the roles that perform / sign off
+    inspection in this repo's role model (there is no separate INSPECTOR role).
+
+    FAI-pass auto-wire is DEFERRED: the FAI/NCR tables carry no ``operation_id`` FK,
+    so an FAI passing cannot be linked back to a specific operation without a schema
+    change (database-migration-specialist). In warn-and-record mode the manual writer
+    is sufficient (nothing is blocked); the auto-wire is flagged as a follow-up.
+    """
+    operation = (
+        db.query(WorkOrderOperation)
+        .options(joinedload(WorkOrderOperation.work_order))
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
+        .first()
+    )
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+
+    work_order = operation.work_order
+    was_complete = bool(operation.inspection_complete)
+    operation.inspection_complete = True
+    if inspection_data.inspection_type:
+        operation.inspection_type = inspection_data.inspection_type
+    operation.updated_at = datetime.utcnow()
+
+    # Tamper-evident audit row for the inspection sign-off (who/when/what). Flushed
+    # (not committed) by AuditService.log so it commits atomically with the flag below.
+    note_suffix = f". Notes: {inspection_data.notes}" if inspection_data.notes else ""
+    type_suffix = f" ({inspection_data.inspection_type})" if inspection_data.inspection_type else ""
+    AuditService(db, current_user).log(
+        action="MARK_OPERATION_INSPECTED",
+        resource_type="work_order_operation",
+        resource_id=operation.id,
+        resource_identifier=operation.operation_number,
+        description=(
+            f"Recorded inspection complete{type_suffix} for operation {operation.operation_number}"
+            + (f" on WO {work_order.work_order_number}" if work_order else "")
+            + note_suffix
+        ),
+        new_values={"inspection_complete": True},
+        old_values={"inspection_complete": was_complete},
+    )
+
+    if work_order:
+        try:
+            OperationalEventService(db).emit(
+                company_id=company_id,
+                event_type="operation_inspected",
+                source_module="shop_floor",
+                entity_type="work_order_operation",
+                entity_id=operation.id,
+                work_order_id=work_order.id,
+                operation_id=operation.id,
+                user_id=current_user.id,
+                severity="info",
+                event_payload={
+                    "work_order_number": work_order.work_order_number,
+                    "operation_name": operation.name,
+                    "inspection_type": inspection_data.inspection_type,
+                },
+            )
+        except Exception:  # pragma: no cover - signal emission must not break the write
+            pass
+
+    db.commit()
+    db.refresh(operation)
+
+    if operation.work_center_id:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            operation.work_center_id,
+            {
+                "event": "operation_inspected",
+                "work_order_id": work_order.id if work_order else None,
+                "operation_id": operation.id,
+            },
+            company_id=company_id,
+        )
+
+    return {
+        "message": "Operation inspection recorded",
+        "operation_id": operation.id,
+        "inspection_complete": operation.inspection_complete,
+        "inspection_type": operation.inspection_type,
+    }

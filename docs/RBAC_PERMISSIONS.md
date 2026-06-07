@@ -127,6 +127,14 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Approve | ✓ | ✓ | | | ✓ | | |
 | Calibration | ✓ | ✓ | | | ✓ | | |
 
+> **Inspect — endpoint mapping.** The shop-floor inspection sign-off
+> `POST /api/v1/shop-floor/operations/{operation_id}/inspection` (which records
+> `WorkOrderOperation.inspection_complete = True` and clears the completion inspection quality gate)
+> is enforced **in code** to this Inspect row:
+> `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])` (`app/api/endpoints/shop_floor.py`,
+> `mark_operation_inspected`). The role set matches the matrix exactly — this repo has no separate
+> `INSPECTOR` role, so operation inspection is performed by Admin / Manager / Supervisor / Quality.
+
 ### Users
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

@@ -20,7 +20,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **1** ☑ | 1–4 | Tenant isolation + audit logging | no | no (legit users unaffected) |
 | **2** ☑ | 5 | Concurrency: row locks + version + partial unique index | **yes** | 409 on stale write |
 | **3** ☑ | 6 | Shared completion finalizer (consolidation) | no | quantity semantics documented; ON_HOLD completion → 409 |
-| **4** | 7 | Quality-gate enforcement on completion | maybe (FAI/NCR op FK) | **yes — blocks some completions** |
+| **4** ☑ | 7 | Quality gates on completion (warn-and-record) | no | records a tamper-evident exception, does not block |
 | **5** | 8 | Uniform completion signal set (events/notify/webhook/sched) | no | new outbound signals |
 | **6** | 9 | FG receipt + backflush + as-built genealogy | maybe (genealogy table) | inventory now moves |
 | **7** | 10 | Labor-hour + job/actual-cost rollup | maybe (drop cols) | cost reports populate |
@@ -168,14 +168,83 @@ Findings: DUP-2, DUP-3, DUP-4, DUP-5, SFI-4, SFI-5, RUP-1, RUP-4, RUP-6, QG-5, B
 >    audit emission with it**: once reconcile no longer runs under the requesting user it has to
 >    re-attribute the `reconcile_on_read` status-change rows to a **system actor** rather than
 >    `current_user`. Do not drop the audit when moving reconcile off the read path.
-> 3. **Batch-4 dependency — deferred `complete_work_order` ON_HOLD audited override.** Batch 3 only
->    makes the endpoints *consistently refuse* an ON_HOLD completion (409). The **audited QUALITY-role
->    override** that may clear a hold during completion is part of rank 7 (Batch 4) quality-gate
->    enforcement.
+> 3. **Batch-4 dependency — ON_HOLD policy.** Batch 3 makes the endpoints *consistently refuse* an
+>    ON_HOLD completion (409). Batch 4 adopted **warn-and-record** rather than a blocking gate, so the
+>    originally-planned "audited QUALITY-role override that clears a hold during completion" was **not
+>    built** — Batch 4 records (does not clear) an unsatisfied gate, and the ON_HOLD 409 refusal from
+>    Batch 3 stands unchanged. See the Batch 4 status note under Rank 7.
 
-### Rank 7 — Enforce quality gates on completion ☐ (Batch 4 · behavior change)
-`assert_operation_completable(op)` in the finalizer + inside reconcile: refuse COMPLETE when `requires_inspection and not inspection_complete`, open NCR (PENDING disposition), non-passed FAI, or open `WorkOrderBlocker` — or audited QUALITY-role override. Ship the missing `inspection_complete` writer. Auto-resolve/surface blockers on completion/resume.
+### Rank 7 — Quality gates on completion (warn-and-record) ☑ (Batch 4)
+> **Posture change from the original plan.** The original action proposed a hard block
+> (`assert_operation_completable(op)` refusing COMPLETE) with an audited QUALITY-role override. The
+> product owner chose **warn-and-record instead of blocking**: completion still succeeds, but every
+> unsatisfied gate leaves a tamper-evident `audit_log` row + a warning event and is returned on the
+> response. No override path is needed because nothing is blocked. The detection logic lives in
+> `app/services/quality_gate_service.py`; ship the missing `inspection_complete` writer (QG-2);
+> surface still-open blockers on completion/resume.
 Findings: QG-1, QG-2, QG-3, QG-4, QG-5, BLK-1, BLK-2, BLK-4.
+
+> **Batch 4 status (2026-06-07, rank 7 landed — warn-and-record).** Quality gates are now evaluated
+> on every completion but **do not block** it. When an operation or work order completes while a gate
+> is unsatisfied, completion still succeeds (**200**) and the system, in the same unit of work that
+> commits the completion:
+> 1. writes ONE tamper-evident `audit_log` row with action **`COMPLETED_WITH_QUALITY_EXCEPTION`** (a
+>    distinct, greppable verb — not a plain `COMPLETE`) carrying the exception codes + offending
+>    record references in `extra_data`;
+> 2. emits ONE warning `OperationalEvent` (`event_type = "quality_exception_on_completion"`,
+>    `severity = "warning"`) for AI / realtime context; and
+> 3. returns the exceptions on a new `quality_exceptions` response field (default `[]`).
+>
+> All detection is **read-only and tenant-scoped** (`app/services/quality_gate_service.py`); it never
+> mutates a row and never raises on a failed gate. The single entry point
+> `evaluate_and_record_completion_quality_exceptions(...)` runs on the live (locked-row) completion
+> paths: shop-floor and office `complete_operation` (on a *true* completion only), `clock_out` when it
+> completes an op/WO, and `complete_work_order` (which gathers the WO-grain NCR/FAI/blocker gates once
+> plus one inspection gate per still-open operation). The inspection-only gate also runs on the
+> **reconcile-on-read** path.
+>
+> **Gates (codes):**
+> - `inspection_incomplete` (QG-1) — `operation.requires_inspection and not operation.inspection_complete`. Evaluated off the already-loaded operation row (no extra query); this is the one gate cheap enough to also run on the reconcile/read path.
+> - `open_ncr` (QG-3) — an NCR on the WO whose status is not `CLOSED`/`VOID`, or whose disposition is still `PENDING`. Company-scoped.
+> - `fai_not_passed` (QG-3) — a First Article Inspection on the WO whose status is not `PASSED`. Company-scoped.
+> - `open_blocker` (BLK-2) — an `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` on the operation or work order. Company-scoped.
+>
+> **QG-2 — the missing `inspection_complete` writer shipped.** New audited, tenant-scoped, RBAC-gated
+> endpoint **`POST /api/v1/shop-floor/operations/{operation_id}/inspection`** (`mark_operation_inspected`)
+> sets `inspection_complete = True` (and an optional `inspection_type`), writes a
+> `MARK_OPERATION_INSPECTED` audit row, and emits an `operation_inspected` event — so the
+> `inspection_incomplete` gate can actually be CLEARED. Role-gated to **ADMIN / MANAGER / SUPERVISOR /
+> QUALITY** (this repo has no separate `INSPECTOR` role).
+>
+> **BLK-4 — `resume_operation` surfaces open blockers.** Resuming an on-hold operation does not
+> resolve its blocker(s); `/operations/{id}/resume` now returns any still-`OPEN`/`ACKNOWLEDGED`
+> blocker on the operation in an `open_blockers` array (and records their ids in the resume audit
+> row's `extra_data`), so the operator/dashboard is warned that operation status and blocker status
+> are diverging.
+>
+> **Response shape.** All completion responses carry
+> `quality_exceptions: list[{code, message, reference_type, reference_id, severity}]` (default `[]`):
+> shop-floor + office `complete_operation`, `complete_work_order`, and `clock_out`'s
+> `TimeEntryResponse` (`QualityExceptionInfo` in `app/schemas/work_order.py`). Backward-compatible — an
+> all-clear completion returns an empty list, indistinguishable from the pre-Batch-4 shape.
+>
+> **Deferrals / follow-ups (tracked, not fixed in Batch 4):**
+> 1. **`fai_not_passed` cannot detect a *missing-but-required* FAI.** The FAI model carries no
+>    "FAI required" flag (and no `operation_id`), so the gate only fires when an FAI *exists* and is
+>    not passed — a required FAI that was never created is invisible to it.
+> 2. **FAI-pass → `inspection_complete` auto-wire deferred.** An FAI passing cannot auto-clear an
+>    operation's inspection gate, because there is no FAI↔operation FK to link them. Auto-wiring
+>    requires a schema change (database-migration-specialist); until then the manual
+>    `mark_operation_inspected` writer is the only clear path. Acceptable under warn-and-record because
+>    nothing is blocked.
+> 3. **QG-4 reconcile coverage is partial.** A completion can happen on a GET via reconcile-on-read;
+>    that path records only `inspection_incomplete` (the cheapest, no-extra-query gate). The
+>    NCR/FAI/blocker gates (which need extra queries) are **not** evaluated on the read path — they are
+>    caught on the next live completion / WO-complete. Documented partial coverage.
+> 4. **Defense-in-depth — `record_reconcile_inspection_exception` self-scope on `company_id`.** It
+>    currently derives the company from the operation row it loads (`operation.company_id`) rather than
+>    re-deriving it from the caller's active company; harden it to self-scope so a future caller can't
+>    record against the wrong tenant.
 
 ### Rank 8 — Uniform completion signal set from the finalizer ☐ (Batch 5)
 Emit `operation_completed`/`work_order_completed`/`work_order_closed` events; tenant-scoped broadcasts; enqueue ARQ → `NotificationService.WO_COMPLETED` + `WebhookService.dispatch_event('work_order.completed')` (scope `get_webhooks_for_event` first); refresh scheduling on `complete_work_order`+reconcile; reconcile returns transitions so read handlers emit events/audit.

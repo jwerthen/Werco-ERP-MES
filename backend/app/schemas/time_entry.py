@@ -1,10 +1,11 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.time_utils import to_utc_iso
 from app.models.time_entry import TimeEntryType
+from app.schemas.work_order import QualityExceptionInfo
 
 
 class TimeEntryBase(BaseModel):
@@ -64,6 +65,9 @@ class TimeEntryResponse(TimeEntryBase):
     approved_by: Optional[int]
     created_at: datetime
     updated_at: datetime
+    # Warn-and-record (Batch 4 / rank 7): quality gates that were unsatisfied when a
+    # clock-out completed the operation/WO. Backward-compatible -- defaults to empty.
+    quality_exceptions: List[QualityExceptionInfo] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
