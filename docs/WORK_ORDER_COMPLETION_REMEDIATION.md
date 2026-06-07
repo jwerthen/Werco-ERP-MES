@@ -19,7 +19,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 |---|---|---|---|---|
 | **1** ☑ | 1–4 | Tenant isolation + audit logging | no | no (legit users unaffected) |
 | **2** ☑ | 5 | Concurrency: row locks + version + partial unique index | **yes** | 409 on stale write |
-| **3** | 6 | Shared completion finalizer (consolidation) | no | quantity semantics documented |
+| **3** ☑ | 6 | Shared completion finalizer (consolidation) | no | quantity semantics documented; ON_HOLD completion → 409 |
 | **4** | 7 | Quality-gate enforcement on completion | maybe (FAI/NCR op FK) | **yes — blocks some completions** |
 | **5** | 8 | Uniform completion signal set (events/notify/webhook/sched) | no | new outbound signals |
 | **6** | 9 | FG receipt + backflush + as-built genealogy | maybe (genealogy table) | inventory now moves |
@@ -45,7 +45,7 @@ Findings: EVT-6.
 ### Rank 4 — Tamper-evident audit on every completion/close/status-change ☑ (Batch 1)
 Files: `shop_floor.py`, `work_orders.py`, `shipping.py`, `inventory.py`, `work_order_blocker_service.py`. `AuditService.log_status_change`/`log_update` (via `get_audit_service`) before each terminal commit; mirror `release_work_order`'s flush→audit→commit atomicity. Includes inventory `/receive,/issue,/transfer,/adjust` and blocker create/update/resolve/dismiss. DUP-1's office complete_operation needs BOTH rank-1 scope AND this audit row.
 Findings: DUP-1, RUP-5, AUD-1, AUD-2, ~~AUD-3~~ (deferred to Batch 3), AUD-4, EVT-1, EVT-5, INV-4, BLK-3.
-**AUD-3 deferred:** reconcile-on-read status transitions (dashboard / list / detail / `get_all_operations` calling `reconcile_work_orders_from_completion_evidence`) are still not audited — marked with `TODO(AUD-3, Batch 3)` at each call site, to be handled by the shared finalizer in Rank 6.
+**AUD-3 — now closed in Batch 3 (rank 6):** reconcile-on-read status transitions (dashboard / list / detail / `get_all_operations` calling `reconcile_work_orders_from_completion_evidence`) were deferred here and are now audited. `reconcile_work_orders_from_completion_evidence` returns the terminal transitions and the read handler writes a tamper-evident status-change row per transition (attributed to the requesting user, `extra_data.source = "reconcile_on_read"`) before its commit. See the Batch 3 status note under Rank 6.
 
 > **Batch 1 status (2026-06-07, ranks 1–4 landed).** Tenant isolation is now enforced on the
 > completion/operation/clock endpoints (`/shop-floor/clock-in`, `/clock-out/{id}`,
@@ -110,9 +110,68 @@ Findings: SFI-1, SFI-2, SFI-3, LOCK-1.
 > sequence allocation (advisory lock / `SELECT … FOR UPDATE` on the chain tail) or catch-and-retry on
 > the sequence-collision `IntegrityError`.
 
-### Rank 6 — Consolidate op-complete → WO-rollup into one shared finalizer ☐ (Batch 3 · keystone)
+### Rank 6 — Consolidate op-complete → WO-rollup into one shared finalizer ☑ (Batch 3 · keystone)
 File: `work_order_state_service.py` (+ both endpoints). `finalize_operation_completion(db, wo, op, user, company_id)`: remaining-ops count (reuse loaded relationship), COMPLETE-vs-release branch, `max()`-guarded qty floored at TimeEntry evidence, always stamp `actual_start`, one absolute-vs-additive contract per verb, stop zeroing scrap from defaulted-0 param, self-healing READY release via `has_incomplete_predecessors`, populate/drop `current_operation_id`, return affected work_center_ids. `complete_work_order` delegates. Consistent ON_HOLD policy.
 Findings: DUP-2, DUP-3, DUP-4, DUP-5, SFI-4, SFI-5, RUP-1, RUP-4, RUP-6, QG-5, BLK-1.
+
+> **Batch 3 status (2026-06-07, rank 6 landed).** The op-complete → WO-rollup logic is now a
+> **single shared finalizer**, `finalize_operation_completion(db, wo, op)` in
+> `app/services/work_order_state_service.py`. Every completion path delegates to it — both
+> `/operations/{id}/complete` endpoints (shop-floor and office), the additive verbs (`clock_out`,
+> `/shop-floor/operations/{id}/production`), and the privileged `/work-orders/{id}/complete`
+> override (which force-completes each still-open op through the finalizer rather than blind-flipping
+> the WO). The three former inline copies can no longer drift (DUP-2 … DUP-5).
+>
+> **Unified completion contract:**
+> - **Quantity (RUP-6 / SFI-5 / DUP-3).** Absolute verbs (both `/operations/{id}/complete`) store
+>   `clamp(max(existing, requested, durable TimeEntry produced-evidence sum), 0, target)` via
+>   `resolve_absolute_operation_quantity` — never below the value already stored, never below
+>   recorded production evidence, never above the operation target. Additive verbs (`clock_out`,
+>   `/production`) compute `existing + delta` then pass it through
+>   `floor_operation_quantity_at_evidence` (same evidence floor + target cap). Work-order
+>   `quantity_complete` is rolled up with a `max()` guard so an out-of-sequence / earlier-stage op
+>   can never pull finished quantity backward.
+> - **Scrap (DUP-3).** The office `complete_operation` `quantity_scrapped` param and the
+>   `complete_work_order` `quantity_scrapped` param are now **optional** — an omitted value is left
+>   untouched, so a defaulted call can no longer zero previously-accumulated operation / WO scrap.
+>   Pass an explicit value (including `0`) to overwrite.
+> - **ON_HOLD (QG-5 / BLK-1).** Completing an ON_HOLD operation is **refused with 409** on BOTH
+>   `/operations/{id}/complete` endpoints ("Operation is on hold and cannot be completed"), and
+>   `/work-orders/{id}/complete` returns **409** up front if any open operation is on hold ("…is on
+>   hold; resolve the hold first"). The completion path no longer silently lifts a quality / material
+>   hold. (Full quality-gate enforcement — inspection / NCR / FAI / blocker — is Batch 4 / rank 7.)
+> - **Timestamps (DUP-2 / RUP-1).** A WO reaching COMPLETE always has BOTH `actual_start` and
+>   `actual_end` set, with `actual_start` clamped `≤ actual_end` (no negative cycle time). The
+>   finalizer maintains `current_operation_id` throughout: it points at the active/next operation
+>   while the route is open and is cleared when the WO reaches COMPLETE.
+>
+> **AUD-3 closed.** Reconcile-on-read status transitions — an operation / WO driven to COMPLETE from
+> durable TimeEntry evidence when a list / detail / dashboard endpoint is loaded — now write a
+> tamper-evident `audit_log` status-change row **attributed to the requesting user** and tagged
+> `extra_data.source = "reconcile_on_read"`. The reconcile itself has no actor, so
+> `reconcile_work_orders_from_completion_evidence` returns the transitions (as `StatusTransition`
+> records, enriched with the contributing `time_entry_ids`) and the read handler emits the audit rows
+> before its commit. Reconcile-on-read remains **best-effort**: `_reconcile_and_commit` catches
+> `SQLAlchemyError` broadly, rolls back the reconcile mutation **and** its audit rows atomically, and
+> still serves the read with a 200 — a benign version race or a poisoned session (e.g. an
+> `audit_log.sequence_number` collision) can never turn a GET into a 500.
+>
+> **Open follow-ups (tracked, not yet fixed):**
+> 1. **A1 — root `audit_log.sequence_number` race (carried over from Batch 2).** The `max()+1`
+>    sequence allocation is still **not** serialized under concurrent writes; Batch 3 only guaranteed
+>    that reconcile-on-read *reads* don't 500 when the collision happens (it swallows the failure and
+>    drops the redundant write). The hot completion-path writers can still collide on the unique
+>    `sequence_number` → occasional **500**. Needs a dedicated fix (serialize sequence allocation via
+>    an advisory lock / `FOR UPDATE` on the chain tail, or catch-and-retry on the collision).
+> 2. **Rank-12 tension — AUD-3 keeps mutation + audit on the read path.** The planned rank-12
+>    "bound the dashboard reconcile / move it to a debounced ARQ job" (Batch 9) must **carry the
+>    audit emission with it**: once reconcile no longer runs under the requesting user it has to
+>    re-attribute the `reconcile_on_read` status-change rows to a **system actor** rather than
+>    `current_user`. Do not drop the audit when moving reconcile off the read path.
+> 3. **Batch-4 dependency — deferred `complete_work_order` ON_HOLD audited override.** Batch 3 only
+>    makes the endpoints *consistently refuse* an ON_HOLD completion (409). The **audited QUALITY-role
+>    override** that may clear a hold during completion is part of rank 7 (Batch 4) quality-gate
+>    enforcement.
 
 ### Rank 7 — Enforce quality gates on completion ☐ (Batch 4 · behavior change)
 `assert_operation_completable(op)` in the finalizer + inside reconcile: refuse COMPLETE when `requires_inspection and not inspection_complete`, open NCR (PENDING disposition), non-passed FAI, or open `WorkOrderBlocker` — or audited QUALITY-role override. Ship the missing `inspection_complete` writer. Auto-resolve/surface blockers on completion/resume.

@@ -75,6 +75,20 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > the update; the client should re-fetch and retry. The server also takes a row lock
 > (`SELECT … FOR UPDATE`) around the over-completion check so two simultaneous completions cannot
 > double-count quantity.
+>
+> **Completion contract (shared finalizer).** Operation completion rolls up into the work order
+> through one shared finalizer, so all completion paths behave identically. On the absolute
+> completion verbs (`/operations/{id}/complete`, both here and on the shop floor) the stored
+> `quantity_complete` is `clamp(max(existing, requested, recorded production evidence), 0, target)`:
+> it never drops below the value already recorded or below durable production evidence, and never
+> exceeds the operation target. The work order's `quantity_complete` only ever moves forward. Scrap
+> is **opt-in on update**: `quantity_scrapped` is optional on both `/work-orders/{id}/complete` and
+> `/work-orders/operations/{id}/complete` — omit it to leave previously-recorded scrap untouched;
+> send an explicit value (including `0`) to overwrite it. Completing an **on-hold** operation is
+> rejected with **409 Conflict** (`{"detail": "Operation is on hold and cannot be completed"}`);
+> `/work-orders/{id}/complete` likewise returns **409** if any open operation is on hold
+> (`"…is on hold; resolve the hold first"`) — resolve the hold before completing. A work order that
+> reaches `complete` always carries both an `actual_start` and an `actual_end`.
 
 #### Work Order Schema
 
@@ -227,6 +241,19 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > open time entry can exist per user + operation. A racing double clock-in is rejected with
 > **400 Bad Request** (`"You are already clocked in to this operation."`) instead of creating a
 > second open entry that would double-count production.
+>
+> **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
+> the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores
+> `clamp(max(existing, requested, recorded production evidence), 0, target)`; the additive verbs
+> (`/clock-out/{id}`, `/operations/{id}/production`) add a delta floored at the same evidence and
+> capped at the target. Completing an **on-hold** operation is rejected with **409 Conflict**
+> (`{"detail": "Operation is on hold and cannot be completed"}`).
+>
+> **Reconcile-on-read is audited.** When a read endpoint (e.g. `/shop-floor/dashboard`, the operation
+> list, or a work-order detail) drives an operation or work order to `complete` from durable time-entry
+> evidence, that status change is now written to the tamper-evident audit trail (`GET /audit/`),
+> attributed to the requesting user and tagged `source = "reconcile_on_read"`. This reconcile is
+> best-effort: if its write fails it is rolled back silently and the read still returns **200**.
 
 #### Clock Out Schema
 

@@ -83,10 +83,17 @@
   stock-level change(s)), and work-order **blocker** create / update / resolve (including any
   operation hold/resume they trigger). Each is written to the tamper-evident hash chain and
   flushed so the audit row commits atomically with the state change.
-  *Known gap (tracked):* status transitions performed by the reconcile-on-read path
-  (`reconcile_work_orders_from_completion_evidence`, invoked from dashboard / list / detail reads)
-  are **not yet audited** — flagged `TODO(AUD-3, Batch 3)` at each call site, to be closed when
-  that logic moves into the shared completion finalizer.
+  AU-3.3.1 coverage also includes status transitions performed by the **reconcile-on-read** path
+  (`reconcile_work_orders_from_completion_evidence`, invoked from dashboard / list / detail reads):
+  when a read drives an operation or work order to COMPLETE from durable time-entry evidence, the
+  read handler writes a tamper-evident status-change row per transition, **attributed to the
+  requesting user** and tagged `extra_data.source = "reconcile_on_read"` (the reconcile itself has no
+  actor, so it returns the transitions for the handler to audit before commit). This closes the
+  previously-tracked AUD-3 gap. The reconcile write is best-effort — on any failure the mutation and
+  its audit rows are rolled back atomically and the read still serves 200 (no orphaned, unaudited
+  state change).
+  *Known gap (tracked):* the root `audit_log.sequence_number` (`max()+1`) allocation is still not
+  serialized under concurrent writes — see follow-up A1 in `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`.
 
 **GAPS:**
 - [x] **AU-3.3.8 - Protect Audit Information** ✅ COMPLETE
@@ -518,6 +525,7 @@ Backend:
 | 2026-06-05 | AU-3.3.8: audit-log retention reconciled with immutability — `cleanup_old_logs_task` no longer deletes audit logs; aged rows are archived to cold storage (never deleted) by `archive_aged_audit_logs_task` / `AuditArchivalService`; physical removal is a documented DBA partition-drop only. See `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` | Droid |
 | 2026-06-07 | AC-3.1.3 / AU-3.3.1 (work-order completion hardening, Batch 1): tenant isolation enforced on the operation/clock/completion endpoints (404-before-mutation on a foreign id) and on traceability/analytics/OEE/scheduling/MRP services; `/ws/updates` now requires auth with completion broadcasts scoped per company. Tamper-evident audit coverage extended to operation/WO start+complete, shipment-close (WO `CLOSED`), inventory `/receive,/issue,/transfer,/adjust`, and blocker create/update/resolve. Reconcile-on-read audit (AUD-3) deferred to Batch 3. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
 | 2026-06-07 | Data-integrity hardening (work-order completion, Batch 2): completion/clock endpoints now take row locks (`SELECT … FOR UPDATE`) and enforce optimistic locking (`version_id_col` on `WorkOrderOperation`/`TimeEntry`) — concurrent stale write → HTTP 409 instead of a lost update; new partial unique index `uq_open_time_entry` DB-enforces one open clock-in per user+operation (duplicate → HTTP 400). Migrations `038_optimistic_lock_backfill` / `039_uq_open_time_entry` (non-destructive open-duplicate dedupe; closed-row ids logged to deploy output for AS9100D labor traceability, not to `audit_log`). Residual follow-up A1: `audit_log.sequence_number` `max()+1` allocation is not serialized by the new row locks (concurrent audit writes can collide → occasional 500) — tracked for a dedicated fix. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-07 | AU-3.3.1 (work-order completion, Batch 3 — AUD-3 closed): reconcile-on-read status transitions (operation/WO driven to COMPLETE from durable time-entry evidence on dashboard/list/detail reads) now write a tamper-evident `audit_log` status-change row attributed to the requesting user, tagged `extra_data.source = "reconcile_on_read"`; the reconcile returns its transitions for the read handler to audit before commit, and the write is best-effort (rolled back atomically with its audit rows on failure — reads never 500/orphan an unaudited transition). Completion logic consolidated into the shared `finalize_operation_completion`; ON_HOLD completion now refused with HTTP 409 on both op-complete endpoints and `complete_work_order`. Follow-up A1 (`audit_log.sequence_number` race) still open. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
 | | | |
 
 ---

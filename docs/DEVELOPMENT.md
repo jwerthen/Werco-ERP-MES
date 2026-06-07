@@ -337,6 +337,27 @@ Two migrations back the work-order-completion concurrency fixes (see
   (`IF NOT EXISTS` / inspector guard); Postgres-only (skipped on SQLite, where the app-level guard
   still applies).
 
+## Work-order completion rollup (shared finalizer)
+
+Completion is consolidated in **one** place: `finalize_operation_completion(db, wo, op)` in
+`app/services/work_order_state_service.py` (Rank 6 / Batch 3 — see
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`). Every completion path **delegates** to it rather than
+re-implementing the op → work-order rollup:
+
+- both `/operations/{id}/complete` endpoints (office `work_orders.py` and shop-floor `shop_floor.py`),
+- the additive verbs (`/shop-floor/clock-out/{id}`, `/shop-floor/operations/{id}/production`),
+- the privileged `/work-orders/{id}/complete` override (it force-completes each still-open operation
+  through the finalizer instead of blind-flipping the work order to COMPLETE).
+
+The finalizer owns **only** the state transition — remaining-ops decision (reusing the loaded
+`work_order.operations` relationship), the COMPLETE-vs-`RELEASED`→`IN_PROGRESS` branch, the
+`max()`-guarded finished-quantity sync (floored at durable `TimeEntry` evidence, capped at target),
+the `actual_start`/`actual_end` stamping (clamped so `actual_start ≤ actual_end`), the self-healing
+next-`READY` release, and maintaining `current_operation_id` — and returns the set of affected
+`work_center_id`s. The **caller** keeps auth, tenant lookup, row locks, audit, scheduling refresh and
+broadcasts. The finalizer does not commit and does not flush the audit chain. When adding a new
+completion entry point, call `finalize_operation_completion` rather than duplicating the rollup.
+
 ## API Documentation
 
 Once the backend is running, access the interactive API documentation:

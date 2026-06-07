@@ -208,9 +208,7 @@ def test_complete_work_order_emits_committed_status_change_audit(client: TestCli
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
 
-    rows = _committed_audit_rows(
-        db_session, resource_type="work_order", resource_id=wo.id, action="STATUS_CHANGE"
-    )
+    rows = _committed_audit_rows(db_session, resource_type="work_order", resource_id=wo.id, action="STATUS_CHANGE")
     assert len(rows) == 1, "expected exactly one COMMITTED work_order STATUS_CHANGE row"
     row = rows[0]
     assert row.resource_type == "work_order"
@@ -222,9 +220,7 @@ def test_complete_work_order_emits_committed_status_change_audit(client: TestCli
     assert row.integrity_hash
 
     # The accompanying quantities UPDATE row is also committed.
-    update_rows = _committed_audit_rows(
-        db_session, resource_type="work_order", resource_id=wo.id, action="UPDATE"
-    )
+    update_rows = _committed_audit_rows(db_session, resource_type="work_order", resource_id=wo.id, action="UPDATE")
     assert len(update_rows) == 1, "expected the quantities UPDATE row to be committed too"
 
     _assert_hash_chain_intact(db_session)
@@ -262,9 +258,7 @@ def test_office_complete_operation_emits_committed_status_change_audit(client: T
     assert op_row.new_values == {"status": "complete"}
 
     # Last operation -> work order also completes and is audited.
-    wo_rows = _committed_audit_rows(
-        db_session, resource_type="work_order", resource_id=wo.id, action="STATUS_CHANGE"
-    )
+    wo_rows = _committed_audit_rows(db_session, resource_type="work_order", resource_id=wo.id, action="STATUS_CHANGE")
     assert len(wo_rows) == 1, "expected the work_order completion STATUS_CHANGE row"
     assert wo_rows[0].new_values == {"status": "complete"}
 
@@ -289,7 +283,11 @@ def test_office_complete_operation_partial_emits_committed_update_audit(client: 
         db_session, resource_type="work_order_operation", resource_id=op.id, action="UPDATE"
     )
     assert len(update_rows) == 1, "expected a committed UPDATE row for the partial progress"
-    assert update_rows[0].new_values == {"quantity_complete": 4, "quantity_scrapped": 0}
+    # Batch 3 / DUP-3: scrap is no longer written when the param is omitted, so it
+    # is absent from the audit diff (the office path can no longer zero accumulated
+    # scrap with a defaulted-0 query param). The stored quantity is the resolved,
+    # evidence-floored value.
+    assert update_rows[0].new_values == {"quantity_complete": 4}
 
     status_rows = _committed_audit_rows(
         db_session, resource_type="work_order_operation", resource_id=op.id, action="STATUS_CHANGE"
@@ -340,9 +338,7 @@ def test_clock_out_completion_emits_committed_status_change_audit(client: TestCl
     assert op_rows[0].old_values == {"status": "in_progress"}
     assert op_rows[0].new_values == {"status": "complete"}
 
-    wo_rows = _committed_audit_rows(
-        db_session, resource_type="work_order", resource_id=wo.id, action="STATUS_CHANGE"
-    )
+    wo_rows = _committed_audit_rows(db_session, resource_type="work_order", resource_id=wo.id, action="STATUS_CHANGE")
     assert len(wo_rows) == 1, "expected a committed work_order STATUS_CHANGE row from clock-out"
     assert wo_rows[0].old_values == {"status": "in_progress"}
     assert wo_rows[0].new_values == {"status": "complete"}

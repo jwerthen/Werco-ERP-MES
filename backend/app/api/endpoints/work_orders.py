@@ -8,6 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -47,12 +48,15 @@ from app.services.laser_nest_service import (
 from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_state_service import (
+    StatusTransition,
     WorkOrderStateError,
+    begin_operation_progress,
+    finalize_operation_completion,
     has_incomplete_predecessors,
     operation_target_quantity,
     reconcile_work_orders_from_completion_evidence,
     release_first_ready_operation,
-    release_next_ready_operation,
+    resolve_absolute_operation_quantity,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
     work_order_operation_progress,
@@ -61,24 +65,82 @@ from app.services.work_order_state_service import (
 router = APIRouter()
 
 
-def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder]) -> None:
+def _audit_reconcile_transitions(
+    db: Session,
+    current_user: User,
+    transitions: list[StatusTransition],
+) -> None:
+    """Emit a tamper-evident status-change audit row per reconcile-driven transition.
+
+    AUD-3: reconcile-on-read drives operations/WOs to COMPLETE from durable
+    TimeEntry evidence; those transitions were previously unaudited and could not
+    be attributed (the reconcile has no actor). We thread the requesting user in
+    and write one ``log_status_change`` per transition with the contributing
+    TimeEntry ids in ``extra_data``. ``AuditService.log`` already swallows its own
+    failures and only flushes (never commits), and this block is additionally
+    wrapped so the read stays resilient even on an unexpected error.
+    """
+    if not transitions:
+        return
+    try:
+        audit = AuditService(db, current_user)
+        for tr in transitions:
+            audit.log_status_change(
+                resource_type=tr.resource_type,
+                resource_id=tr.resource_id,
+                resource_identifier=tr.resource_identifier or str(tr.resource_id),
+                old_status=tr.old_status or "",
+                new_status=tr.new_status,
+                description=(
+                    f"Reconciled {tr.resource_type} "
+                    f"{tr.resource_identifier or tr.resource_id} to {tr.new_status} "
+                    "from durable completion evidence"
+                ),
+                extra_data={
+                    "source": "reconcile_on_read",
+                    "work_order_number": tr.work_order_number,
+                    "time_entry_ids": tr.time_entry_ids,
+                },
+            )
+    except Exception:  # pragma: no cover - reads must never 500 on audit failure
+        pass
+
+
+def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_user: User) -> None:
     """Reconcile operation rows from completion evidence and commit, tolerating
-    a concurrent-write conflict on a READ/list path.
+    ANY failure of that best-effort write on a READ/list path.
 
     ``reconcile_work_orders_from_completion_evidence`` mutates version-mapped
-    operation rows; committing that mutation can now raise ``StaleDataError``
-    when another transaction bumped the same rows' version first. On a read,
-    that conflict is BENIGN -- the reconcile is idempotent and the other writer
+    operation rows; committing that mutation can raise ``StaleDataError`` when
+    another transaction bumped the same rows' version first. On a read that
+    conflict is BENIGN -- the reconcile is idempotent and the other writer
     already persisted the truth -- so we roll the reconcile back (NOT a 409) and
-    let the caller serve the read against the freshest committed state. The read
-    must still return 200; never let this turn a GET into a 500.
+    serve the read against the freshest committed state.
+
+    Reconcile-on-read is a best-effort optimization, so this intentionally
+    swallows ALL of its own commit failures, not just the version race. AUD-3:
+    the audit INSERT can itself fail (e.g. an ``audit_log.sequence_number``
+    unique collision under concurrency); ``AuditService.log`` absorbs that
+    without rolling back, which POISONS the session, so the subsequent
+    ``db.commit()`` here raises ``PendingRollbackError`` / ``InvalidRequestError``
+    / ``IntegrityError`` rather than ``StaleDataError``. We catch ``SQLAlchemyError``
+    broadly, roll back, expire, and serve the read normally so a poisoned session
+    can never turn a GET into a 500. Because the reconcile mutation and its audit
+    rows share one unit of work, the rollback drops BOTH atomically -- no orphaned
+    state change, no unaudited transition -- and the next read retries.
+
+    (The root ``sequence_number`` race is a separately-tracked follow-up; this
+    guard only guarantees reads never 500.)
     """
+    transitions: list[StatusTransition] = []
     try:
-        if reconcile_work_orders_from_completion_evidence(db, work_orders):
+        if reconcile_work_orders_from_completion_evidence(db, work_orders, transitions):
+            _audit_reconcile_transitions(db, current_user, transitions)
             db.commit()
-    except StaleDataError:
-        # Another writer won the race and already committed the reconciled
-        # truth. Drop our redundant mutation and serve the read with the
+    except SQLAlchemyError:
+        # Best-effort reconcile lost a version race OR its commit failed on a
+        # poisoned session (audit INSERT collision). Either way, drop our
+        # redundant mutation + its audit rows and serve the read with the
         # freshest data; expire so subsequent reads reload from the DB.
         db.rollback()
         db.expire_all()
@@ -469,10 +531,10 @@ def list_work_orders(
         )
 
     work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date).offset(skip).limit(limit).all()
-    # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the list -- _reconcile_and_commit swallows StaleDataError.
-    _reconcile_and_commit(db, work_orders)
+    # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
+    _reconcile_and_commit(db, work_orders, current_user)
 
     result = []
     for wo in work_orders:
@@ -797,7 +859,9 @@ def create_work_order(
     # no-op; this guard is defensive and keeps the POST off the 500 path.)
     try:
         _reconcile_operation_component_quantities(db, work_order, company_id)
-        # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
+        # AUD-3 N/A here: a brand-new WO has no TimeEntry evidence, so this reconcile
+        # can drive no terminal status transition -- nothing to audit. Pass no
+        # transitions accumulator to keep this the documented no-op it has always been.
         reconcile_work_orders_from_completion_evidence(db, [work_order])
         db.commit()
     except StaleDataError:
@@ -1163,8 +1227,8 @@ def get_work_order(
     except StaleDataError:
         db.rollback()
         db.expire_all()
-    # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
-    _reconcile_and_commit(db, [work_order])
+    # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
+    _reconcile_and_commit(db, [work_order], current_user)
     _enrich_work_order_operations(work_order)
 
     return work_order
@@ -1721,17 +1785,34 @@ def complete_work_order(
     work_order_id: int,
     request: Request,
     quantity_complete: float,
-    quantity_scrapped: float = 0,
+    quantity_scrapped: Optional[float] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(
         require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
     ),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Complete a work order"""
+    """Manually complete a work order (privileged override).
+
+    DUP-4: this override now delegates to the SHARED rollup instead of blindly
+    flipping the WO to COMPLETE. It force-completes every still-open operation
+    through the shared finalizer -- each gets ``actual_end``/``completed_by``
+    stamped, an audit row, and the WO ``actual_start``/qty-sync/scheduling refresh
+    -- so it can no longer leave a COMPLETE WO with open operations and unreleased
+    capacity. The manager-supplied ``quantity_complete`` is bounded
+    (validate_operation_quantity-style) and applied as a max-guarded override on
+    top of the computed finished quantity.
+
+    DUP-3 scrap parity (mirrors the op-level fix): ``quantity_scrapped`` is
+    optional. When omitted (``None``) the WO's recorded scrap is left untouched so
+    a defaulted call cannot ZERO previously-booked WO scrap; only an explicit value
+    overwrites it.
+    """
     # SFI-1 / LOCK-1: lock the WO row before this privileged manual read-modify
-    # so two concurrent completers serialize instead of losing each other's
-    # quantity writes. Re-fetch under the lock, scoped to the active company.
+    # so two concurrent completers serialize. Then load+lock its operations so the
+    # force-complete below runs against the freshest committed rows. Lock order is
+    # WORK ORDER then OPERATIONS here (the manual override is WO-centric and starts
+    # from a WO id); operations are locked in a deterministic id order.
     work_order = (
         db.query(WorkOrder)
         .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
@@ -1741,14 +1822,114 @@ def complete_work_order(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
+    # Bound the manager-supplied quantities (DUP-4): non-negative and not above the
+    # quantity ordered. quantity_ordered is the natural cap for a finished WO.
+    # quantity_complete is required; quantity_scrapped is optional (DUP-3) and only
+    # bounded when explicitly provided.
+    ordered_qty = float(work_order.quantity_ordered or 0)
+    if quantity_complete is None or quantity_complete < 0:
+        raise HTTPException(status_code=400, detail="quantity_complete cannot be negative")
+    if quantity_scrapped is not None and quantity_scrapped < 0:
+        raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
+    if ordered_qty > 0 and quantity_complete > ordered_qty:
+        raise HTTPException(
+            status_code=400,
+            detail=f"quantity_complete ({quantity_complete}) cannot exceed quantity ordered ({ordered_qty})",
+        )
+
+    operations = (
+        db.query(WorkOrderOperation)
+        .filter(WorkOrderOperation.work_order_id == work_order.id, WorkOrderOperation.company_id == company_id)
+        .order_by(WorkOrderOperation.id)
+        .with_for_update()
+        .all()
+    )
+    work_order.operations = operations
+
+    # QG-5 / BLK-1 consistency: this privileged override force-completes every open
+    # op, but it must NOT silently lift a quality/material hold -- that contradicts
+    # the ON_HOLD refusal the op-complete endpoints now enforce. Refuse (409) up
+    # front, before mutating anything, if any open op is ON_HOLD. (Batch 4 adds an
+    # audited QUALITY-role override for clearing a hold during completion.)
+    held = next(
+        (op for op in operations if op.status == OperationStatus.ON_HOLD),
+        None,
+    )
+    if held is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"cannot complete work order: operation {held.operation_number or held.sequence} "
+                "is on hold; resolve the hold first"
+            ),
+        )
+
     old_status = work_order.status.value if work_order.status else None
     old_quantity_complete = float(work_order.quantity_complete or 0)
     old_quantity_scrapped = float(work_order.quantity_scrapped or 0)
 
-    work_order.status = WorkOrderStatus.COMPLETE
-    work_order.quantity_complete = quantity_complete
-    work_order.quantity_scrapped = quantity_scrapped
-    work_order.actual_end = datetime.utcnow()
+    db.flush()
+    audit = AuditService(db, current_user, request)
+
+    # Force-complete each still-open operation through the shared path so each is
+    # stamped + audited and the route is genuinely closed (no COMPLETE WO over open
+    # ops). The last force-complete drives the WO to COMPLETE via the finalizer.
+    now = datetime.utcnow()
+    affected_work_centers: set[int] = set()
+    for operation in operations:
+        if operation.status == OperationStatus.COMPLETE:
+            continue
+        op_old_status = operation.status.value if operation.status else None
+        if not operation.actual_start:
+            operation.actual_start = now
+            operation.started_by = operation.started_by or current_user.id
+        operation.status = OperationStatus.COMPLETE
+        operation.actual_end = now
+        operation.completed_by = current_user.id
+        operation.updated_at = now
+        sync_laser_nest_from_operation(operation)
+        affected_work_centers |= finalize_operation_completion(db, work_order, operation)
+        audit.log_status_change(
+            resource_type="work_order_operation",
+            resource_id=operation.id,
+            resource_identifier=operation.operation_number,
+            old_status=op_old_status,
+            new_status=OperationStatus.COMPLETE.value,
+            description=(
+                f"Force-completed operation {operation.operation_number} via manual "
+                f"completion of WO {work_order.work_order_number}"
+            ),
+        )
+
+    # Ensure the WO is COMPLETE even when it had no operations to force-complete
+    # (the finalizer only runs per-operation). actual_start is stamped before the
+    # COMPLETE flip to avoid an actual_end-without-actual_start row (DUP-2).
+    if work_order.status not in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED):
+        if not work_order.actual_start:
+            work_order.actual_start = now
+        work_order.status = WorkOrderStatus.COMPLETE
+        work_order.current_operation_id = None
+    if not work_order.actual_end:
+        work_order.actual_end = now
+
+    # Apply the manager-supplied finished quantities as a max-guarded override on
+    # top of what the rollup computed -- never regress finished quantity (RUP-6).
+    work_order.quantity_complete = max(float(work_order.quantity_complete or 0), float(quantity_complete))
+    # DUP-3: only overwrite recorded WO scrap when an explicit value was supplied;
+    # a defaulted (omitted) call must not zero previously-booked scrap.
+    if quantity_scrapped is not None:
+        work_order.quantity_scrapped = quantity_scrapped
+    work_order.updated_at = now
+    # The effective scrap actually persisted (the existing value when omitted), used
+    # in the event + audit payloads so they reflect what was stored, not the raw arg.
+    effective_quantity_scrapped = float(work_order.quantity_scrapped or 0)
+
+    # Release capacity for every affected work center (DUP-4: this override used to
+    # emit no scheduling refresh, stranding capacity for the still-open operations).
+    if affected_work_centers:
+        SchedulingService(db).update_availability_rates(
+            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
+        )
 
     _emit_work_order_event(
         db,
@@ -1756,14 +1937,13 @@ def complete_work_order(
         current_user=current_user,
         work_order=work_order,
         event_type="work_order_completed",
-        payload={"quantity_complete": quantity_complete, "quantity_scrapped": quantity_scrapped},
+        payload={"quantity_complete": work_order.quantity_complete, "quantity_scrapped": effective_quantity_scrapped},
     )
 
     # Audit this privileged manual completion (status change + the quantities it set)
     # on the tamper-evident chain. Logged BEFORE the terminal commit so the audit rows
     # commit atomically with the status change.
     db.flush()
-    audit = AuditService(db, current_user, request)
     audit.log_status_change(
         resource_type="work_order",
         resource_id=work_order.id,
@@ -1777,13 +1957,16 @@ def complete_work_order(
         resource_id=work_order.id,
         resource_identifier=work_order.work_order_number,
         old_values={"quantity_complete": old_quantity_complete, "quantity_scrapped": old_quantity_scrapped},
-        new_values={"quantity_complete": quantity_complete, "quantity_scrapped": quantity_scrapped},
+        new_values={
+            "quantity_complete": work_order.quantity_complete,
+            "quantity_scrapped": effective_quantity_scrapped,
+        },
         description=f"Recorded completion quantities for work order {work_order.work_order_number}",
     )
     try:
         db.commit()
     except StaleDataError as exc:
-        # A concurrent completer committed a newer version of this WO between our
+        # A concurrent completer committed a newer version of this WO/op between our
         # locked read and this commit (version_id_col mismatch).
         db.rollback()
         raise HTTPException(
@@ -1976,12 +2159,24 @@ def complete_operation(
     operation_id: int,
     request: Request,
     quantity_complete: float,
-    quantity_scrapped: float = 0,
+    quantity_scrapped: Optional[float] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Complete an operation"""
+    """Complete an operation.
+
+    DUP-3 scrap contract: ``quantity_scrapped`` is now optional. When omitted it
+    is NOT written, so this office path can no longer silently zero accumulated
+    operation scrap with a defaulted-0 query param. Pass an explicit value
+    (including 0) to update scrap.
+
+    ON_HOLD policy (QG-5 / BLK-1): an ON_HOLD operation is REFUSED here, matching
+    the shop-floor twin. This path no longer force-lifts a held op to IN_PROGRESS
+    and silently completes it (leaving its blocker open). The quality-gate/blocker
+    enforcement that decides what may complete is Batch 4 (rank 7); here the two
+    endpoints are only made consistent.
+    """
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
@@ -2043,61 +2238,58 @@ def complete_operation(
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Operation is already complete")
 
+    # QG-5 / BLK-1: refuse to complete an ON_HOLD (or otherwise non-startable)
+    # operation, identical to the shop_floor twin. Previously this path force-set
+    # ANY non-IN_PROGRESS status (incl. ON_HOLD) to IN_PROGRESS and completed it,
+    # silently lifting a quality/material hold and leaving its blocker open.
+    if operation.status not in (OperationStatus.IN_PROGRESS, OperationStatus.READY):
+        if operation.status == OperationStatus.ON_HOLD:
+            raise HTTPException(status_code=409, detail="Operation is on hold and cannot be completed")
+        raise HTTPException(status_code=400, detail=f"Cannot complete operation with status: {operation.status.value}")
+
     # Capture pre-mutation statuses/quantities so transitions can be audited below.
     old_operation_status = operation.status.value if operation.status else None
     old_work_order_status = work_order.status.value if work_order and work_order.status else None
     old_quantity_complete = float(operation.quantity_complete or 0)
     work_order_completed = False
 
+    # Auto-start a READY op (consistent with the shop_floor twin). ON_HOLD is no
+    # longer reachable here -- it was refused above.
     if operation.status != OperationStatus.IN_PROGRESS:
         operation.status = OperationStatus.IN_PROGRESS
         if not operation.actual_start:
             operation.actual_start = datetime.utcnow()
             operation.started_by = current_user.id
-    if work_order and work_order.status == WorkOrderStatus.RELEASED:
-        work_order.status = WorkOrderStatus.IN_PROGRESS
-        if not work_order.actual_start:
-            work_order.actual_start = datetime.utcnow()
 
-    operation.quantity_complete = quantity_complete
-    operation.quantity_scrapped = quantity_scrapped
+    # ABSOLUTE verb (DUP-3 / SFI-5): clamp to max(existing, requested, evidence)
+    # capped at target so the office /complete can never lower the operation below
+    # durable TimeEntry evidence (which a later reconcile would silently re-raise).
+    resolved_quantity = resolve_absolute_operation_quantity(db, operation, quantity_complete, target_qty)
+    operation.quantity_complete = resolved_quantity
+    # DUP-3 scrap: only overwrite when an explicit value was provided.
+    if quantity_scrapped is not None:
+        operation.quantity_scrapped = quantity_scrapped
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
 
-    is_fully_complete = quantity_complete >= target_qty
+    is_fully_complete = resolved_quantity >= target_qty
     if is_fully_complete:
         operation.status = OperationStatus.COMPLETE
         operation.actual_end = datetime.utcnow()
         operation.completed_by = current_user.id
 
     # work_order is the row already locked above; don't re-derive it from the
-    # (unlocked, unscoped) relationship.
+    # (unlocked, unscoped) relationship. The shared finalizer owns the rollup
+    # (DUP-5): remaining-ops decision, COMPLETE-vs-release, actual_start/actual_end
+    # stamping, qty sync, current_operation_id; it returns the WCs to refresh.
     affected_work_centers = {operation.work_center_id}
     if work_order and is_fully_complete:
-        remaining_ops = (
-            db.query(WorkOrderOperation)
-            .filter(
-                WorkOrderOperation.work_order_id == work_order.id,
-                WorkOrderOperation.id != operation.id,
-                WorkOrderOperation.status != OperationStatus.COMPLETE,
-            )
-            .count()
-        )
-
-        if remaining_ops == 0:
-            work_order.status = WorkOrderStatus.COMPLETE
-            work_order.actual_end = datetime.utcnow()
-            work_order_completed = True
-            sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
-        else:
-            release_next_ready_operation(db, work_order, operation)
-
-        newly_ready_wcs = {
-            op.work_center_id
-            for op in work_order.operations
-            if op.status == OperationStatus.READY and op.work_center_id
-        }
-        affected_work_centers |= newly_ready_wcs
+        affected_work_centers |= finalize_operation_completion(db, work_order, operation)
+        work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
+    elif work_order and not is_fully_complete:
+        # Partial progress: lift a RELEASED WO to IN_PROGRESS / stamp actual_start
+        # and roll partial qty up without forcing a completion rollup.
+        begin_operation_progress(work_order, operation)
 
     if work_order:
         sync_work_order_quantity_complete(
@@ -2132,12 +2324,17 @@ def complete_operation(
             ),
         )
     else:
+        # Record the RESOLVED (evidence-floored) quantity actually stored, and only
+        # include scrap in the diff when it was explicitly provided (DUP-3 scrap).
+        new_values: dict = {"quantity_complete": resolved_quantity}
+        if quantity_scrapped is not None:
+            new_values["quantity_scrapped"] = quantity_scrapped
         audit.log_update(
             resource_type="work_order_operation",
             resource_id=operation.id,
             resource_identifier=operation.operation_number,
             old_values={"quantity_complete": old_quantity_complete},
-            new_values={"quantity_complete": quantity_complete, "quantity_scrapped": quantity_scrapped},
+            new_values=new_values,
             description=f"Updated operation {operation.operation_number} progress",
         )
     if work_order_completed and work_order:

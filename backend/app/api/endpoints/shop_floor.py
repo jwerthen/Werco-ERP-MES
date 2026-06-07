@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import and_, case, func, or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -36,11 +36,15 @@ from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 from app.services.work_order_state_service import (
+    StatusTransition,
     WorkOrderStateError,
+    begin_operation_progress,
+    finalize_operation_completion,
+    floor_operation_quantity_at_evidence,
     has_incomplete_predecessors,
     operation_target_quantity,
     reconcile_work_orders_from_completion_evidence,
-    release_next_ready_operation,
+    resolve_absolute_operation_quantity,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
 )
@@ -66,24 +70,86 @@ class OperationHoldRequest(BaseModel):
 router = APIRouter()
 
 
-def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder]) -> None:
+def _audit_reconcile_transitions(
+    db: Session,
+    current_user: User,
+    transitions: list[StatusTransition],
+) -> None:
+    """Emit a tamper-evident status-change audit row per reconcile-driven transition.
+
+    AUD-3: reconcile-on-read drives operations/WOs to COMPLETE from durable
+    TimeEntry evidence; those transitions were previously unaudited and could not
+    even be attributed (the reconcile has no actor). We now thread the requesting
+    user in and write one ``log_status_change`` per transition, attributed to that
+    user, with the contributing TimeEntry ids in ``extra_data``. ``AuditService.log``
+    already swallows its own failures and only flushes (never commits), so a single
+    bad audit write cannot 500 the read; this whole block is additionally wrapped so
+    the GET stays resilient even on an unexpected error.
+    """
+    if not transitions:
+        return
+    try:
+        audit = AuditService(db, current_user)
+        for tr in transitions:
+            audit.log_status_change(
+                resource_type=tr.resource_type,
+                resource_id=tr.resource_id,
+                resource_identifier=tr.resource_identifier or str(tr.resource_id),
+                old_status=tr.old_status or "",
+                new_status=tr.new_status,
+                description=(
+                    f"Reconciled {tr.resource_type} "
+                    f"{tr.resource_identifier or tr.resource_id} to {tr.new_status} "
+                    "from durable completion evidence"
+                ),
+                extra_data={
+                    "source": "reconcile_on_read",
+                    "work_order_number": tr.work_order_number,
+                    "time_entry_ids": tr.time_entry_ids,
+                },
+            )
+    except Exception:  # pragma: no cover - reads must never 500 on audit failure
+        # Reads must still succeed even if the audit chain write fails. The
+        # status mutation itself is already committed by the caller; losing the
+        # audit row degrades traceability but must not break the GET.
+        pass
+
+
+def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_user: User) -> None:
     """Reconcile operation rows from completion evidence and commit, tolerating
-    a concurrent-write conflict on a READ/dashboard path.
+    ANY failure of that best-effort write on a READ/dashboard path.
 
     ``reconcile_work_orders_from_completion_evidence`` mutates version-mapped
-    operation rows; committing that mutation can now raise ``StaleDataError``
-    when another transaction bumped the same rows' version first. On a read,
-    that conflict is BENIGN -- the reconcile is idempotent and the other writer
+    operation rows; committing that mutation can raise ``StaleDataError`` when
+    another transaction bumped the same rows' version first. On a read that
+    conflict is BENIGN -- the reconcile is idempotent and the other writer
     already persisted the truth -- so we roll the reconcile back (NOT a 409) and
-    let the caller serve the read against the freshest committed state. The read
-    must still return 200; never let this turn a GET into a 500.
+    serve the read against the freshest committed state.
+
+    Reconcile-on-read is a best-effort optimization, so this intentionally
+    swallows ALL of its own commit failures, not just the version race. AUD-3:
+    the audit INSERT can itself fail (e.g. an ``audit_log.sequence_number``
+    unique collision under concurrency); ``AuditService.log`` absorbs that
+    without rolling back, which POISONS the session, so the subsequent
+    ``db.commit()`` here raises ``PendingRollbackError`` / ``InvalidRequestError``
+    / ``IntegrityError`` rather than ``StaleDataError``. We catch ``SQLAlchemyError``
+    broadly, roll back, expire, and serve the read normally so a poisoned session
+    can never turn a GET into a 500. Because the reconcile mutation and its audit
+    rows share one unit of work, the rollback drops BOTH atomically -- no orphaned
+    state change, no unaudited transition -- and the next read retries.
+
+    (The root ``sequence_number`` race is a separately-tracked follow-up; this
+    guard only guarantees reads never 500.)
     """
+    transitions: list[StatusTransition] = []
     try:
-        if reconcile_work_orders_from_completion_evidence(db, work_orders):
+        if reconcile_work_orders_from_completion_evidence(db, work_orders, transitions):
+            _audit_reconcile_transitions(db, current_user, transitions)
             db.commit()
-    except StaleDataError:
-        # Another writer won the race and already committed the reconciled
-        # truth. Drop our redundant mutation and serve the read with the
+    except SQLAlchemyError:
+        # Best-effort reconcile lost a version race OR its commit failed on a
+        # poisoned session (audit INSERT collision). Either way, drop our
+        # redundant mutation + its audit rows and serve the read with the
         # freshest data; expire so subsequent reads reload from the DB.
         db.rollback()
         db.expire_all()
@@ -482,8 +548,14 @@ def clock_out(
         else:
             operation.actual_run_hours += time_entry.duration_hours
 
-        operation.quantity_complete = float(operation.quantity_complete or 0) + float(
-            clock_out_data.quantity_produced or 0
+        # clock_out is an ADDITIVE verb: the operation total grows by the produced
+        # delta. The stored result is floored at durable TimeEntry evidence and
+        # capped at the operation target so additive and absolute writes converge
+        # on the same invariant (DUP-3 / SFI-5). The over-completion guard above
+        # already rejected a delta that would exceed target.
+        additive_complete = float(operation.quantity_complete or 0) + float(clock_out_data.quantity_produced or 0)
+        operation.quantity_complete = floor_operation_quantity_at_evidence(
+            db, operation, additive_complete, operation_target_quantity(operation, work_order)
         )
         operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + float(
             clock_out_data.quantity_scrapped or 0
@@ -516,7 +588,11 @@ def clock_out(
     operation_completed = False
     work_order_completed = False
 
-    # Update statuses if operation complete
+    # Update statuses if operation complete. The shared finalizer owns the rollup
+    # (remaining-ops decision, COMPLETE-vs-release branch, actual_start/actual_end
+    # stamping, qty sync, current_operation_id) so this path can never drift from
+    # the office / scan twins (DUP-5). The caller still owns the row locks (held),
+    # the audit rows below, and the scheduling refresh of the returned WCs.
     if operation:
         target_qty = operation_target_quantity(operation, work_order)
         is_fully_complete = operation.quantity_complete >= target_qty
@@ -525,45 +601,33 @@ def clock_out(
             operation.status = OperationStatus.COMPLETE
             operation.actual_end = datetime.utcnow()
             operation.completed_by = current_user.id
+            # DUP-2: the clock_out path historically stamped only actual_end /
+            # completed_by, leaving actual_start NULL on a one-shot completion. The
+            # finalizer would then fall back to now() for the WO actual_start AFTER
+            # actual_end was set, yielding a negative cycle time. Stamp the op's
+            # actual_start from its earliest TimeEntry clock_in (the entry being
+            # clocked out, or any earlier one), falling back to actual_end so the
+            # op never carries actual_end without a sane (<=) actual_start.
+            if not operation.actual_start:
+                earliest_clock_in = (
+                    db.query(func.min(TimeEntry.clock_in)).filter(TimeEntry.operation_id == operation.id).scalar()
+                )
+                operation.actual_start = earliest_clock_in or time_entry.clock_in or operation.actual_end
+                if not operation.started_by:
+                    operation.started_by = current_user.id
             operation_completed = True
 
-            remaining_ops = (
-                db.query(WorkOrderOperation)
-                .filter(
-                    and_(
-                        WorkOrderOperation.work_order_id == work_order.id,
-                        WorkOrderOperation.id != operation.id,
-                        WorkOrderOperation.status != OperationStatus.COMPLETE,
-                    )
-                )
-                .count()
+            affected_work_centers = finalize_operation_completion(db, work_order, operation)
+            work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
+            SchedulingService(db).update_availability_rates(
+                work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
             )
-
-            if remaining_ops == 0:
-                work_order.status = WorkOrderStatus.COMPLETE
-                work_order.actual_end = datetime.utcnow()
-                work_order_completed = True
-                sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
-                SchedulingService(db).update_availability_rates(
-                    work_center_ids=[operation.work_center_id], horizon_days=90
-                )
-            else:
-                release_next_ready_operation(db, work_order, operation)
-                ready_wcs = {
-                    op.work_center_id
-                    for op in work_order.operations
-                    if op.status == OperationStatus.READY and op.work_center_id
-                }
-                affected_work_centers = {operation.work_center_id} | ready_wcs
-                SchedulingService(db).update_availability_rates(
-                    work_center_ids=list(affected_work_centers), horizon_days=90
-                )
-
-        sync_work_order_quantity_complete(
-            work_order,
-            operation,
-            all_operations_complete=work_order.status == WorkOrderStatus.COMPLETE,
-        )
+        else:
+            # Partial production on an unfinished operation: still lift a RELEASED
+            # WO to IN_PROGRESS / stamp actual_start and roll partial qty up (DUP-2,
+            # RUP-6) without forcing a completion rollup.
+            begin_operation_progress(work_order, operation)
+            sync_work_order_quantity_complete(work_order, operation, all_operations_complete=False)
         work_order.updated_at = datetime.utcnow()
 
     # Audit completion transitions on the tamper-evident chain. clock_out is the
@@ -727,10 +791,11 @@ def shop_floor_dashboard(
         )
         .all()
     )
-    # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the dashboard -- _reconcile_and_commit swallows StaleDataError.
-    _reconcile_and_commit(db, work_orders_to_reconcile)
+    # AUD-3: terminal reconcile-driven transitions are audited, attributed to the
+    # requesting user, without failing the read if the audit write fails.
+    _reconcile_and_commit(db, work_orders_to_reconcile, current_user)
 
     # Active work orders
     active_wos = (
@@ -1142,10 +1207,10 @@ def get_all_operations(
     operations = paginated_query.all()
     work_orders_by_id = {op.work_order.id: op.work_order for op in operations if op.work_order}
     work_orders = list(work_orders_by_id.values())
-    # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the list -- _reconcile_and_commit swallows StaleDataError.
-    _reconcile_and_commit(db, work_orders)
+    # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
+    _reconcile_and_commit(db, work_orders, current_user)
     if not status:
         operations = [op for op in operations if op.status != OperationStatus.COMPLETE]
 
@@ -1463,7 +1528,11 @@ def report_operation_production(
             status_code=400, detail=f"Quantity ({next_complete_qty}) cannot exceed quantity ordered ({target_qty})"
         )
 
-    operation.quantity_complete = next_complete_qty
+    # /production is an ADDITIVE verb: floor the incremented total at durable
+    # TimeEntry evidence and cap at target so additive and absolute writes converge
+    # on the same invariant (DUP-3 / SFI-5). The over-completion guard above already
+    # rejected a delta that would exceed target.
+    operation.quantity_complete = floor_operation_quantity_at_evidence(db, operation, next_complete_qty, target_qty)
     operation.quantity_scrapped = float(operation.quantity_scrapped or 0) + scrap_delta
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
@@ -1562,10 +1631,16 @@ def complete_operation(
 ):
     """
     Mark operation as complete (full or partial).
-    - Updates quantity_complete
+    - Updates quantity_complete (max-guarded, floored at durable TimeEntry
+      evidence and capped at the operation target via the shared finalizer)
     - If qty_complete >= qty_ordered: status = COMPLETE, record actual_end_time
     - If qty_complete < qty_ordered: status remains IN_PROGRESS
     - Optionally record notes
+
+    ON_HOLD policy (QG-5 / BLK-1): completing an ON_HOLD operation is REFUSED
+    with **409 Conflict** ("Operation is on hold and cannot be completed"),
+    matching the office `/work-orders/operations/{id}/complete` twin -- so the
+    completion path can no longer silently lift a quality / material hold.
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -1619,7 +1694,13 @@ def complete_operation(
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Operation is already complete")
 
+    # QG-5 / BLK-1: refuse to complete an ON_HOLD (or otherwise non-startable)
+    # operation -- identical to the office twin. An ON_HOLD op is a STATE conflict
+    # (409), not bad input (400): completing it would silently lift a quality /
+    # material hold. Any other non-startable status stays a 400.
     if operation.status not in [OperationStatus.IN_PROGRESS, OperationStatus.READY]:
+        if operation.status == OperationStatus.ON_HOLD:
+            raise HTTPException(status_code=409, detail="Operation is on hold and cannot be completed")
         raise HTTPException(status_code=400, detail=f"Cannot complete operation with status: {operation.status.value}")
 
     ordered_qty = operation_target_quantity(operation, work_order)
@@ -1647,59 +1728,37 @@ def complete_operation(
 
     previous_quantity_complete = float(operation.quantity_complete or 0)
 
-    # Update quantity
-    operation.quantity_complete = completion_data.quantity_complete
+    # Update quantity. /complete is an ABSOLUTE verb: clamp to
+    # max(existing, requested, produced-evidence) capped at target so it can never
+    # regress below durable TimeEntry evidence (SFI-5) and a later read-time
+    # reconcile cannot silently re-raise and mask the write.
+    resolved_quantity = resolve_absolute_operation_quantity(
+        db, operation, completion_data.quantity_complete, ordered_qty
+    )
+    operation.quantity_complete = resolved_quantity
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
 
-    # Check if fully complete
-    is_fully_complete = completion_data.quantity_complete >= ordered_qty
+    # Check if fully complete (against the resolved, evidence-floored quantity).
+    is_fully_complete = resolved_quantity >= ordered_qty
 
     if is_fully_complete:
         operation.status = OperationStatus.COMPLETE
         operation.actual_end = datetime.utcnow()
         operation.completed_by = current_user.id
 
-        # Check if this is the last operation
-        remaining_ops = (
-            db.query(WorkOrderOperation)
-            .filter(
-                and_(
-                    WorkOrderOperation.work_order_id == work_order.id,
-                    WorkOrderOperation.id != operation_id,
-                    WorkOrderOperation.status != OperationStatus.COMPLETE,
-                )
-            )
-            .count()
+        # Shared finalizer owns the rollup (DUP-5): remaining-ops decision,
+        # COMPLETE-vs-release, actual_start/actual_end stamping, qty sync,
+        # current_operation_id. Returns the WCs whose capacity to refresh.
+        affected_work_centers = finalize_operation_completion(db, work_order, operation)
+        SchedulingService(db).update_availability_rates(
+            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
         )
-
-        if remaining_ops == 0:
-            # All operations complete - mark work order complete
-            work_order.status = WorkOrderStatus.COMPLETE
-            work_order.actual_end = datetime.utcnow()
-            sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
-            if operation.work_center_id:
-                SchedulingService(db).update_availability_rates(
-                    work_center_ids=[operation.work_center_id], horizon_days=90
-                )
-        else:
-            release_next_ready_operation(db, work_order, operation)
-            ready_wcs = {
-                op.work_center_id
-                for op in work_order.operations
-                if op.status == OperationStatus.READY and op.work_center_id
-            }
-            affected_work_centers = {operation.work_center_id} | ready_wcs
-            SchedulingService(db).update_availability_rates(
-                work_center_ids=list(affected_work_centers), horizon_days=90
-            )
-
-    # Update work order quantity tracking
-    sync_work_order_quantity_complete(
-        work_order,
-        operation,
-        all_operations_complete=work_order.status == WorkOrderStatus.COMPLETE,
-    )
+    else:
+        # Partial completion: lift a RELEASED WO to IN_PROGRESS / stamp actual_start
+        # and roll partial qty up without forcing a completion rollup.
+        begin_operation_progress(work_order, operation)
+        sync_work_order_quantity_complete(work_order, operation, all_operations_complete=False)
     work_order.updated_at = datetime.utcnow()
 
     # Close any open time entries for this operation when fully complete
@@ -1717,7 +1776,9 @@ def complete_operation(
             .all()
         )
         now = datetime.utcnow()
-        completion_delta = max(0.0, float(completion_data.quantity_complete or 0) - previous_quantity_complete)
+        # Credit the resolved (evidence-floored) quantity, not the raw request, so
+        # the closed TimeEntry total and the operation total stay consistent.
+        completion_delta = max(0.0, resolved_quantity - previous_quantity_complete)
         for entry in open_entries:
             entry.clock_out = now
             if entry.clock_in:
@@ -1732,7 +1793,7 @@ def complete_operation(
         resource_id=operation_id,
         description=(
             f"{'Completed' if is_fully_complete else 'Updated'} operation {operation.operation_number} on WO {work_order.work_order_number}. "
-            f"Qty: {completion_data.quantity_complete}/{work_order.quantity_ordered}"
+            f"Qty: {resolved_quantity}/{work_order.quantity_ordered}"
             + (f". Notes: {completion_data.notes}" if completion_data.notes else "")
         ),
     )
@@ -1837,10 +1898,10 @@ def get_operation_details(
         .all()
     )
     wo.operations = all_ops
-    # TODO(AUD-3, Batch 3): audit reconcile-driven status transitions in shared finalizer
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the details read -- _reconcile_and_commit swallows StaleDataError.
-    _reconcile_and_commit(db, [wo])
+    # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
+    _reconcile_and_commit(db, [wo], current_user)
 
     # Get recent history (audit logs). The operation is already tenant-validated
     # above; the company_id filter is defense-in-depth now that audit rows are
