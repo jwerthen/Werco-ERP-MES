@@ -337,3 +337,39 @@ class TestSupabaseDatabaseConfiguration:
                 Settings()
 
             assert "Production must use Supabase" in str(exc_info.value)
+
+
+@pytest.mark.unit
+class TestAllowedHostsList:
+    """ALLOWED_HOSTS parsing + the deliberate fail-open-to-['*'] default.
+
+    allowed_hosts_list feeds TrustedHostMiddleware, so '*' (or any empty/blank value that
+    falls back to it) means allow-any = Host validation disabled. Pinning these keeps a
+    future refactor from silently flipping the security-relevant default to deny-all (or
+    from dropping the whitespace trimming).
+    """
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("*", ["*"]),
+            ("", ["*"]),  # fail-open: a cleared var = allow-any, not deny-all
+            ("   ", ["*"]),
+            (",", ["*"]),
+            (",,,", ["*"]),
+            ("api.werco.com", ["api.werco.com"]),
+            ("a.com, b.com ,, c.com", ["a.com", "b.com", "c.com"]),  # trim + drop blanks
+            ("a.com,", ["a.com"]),
+            ("*.werco.com", ["*.werco.com"]),
+        ],
+    )
+    def test_allowed_hosts_list_parsing(self, raw, expected):
+        from app.core.config import Settings
+
+        assert Settings(ALLOWED_HOSTS=raw).allowed_hosts_list == expected
+
+    def test_default_is_wildcard(self):
+        from app.core.config import Settings
+
+        # Default disables enforcement (dev convenience); production must set explicit hosts.
+        assert Settings().allowed_hosts_list == ["*"]

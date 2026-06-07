@@ -224,6 +224,8 @@ The other `AUDIT_*` settings (`AUDIT_ARCHIVE_ENABLED`, `AUDIT_RETENTION_DAYS_DEF
 
 ### Health Checks
 
+> **Note:** The container `HEALTHCHECK` probes `http://localhost:8000/health…` (sending `Host: localhost`). If you set `ALLOWED_HOSTS` to lock down Host validation, it **must include `localhost`** or the probe gets a `400` and the container is reported unhealthy. See [Trusted Hosts](ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header).
+
 ```bash
 # Check all services
 docker-compose -f docker-compose.prod.yml ps
@@ -295,6 +297,7 @@ deploy:
 | `REFRESH_TOKEN_SECRET_KEY` | Yes | Refresh token key (64+ chars) |
 | `REDIS_PASSWORD` | Yes | Redis password |
 | `CORS_ORIGINS` | Yes | Allowed CORS origins |
+| `ALLOWED_HOSTS` | Recommended | HTTP `Host`-header allowlist (Host-header validation). Default `*` disables it; lock it down to your real hostnames in production. **Must include `localhost`** — the container `HEALTHCHECK` in `Dockerfile.prod`/`docker-compose.prod.yml` probes `http://localhost:8000/health…`, so omitting it makes every health check return `400` and the container is marked unhealthy. See [Trusted Hosts](ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header). |
 | `REACT_APP_API_URL` | Yes | Frontend API URL |
 | `SMTP_*` | Yes | Email configuration |
 | `ANTHROPIC_API_KEY` | No | AI features (optional) |

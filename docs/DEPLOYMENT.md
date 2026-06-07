@@ -269,6 +269,10 @@ server {
     # Health check endpoint
     location /health {
         proxy_pass http://backend;
+        # Forward the real client Host (not the "backend" upstream name) so the
+        # backend's TrustedHostMiddleware allowlist (ALLOWED_HOSTS) sees a real
+        # hostname. See docs/ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header
+        proxy_set_header Host $host;
         access_log off;
     }
 }

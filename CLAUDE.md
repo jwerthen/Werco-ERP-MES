@@ -84,7 +84,7 @@ docker compose up      # backend + frontend + redis + worker (ARQ background job
 
 Layered FastAPI app under `backend/app/`:
 
-- `main.py` — app factory, middleware wiring (CORS, GZip, rate limiting via slowapi, Sentry).
+- `main.py` — app factory, middleware wiring (CORS, GZip, rate limiting via slowapi, Sentry, Host-header allowlist via TrustedHostMiddleware).
 - `api/endpoints/` — ~53 REST routers, one per domain, mounted under `/api/v1/`. Thin: validate, call a service, return a Pydantic schema.
 - `api/deps.py` — **the dependency-injection seam.** Auth, tenancy, and RBAC all flow through here. Use these rather than re-implementing:
   - `get_current_user` / `get_current_active_user`

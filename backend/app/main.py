@@ -1,4 +1,5 @@
 # Werco ERP Main Application - v1.0.1
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -10,6 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.router import api_router
 from app.core.cache import cache, init_cache
@@ -754,6 +756,43 @@ if settings.RATE_LIMIT_ENABLED:
         logger.info("Auth rate limits: login=5/min, register=3/min, refresh=30/min")
     except ImportError:
         logger.warning("Rate limiting requested but slowapi not installed")
+
+
+def _host_validation_log_record(environment: str, allowed_hosts: list[str]) -> tuple[int, str]:
+    """Return the (level, message) for the Host-validation startup log.
+
+    A "*" entry makes TrustedHostMiddleware allow-any, i.e. Host validation is
+    effectively DISABLED. In production that is a misconfiguration worth a WARNING;
+    otherwise it is the expected permissive dev default. A concrete allowlist means
+    validation is ENABLED. (Pure function so the decision is unit-testable without
+    booting the app — see tests/api/test_security_headers.py.)
+    """
+    if "*" in allowed_hosts:
+        if environment == "production":
+            return (
+                logging.WARNING,
+                "ALLOWED_HOSTS is '*' in production: Host-header validation is DISABLED. "
+                "Set ALLOWED_HOSTS to the API's real hostnames to enable it.",
+            )
+        return (
+            logging.INFO,
+            f"Host-header validation disabled (ALLOWED_HOSTS='*' = allow-any); allowed_hosts={allowed_hosts}",
+        )
+    return (logging.INFO, f"Trusted host validation enabled (allowed_hosts={allowed_hosts})")
+
+
+# Trusted Host validation — added last so it is the OUTERMOST middleware (Starlette
+# inserts each add_middleware at index 0), i.e. the first to run on every request.
+# Requests whose Host header is not in the allowlist are rejected with HTTP 400 before
+# any other middleware or route executes. Defense-in-depth against Host-header poisoning
+# (the Starlette CVE-2026-48710 class): this app keys security decisions off
+# request.url.path (CSRF exemptions, rate-limit selection, the read-only-context write
+# guard in api/deps.py). Default ALLOWED_HOSTS="*" disables enforcement (dev); set
+# explicit hostnames in production. www_redirect=False keeps behavior predictable for an
+# API (a Host mismatch is a 400, never a redirect).
+_allowed_hosts = settings.allowed_hosts_list
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts, www_redirect=False)
+logger.log(*_host_validation_log_record(settings.ENVIRONMENT, _allowed_hosts))
 
 
 # Global exception handler - ensures CORS headers on all error responses
