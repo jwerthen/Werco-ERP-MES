@@ -3,7 +3,7 @@ Report Builder Service - Dynamic query execution for custom reports
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import asc, desc, func
 from sqlalchemy.orm import Session
@@ -20,8 +20,16 @@ from app.schemas.analytics import (
     CustomReportRequest,
     ReportDataSource,
 )
+from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 
 logger = logging.getLogger(__name__)
+
+# WORK_ORDERS columns that are populated ONLY by the labor-cost rollup. When
+# ``LABOR_COST_ROLLUP_ENABLED`` is OFF (the default) these render a literal 0 that means
+# "not tracked", NOT a genuine $0/0-hours. ``labor_tracking_note`` annotates a report so
+# a consumer can tell the two apart (G3-content), resolved via the SAME flag chokepoint
+# (labor_cost_service.is_labor_cost_rollup_enabled) the completion paths + cost analysis use.
+LABOR_DERIVED_WORK_ORDER_FIELDS = ("actual_hours", "actual_cost", "estimated_cost")
 
 # Model mapping for data sources
 DATA_SOURCE_MODELS = {
@@ -46,7 +54,10 @@ FIELD_MAPPINGS = {
         "actual_end": WorkOrder.actual_end,
         "customer_name": WorkOrder.customer_name,
         "customer_po": WorkOrder.customer_po,
-        "estimated_hours": WorkOrder.estimated_hours,
+        # G3-content: ``estimated_hours`` intentionally NOT exposed -- it has no writer
+        # anywhere in the system (structurally 0 in every tenant), so a report column for
+        # it only renders a misleading literal 0. Computing it needs a routing/operations
+        # join (out of scope). Dropped rather than surfaced as a phantom column.
         "actual_hours": WorkOrder.actual_hours,
         "estimated_cost": WorkOrder.estimated_cost,
         "actual_cost": WorkOrder.actual_cost,
@@ -107,6 +118,37 @@ FIELD_MAPPINGS = {
 class ReportBuilderService:
     def __init__(self, db: Session):
         self.db = db
+
+    def labor_tracking_note(self, request: CustomReportRequest, company_id: int) -> Optional[Dict[str, Any]]:
+        """Flag-OFF annotation for labor-derived report columns (G3-content).
+
+        When ``LABOR_COST_ROLLUP_ENABLED`` is OFF (default) for this company AND the
+        report selects any of the WORK_ORDERS labor-derived columns
+        (``actual_hours`` / ``actual_cost`` / ``estimated_cost``), those columns render a
+        literal 0 that means "not tracked", not a genuine zero. Returns a small metadata
+        dict the endpoint can surface (e.g. as a response header) so a consumer can tell
+        the two apart -- mirroring the documented flag-OFF stance of
+        ``analytics_service.get_cost_analysis``. Returns ``None`` when the flag is ON, the
+        data source isn't WORK_ORDERS, or no labor-derived column was selected (so the
+        bare-list report contract is otherwise unchanged). Resolves the flag via the SAME
+        chokepoint (``labor_cost_service.is_labor_cost_rollup_enabled``).
+        """
+        if request.data_source != ReportDataSource.WORK_ORDERS:
+            return None
+        if is_labor_cost_rollup_enabled(company_id):
+            return None
+        selected = {col.field for col in request.columns}
+        not_tracked = [f for f in LABOR_DERIVED_WORK_ORDER_FIELDS if f in selected]
+        if not_tracked:
+            return {
+                "labor_cost_rollup_enabled": False,
+                "not_tracked_fields": not_tracked,
+                "note": (
+                    "Labor-cost rollup is disabled for this company, so "
+                    f"{', '.join(not_tracked)} are reported as 0 (not tracked), not a measured $0."
+                ),
+            }
+        return None
 
     def execute_report(self, request: CustomReportRequest, company_id: int) -> List[Dict[str, Any]]:
         """Execute a custom report query and return results, scoped to ``company_id``.

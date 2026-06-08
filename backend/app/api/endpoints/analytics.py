@@ -4,10 +4,11 @@ Analytics & Business Intelligence API Endpoints
 
 import csv
 import io
+import json
 from datetime import date
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -160,6 +161,7 @@ def get_inventory_analytics(
 @router.post("/custom-report")
 def run_custom_report(
     request: CustomReportRequest,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
@@ -169,6 +171,14 @@ def run_custom_report(
     from app.services.report_builder import ReportBuilderService
 
     service = ReportBuilderService(db)
+    # G3-content: when the labor-cost rollup is OFF (default), the labor-derived columns
+    # render literal 0 = "not tracked", not a measured zero. Surface that distinction on a
+    # response header so a consumer can tell them apart, WITHOUT changing the bare-list
+    # body contract the export + clients rely on. Header only set when applicable.
+    note = service.labor_tracking_note(request, company_id)
+    if note is not None:
+        response.headers["X-Report-Labor-Not-Tracked"] = json.dumps(note["not_tracked_fields"])
+        response.headers["X-Report-Labor-Note"] = note["note"]
     # G3-scope: pass the active company so the report is tenant-isolated; without it
     # the builder queried across all tenants.
     return service.execute_report(request, company_id)
@@ -364,7 +374,9 @@ def get_available_data_sources(current_user: User = Depends(require_role([UserRo
                 {"name": "actual_start", "type": "datetime", "label": "Start Date"},
                 {"name": "actual_end", "type": "datetime", "label": "End Date"},
                 {"name": "customer_name", "type": "string", "label": "Customer"},
-                {"name": "estimated_hours", "type": "number", "label": "Est. Hours"},
+                # G3-content: ``estimated_hours`` removed from the selectable catalog -- it
+                # has no writer (always 0) and is no longer in report_builder FIELD_MAPPINGS,
+                # so offering it would render a phantom column that silently drops out.
                 {"name": "actual_hours", "type": "number", "label": "Actual Hours"},
                 {"name": "estimated_cost", "type": "number", "label": "Est. Cost"},
                 {"name": "actual_cost", "type": "number", "label": "Actual Cost"},
