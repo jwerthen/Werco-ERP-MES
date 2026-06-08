@@ -337,6 +337,38 @@ Two migrations back the work-order-completion concurrency fixes (see
   (`IF NOT EXISTS` / inspector guard); Postgres-only (skipped on SQLite, where the app-level guard
   still applies).
 
+### Completion-inventory migrations (Batch 6 — FG receipt + backflush)
+
+Two migrations back the work-order-completion inventory side-effects (see
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 9 / Batch 6):
+
+- **`040_add_part_backflush_flag`** — adds the opt-in flag the backflush logic keys off:
+  `parts.backflush_components BOOLEAN NOT NULL DEFAULT false`. The `server_default='false'` backfills
+  every existing row in the same `ALTER` (a metadata-only column add on PostgreSQL 11+ — brief
+  `ACCESS EXCLUSIVE` lock, no table rewrite, no backfill pass). The model (`app/models/part.py`)
+  declares the identical `server_default`, so the `create_all` bootstrap path produces the same column
+  definition. Idempotent (inspector column-existence guard) and reversible (guarded `drop_column`).
+
+- **`041_uq_wo_inventory_idempotency`** — DB-enforces "one finished-goods receipt and one
+  backflush issue per work order" with **two partial UNIQUE indexes** on `inventory_transactions`:
+  `uq_wo_inventory_receipt` on `(company_id, reference_type, reference_id, transaction_type)`
+  `WHERE reference_type='work_order' AND transaction_type='RECEIVE'`, and `uq_wo_inventory_issue` on
+  `(company_id, reference_type, reference_id, transaction_type, part_id)`
+  `WHERE reference_type='work_order' AND transaction_type='ISSUE'`. The partial predicate scopes the
+  constraint to work-order-referenced rows only, so PO/SO receipts, manual adjustments, transfers,
+  scrap, ships and counts are unaffected. The predicate uses the **UPPERCASE** enum labels
+  (`'RECEIVE'`/`'ISSUE'`) because the native Postgres `transactiontype` enum stores the member name —
+  the model's `__table_args__` declares the identical indexes and the two must stay in lock-step.
+  Both indexes are built with `CREATE UNIQUE INDEX CONCURRENTLY` inside an autocommit block (so they
+  can't run in a transaction) to avoid blocking writes on the high-write `inventory_transactions`
+  table; the `downgrade` drops them `CONCURRENTLY` too. **Pre-flight duplicate guard fails loudly:**
+  inventory transactions are regulated traceability records, so if pre-existing duplicate work-order
+  RECEIVE/ISSUE groups exist, the migration **lists the offending `(company_id, reference_id[,
+  part_id])` groups and raises** rather than deleting any rows — an operator resolves them deliberately
+  (keep the earliest min-id row), then re-runs. Idempotent (`IF NOT EXISTS` / inspector + `pg_indexes`
+  guard) and reversible; Postgres-only (skipped on SQLite, where `create_all` still emits a full unique
+  index from the model and the app-level guard applies).
+
 ## Work-order completion rollup (shared finalizer)
 
 Completion is consolidated in **one** place: `finalize_operation_completion(db, wo, op)` in

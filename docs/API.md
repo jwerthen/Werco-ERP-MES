@@ -104,6 +104,28 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > re-invoking on an already-terminal work order/shipment returns the current state
 > (`{"already_completed": true}` / `{"already_shipped": true}`) and fires no second audit row, event,
 > notification, or webhook.
+>
+> **Completion writes finished goods to inventory.** When a work order reaches **COMPLETE** (any
+> completion path, including reconcile-on-read), the system **always** performs a finished-goods
+> RECEIVE: it assigns the work order a lot number if it has none (`LOT-<work_order_number>`),
+> creates or increments an inventory item for the work order's part at warehouse **`MAIN`** /
+> location **`FINISHED-GOODS`** for the completed quantity, and writes a positive `RECEIVE`
+> `InventoryTransaction` (`reference_type='work_order'`) at the part's `standard_cost`. The receipt is
+> **audited** (`GET /audit/`) and **idempotent** — at most one finished-goods receipt per work order
+> (DB-enforced), so a re-completion or a reconcile re-read never double-receives. Receipts are lot-only
+> (no serial is assigned; the system has no part-serialization flag yet). A fully-scrapped work order
+> (zero completed quantity) receives nothing. The receipt's lot is reconstructable end-to-end via
+> [Traceability](#traceability).
+>
+> **Component backflush is opt-in per part (default off).** If the finished part has
+> `backflush_components = true` (see [Part Schema](#part-schema)), completion **auto-consumes** the
+> part's BOM components: one negative `ISSUE` `InventoryTransaction` per component (quantity scaled by
+> the produced quantity and each BOM item's `scrap_factor`), decrementing source stock and carrying the
+> consumed lot for genealogy — each **audited** and **idempotent** per component. When the flag is
+> **false** (the default) completion moves no components, so a shop that issues material manually is
+> never double-consumed. A backflush shortage (insufficient stock) **does not fail the completion** —
+> the source lot is driven negative and the shortfall is recorded as a tamper-evident
+> `BACKFLUSH_SHORTAGE` audit row plus a `backflush_shortage` warning event.
 
 #### Work Order Schema
 
@@ -145,9 +167,16 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
   "unit_of_measure": "EA",
   "material_type": "ST-304",
   "is_active": true,
+  "backflush_components": false,
   "created_at": "2024-01-01T10:00:00"
 }
 ```
+
+> `backflush_components` (boolean, default `false`) opts this part into **component backflush on
+> work-order completion**: when a work order for this part completes, its BOM components are
+> auto-consumed via negative `ISSUE` inventory transactions. Leave it `false` (the default) when
+> material is issued manually, to avoid double-consuming stock. See the completion-inventory notes
+> under [Work Orders](#work-orders).
 
 ### BOM (Bill of Materials)
 
@@ -470,6 +499,25 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > increment) — flushed inside the same atomic transaction as the inventory write so the audit row
 > commits with the movement. The new `InventoryTransaction` rows are tenant-tagged with the active
 > `company_id`.
+
+### Traceability
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/traceability/lot/{lot_number}` | Full lot trace (source, usage, as-built genealogy, history) | Yes |
+| GET | `/traceability/serial/{serial_number}` | Serial trace (transactions, work orders, NCRs) | Yes |
+
+> **As-built genealogy (`consumed_components`).** `GET /traceability/lot/{lot_number}` returns a
+> `consumed_components` array (default `[]`). When the traced lot is a finished-goods lot **produced by
+> a work order** (it has a work-order RECEIVE transaction), this section reconstructs the as-built
+> genealogy by enumerating that work order's component `ISSUE` transactions — so a single trace shows
+> the parent finished lot **and** the component part / lot / quantity consumed to build it. It is empty
+> for purchased/raw lots. Each entry carries `work_order_id`, `work_order_number`,
+> `component_part_id`, `component_part_number`, `component_part_name`, `lot_number`, and `quantity`
+> (reported positive). Component genealogy is populated by the **backflush** path, so a lot's
+> `consumed_components` is non-empty only when the producing part had `backflush_components = true`.
+> `GET /traceability/serial/{serial_number}` mirrors the lot trace's work-order and NCR collection.
+> Every query is scoped to the active company.
 
 ### Shipping
 

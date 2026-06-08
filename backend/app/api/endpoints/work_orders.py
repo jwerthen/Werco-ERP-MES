@@ -37,6 +37,7 @@ from app.schemas.work_order import (
     WorkOrderUpdate,
 )
 from app.services.audit_service import AuditService
+from app.services.completion_inventory_service import apply_completion_inventory_effects
 from app.services.completion_signal_service import (
     emit_operation_completed_event,
     emit_work_order_completed_event,
@@ -195,6 +196,40 @@ def _refresh_reconcile_scheduling(db: Session, company_id: int, transitions: lis
         pass
 
 
+def _apply_reconcile_inventory_effects(
+    db: Session,
+    company_id: int,
+    current_user: User,
+    work_orders: list[WorkOrder],
+    transitions: list[StatusTransition],
+) -> None:
+    """FG receipt + gated backflush for reconcile-driven WO completions (Batch 6 / rank 9).
+
+    Mirror of the shop_floor helper: a WO that completes implicitly on a list/detail
+    GET via reconcile must move inventory the SAME way the live paths do (INV-1/INV-2).
+    READ-SAFE / best-effort (wrapped so it can never 500 a GET) and IDEMPOTENT (a prior
+    WO RECEIVE / component ISSUE short-circuits it). Joined to THIS read's unit of work
+    (the caller commits) and tenant-scoped via ``company_id``.
+    """
+    completed_wo_ids = {tr.resource_id for tr in transitions if tr.resource_type == "work_order"}
+    if not completed_wo_ids:
+        return
+    try:
+        audit = AuditService(db, current_user)
+        for work_order in work_orders:
+            if work_order.id in completed_wo_ids:
+                # The returned BackflushResult is intentionally not inspected here: a
+                # backflush shortage is now recorded tamper-evidently INSIDE the service
+                # (a BACKFLUSH_SHORTAGE audit_log row + a backflush_shortage
+                # OperationalEvent), so it is captured on this read path too -- atomic
+                # with the reconcile's unit of work and inside this read-safe guard.
+                apply_completion_inventory_effects(
+                    db, work_order, user_id=current_user.id, company_id=company_id, audit=audit
+                )
+    except Exception:  # pragma: no cover - reads must never 500 on inventory-effect failure
+        pass
+
+
 def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_user: User, company_id: int) -> None:
     """Reconcile operation rows from completion evidence and commit, tolerating
     ANY failure of that best-effort write on a READ/list path.
@@ -231,6 +266,9 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
             # MS-2: refresh cached work-center availability for reconcile-driven WO
             # completions, joined to this read's unit of work (commit=False).
             _refresh_reconcile_scheduling(db, company_id, transitions)
+            # Batch 6 / rank 9 (INV-1/INV-2): FG receipt + gated backflush for any WO
+            # this reconcile drove to COMPLETE. Read-safe (best-effort) + idempotent.
+            _apply_reconcile_inventory_effects(db, company_id, current_user, work_orders, transitions)
             db.commit()
     except SQLAlchemyError:
         # Best-effort reconcile lost a version race OR its commit failed on a
@@ -2062,6 +2100,12 @@ def complete_work_order(
         payload={"quantity_complete": work_order.quantity_complete, "quantity_scrapped": effective_quantity_scrapped},
     )
 
+    # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): this privileged override
+    # drives the WO to COMPLETE, so it too must receive the finished good (always,
+    # lot-only, idempotent) and backflush components (only if part.backflush_components).
+    # Atomic with the manual completion below; a backflush shortage never fails it.
+    apply_completion_inventory_effects(db, work_order, user_id=current_user.id, company_id=company_id, audit=audit)
+
     # Audit this privileged manual completion (status change + the quantities it set)
     # on the tamper-evident chain. Logged BEFORE the terminal commit so the audit rows
     # commit atomically with the status change.
@@ -2523,6 +2567,9 @@ def complete_operation(
             user_id=current_user.id,
             source_module="work_orders",
         )
+        # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): FG receipt (always,
+        # lot-only, idempotent) + gated backflush, atomic with this completion.
+        apply_completion_inventory_effects(db, work_order, user_id=current_user.id, company_id=company_id, audit=audit)
 
     # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record on a true completion only.
     # Read-only evaluation against the locked op + WO; each unsatisfied gate gets a

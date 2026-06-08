@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -196,6 +196,46 @@ class InventoryTransaction(Base, TenantMixin):
     """Transaction history for inventory movements"""
 
     __tablename__ = "inventory_transactions"
+
+    # DB-enforced idempotency for work-order completion inventory side-effects
+    # (completion_inventory_service.py). These PARTIAL UNIQUE indexes back the
+    # application-level check-then-insert guards so a concurrent double-complete /
+    # reconcile-on-read race cannot double-receive finished goods or double-issue a
+    # backflushed component (the second insert raises IntegrityError, which the
+    # service catches and treats as an idempotent no-op).
+    #
+    # Predicate values are the UPPERCASE enum MEMBER NAMES ('RECEIVE'/'ISSUE'),
+    # which is what SQLAlchemy's native Postgres enum stores and binds for
+    # ``TransactionType.RECEIVE`` / ``TransactionType.ISSUE`` (it uses ``enum.name``,
+    # not ``enum.value``). They MUST stay aligned with the columns/filters in
+    # ``_existing_work_order_receipt`` and ``_component_already_issued``.
+    #
+    # Defined here so the ``create_all`` bootstrap path produces the same indexes a
+    # stamped+migrated DB gets (migration 041_uq_wo_inventory_idempotency). Both are
+    # mirrored there; keep the two in lock-step.
+    __table_args__ = (
+        # At most one finished-goods RECEIPT per (company, work_order).
+        Index(
+            "uq_wo_inventory_receipt",
+            "company_id",
+            "reference_type",
+            "reference_id",
+            "transaction_type",
+            unique=True,
+            postgresql_where=text("reference_type = 'work_order' AND transaction_type = 'RECEIVE'"),
+        ),
+        # At most one backflush ISSUE per (company, work_order, component part).
+        Index(
+            "uq_wo_inventory_issue",
+            "company_id",
+            "reference_type",
+            "reference_id",
+            "transaction_type",
+            "part_id",
+            unique=True,
+            postgresql_where=text("reference_type = 'work_order' AND transaction_type = 'ISSUE'"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=True)

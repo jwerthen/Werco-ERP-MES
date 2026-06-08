@@ -138,6 +138,13 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 | `PORT` | No | `8000` | Server port (Railway sets this automatically) |
 | `LOG_LEVEL` | No | `INFO` | Logging level: DEBUG, INFO, WARNING, ERROR |
 
+> **Not environment-configurable (intentional).** The work-order-completion finished-goods receipt
+> location is **not** an env var — the warehouse (`MAIN`) and location (`FINISHED-GOODS`) are module
+> constants (`FINISHED_GOODS_WAREHOUSE` / `FINISHED_GOODS_LOCATION` in
+> `app/services/completion_inventory_service.py`). Likewise, **component backflush on completion** is
+> not a global switch: it is a per-part database flag (`parts.backflush_components`, default `false`),
+> set on the part record, not via configuration. Neither has an environment variable.
+
 ### Redis Cache
 
 | Variable | Required | Default | Description |

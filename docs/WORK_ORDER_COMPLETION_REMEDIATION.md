@@ -22,7 +22,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **3** ☑ | 6 | Shared completion finalizer (consolidation) | no | quantity semantics documented; ON_HOLD completion → 409 |
 | **4** ☑ | 7 | Quality gates on completion (warn-and-record) | no | records a tamper-evident exception, does not block |
 | **5** ☑ | 8 | Uniform completion signal set (events/notify/webhook/sched) | no | new outbound signals |
-| **6** | 9 | FG receipt + backflush + as-built genealogy | maybe (genealogy table) | inventory now moves |
+| **6** ☑ | 9 | FG receipt + backflush + as-built genealogy | **yes** (`040`/`041`) | inventory now moves |
 | **7** | 10 | Labor-hour + job/actual-cost rollup | maybe (drop cols) | cost reports populate |
 | **8** | 11 | OEE/OTD metric correctness + dead auto-OEE endpoint | no | **KPI values move** |
 | **9** | 12 | Indexes + de-risk reconcile-on-read | **yes** | reconcile may move off read path |
@@ -320,9 +320,93 @@ Findings: EVT-1, EVT-2, EVT-3, EVT-4, EVT-5, MS-2.
 >    tenant can close a WO by shipping it. This pre-dates Batch 5 (not introduced here) and is raised
 >    separately for an RBAC gate.
 
-### Rank 9 — FG receipt + backflush + as-built genealogy on completion ☐ (Batch 6 · data-sensitive)
+### Rank 9 — FG receipt + backflush + as-built genealogy on completion ☑ (Batch 6 · data-sensitive)
 In finalizer on WO COMPLETE: assign FG lot/serial; create/increment FG `InventoryItem` + RECEIVE txn; backflush components (ISSUE txns carrying consumed lot, apply `scrap_factor`, per-part flag); route through `get_audit_service`. **Idempotent** (reconcile re-enters). Mirror trace into `trace_serial`; populate MRP `on_order`.
 Findings: INV-1, INV-2, INV-3, TRACE-2, TRACE-3, TRACE-4, TRACE-5, MS-4.
+
+> **Batch 6 status (2026-06-07, rank 9 landed).** Work-order completion now **moves inventory**. The
+> inventory side-effects live in `app/services/completion_inventory_service.py`
+> (`apply_completion_inventory_effects`), invoked on all **four live completion paths** (office +
+> shop-floor `complete_operation`, `clock_out`, `complete_work_order`) — atomic with the completion,
+> the handler owns the commit — and on the **reconcile-on-read** path (best-effort, read-safe; a
+> duplicate insert rolls back only a SAVEPOINT and can never turn a GET into a 500). None of these
+> functions commit; they join the caller's unit of work.
+>
+> **FG receipt (INV-1 / TRACE-3) — ALWAYS.** On WO COMPLETE the system performs a finished-goods
+> RECEIVE: it assigns `work_order.lot_number` if empty (`LOT-<work_order_number>`, de-collided
+> per-company with a `-NN` suffix), creates or increments an `InventoryItem` at warehouse **`MAIN`** /
+> location **`FINISHED-GOODS`** for `work_order.part_id` and quantity `quantity_complete`, writes a
+> positive `RECEIVE` `InventoryTransaction` (`reference_type='work_order'`, `reference_id=<wo>`) with
+> `unit_cost = part.standard_cost`, and **audits** the movement on the tamper-evident hash chain via
+> `AuditService` (INV-4). Lot-only — `InventoryItem.serial_number` is left NULL (no Part serialization
+> flag exists yet; serial assignment is a deferred follow-up). A fully-scrapped WO (zero
+> `quantity_complete`) receives nothing.
+>
+> **Component backflush (INV-2) — OPT-IN, default OFF.** Only when the finished part's
+> `parts.backflush_components` flag is **True** (migration `040`, default FALSE) does completion
+> auto-consume the BOM components: one negative `ISSUE` `InventoryTransaction` per component (quantity
+> scaled by produced qty and `BOMItem.scrap_factor`, resolved from explicit WO-operation component
+> demand first, else by exploding the active BOM), decrementing source stock, each **audited**, and
+> carrying the consumed source lot on the txn for genealogy. The default-OFF posture exists so material
+> a shop issued manually is never double-consumed. **A shortage never fails completion** — the primary
+> source lot is driven negative (matching the permissive manual `/inventory/adjust` behavior), and the
+> gap is now recorded as a tamper-evident `BACKFLUSH_SHORTAGE` `audit_log` row **plus** a
+> `backflush_shortage` warning `OperationalEvent` (item 3) — captured on both the live and reconcile
+> paths.
+>
+> **As-built genealogy (INV-3 / TRACE-2 / TRACE-5).** `GET /traceability/lot/{lot}` (`trace_lot`) now
+> reconstructs the second hop: from the FG lot it finds the producing WO (the WO-referenced RECEIVE),
+> then enumerates that WO's component ISSUE txns and returns them as a new `consumed_components`
+> section (component part / lot / quantity), so a single trace reconstructs the as-built genealogy.
+> `GET /traceability/serial/{serial}` (`trace_serial`) now mirrors `trace_lot`'s WO + NCR collection
+> (TRACE-4). All queries are tenant-scoped (invariant #1).
+>
+> **MRP `on_order` (MS-4).** `MRPService.get_inventory_summary` now populates `on_order` from the
+> remaining output (`quantity_ordered − quantity_complete`) of the tenant's **RELEASED / IN_PROGRESS**
+> make-WOs that produce the part. **COMPLETE WOs are excluded** — their output is now received into
+> `InventoryItem` on completion (INV-1) and so is already counted in `on_hand`; counting it here too
+> would double it.
+>
+> **DB-enforced idempotency.** At most **one FG RECEIVE per (company, work order)** and **one
+> backflush ISSUE per (company, work order, component part)**. Beyond the app-level check-then-insert,
+> migration `041` adds two partial UNIQUE indexes on `inventory_transactions` that back the exact
+> idempotency keys, so a concurrent double-receive / double-issue race (two reconcile GETs, or a live
+> completion racing a reconcile GET) loses on an `IntegrityError` the service catches as a clean no-op
+> (no double-count). Each insert is wrapped in a SAVEPOINT so the loser rolls back only the savepoint,
+> never the outer completion/reconcile transaction.
+>
+> **Migrations:** `040_add_part_backflush_flag` (the opt-in `parts.backflush_components` boolean,
+> NOT NULL DEFAULT false; metadata-only add) and `041_uq_wo_inventory_idempotency` (the two partial
+> UNIQUE indexes, built `CONCURRENTLY` in an autocommit block; idempotent + reversible). **`041`'s
+> pre-flight duplicate guard fails LOUDLY** — it lists the offending `(company_id, reference_id[,
+> part_id])` groups and **raises** rather than deleting any inventory rows (inventory transactions are
+> regulated traceability records; silent dedup is not acceptable). See `docs/DEVELOPMENT.md` →
+> Database Migrations.
+>
+> **Follow-ups (tracked, not fixed in Batch 6):**
+> 1. **Serial assignment deferred.** FG receipt is lot-only; assigning a serial needs a Part
+>    serialization flag (no schema field exists yet). `InventoryItem.serial_number` stays NULL until
+>    then.
+> 2. **Multi-lot FIFO backflush deferred.** A component is consumed by exactly ONE ISSUE per WO against
+>    the primary (lowest-id on-hand) source lot — not a multi-lot FIFO split. The full required
+>    quantity rides one lot; when that lot is insufficient it goes negative. A FIFO/multi-lot
+>    consumption is a tracked follow-up.
+> 3. **Reconcile-path inventory writes should move to the ARQ reconcile job (rank 12 / Batch 9).** FG
+>    receipt + backflush currently run inline (best-effort) on reconcile-on-read; when reconcile moves
+>    to a debounced background job the inventory writes should move with it (and re-attribute to a
+>    system actor), mirroring the AUD-3 / EVT-4 reconcile-off-read follow-ups.
+> 4. **A1 (`audit_log.sequence_number` race) is amplified by read-path inventory audits.** Each FG
+>    receipt / backflush now writes additional `audit_log` rows, and on the reconcile-on-read path
+>    these are emitted under a GET — increasing the volume of concurrent audit writers that can collide
+>    on the unserialized `max()+1` `sequence_number`. A1 remains the tracked dedicated fix (serialize
+>    sequence allocation or catch-and-retry the collision).
+>
+> ⚠️ **Auditor sign-off — negative-stock-on-shortage posture.** A backflush that exceeds available
+> stock **drives the primary source lot negative and still completes the work order** (the demand is
+> recorded; nothing blocks). This is deliberate (it matches the existing permissive `/inventory/adjust`
+> behavior and avoids a backflush ever blocking production) and the shortage is now tamper-evidently
+> recorded — but a negative on-hand is a material-trail condition a quality/compliance owner should
+> review and explicitly accept for AS9100D/CMMC-L2.
 
 ### Rank 10 — Labor-hour + job/actual-cost rollup ☐ (Batch 7)
 Accumulate auto-closed TimeEntry `duration_hours` into op/WO actual hours; extract `JobCostingService.recompute_from_time_entries`; set `JobCost.status=COMPLETED`; populate `WorkOrder.actual_cost`/`estimated_cost` (or repoint report to JobCost); single configurable labor rate replacing hardcoded $45/$50.

@@ -104,8 +104,28 @@
   event — the recorded-nonconformance control for **AS9100D 8.7 (control of nonconforming output)**:
   the system does not prevent the completion, but every nonconforming completion leaves a traceable
   record of who completed it and which gate was unsatisfied.
+  AU-3.3.1 coverage also now records **completion-driven inventory movements** (Batch 6 / rank 9).
+  When a work order reaches COMPLETE the system always receives the finished goods into inventory
+  (a `RECEIVE` `InventoryTransaction`) and, when the part opts into backflush, consumes its BOM
+  components (`ISSUE` transactions) — **every one of these movements is written to the tamper-evident
+  hash chain** via `AuditService`, flushed atomically with the completion, exactly like the manual
+  `/inventory` movements. A **backflush shortage** (a component driven to negative on-hand) is not
+  silent: it writes a tamper-evident `BACKFLUSH_SHORTAGE` `audit_log` row (shortfall qty + consumed lot
+  + producing work order) plus a `backflush_shortage` warning operational event, so the negative
+  material-trail condition is attributable and recorded. *(See the negative-stock-on-shortage posture
+  flagged for review in `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Batch 6 — a negative on-hand still
+  completes the work order by design; this warrants explicit quality/compliance acceptance.)*
+  **AS9100D 8.5.2 (identification & traceability):** because the finished-goods receipt assigns and
+  records a work-order lot and the backflush carries the consumed component lots, **as-built lot
+  genealogy is now reconstructable** from a single trace — `GET /traceability/lot/{lot}` reports the
+  producing work order and its `consumed_components` (component part / lot / quantity), and
+  `GET /traceability/serial/{serial}` mirrors the work-order/NCR collection. All trace queries are
+  tenant-scoped. **DB-enforced idempotency** (migration `041`, two partial UNIQUE indexes) guarantees
+  at most one receipt per work order and one issue per component, so a re-completion or reconcile
+  re-read cannot duplicate a regulated inventory/traceability record.
   *Known gap (tracked):* the root `audit_log.sequence_number` (`max()+1`) allocation is still not
-  serialized under concurrent writes — see follow-up A1 in `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`.
+  serialized under concurrent writes — see follow-up A1 in `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`
+  (amplified in Batch 6 by the additional read-path inventory audit rows).
 
 **GAPS:**
 - [x] **AU-3.3.8 - Protect Audit Information** ✅ COMPLETE
@@ -551,6 +571,7 @@ Backend:
 | 2026-06-07 | AU-3.3.1 (work-order completion, Batch 3 — AUD-3 closed): reconcile-on-read status transitions (operation/WO driven to COMPLETE from durable time-entry evidence on dashboard/list/detail reads) now write a tamper-evident `audit_log` status-change row attributed to the requesting user, tagged `extra_data.source = "reconcile_on_read"`; the reconcile returns its transitions for the read handler to audit before commit, and the write is best-effort (rolled back atomically with its audit rows on failure — reads never 500/orphan an unaudited transition). Completion logic consolidated into the shared `finalize_operation_completion`; ON_HOLD completion now refused with HTTP 409 on both op-complete endpoints and `complete_work_order`. Follow-up A1 (`audit_log.sequence_number` race) still open. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
 | 2026-06-07 | AU-3.3.1 / AS9100D 8.7 (work-order completion, Batch 4 — quality gates, warn-and-record): completing an operation/WO past an unsatisfied quality gate (`inspection_incomplete` / `open_ncr` / `fai_not_passed` / `open_blocker`) is no longer silent — it succeeds (200) but writes a tamper-evident `audit_log` row with action `COMPLETED_WITH_QUALITY_EXCEPTION` (codes + offending-record references), emits a warning operational event, and returns the exceptions on the completion response (`quality_exceptions`, default `[]`). Gates are read-only + tenant-scoped (`app/services/quality_gate_service.py`); they do **not** block. New audited `inspection_complete` writer `POST /shop-floor/operations/{id}/inspection` (`MARK_OPERATION_INSPECTED`, role-gated ADMIN/MANAGER/SUPERVISOR/QUALITY). Deferrals: missing-but-required FAI undetectable (no FAI-required flag); FAI-pass→`inspection_complete` auto-wire needs an FAI↔operation FK; reconcile-on-read records only `inspection_incomplete`. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
 | 2026-06-07 | SC-3.13.1 (work-order completion, Batch 5 — uniform completion signals): completion now fires outbound `work_order.completed` / `work_order.closed` webhooks that are **tenant-scoped** (`WebhookService.dispatch_event` requires `company_id` and refuses an unscoped/cross-tenant dispatch; deliveries reach only the owning company's registered endpoints; `WebhookDelivery` rows are tenant-stamped) and **CUI-minimized** — the egressing payload is a redacted identifier set (`work_order_id`, `work_order_number`, `part_id`, `status`, `quantity_complete`, `quantity_scrapped`, `company_id`, `completed_at`) that deliberately omits `customer_name`/free-text; subscribers re-fetch detail via the authenticated API. Dispatch is async (ARQ) + post-commit + best-effort (a signal failure never affects the completion). Internal `WO_COMPLETED` notifications are tenant-scoped to the company's own users. Reconcile-on-read emits in-process events only (no outbound dispatch from a read). Follow-up: reconcile outbound notify/webhook deferred to rank 12 (re-attribute to a system actor when moved to ARQ). See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-07 | AU-3.3.1 / AS9100D 8.5.2 (work-order completion, Batch 6 — FG receipt + backflush + as-built genealogy): WO completion now moves inventory. A finished-goods `RECEIVE` is always written (warehouse `MAIN` / location `FINISHED-GOODS`, lot `LOT-<wo#>`, `unit_cost = standard_cost`); component backflush (`ISSUE` per component, `scrap_factor`-scaled) runs only when the part opts in (`parts.backflush_components`, default false). Every movement is tamper-evidently audited; a backflush shortage writes a `BACKFLUSH_SHORTAGE` audit row + warning event (the source lot is still driven negative — completion never blocks, **negative-stock posture flagged for explicit quality/compliance acceptance**). As-built lot genealogy is reconstructable via `consumed_components` on `GET /traceability/lot/{lot}`; `trace_serial` mirrors the WO/NCR collection. MRP `on_order` now counts only RELEASED/IN_PROGRESS WO output (completed output is on-hand). Idempotency is DB-enforced (migration `041`, two partial UNIQUE indexes on `inventory_transactions`; duplicate guard fails loudly, never deletes); migration `040` adds the opt-in flag. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
 
 ---
 

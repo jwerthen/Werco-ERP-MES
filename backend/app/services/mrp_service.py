@@ -85,11 +85,26 @@ class MRPService:
             or 0.0
         )
 
-        # On order - would come from purchase orders (simplified for now)
-        # In a full implementation, this would query open PO lines
-        on_order = 0.0
+        # On order (MS-4): scheduled make-WO output not yet received as inventory.
+        # Sum the REMAINING output (quantity_ordered - quantity_complete) of this
+        # tenant's RELEASED / IN_PROGRESS work orders that PRODUCE this part, so MRP
+        # nets parent demand against in-flight WO supply instead of re-ordering parts
+        # that are already being manufactured. COMPLETE WOs are excluded -- their
+        # output is received into InventoryItem on completion (Batch 6 / INV-1), so it
+        # is already counted in on_hand; counting it here too would double it.
+        # (Open PO-line supply could be added to this same figure later.)
+        on_order_rows = (
+            self.db.query(WorkOrder.quantity_ordered, WorkOrder.quantity_complete)
+            .filter(
+                WorkOrder.company_id == self.company_id,
+                WorkOrder.part_id == part_id,
+                WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
+            )
+            .all()
+        )
+        on_order = sum(max(0.0, float(ordered or 0) - float(complete or 0)) for ordered, complete in on_order_rows)
 
-        return float(on_hand_result), float(allocated_result), on_order
+        return float(on_hand_result), float(allocated_result), float(on_order)
 
     def get_work_order_requirements(self, horizon_end: date, include_allocated: bool = True) -> List[Dict]:
         """Get material requirements from work orders"""

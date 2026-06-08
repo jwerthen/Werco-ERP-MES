@@ -99,6 +99,12 @@ class Part(Base, SoftDeleteMixin, TenantMixin):
     requires_inspection = Column(Boolean, default=True)
     inspection_requirements = Column(Text)
 
+    # Manufacturing behavior
+    # When True, completing an operation / work order for this part auto-issues
+    # (backflushes) its BOM components from inventory. OPT-IN per part, default
+    # OFF so it never double-counts material a shop issues manually.
+    backflush_components = Column(Boolean, nullable=False, server_default="false", default=False)
+
     # Status
     is_active = Column(Boolean, default=True)
     status = Column(String(50), default="active")  # active, obsolete, pending_approval

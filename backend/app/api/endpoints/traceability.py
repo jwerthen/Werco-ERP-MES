@@ -8,10 +8,12 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
-from app.models.inventory import InventoryItem, InventoryTransaction
+from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
+from app.models.part import Part
 from app.models.purchasing import POReceipt, PurchaseOrder, PurchaseOrderLine
 from app.models.quality import NonConformanceReport
 from app.models.user import User
+from app.models.work_order import WorkOrder
 
 router = APIRouter()
 
@@ -25,6 +27,23 @@ class LotHistoryItem(BaseModel):
     reference: Optional[str] = None
     user: Optional[str] = None
     details: Optional[dict] = None
+
+
+class ConsumedComponent(BaseModel):
+    """One component lot consumed to BUILD a work-order-produced (finished-good) lot.
+
+    The as-built genealogy second hop: tracing a finished-good lot enumerates the
+    components that went into it (component part + the consumed source lot + quantity),
+    grouped per producing work order, reconstructed from that WO's component ISSUE txns.
+    """
+
+    work_order_id: int
+    work_order_number: Optional[str] = None
+    component_part_id: Optional[int] = None
+    component_part_number: Optional[str] = None
+    component_part_name: Optional[str] = None
+    lot_number: Optional[str] = None
+    quantity: float = 0
 
 
 class LotTraceResponse(BaseModel):
@@ -50,6 +69,10 @@ class LotTraceResponse(BaseModel):
     shipments: List[str] = []
     ncrs: List[str] = []
 
+    # As-built genealogy: components consumed to produce THIS lot (when it is a
+    # work-order-produced finished-good lot). Empty for purchased/raw lots.
+    consumed_components: List[ConsumedComponent] = []
+
     # Full history
     history: List[LotHistoryItem] = []
 
@@ -63,12 +86,21 @@ def trace_lot(
 ):
     """
     Get full traceability for a lot number.
-    Shows source, usage, and current status for AS9100D compliance.
+
+    Shows source, usage, and current status for AS9100D compliance. For a
+    finished-good lot produced by a work order, the response also reconstructs the
+    as-built genealogy in ``consumed_components`` (the component part / lot / quantity
+    consumed to build this lot, from the producing work order's backflush ISSUE
+    transactions). All data is scoped to the active company.
     """
     history: List[LotHistoryItem] = []
     work_orders_used = set()
     shipments_list = set()
     ncrs_list = set()
+    # Producing work-order ids for the as-built second hop: a RECEIVE txn whose
+    # reference is a work order means THIS lot is that WO's finished-good lot, so the
+    # WO's component ISSUE txns carry the consumed-component genealogy.
+    producing_work_order_ids: set[int] = set()
 
     # Find inventory items with this lot
     inv_items = (
@@ -122,6 +154,14 @@ def trace_lot(
 
         if txn.reference_type == "work_order" and txn.reference_number:
             work_orders_used.add(txn.reference_number)
+        # A RECEIVE referencing a work order: this lot was PRODUCED by that WO -> its
+        # component ISSUE txns hold the as-built genealogy (the second hop below).
+        if (
+            txn.reference_type == "work_order"
+            and txn.reference_id is not None
+            and txn.transaction_type == TransactionType.RECEIVE
+        ):
+            producing_work_order_ids.add(txn.reference_id)
 
         history.append(
             LotHistoryItem(
@@ -194,6 +234,14 @@ def trace_lot(
     # Check shipments (if lot tracking added to shipments)
     # This would require joining through work orders
 
+    # As-built genealogy second hop (INV-3 / TRACE-2 / TRACE-5): the lot-keyed scan
+    # above surfaces only the PRODUCING work order for a finished-good lot -- the
+    # consumed component lots ride the WO's *component* ISSUE txns, not the FG lot. So,
+    # for each producing WO, enumerate its component ISSUE txns (the backflush
+    # consumption) and report the consumed component part / lot / quantity. Every query
+    # is tenant-scoped (company_id) per invariant #1.
+    consumed_components = _reconstruct_consumed_components(db, producing_work_order_ids, company_id)
+
     # Sort history by timestamp
     history.sort(key=lambda x: x.timestamp)
 
@@ -213,8 +261,76 @@ def trace_lot(
         work_orders_used=list(work_orders_used),
         shipments=list(shipments_list),
         ncrs=list(ncrs_list),
+        consumed_components=consumed_components,
         history=history,
     )
+
+
+def _reconstruct_consumed_components(
+    db: Session,
+    producing_work_order_ids: set[int],
+    company_id: int,
+) -> List[ConsumedComponent]:
+    """As-built second hop: consumed component lots for each producing work order.
+
+    Given the work orders that PRODUCED the traced finished-good lot (collected from
+    its RECEIVE txns), enumerate each WO's component ISSUE transactions -- the backflush
+    consumption -- and return one ``ConsumedComponent`` per (WO, component part, lot)
+    with the total quantity consumed (reported positive). Tenant-scoped: every query
+    filters ``company_id`` so a cross-tenant trace can never surface another company's
+    genealogy (invariant #1 / TRACE-1).
+    """
+    if not producing_work_order_ids:
+        return []
+
+    issue_txns = (
+        db.query(InventoryTransaction)
+        .filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.reference_type == "work_order",
+            InventoryTransaction.reference_id.in_(producing_work_order_ids),
+            InventoryTransaction.transaction_type == TransactionType.ISSUE,
+        )
+        .order_by(InventoryTransaction.created_at)
+        .all()
+    )
+    if not issue_txns:
+        return []
+
+    # Resolve WO numbers + component part identity in two batched, tenant-scoped reads.
+    wo_numbers = {
+        wo_id: wo_number
+        for wo_id, wo_number in db.query(WorkOrder.id, WorkOrder.work_order_number)
+        .filter(WorkOrder.id.in_(producing_work_order_ids), WorkOrder.company_id == company_id)
+        .all()
+    }
+    component_part_ids = {txn.part_id for txn in issue_txns if txn.part_id is not None}
+    parts_by_id = {
+        p.id: p for p in db.query(Part).filter(Part.id.in_(component_part_ids), Part.company_id == company_id).all()
+    }
+
+    # Aggregate per (work_order, component part, consumed lot) so multiple ISSUE rows
+    # for the same component lot collapse into a single consumed-quantity line.
+    aggregated: dict[tuple, float] = {}
+    for txn in issue_txns:
+        key = (txn.reference_id, txn.part_id, txn.lot_number)
+        aggregated[key] = aggregated.get(key, 0.0) + abs(float(txn.quantity or 0))
+
+    consumed: List[ConsumedComponent] = []
+    for (wo_id, comp_part_id, lot), qty in aggregated.items():
+        comp_part = parts_by_id.get(comp_part_id)
+        consumed.append(
+            ConsumedComponent(
+                work_order_id=wo_id,
+                work_order_number=wo_numbers.get(wo_id),
+                component_part_id=comp_part_id,
+                component_part_number=comp_part.part_number if comp_part else None,
+                component_part_name=comp_part.name if comp_part else None,
+                lot_number=lot,
+                quantity=qty,
+            )
+        )
+    return consumed
 
 
 @router.get("/serial/{serial_number}")
@@ -244,8 +360,16 @@ def trace_serial(
         .all()
     )
 
+    # TRACE-4: mirror trace_lot's work-order/NCR collection so a serial trace is as
+    # complete as a lot trace. Collect the WOs this serial was built by / used in from
+    # the transaction reference linkage (the FG-receipt + backflush txns from a WO
+    # completion carry reference_type=='work_order'), and query NCRs raised against
+    # this serial. Both are tenant-scoped (company_id) per invariant #1 (TRACE-1).
+    work_orders_used: set[str] = set()
     history = []
     for txn in transactions:
+        if txn.reference_type == "work_order" and txn.reference_number:
+            work_orders_used.add(txn.reference_number)
         history.append(
             {
                 "timestamp": txn.created_at,
@@ -253,9 +377,33 @@ def trace_serial(
                 "quantity": txn.quantity,
                 "location": txn.to_location or txn.from_location,
                 "reference": txn.reference_number,
+                "reference_type": txn.reference_type,
                 "user": txn.user.full_name if txn.user else None,
             }
         )
+
+    ncrs_list: set[str] = set()
+    ncrs = (
+        db.query(NonConformanceReport)
+        .filter(
+            NonConformanceReport.serial_number == serial_number,
+            NonConformanceReport.company_id == company_id,
+        )
+        .all()
+    )
+    for ncr in ncrs:
+        ncrs_list.add(ncr.ncr_number)
+        history.append(
+            {
+                "timestamp": ncr.created_at,
+                "event_type": "ncr",
+                "reference": ncr.ncr_number,
+                "reference_type": "ncr",
+                "description": f"NCR #{ncr.ncr_number} - {ncr.disposition or 'Open'}",
+            }
+        )
+
+    history.sort(key=lambda x: x["timestamp"])
 
     return {
         "serial_number": serial_number,
@@ -266,6 +414,8 @@ def trace_serial(
         "status": inv_item.status,
         "received_date": inv_item.received_date,
         "cert_number": inv_item.cert_number,
+        "work_orders_used": list(work_orders_used),
+        "ncrs": list(ncrs_list),
         "history": history,
     }
 
