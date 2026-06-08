@@ -353,6 +353,41 @@ class Settings(BaseSettings):
     # Webhook Configuration
     WEBHOOK_ENCRYPTION_KEY: str = ""
 
+    # Labor-cost / hour rollup on work-order completion (Batch 7 / rank 10).
+    #
+    # OPT-IN, DEFAULT OFF (product decision). When False (the default) work-order
+    # completion preserves the pre-Batch-7 behavior: it does NOT auto-populate
+    # ``WorkOrder.actual_hours`` / ``actual_cost`` and does NOT auto-sync a linked
+    # ``JobCost`` -- the on-demand ``POST /job-costs/{id}/calculate`` endpoint remains
+    # the only way to materialize cost actuals, so no untrusted labor-check-in data
+    # surfaces as cost truth before a shop validates it. When True, completion
+    # auto-rolls labor hours into the operation/WO actuals, computes
+    # ``WorkOrder.actual_cost`` (labor + issued material + overhead), and syncs the
+    # linked ``JobCost`` (status -> COMPLETED) in the same unit of work.
+    #
+    # The ``no_labor_recorded`` data-quality signal and the labor-hour rollup's
+    # downstream-rate consistency (COST-5) are independent of this flag where noted.
+    #
+    # TODO(per-company): this is a GLOBAL flag because the Company model currently has
+    # no settings/feature-flags JSON column (see app/models/company.py). When a
+    # per-company settings field is added, promote this to a per-tenant flag so a
+    # trusted shop can enable cost rollup without forcing it on every tenant; the
+    # resolution helper (services/labor_cost_service.is_labor_cost_rollup_enabled)
+    # is the single chokepoint to repoint at that field.
+    LABOR_COST_ROLLUP_ENABLED: bool = False
+
+    # Default labor rate ($/hour) used when a work center has no ``hourly_rate``
+    # (COST-5). The shared rate resolver prefers ``WorkCenter.hourly_rate`` so labor
+    # cost reflects WHERE the work happened, and falls back to this single
+    # configurable value -- used by BOTH the completion rollup and the analytics
+    # cost report so the two views can never disagree (replaces the old hardcoded
+    # $45 / $50 split).
+    DEFAULT_LABOR_RATE: float = 75.0
+    # Default overhead/burden rate ($/hour) charged on labor when a work center
+    # carries no overhead rate. Applied to actual labor hours to populate the
+    # overhead leg of ``actual_cost`` / JobCost overhead.
+    DEFAULT_OVERHEAD_RATE: float = 0.0
+
     # Audit Log Retention / Archival (CMMC AU-3.3.8 + AS9100D)
     # Audit logs are immutable (DB triggers block UPDATE/DELETE) and must NOT be
     # row-deleted by maintenance jobs. Aged rows are exported to cold storage by

@@ -31,6 +31,42 @@
 - [x] JWT token authentication
 - [x] Session management with absolute timeout (24 hours)
 - [x] Account lockout after failed attempts
+- [x] Multi-tenant data isolation enforced on shop-floor / work-order completion paths
+  (AC-3.1.3 boundary control): the operation, clock, and completion endpoints
+  (`/shop-floor/clock-in`, `/clock-out/{id}`, `/operations/{id}/start|complete`, and
+  `work-orders` `/operations/{id}` update/start/complete plus `/work-orders/{id}/complete`/`/start`)
+  scope every work-order, operation, and `TimeEntry` lookup to the caller's active company and
+  return **404 before any mutation** on a foreign id, so a guessed identifier cannot drive another
+  tenant's production records. Traceability, analytics/OEE, scheduling, and MRP services are
+  tenant-scoped, and the real-time `/ws/updates` channel now requires authentication and delivers
+  completion broadcasts only to the originating company's connections.
+- [x] Concurrency-safe production records on the completion path (data-integrity hardening,
+  Batch 2): the completion/clock endpoints take row locks (`SELECT … FOR UPDATE`) around the
+  over-completion read-modify-write and enforce optimistic locking (`version_id_col` on
+  `WorkOrderOperation` / `TimeEntry`) — a concurrent stale update returns **HTTP 409** rather than
+  silently losing the write. A partial unique index
+  (`uq_open_time_entry ON time_entries(user_id, operation_id) WHERE clock_out IS NULL`) DB-enforces a
+  single open clock-in per user + operation (duplicate → **HTTP 400**), so a double-submit cannot
+  create a second open entry and double-count labor/production. Migration `039`'s one-time dedupe of
+  pre-existing duplicate open entries is non-destructive (closes the older rows, preserves
+  `quantity_produced`) and logs the altered labor-record ids to the deploy output for AS9100D
+  traceability rather than to the tamper-evident `audit_log`.
+- [x] Cross-tenant job-cost recompute closed (AC-3.1.3 boundary control, Batch 7 / rank 10):
+  `POST /job-costs/{id}/calculate` now looks up the job cost by id **and** active `company_id` and
+  returns **404 before any recompute** on a foreign id — previously it resolved a `JobCost` by id
+  alone and could recompute another tenant's job. The `WorkOrderOperation` lookup inside the shared
+  recompute helper (`recompute_from_time_entries`) is likewise company-scoped, and the labor-rate
+  resolver (`labor_cost_service`) filters every work-center lookup by company, so no cross-tenant rate
+  or labor record can leak into a cost figure.
+- [x] OEE-metric write authorization tightened (AC-3.1.5 least-privilege, Batch 8 / rank 11): the OEE
+  **write/mutation** endpoints — `POST /api/v1/oee/calculate/{work_center_id}`,
+  `POST`/`PUT`/`DELETE /oee/records`, and `POST`/`PUT`/`DELETE /oee/targets` — now require
+  **ADMIN / MANAGER / SUPERVISOR** (`require_role(OEE_WRITE_ROLES)` in `app/api/endpoints/oee.py`),
+  matching the sibling Analytics-write posture; they were previously open to **any** authenticated user,
+  so any operator could create or overwrite OEE records and targets. OEE **read** endpoints
+  (dashboard / trends / six-big-losses / list records & targets) remain open to any authenticated user
+  so the shop floor can view dashboards (read-broad / write-restricted). See `docs/RBAC_PERMISSIONS.md`
+  → OEE.
 
 **GAPS:**
 - [ ] **AC-3.1.10 - Session Inactivity Timeout** ⚠️ HIGH
@@ -54,6 +90,68 @@
 - [x] User action logging (create, update, delete, login, etc.)
 - [x] Old/new value tracking for changes
 - [x] Structured JSON logging in production
+- [x] Production-event coverage (AU-3.3.1 audited events) extended to the work-order
+  completion/close lifecycle: operation and work-order **start** and **completion** (both the
+  shop-floor clock-out path and the office/admin `/operations/{id}/complete` path), the manual
+  `/work-orders/{id}/complete` (status change plus the completion quantities it records),
+  **shipment-close** (`mark_shipped` → work order `CLOSED`), inventory stock movements
+  (`/receive`, `/issue`, `/transfer`, `/adjust` — each logs the transaction plus the resulting
+  stock-level change(s)), and work-order **blocker** create / update / resolve (including any
+  operation hold/resume they trigger). Each is written to the tamper-evident hash chain and
+  flushed so the audit row commits atomically with the state change.
+  AU-3.3.1 coverage also includes status transitions performed by the **reconcile-on-read** path
+  (`reconcile_work_orders_from_completion_evidence`, invoked from dashboard / list / detail reads):
+  when a read drives an operation or work order to COMPLETE from durable time-entry evidence, the
+  read handler writes a tamper-evident status-change row per transition, **attributed to the
+  requesting user** and tagged `extra_data.source = "reconcile_on_read"` (the reconcile itself has no
+  actor, so it returns the transitions for the handler to audit before commit). This closes the
+  previously-tracked AUD-3 gap. The reconcile write is best-effort — on any failure the mutation and
+  its audit rows are rolled back atomically and the read still serves 200 (no orphaned, unaudited
+  state change).
+  AU-3.3.1 coverage also now records **quality-gate bypasses on completion** (Batch 4 / rank 7,
+  warn-and-record): when an operation or work order completes while a quality gate is unsatisfied —
+  `inspection_incomplete`, `open_ncr`, `fai_not_passed`, or `open_blocker` — the completion still
+  succeeds but the system writes a tamper-evident `audit_log` row with action
+  **`COMPLETED_WITH_QUALITY_EXCEPTION`** (distinct from a plain completion, so a bypass is greppable in
+  the trail) carrying the exception codes and offending-record references, alongside a warning
+  operational event. The new `MARK_OPERATION_INSPECTED` writer (the audited
+  `inspection_complete = True` sign-off) is likewise recorded. This makes a completion past an open
+  inspection / NCR / FAI / blocker an **attributable, tamper-evident record** rather than a silent
+  event — the recorded-nonconformance control for **AS9100D 8.7 (control of nonconforming output)**:
+  the system does not prevent the completion, but every nonconforming completion leaves a traceable
+  record of who completed it and which gate was unsatisfied.
+  AU-3.3.1 coverage also now records **completion-driven inventory movements** (Batch 6 / rank 9).
+  When a work order reaches COMPLETE the system always receives the finished goods into inventory
+  (a `RECEIVE` `InventoryTransaction`) and, when the part opts into backflush, consumes its BOM
+  components (`ISSUE` transactions) — **every one of these movements is written to the tamper-evident
+  hash chain** via `AuditService`, flushed atomically with the completion, exactly like the manual
+  `/inventory` movements. A **backflush shortage** (a component driven to negative on-hand) is not
+  silent: it writes a tamper-evident `BACKFLUSH_SHORTAGE` `audit_log` row (shortfall qty + consumed lot
+  + producing work order) plus a `backflush_shortage` warning operational event, so the negative
+  material-trail condition is attributable and recorded. *(See the negative-stock-on-shortage posture
+  flagged for review in `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Batch 6 — a negative on-hand still
+  completes the work order by design; this warrants explicit quality/compliance acceptance.)*
+  **AS9100D 8.5.2 (identification & traceability):** because the finished-goods receipt assigns and
+  records a work-order lot and the backflush carries the consumed component lots, **as-built lot
+  genealogy is now reconstructable** from a single trace — `GET /traceability/lot/{lot}` reports the
+  producing work order and its `consumed_components` (component part / lot / quantity), and
+  `GET /traceability/serial/{serial}` mirrors the work-order/NCR collection. All trace queries are
+  tenant-scoped. **DB-enforced idempotency** (migration `041`, two partial UNIQUE indexes) guarantees
+  at most one receipt per work order and one issue per component, so a re-completion or reconcile
+  re-read cannot duplicate a regulated inventory/traceability record.
+  AU-3.3.1 coverage also now records **completion cost/hours rollup and job-cost status changes**
+  (Batch 7 / rank 10), which surface in compliance-facing cost reports. The labor-hour + actual-cost
+  rollup is opt-in (global flag `LABOR_COST_ROLLUP_ENABLED`, default OFF); **when enabled**, a
+  completing work order writes one tamper-evident `audit_log` row recording the rolled-up actuals
+  (action `cost_rollup`: old/new `actual_hours` and `actual_cost`), and the linked `JobCost` flip to
+  status `COMPLETED` writes its own tamper-evident row — both via `AuditService`, flushed atomically
+  with the completion. Separately, and **regardless of the flag**, a work order completed with one or
+  more operations that recorded **zero** labor writes a tamper-evident `COMPLETED_WITH_QUALITY_EXCEPTION`
+  row (code `no_labor_recorded`) plus a `quality_exception_on_completion` warning event, so a
+  potentially understated cost/hour record is attributable rather than silent.
+  *Known gap (tracked):* the root `audit_log.sequence_number` (`max()+1`) allocation is still not
+  serialized under concurrent writes — see follow-up A1 in `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`
+  (amplified in Batch 6 by the additional read-path inventory audit rows).
 
 **GAPS:**
 - [x] **AU-3.3.8 - Protect Audit Information** ✅ COMPLETE
@@ -302,6 +400,17 @@
 - [x] CORS controls
 - [x] Input validation
 - [x] API rate limiting
+- [x] Outbound webhook dispatch is **tenant-scoped and CUI-minimized** (SC-3.13.1 boundary /
+  CUI-egress control). The work-order completion webhook (`work_order.completed` /
+  `work_order.closed`) is dispatched only to the **owning company's** registered endpoints
+  (`WebhookService.dispatch_event` requires a `company_id` and refuses an unscoped/cross-tenant
+  dispatch; `WebhookDelivery` rows are tenant-stamped), and the egressing payload is a **minimal,
+  redacted** identifier set — `work_order_id`, `work_order_number`, `part_id`, `status`,
+  `quantity_complete`, `quantity_scrapped`, `company_id`, `completed_at`. It **deliberately omits**
+  `customer_name` and free-text/notes (CUI minimization at the system boundary); subscribers re-fetch
+  any detail via the authenticated API. A richer outbound payload is an explicit
+  data-classification decision, not the default. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`
+  (Batch 5 / rank 8).
 
 **GAPS:**
 - [ ] **SC-3.13.8 - Data at Rest Encryption** 🔴 CRITICAL
@@ -322,6 +431,20 @@
 - [x] Input validation (Pydantic schemas)
 - [x] Error boundaries (React)
 - [x] Database constraints
+- [x] KPI reporting integrity (AS9100D 9.1.1 monitoring/measurement honesty, Batch 8 / rank 11): the
+  analytics dashboard no longer reports a fabricated metric when there is no underlying data. On
+  `GET /analytics/kpis`, **OEE** and **on-time delivery** return **`null` ("n/a")** when the metric is
+  genuinely uncomputable — OEE when the work center/plant has no staffed (clocked) time in the window
+  (no availability denominator), OTD when no work order with a due date completed in the window (empty
+  denominator). Previously **OTD with no completed work orders reported a misleading 100% on-time** — a
+  measurement that read "perfect" precisely when there was nothing to measure. `KPIValue.value` is now
+  nullable to carry the honest n/a; the frontend renders "n/a". The OTD rule also no longer flatters
+  the figure: a COMPLETE work order with a null `actual_end` (no verifiable completion date) counts as
+  **not on time**, and the completed-set is soft-delete-filtered. The OEE convention
+  (`Availability × Performance × Quality` on the staffed-time basis) is now identical on the KPI
+  headline and the persisted `OEERecord`, derived from real clocked time, routing standard cycle, and
+  reported downtime/scrap rather than hardcoded assumptions, so the reported number reflects the
+  production records. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` → Rank 11.
 
 **GAPS:**
 - [ ] **SI-3.14.1 - Flaw Remediation**
@@ -483,7 +606,13 @@ Backend:
 | 2026-06-05 | AU-3.3.8: audit rows tenant-tagged (`company_id`) for scoped retrieval; `company_id` documented as deliberately excluded from the integrity hash; integrity endpoints restricted to Platform Admin (per-record check stays Admin, own-company) | Droid |
 | 2026-06-05 | AU-3.3.8: settings-audit trail (`SettingsAuditLog`, `log_change`) now tags rows with the active company to match `AuditService._resolve_company_id`; defense-in-depth parity fix (cross-company switches are read-only, so no live cross-tenant write) | Droid |
 | 2026-06-05 | AU-3.3.8: audit-log retention reconciled with immutability — `cleanup_old_logs_task` no longer deletes audit logs; aged rows are archived to cold storage (never deleted) by `archive_aged_audit_logs_task` / `AuditArchivalService`; physical removal is a documented DBA partition-drop only. See `docs/AUDIT_LOG_RETENTION_RUNBOOK.md` | Droid |
-| | | |
+| 2026-06-07 | AC-3.1.3 / AU-3.3.1 (work-order completion hardening, Batch 1): tenant isolation enforced on the operation/clock/completion endpoints (404-before-mutation on a foreign id) and on traceability/analytics/OEE/scheduling/MRP services; `/ws/updates` now requires auth with completion broadcasts scoped per company. Tamper-evident audit coverage extended to operation/WO start+complete, shipment-close (WO `CLOSED`), inventory `/receive,/issue,/transfer,/adjust`, and blocker create/update/resolve. Reconcile-on-read audit (AUD-3) deferred to Batch 3. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-07 | Data-integrity hardening (work-order completion, Batch 2): completion/clock endpoints now take row locks (`SELECT … FOR UPDATE`) and enforce optimistic locking (`version_id_col` on `WorkOrderOperation`/`TimeEntry`) — concurrent stale write → HTTP 409 instead of a lost update; new partial unique index `uq_open_time_entry` DB-enforces one open clock-in per user+operation (duplicate → HTTP 400). Migrations `038_optimistic_lock_backfill` / `039_uq_open_time_entry` (non-destructive open-duplicate dedupe; closed-row ids logged to deploy output for AS9100D labor traceability, not to `audit_log`). Residual follow-up A1: `audit_log.sequence_number` `max()+1` allocation is not serialized by the new row locks (concurrent audit writes can collide → occasional 500) — tracked for a dedicated fix. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-07 | AU-3.3.1 (work-order completion, Batch 3 — AUD-3 closed): reconcile-on-read status transitions (operation/WO driven to COMPLETE from durable time-entry evidence on dashboard/list/detail reads) now write a tamper-evident `audit_log` status-change row attributed to the requesting user, tagged `extra_data.source = "reconcile_on_read"`; the reconcile returns its transitions for the read handler to audit before commit, and the write is best-effort (rolled back atomically with its audit rows on failure — reads never 500/orphan an unaudited transition). Completion logic consolidated into the shared `finalize_operation_completion`; ON_HOLD completion now refused with HTTP 409 on both op-complete endpoints and `complete_work_order`. Follow-up A1 (`audit_log.sequence_number` race) still open. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-07 | AU-3.3.1 / AS9100D 8.7 (work-order completion, Batch 4 — quality gates, warn-and-record): completing an operation/WO past an unsatisfied quality gate (`inspection_incomplete` / `open_ncr` / `fai_not_passed` / `open_blocker`) is no longer silent — it succeeds (200) but writes a tamper-evident `audit_log` row with action `COMPLETED_WITH_QUALITY_EXCEPTION` (codes + offending-record references), emits a warning operational event, and returns the exceptions on the completion response (`quality_exceptions`, default `[]`). Gates are read-only + tenant-scoped (`app/services/quality_gate_service.py`); they do **not** block. New audited `inspection_complete` writer `POST /shop-floor/operations/{id}/inspection` (`MARK_OPERATION_INSPECTED`, role-gated ADMIN/MANAGER/SUPERVISOR/QUALITY). Deferrals: missing-but-required FAI undetectable (no FAI-required flag); FAI-pass→`inspection_complete` auto-wire needs an FAI↔operation FK; reconcile-on-read records only `inspection_incomplete`. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-07 | SC-3.13.1 (work-order completion, Batch 5 — uniform completion signals): completion now fires outbound `work_order.completed` / `work_order.closed` webhooks that are **tenant-scoped** (`WebhookService.dispatch_event` requires `company_id` and refuses an unscoped/cross-tenant dispatch; deliveries reach only the owning company's registered endpoints; `WebhookDelivery` rows are tenant-stamped) and **CUI-minimized** — the egressing payload is a redacted identifier set (`work_order_id`, `work_order_number`, `part_id`, `status`, `quantity_complete`, `quantity_scrapped`, `company_id`, `completed_at`) that deliberately omits `customer_name`/free-text; subscribers re-fetch detail via the authenticated API. Dispatch is async (ARQ) + post-commit + best-effort (a signal failure never affects the completion). Internal `WO_COMPLETED` notifications are tenant-scoped to the company's own users. Reconcile-on-read emits in-process events only (no outbound dispatch from a read). Follow-up: reconcile outbound notify/webhook deferred to rank 12 (re-attribute to a system actor when moved to ARQ). See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-07 | AU-3.3.1 / AS9100D 8.5.2 (work-order completion, Batch 6 — FG receipt + backflush + as-built genealogy): WO completion now moves inventory. A finished-goods `RECEIVE` is always written (warehouse `MAIN` / location `FINISHED-GOODS`, lot `LOT-<wo#>`, `unit_cost = standard_cost`); component backflush (`ISSUE` per component, `scrap_factor`-scaled) runs only when the part opts in (`parts.backflush_components`, default false). Every movement is tamper-evidently audited; a backflush shortage writes a `BACKFLUSH_SHORTAGE` audit row + warning event (the source lot is still driven negative — completion never blocks, **negative-stock posture flagged for explicit quality/compliance acceptance**). As-built lot genealogy is reconstructable via `consumed_components` on `GET /traceability/lot/{lot}`; `trace_serial` mirrors the WO/NCR collection. MRP `on_order` now counts only RELEASED/IN_PROGRESS WO output (completed output is on-hand). Idempotency is DB-enforced (migration `041`, two partial UNIQUE indexes on `inventory_transactions`; duplicate guard fails loudly, never deletes); migration `040` adds the opt-in flag. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-07 | AC-3.1.5 / AS9100D 9.1.1 (OEE/OTD metric correctness, Batch 8 — rank 11): **reporting integrity** — `GET /analytics/kpis` now returns `null` ("n/a") for OEE when there is no staffed (clocked) time and for OTD when no due-dated WO completed in the window, replacing a fabricated **100% on-time on an empty set** (`KPIValue.value` is now nullable; frontend renders "n/a"). A COMPLETE WO with a null `actual_end` counts as **not on time**; the OTD set is soft-delete-filtered. OEE = Availability × Performance × Quality on the staffed-time basis is now identical on the KPI headline and the persisted `OEERecord` (derived from real clocked time / routing cycle / reported downtime+scrap). **Authorization** — the OEE write endpoints (`POST /oee/calculate/{wc}`, `POST/PUT/DELETE /oee/records`, `POST/PUT/DELETE /oee/targets`) now require ADMIN/MANAGER/SUPERVISOR (`OEE_WRITE_ROLES`); previously open to any authenticated user. Reads stay open so the shop floor can view dashboards. The dead `POST /oee/calculate/{wc}` (referenced non-existent `TimeEntry.start_time/end_time`, 500'd) is fixed. Tracked follow-up: `OEERecord` writes are not yet tamper-evidently audited. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` → Rank 11 | Droid |
 
 ---
 

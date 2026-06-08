@@ -1,6 +1,8 @@
 """Shared work-order state rules used by office and shop-floor flows."""
 
 import math
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import and_, func
@@ -17,6 +19,37 @@ from app.models.work_order import (
 
 class WorkOrderStateError(ValueError):
     """Raised when a requested work-order transition is not valid."""
+
+
+@dataclass
+class StatusTransition:
+    """One reconcile-driven status change, returned so a read handler can audit it.
+
+    ``reconcile_work_orders_from_completion_evidence`` mutates persistent state
+    from durable shop-floor evidence (TimeEntry sums) on the read path. It has no
+    actor, so it cannot write the tamper-evident ``audit_log`` itself. Instead it
+    records each terminal transition here and hands them back to the caller, which
+    *does* hold ``current_user`` and can emit ``AuditService.log_status_change``
+    before its commit (AUD-3).
+    """
+
+    resource_type: str  # "work_order" | "work_order_operation"
+    resource_id: int
+    resource_identifier: Optional[str]
+    old_status: Optional[str]
+    new_status: str
+    work_order_number: Optional[str] = None
+    # EVT-4: the owning work order's id, so a read handler can emit the reconcile
+    # OperationalEvent with the same ``work_order_id`` the live completion paths use
+    # (an operation_completed event must be queryable by work order). For a
+    # work_order transition this equals ``resource_id``.
+    work_order_id: Optional[int] = None
+    time_entry_ids: list[int] = field(default_factory=list)
+    # MS-2: for a work_order -> COMPLETE transition, the work_center_ids whose
+    # capacity the read handler must refresh (a COMPLETE op drops out of the
+    # scheduled-load query, so the persisted availability_rate would otherwise stay
+    # understated). Empty for operation transitions and non-completion transitions.
+    work_center_ids: list[int] = field(default_factory=list)
 
 
 def operation_target_quantity(
@@ -76,21 +109,108 @@ def release_next_ready_operation(
     work_order: WorkOrder,
     completed_op: WorkOrderOperation,
 ) -> Optional[WorkOrderOperation]:
-    next_op = (
+    """Promote the lowest-sequence PENDING op whose predecessors are all complete.
+
+    RUP-4: this is intentionally self-healing rather than strictly forward-only.
+    The shop-floor scan/complete path completes ops out of sequence within the same
+    work center (``allow_same_work_center=True``), which used to strand an
+    earlier-sequence PENDING op in PENDING forever (only ``release_first_ready_operation``
+    at WO release would have promoted it). We now scan every PENDING op on the WO in
+    sequence order and promote the first one whose predecessor gate is satisfied,
+    so single-op completions advance the route without depending on a read-time
+    reconcile or a manual clock-in. Reuses ``has_incomplete_predecessors`` as the
+    order gate so the same rule governs release and the start/complete guards.
+
+    The session runs with ``autoflush=False``, so flush the just-completed
+    operation's status first -- otherwise the predecessor gate below would query
+    its stale (pre-COMPLETE) row and refuse to release the successor.
+    """
+    db.flush()
+    pending_ops = (
         db.query(WorkOrderOperation)
         .filter(
             and_(
                 WorkOrderOperation.work_order_id == work_order.id,
-                WorkOrderOperation.sequence > completed_op.sequence,
                 WorkOrderOperation.status == OperationStatus.PENDING,
             )
         )
         .order_by(WorkOrderOperation.sequence)
-        .first()
+        .all()
     )
-    if next_op:
-        next_op.status = OperationStatus.READY
-    return next_op
+    for candidate in pending_ops:
+        if not has_incomplete_predecessors(
+            db,
+            work_order.id,
+            candidate.sequence,
+            current_operation_id=candidate.id,
+        ):
+            candidate.status = OperationStatus.READY
+            return candidate
+    return None
+
+
+def _operation_produced_evidence(db: Session, operation: WorkOrderOperation) -> float:
+    """Durable produced-good total recorded against an operation's TimeEntry rows.
+
+    SFI-5 / DUP-3: an absolute completion verb must never write
+    ``quantity_complete`` below what the operator already booked on durable
+    TimeEntry evidence, otherwise a later read-time reconcile silently bumps it
+    back up with no audit of the discrepancy. Returns 0 for an unsaved operation.
+    """
+    if operation.id is None:
+        return 0.0
+    total = (
+        db.query(func.coalesce(func.sum(TimeEntry.quantity_produced), 0.0))
+        .filter(TimeEntry.operation_id == operation.id)
+        .scalar()
+    )
+    return float(total or 0.0)
+
+
+def resolve_absolute_operation_quantity(
+    db: Session,
+    operation: WorkOrderOperation,
+    requested_absolute: float,
+    target_qty: float,
+) -> float:
+    """Quantity an *absolute* completion verb should store for an operation.
+
+    ``complete_operation`` (absolute verb) contract:
+        clamp(max(existing, requested_absolute, produced_evidence_sum), 0, target)
+
+    Never regresses below the currently stored value, never below durable
+    TimeEntry evidence (SFI-5), never above the operation target (SFI-5). The
+    additive verbs (``clock_out`` / ``report_operation_production``) keep ``+=``
+    in the endpoint; they pass the already-incremented value through this floor by
+    calling ``floor_operation_quantity_at_evidence`` instead.
+    """
+    floor = max(
+        float(operation.quantity_complete or 0),
+        float(requested_absolute or 0),
+        _operation_produced_evidence(db, operation),
+    )
+    if target_qty > 0:
+        floor = min(floor, target_qty)
+    return max(0.0, floor)
+
+
+def floor_operation_quantity_at_evidence(
+    db: Session,
+    operation: WorkOrderOperation,
+    proposed: float,
+    target_qty: float,
+) -> float:
+    """Floor an additive verb's already-incremented quantity at durable evidence.
+
+    The additive paths compute ``existing + delta`` themselves; this guarantees
+    the stored result is never below recorded TimeEntry evidence (DUP-3) and never
+    above the operation target (SFI-5), keeping additive and absolute writes
+    converging on the same invariant.
+    """
+    floored = max(float(proposed or 0), _operation_produced_evidence(db, operation))
+    if target_qty > 0:
+        floored = min(floored, target_qty)
+    return max(0.0, floored)
 
 
 def sync_work_order_quantity_complete(
@@ -98,13 +218,187 @@ def sync_work_order_quantity_complete(
     operation: WorkOrderOperation,
     all_operations_complete: bool,
 ) -> None:
+    """Roll an operation's progress up into ``work_order.quantity_complete``.
+
+    RUP-6: always guarded with ``max()`` against the WO's current value so an
+    earlier-stage / out-of-sequence operation can never pull finished quantity
+    *backward* across completion events. Component operations do not contribute to
+    finished WO quantity until the whole route is complete.
+    """
+    existing = float(work_order.quantity_complete or 0)
+    target = float(work_order.quantity_ordered or 0)
     if all_operations_complete:
-        work_order.quantity_complete = float(work_order.quantity_ordered or 0)
+        work_order.quantity_complete = max(existing, target)
     elif not operation.component_part_id:
-        work_order.quantity_complete = min(
-            float(operation.quantity_complete or 0),
-            float(work_order.quantity_ordered or 0),
-        )
+        candidate = float(operation.quantity_complete or 0)
+        if target > 0:
+            candidate = min(candidate, target)
+        work_order.quantity_complete = max(existing, candidate)
+
+
+def _active_operation_id(work_order: WorkOrder) -> Optional[int]:
+    """The operation the WO is 'currently on', for ``current_operation_id`` (RUP-1).
+
+    Preference order, by ascending sequence: the first IN_PROGRESS op, else the
+    first READY op, else the first not-yet-COMPLETE op. Returns ``None`` when the
+    whole route is complete (the WO is no longer on any operation).
+    """
+    operations = sorted(
+        (op for op in (work_order.operations or []) if op.id is not None),
+        key=lambda op: (op.sequence if op.sequence is not None else 0),
+    )
+    for wanted in (OperationStatus.IN_PROGRESS, OperationStatus.READY):
+        for op in operations:
+            if op.status == wanted:
+                return op.id
+    for op in operations:
+        if op.status != OperationStatus.COMPLETE:
+            return op.id
+    return None
+
+
+def release_operation_schedule_reservation(operation: WorkOrderOperation) -> bool:
+    """Free a completed operation's capacity reservation by clearing its schedule (MS-5).
+
+    Scheduling capacity is recomputed from operations where ``status !=
+    OperationStatus.COMPLETE`` (``scheduling_service._initialize_capacity`` /
+    ``_get_scheduled_hours_by_work_center``). A completed op that still carries
+    ``scheduled_start``/``scheduled_end`` is correct ONLY as long as every reader
+    remembers that status predicate; any future/third-party query over scheduled
+    operations that omits it would double-count finished work as still-reserved
+    capacity. Nulling the schedule on completion frees the reservation by DATA rather
+    than by every consumer remembering the filter, so the in-tree status filters and
+    any new reader agree. Returns True if it changed anything (for the reconcile
+    change-tracking). No-op if the op is not COMPLETE or already cleared.
+    """
+    if operation.status != OperationStatus.COMPLETE:
+        return False
+    changed = False
+    if operation.scheduled_start is not None:
+        operation.scheduled_start = None
+        changed = True
+    if operation.scheduled_end is not None:
+        operation.scheduled_end = None
+        changed = True
+    return changed
+
+
+def _remaining_incomplete_operation_ids(
+    work_order: WorkOrder,
+    completed_operation: WorkOrderOperation,
+) -> list[int]:
+    """Ids of other operations on the WO that are not COMPLETE.
+
+    DUP-5: reuse the already-loaded ``work_order.operations`` relationship instead
+    of issuing a redundant COUNT query. ``completed_operation`` is treated as
+    complete even if the caller has not flushed its status yet (it is being
+    completed in the same unit of work).
+    """
+    remaining: list[int] = []
+    for op in work_order.operations or []:
+        if op.id == completed_operation.id:
+            continue
+        if op.status != OperationStatus.COMPLETE:
+            remaining.append(op.id)
+    return remaining
+
+
+def finalize_operation_completion(
+    db: Session,
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    *,
+    all_operations_complete_hint: Optional[bool] = None,
+) -> set[int]:
+    """Roll a just-completed operation up into its work order. Returns affected WCs.
+
+    This is the single shared rollup all completion paths delegate to (DUP-5). The
+    caller owns auth, tenant lookup, row locks, audit, scheduling refresh and
+    broadcasts; this function owns ONLY the state transition and returns the set of
+    ``work_center_id``s whose capacity the caller must refresh. It does not commit
+    and it does not flush the audit chain.
+
+    Contract (one implementation, so the three former inline copies cannot drift):
+
+    * Remaining-ops decision reuses the loaded ``work_order.operations`` (DUP-5);
+      ``operation`` must already be flipped to COMPLETE by the caller (it stamps
+      ``actual_end``/``completed_by`` with the acting user before calling).
+    * COMPLETE branch: ALWAYS stamp ``work_order.actual_start`` (min op actual_start,
+      falling back to now) BEFORE flipping the WO to COMPLETE (DUP-2 — fixes the
+      ``actual_end``-without-``actual_start`` rows), set ``actual_end`` = max op
+      actual_end (falling back to now), sync finished qty via the ``max()`` guard
+      (RUP-6) and CLEAR ``current_operation_id`` (RUP-1).
+    * RELEASED→IN_PROGRESS branch: lift a RELEASED WO to IN_PROGRESS and stamp
+      ``actual_start`` on first progress, self-heal the next READY op via
+      ``has_incomplete_predecessors`` (RUP-4), and populate ``current_operation_id``
+      with the now-active/next op (RUP-1).
+    """
+    affected_work_centers: set[int] = set()
+    if operation.work_center_id:
+        affected_work_centers.add(operation.work_center_id)
+
+    # MS-5: the just-completed operation no longer reserves capacity -- free it by data
+    # (clear its schedule) so it cannot be double-counted by any reader that forgets the
+    # ``status != COMPLETE`` predicate. The caller refreshes availability for the WCs we
+    # return, so the persisted availability_rate stays in step with the freed reservation.
+    release_operation_schedule_reservation(operation)
+
+    if all_operations_complete_hint is not None:
+        remaining_ids: list[int] = [] if all_operations_complete_hint else [-1]
+    else:
+        remaining_ids = _remaining_incomplete_operation_ids(work_order, operation)
+
+    if not remaining_ids:
+        # All operations complete -> the work order is finished.
+        now = datetime.utcnow()
+        end_dates = [op.actual_end for op in (work_order.operations or []) if op.actual_end]
+        work_order.actual_end = max(end_dates) if end_dates else now
+        start_dates = [op.actual_start for op in (work_order.operations or []) if op.actual_start]
+        # DUP-2: stamp actual_start BEFORE flipping to COMPLETE so no terminal WO
+        # is left with actual_end but a NULL actual_start (corrupts cycle-time).
+        # When no op carries an actual_start, the `now` fallback is captured AFTER
+        # the endpoints already stamped operation.actual_end, so a bare `now` would
+        # land AFTER actual_end and yield a NEGATIVE cycle time. Clamp the fallback
+        # at actual_end so actual_start <= actual_end always holds.
+        if not work_order.actual_start:
+            work_order.actual_start = min(start_dates) if start_dates else min(now, work_order.actual_end)
+        if work_order.status not in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED):
+            work_order.status = WorkOrderStatus.COMPLETE
+        sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
+        # RUP-1: the WO is no longer sitting on any operation.
+        work_order.current_operation_id = None
+    else:
+        # More operations remain: lift the WO to IN_PROGRESS on first progress and
+        # self-heal the next READY operation.
+        if work_order.status == WorkOrderStatus.RELEASED:
+            work_order.status = WorkOrderStatus.IN_PROGRESS
+            if not work_order.actual_start:
+                work_order.actual_start = operation.actual_start or datetime.utcnow()
+        release_next_ready_operation(db, work_order, operation)
+        for op in work_order.operations or []:
+            if op.status == OperationStatus.READY and op.work_center_id:
+                affected_work_centers.add(op.work_center_id)
+        sync_work_order_quantity_complete(work_order, operation, all_operations_complete=False)
+        # RUP-1: point the WO at the operation it is now on (active/next).
+        work_order.current_operation_id = _active_operation_id(work_order)
+
+    return affected_work_centers
+
+
+def begin_operation_progress(work_order: WorkOrder, operation: WorkOrderOperation) -> None:
+    """Lift a RELEASED WO to IN_PROGRESS and stamp ``actual_start`` on first progress.
+
+    Used by the additive verbs (clock_out / production) and the partial-complete
+    branch where the operation does NOT finish but the WO should reflect that work
+    has started. Keeps ``actual_start`` stamping (DUP-2) and ``current_operation_id``
+    population (RUP-1) consistent with the finalizer without forcing a rollup.
+    """
+    if work_order.status == WorkOrderStatus.RELEASED:
+        work_order.status = WorkOrderStatus.IN_PROGRESS
+        if not work_order.actual_start:
+            work_order.actual_start = operation.actual_start or datetime.utcnow()
+    if work_order.status in (WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS):
+        work_order.current_operation_id = _active_operation_id(work_order)
 
 
 def work_order_operation_progress(work_order: WorkOrder) -> dict:
@@ -162,14 +456,40 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
     }
 
 
-def reconcile_work_orders_from_completion_evidence(db: Session, work_orders: list[WorkOrder]) -> bool:
-    """Repair operation rows from durable shop-floor completion evidence."""
+def reconcile_work_orders_from_completion_evidence(
+    db: Session,
+    work_orders: list[WorkOrder],
+    transitions: Optional[list[StatusTransition]] = None,
+) -> bool:
+    """Repair operation rows from durable shop-floor completion evidence.
+
+    AUD-3: when ``transitions`` is provided, every terminal status change this
+    reconcile drives (operation→COMPLETE, work_order→COMPLETE) is appended to it,
+    tagged with the contributing TimeEntry ids, so the read handler that owns
+    ``current_user`` can emit a tamper-evident ``audit_log`` status-change row per
+    transition before its commit. The reconcile itself has no actor and never
+    writes the audit chain. Passing ``None`` preserves the legacy unaudited
+    behavior for callers that have no actor (e.g. a brand-new WO POST where this is
+    a documented no-op).
+    """
     operations = [op for wo in work_orders for op in (wo.operations or [])]
     operation_ids = [op.id for op in operations if op.id is not None]
     if not operation_ids:
         return False
 
     changed = False
+    # AUD-3: the contributing TimeEntry ids are only needed to enrich audit rows,
+    # so this extra lookup runs ONLY when a caller wants the transitions audited.
+    # Read paths that pass ``transitions=None`` (or have no actor) skip it entirely,
+    # keeping the reconcile-on-read query count unchanged.
+    entry_ids_by_operation: dict[int, list[int]] = {}
+    if transitions is not None:
+        for op_id, entry_id in (
+            db.query(TimeEntry.operation_id, TimeEntry.id).filter(TimeEntry.operation_id.in_(operation_ids)).all()
+        ):
+            if op_id is not None and entry_id is not None:
+                entry_ids_by_operation.setdefault(op_id, []).append(entry_id)
+
     produced_by_operation: dict[int, tuple[float, float]] = {}
     for row in (
         db.query(
@@ -219,20 +539,63 @@ def reconcile_work_orders_from_completion_evidence(db: Session, work_orders: lis
         if scrapped_qty > float(operation.quantity_scrapped or 0):
             operation.quantity_scrapped = scrapped_qty
             changed = True
-        changed = (
-            _sync_operation_status_from_quantity(
-                operation,
-                latest_entry_by_operation.get(operation.id),
-                closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
-            )
-            or changed
+        old_op_status = operation.status.value if operation.status else None
+        op_changed = _sync_operation_status_from_quantity(
+            operation,
+            latest_entry_by_operation.get(operation.id),
+            closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
         )
+        if (
+            op_changed
+            and operation.status == OperationStatus.COMPLETE
+            and old_op_status != OperationStatus.COMPLETE.value
+        ):
+            _record_transition(
+                transitions,
+                resource_type="work_order_operation",
+                resource_id=operation.id,
+                resource_identifier=operation.operation_number,
+                old_status=old_op_status,
+                new_status=OperationStatus.COMPLETE.value,
+                work_order_number=operation.work_order.work_order_number if operation.work_order else None,
+                work_order_id=operation.work_order_id,
+                time_entry_ids=entry_ids_by_operation.get(operation.id, []),
+            )
+        changed = op_changed or changed
 
     for work_order in work_orders:
-        changed = _copy_slot_completion_evidence(work_order) or changed
-        changed = _sync_work_order_status_from_operations(work_order) or changed
+        changed = _copy_slot_completion_evidence(work_order, transitions, entry_ids_by_operation) or changed
+        changed = _sync_work_order_status_from_operations(work_order, transitions, entry_ids_by_operation) or changed
 
     return changed
+
+
+def _record_transition(
+    transitions: Optional[list[StatusTransition]],
+    *,
+    resource_type: str,
+    resource_id: Optional[int],
+    resource_identifier: Optional[str],
+    old_status: Optional[str],
+    new_status: str,
+    work_order_number: Optional[str] = None,
+    work_order_id: Optional[int] = None,
+    time_entry_ids: Optional[list[int]] = None,
+) -> None:
+    if transitions is None or resource_id is None:
+        return
+    transitions.append(
+        StatusTransition(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            resource_identifier=resource_identifier,
+            old_status=old_status,
+            new_status=new_status,
+            work_order_number=work_order_number,
+            work_order_id=work_order_id,
+            time_entry_ids=list(time_entry_ids or []),
+        )
+    )
 
 
 def _operation_progress_key(operation: WorkOrderOperation) -> tuple:
@@ -293,6 +656,8 @@ def _sync_operation_status_from_quantity(
         operation.completed_by = operation.completed_by or (latest_entry.user_id if latest_entry else None)
         operation.actual_start = operation.actual_start or (latest_entry.clock_in if latest_entry else None)
         operation.started_by = operation.started_by or (latest_entry.user_id if latest_entry else None)
+        # MS-5: free the schedule reservation for a reconcile-driven completion too.
+        release_operation_schedule_reservation(operation)
         changed = True
     elif quantity_complete > 0 and operation.status in (OperationStatus.PENDING, OperationStatus.READY):
         operation.status = OperationStatus.IN_PROGRESS
@@ -303,7 +668,11 @@ def _sync_operation_status_from_quantity(
     return changed
 
 
-def _copy_slot_completion_evidence(work_order: WorkOrder) -> bool:
+def _copy_slot_completion_evidence(
+    work_order: WorkOrder,
+    transitions: Optional[list[StatusTransition]] = None,
+    entry_ids_by_operation: Optional[dict[int, list[int]]] = None,
+) -> bool:
     changed = False
     operations_by_key: dict[tuple, list[WorkOrderOperation]] = {}
     for operation in work_order.operations or []:
@@ -323,8 +692,21 @@ def _copy_slot_completion_evidence(work_order: WorkOrder) -> bool:
                 operation.quantity_scrapped = completed_source.quantity_scrapped
                 changed = True
             if operation.status != OperationStatus.COMPLETE:
+                old_op_status = operation.status.value if operation.status else None
                 operation.status = OperationStatus.COMPLETE
+                release_operation_schedule_reservation(operation)  # MS-5
                 changed = True
+                _record_transition(
+                    transitions,
+                    resource_type="work_order_operation",
+                    resource_id=operation.id,
+                    resource_identifier=operation.operation_number,
+                    old_status=old_op_status,
+                    new_status=OperationStatus.COMPLETE.value,
+                    work_order_number=work_order.work_order_number,
+                    work_order_id=work_order.id,
+                    time_entry_ids=(entry_ids_by_operation or {}).get(operation.id, []),
+                )
             if not operation.actual_end and completed_source.actual_end:
                 operation.actual_end = completed_source.actual_end
                 changed = True
@@ -341,7 +723,11 @@ def _copy_slot_completion_evidence(work_order: WorkOrder) -> bool:
     return changed
 
 
-def _sync_work_order_status_from_operations(work_order: WorkOrder) -> bool:
+def _sync_work_order_status_from_operations(
+    work_order: WorkOrder,
+    transitions: Optional[list[StatusTransition]] = None,
+    entry_ids_by_operation: Optional[dict[int, list[int]]] = None,
+) -> bool:
     operations = list(work_order.operations or [])
     if not operations:
         return False
@@ -355,17 +741,33 @@ def _sync_work_order_status_from_operations(work_order: WorkOrder) -> bool:
     )
 
     if all_operations_complete:
-        if work_order.status not in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED):
-            work_order.status = WorkOrderStatus.COMPLETE
-            changed = True
+        # DUP-2: stamp actual_end first, then actual_start clamped at actual_end,
+        # BEFORE the COMPLETE flip -- IDENTICAL to finalize_operation_completion so
+        # reconcile-on-read and the live finalizer agree. This guarantees a terminal
+        # WO never carries actual_end with a NULL or LATER actual_start (negative
+        # cycle time). When no op date exists, fall back to now; the actual_start
+        # fallback is clamped at actual_end so it can never land after it.
+        now = datetime.utcnow()
         if not work_order.actual_end:
             completed_dates = [operation.actual_end for operation in operations if operation.actual_end]
-            if completed_dates:
-                work_order.actual_end = max(completed_dates)
-                changed = True
+            work_order.actual_end = max(completed_dates) if completed_dates else now
+            changed = True
+        if not work_order.actual_start:
+            started_dates = [operation.actual_start for operation in operations if operation.actual_start]
+            work_order.actual_start = min(started_dates) if started_dates else min(now, work_order.actual_end)
+            changed = True
+        if work_order.status not in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED):
+            old_wo_status = work_order.status.value if work_order.status else None
+            work_order.status = WorkOrderStatus.COMPLETE
+            changed = True
+            _record_wo_complete_transition(work_order, operations, transitions, entry_ids_by_operation, old_wo_status)
         target_qty = float(work_order.quantity_ordered or 0)
         if target_qty > 0 and float(work_order.quantity_complete or 0) < target_qty:
             work_order.quantity_complete = target_qty
+            changed = True
+        # RUP-1: a completed WO is no longer sitting on any operation.
+        if work_order.current_operation_id is not None:
+            work_order.current_operation_id = None
             changed = True
     elif any_operation_progress and work_order.status == WorkOrderStatus.RELEASED:
         work_order.status = WorkOrderStatus.IN_PROGRESS
@@ -375,7 +777,47 @@ def _sync_work_order_status_from_operations(work_order: WorkOrder) -> bool:
             work_order.actual_start = min(started_dates)
             changed = True
 
+    # RUP-1: keep current_operation_id pointing at the active/next op while the WO
+    # is still in flight, so reconcile-on-read repairs the historically-dead column
+    # the same way the live finalizer populates it.
+    if work_order.status in (WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS):
+        active_op_id = _active_operation_id(work_order)
+        if work_order.current_operation_id != active_op_id:
+            work_order.current_operation_id = active_op_id
+            changed = True
+
     return changed
+
+
+def _record_wo_complete_transition(
+    work_order: WorkOrder,
+    operations: list[WorkOrderOperation],
+    transitions: Optional[list[StatusTransition]],
+    entry_ids_by_operation: Optional[dict[int, list[int]]],
+    old_status: Optional[str],
+) -> None:
+    entry_ids: list[int] = []
+    for operation in operations:
+        entry_ids.extend((entry_ids_by_operation or {}).get(operation.id, []))
+    # MS-2: capture the affected work centers so the read handler can refresh their
+    # cached availability_rate (a reconcile-driven WO completion otherwise leaves
+    # capacity looking consumed).
+    work_center_ids = sorted({op.work_center_id for op in operations if op.work_center_id})
+    if transitions is None or work_order.id is None:
+        return
+    transitions.append(
+        StatusTransition(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            old_status=old_status,
+            new_status=WorkOrderStatus.COMPLETE.value,
+            work_order_number=work_order.work_order_number,
+            work_order_id=work_order.id,
+            time_entry_ids=entry_ids,
+            work_center_ids=work_center_ids,
+        )
+    )
 
 
 def validate_operation_quantity(quantity_complete: float, target_qty: float) -> None:

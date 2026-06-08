@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -191,7 +191,9 @@ class NotificationService:
         self.db.commit()
 
 
-def get_notification_recipients(db: Session, role: str = None, department: str = None) -> List[User]:
+def get_notification_recipients(
+    db: Session, role: str = None, department: str = None, company_id: Optional[int] = None
+) -> List[User]:
     """
     Get users for notification
 
@@ -199,11 +201,17 @@ def get_notification_recipients(db: Session, role: str = None, department: str =
         db: Database session
         role: Filter by role (e.g., 'supervisor', 'manager')
         department: Filter by department
+        company_id: Restrict to a single tenant's users. When ``None`` (default,
+            backward-compatible) every active user across all tenants is returned;
+            pass the active company to enforce tenant isolation (invariant #1).
 
     Returns:
         List of User objects
     """
     query = db.query(User).filter(User.is_active == True)
+
+    if company_id is not None:
+        query = query.filter(User.company_id == company_id)
 
     if role:
         query = query.filter(User.role == role)

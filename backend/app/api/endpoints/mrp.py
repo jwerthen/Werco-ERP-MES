@@ -46,9 +46,10 @@ def create_mrp_run(
     run_params: MRPRunCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Execute a new MRP run"""
-    service = MRPService(db)
+    service = MRPService(db, company_id)
 
     try:
         mrp_run = service.run_mrp(
@@ -187,9 +188,14 @@ def get_mrp_actions(
     unprocessed_only: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get actions from an MRP run with filtering"""
-    query = db.query(MRPAction).options(joinedload(MRPAction.part)).filter(MRPAction.mrp_run_id == run_id)
+    query = (
+        db.query(MRPAction)
+        .options(joinedload(MRPAction.part))
+        .filter(MRPAction.mrp_run_id == run_id, MRPAction.company_id == company_id)
+    )
 
     if action_type:
         query = query.filter(MRPAction.action_type == action_type)
@@ -298,12 +304,13 @@ def process_mrp_action(
     notes: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Mark an MRP action as processed.
     In a full implementation, this would create the actual WO or PO.
     """
-    action = db.query(MRPAction).filter(MRPAction.id == action_id).first()
+    action = db.query(MRPAction).filter(MRPAction.id == action_id, MRPAction.company_id == company_id).first()
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
 

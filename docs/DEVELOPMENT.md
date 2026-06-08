@@ -275,6 +275,14 @@ alembic upgrade head
 
 After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 
+> **Keep new revision ids ≤ 32 characters.** On the `create_all → stamp → upgrade` bootstrap path
+> the `alembic_version.version_num` column is `varchar(32)`. Migration `014b_widen_alembic_version`
+> widens it (to `varchar(128)`), but `014b` is *stamped over*, not *run*, when the stamped baseline
+> is newer than it — so on a freshly bootstrapped DB the column stays `varchar(32)` and a revision id
+> longer than 32 chars fails to record (`value too long for type character varying(32)`). Until the
+> baseline is at or past `014b` on every target, keep revision ids to ≤ 32 chars (e.g.
+> `038_optimistic_lock_backfill`, `039_uq_open_time_entry`).
+
 ### Create a new migration
 ```bash
 cd backend
@@ -301,6 +309,86 @@ alembic downgrade -1
 ```bash
 alembic history
 ```
+
+### Concurrency-safety migrations (Batch 2 — completion-path hardening)
+
+Two migrations back the work-order-completion concurrency fixes (see
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 5 / Batch 2):
+
+- **`038_optimistic_lock_backfill`** — makes the `version` column on `work_order_operations` and
+  `time_entries` safe for the now-mapped `version_id_col` optimistic locking. It backfills
+  `version = 1 WHERE version IS NULL` (no data destroyed) and re-asserts `NOT NULL` +
+  `server_default '1'`. The column itself is owned by `004_add_optimistic_locking`; this migration
+  only normalizes data, so its `downgrade` is a deliberate no-op (it does not drop the column).
+  Idempotent and safe to re-run. Plain transactional DDL/DML — intentionally split from `039` so it
+  can run inside a transaction.
+
+- **`039_uq_open_time_entry`** — adds the partial unique index
+  `uq_open_time_entry ON time_entries (user_id, operation_id) WHERE clock_out IS NULL` (at most one
+  open clock-in per user + operation). Before building the index it runs a **non-destructive
+  pre-flight dedupe**: within each `(user_id, operation_id)` group of open rows it keeps the most
+  recent (`clock_in DESC, id DESC`) and **closes** the older ones by setting `clock_out = clock_in`
+  and `duration_hours = 0`. `quantity_produced` and the rows themselves are **preserved** (only the
+  duplicated *time* is zeroed; the parts were really made). The closed-row ids are printed to the
+  migration/deploy output (timestamped by the deploy) for AS9100D labor traceability — deliberately
+  **not** written to the tamper-evident `audit_log`. The index is built with
+  `CREATE INDEX CONCURRENTLY` inside an autocommit block (so it can't run in a transaction — hence
+  the split from `038`), and the `downgrade` drops it `CONCURRENTLY` too. Idempotent
+  (`IF NOT EXISTS` / inspector guard); Postgres-only (skipped on SQLite, where the app-level guard
+  still applies).
+
+### Completion-inventory migrations (Batch 6 — FG receipt + backflush)
+
+Two migrations back the work-order-completion inventory side-effects (see
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 9 / Batch 6):
+
+- **`040_add_part_backflush_flag`** — adds the opt-in flag the backflush logic keys off:
+  `parts.backflush_components BOOLEAN NOT NULL DEFAULT false`. The `server_default='false'` backfills
+  every existing row in the same `ALTER` (a metadata-only column add on PostgreSQL 11+ — brief
+  `ACCESS EXCLUSIVE` lock, no table rewrite, no backfill pass). The model (`app/models/part.py`)
+  declares the identical `server_default`, so the `create_all` bootstrap path produces the same column
+  definition. Idempotent (inspector column-existence guard) and reversible (guarded `drop_column`).
+
+- **`041_uq_wo_inventory_idempotency`** — DB-enforces "one finished-goods receipt and one
+  backflush issue per work order" with **two partial UNIQUE indexes** on `inventory_transactions`:
+  `uq_wo_inventory_receipt` on `(company_id, reference_type, reference_id, transaction_type)`
+  `WHERE reference_type='work_order' AND transaction_type='RECEIVE'`, and `uq_wo_inventory_issue` on
+  `(company_id, reference_type, reference_id, transaction_type, part_id)`
+  `WHERE reference_type='work_order' AND transaction_type='ISSUE'`. The partial predicate scopes the
+  constraint to work-order-referenced rows only, so PO/SO receipts, manual adjustments, transfers,
+  scrap, ships and counts are unaffected. The predicate uses the **UPPERCASE** enum labels
+  (`'RECEIVE'`/`'ISSUE'`) because the native Postgres `transactiontype` enum stores the member name —
+  the model's `__table_args__` declares the identical indexes and the two must stay in lock-step.
+  Both indexes are built with `CREATE UNIQUE INDEX CONCURRENTLY` inside an autocommit block (so they
+  can't run in a transaction) to avoid blocking writes on the high-write `inventory_transactions`
+  table; the `downgrade` drops them `CONCURRENTLY` too. **Pre-flight duplicate guard fails loudly:**
+  inventory transactions are regulated traceability records, so if pre-existing duplicate work-order
+  RECEIVE/ISSUE groups exist, the migration **lists the offending `(company_id, reference_id[,
+  part_id])` groups and raises** rather than deleting any rows — an operator resolves them deliberately
+  (keep the earliest min-id row), then re-runs. Idempotent (`IF NOT EXISTS` / inspector + `pg_indexes`
+  guard) and reversible; Postgres-only (skipped on SQLite, where `create_all` still emits a full unique
+  index from the model and the app-level guard applies).
+
+## Work-order completion rollup (shared finalizer)
+
+Completion is consolidated in **one** place: `finalize_operation_completion(db, wo, op)` in
+`app/services/work_order_state_service.py` (Rank 6 / Batch 3 — see
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`). Every completion path **delegates** to it rather than
+re-implementing the op → work-order rollup:
+
+- both `/operations/{id}/complete` endpoints (office `work_orders.py` and shop-floor `shop_floor.py`),
+- the additive verbs (`/shop-floor/clock-out/{id}`, `/shop-floor/operations/{id}/production`),
+- the privileged `/work-orders/{id}/complete` override (it force-completes each still-open operation
+  through the finalizer instead of blind-flipping the work order to COMPLETE).
+
+The finalizer owns **only** the state transition — remaining-ops decision (reusing the loaded
+`work_order.operations` relationship), the COMPLETE-vs-`RELEASED`→`IN_PROGRESS` branch, the
+`max()`-guarded finished-quantity sync (floored at durable `TimeEntry` evidence, capped at target),
+the `actual_start`/`actual_end` stamping (clamped so `actual_start ≤ actual_end`), the self-healing
+next-`READY` release, and maintaining `current_operation_id` — and returns the set of affected
+`work_center_id`s. The **caller** keeps auth, tenant lookup, row locks, audit, scheduling refresh and
+broadcasts. The finalizer does not commit and does not flush the audit chain. When adding a new
+completion entry point, call `finalize_operation_completion` rather than duplicating the rollup.
 
 ## API Documentation
 

@@ -15,6 +15,7 @@ from app.models.work_order_blocker import (
     WorkOrderBlockerStatus,
 )
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate, WorkOrderBlockerUpdate
+from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService, redact_event_payload
 
 
@@ -67,6 +68,7 @@ class WorkOrderBlockerService:
         user: User,
         work_order_id: int,
         data: WorkOrderBlockerCreate,
+        audit: Optional[AuditService] = None,
     ) -> WorkOrderBlocker:
         work_order = (
             self.db.query(WorkOrder)
@@ -109,7 +111,9 @@ class WorkOrderBlockerService:
         self.db.add(blocker)
         self.db.flush()
 
+        operation_previous_status = None
         if data.put_operation_on_hold and operation and operation.status != OperationStatus.COMPLETE:
+            operation_previous_status = _enum_value(operation.status)
             operation.status = OperationStatus.ON_HOLD
             operation.updated_at = datetime.utcnow()
 
@@ -132,6 +136,34 @@ class WorkOrderBlockerService:
         )
         self._create_notification_logs(company_id=company_id, blocker=blocker, work_order=work_order)
         self._create_blocker_recommendation(company_id=company_id, user=user, blocker=blocker, work_order=work_order)
+
+        # Tamper-evident audit trail (hash chain): the blocker creation and any
+        # operation status mutation it triggers. Flushed (not committed) so the
+        # audit rows commit atomically with the blocker via the caller's commit.
+        if audit is not None:
+            audit.log_create(
+                "work_order_blocker",
+                blocker.id,
+                blocker.title,
+                new_values=blocker,
+                description=(
+                    f"Reported {category} blocker on work order {work_order.work_order_number}"
+                    + (f" operation {operation.name}" if operation else "")
+                ),
+            )
+            if operation is not None and operation_previous_status is not None:
+                audit.log_status_change(
+                    "work_order_operation",
+                    operation.id,
+                    operation.name or str(operation.id),
+                    operation_previous_status,
+                    _enum_value(operation.status),
+                    description=(
+                        f"Operation {operation.name} put on hold by blocker {blocker.title} "
+                        f"on work order {work_order.work_order_number}"
+                    ),
+                )
+
         self.db.flush()
         return blocker
 
@@ -142,6 +174,7 @@ class WorkOrderBlockerService:
         user: User,
         blocker_id: int,
         data: WorkOrderBlockerUpdate,
+        audit: Optional[AuditService] = None,
     ) -> WorkOrderBlocker:
         blocker = self._get_blocker(company_id=company_id, blocker_id=blocker_id)
         previous_status = blocker.status
@@ -151,12 +184,14 @@ class WorkOrderBlockerService:
                 continue
             setattr(blocker, field, _enum_value(value) if hasattr(value, "value") else value)
 
+        resumed_operation = None
+        resumed_operation_previous_status = None
         if blocker.status == WorkOrderBlockerStatus.ACKNOWLEDGED.value and previous_status != blocker.status:
             blocker.acknowledged_at = datetime.utcnow()
         if blocker.status in {WorkOrderBlockerStatus.RESOLVED.value, WorkOrderBlockerStatus.DISMISSED.value}:
             blocker.resolved_at = blocker.resolved_at or datetime.utcnow()
             blocker.resolved_by = blocker.resolved_by or user.id
-            self._resume_operation_if_no_open_blockers(blocker)
+            resumed_operation, resumed_operation_previous_status = self._resume_operation_if_no_open_blockers(blocker)
         blocker.updated_at = datetime.utcnow()
 
         OperationalEventService(self.db).emit(
@@ -171,6 +206,32 @@ class WorkOrderBlockerService:
             severity=blocker.severity,
             event_payload={"status": blocker.status, "previous_status": previous_status},
         )
+
+        # Tamper-evident audit trail (hash chain): the blocker status transition
+        # and any operation resume it triggers. Flushed (not committed) so the
+        # audit rows commit atomically with the blocker via the caller's commit.
+        if audit is not None and blocker.status != previous_status:
+            audit.log_status_change(
+                "work_order_blocker",
+                blocker.id,
+                blocker.title,
+                previous_status,
+                blocker.status,
+                description=f"Blocker '{blocker.title}' status changed from '{previous_status}' to '{blocker.status}'",
+            )
+        if audit is not None and resumed_operation is not None and resumed_operation_previous_status is not None:
+            audit.log_status_change(
+                "work_order_operation",
+                resumed_operation.id,
+                resumed_operation.name or str(resumed_operation.id),
+                resumed_operation_previous_status,
+                _enum_value(resumed_operation.status),
+                description=(
+                    f"Operation {resumed_operation.name} resumed after blocker '{blocker.title}' was "
+                    f"{blocker.status}"
+                ),
+            )
+
         self.db.flush()
         return blocker
 
@@ -181,6 +242,7 @@ class WorkOrderBlockerService:
         user: User,
         blocker_id: int,
         resolution_note: Optional[str] = None,
+        audit: Optional[AuditService] = None,
     ) -> WorkOrderBlocker:
         return self.update_blocker(
             company_id=company_id,
@@ -190,6 +252,7 @@ class WorkOrderBlockerService:
                 status=WorkOrderBlockerStatus.RESOLVED,
                 resolution_note=resolution_note,
             ),
+            audit=audit,
         )
 
     def stale_open_blockers(
@@ -219,9 +282,16 @@ class WorkOrderBlockerService:
             raise ValueError("Blocker not found")
         return blocker
 
-    def _resume_operation_if_no_open_blockers(self, blocker: WorkOrderBlocker) -> None:
+    def _resume_operation_if_no_open_blockers(
+        self, blocker: WorkOrderBlocker
+    ) -> tuple[Optional[WorkOrderOperation], Optional[str]]:
+        """Resume the operation if no other open blockers remain.
+
+        Returns ``(operation, previous_status)`` when an operation was actually
+        resumed (for audit logging by the caller), otherwise ``(None, None)``.
+        """
         if not blocker.operation_id:
-            return
+            return None, None
         open_count = (
             self.db.query(WorkOrderBlocker)
             .filter(
@@ -235,11 +305,21 @@ class WorkOrderBlockerService:
             .count()
         )
         if open_count:
-            return
-        operation = self.db.query(WorkOrderOperation).filter(WorkOrderOperation.id == blocker.operation_id).first()
+            return None, None
+        operation = (
+            self.db.query(WorkOrderOperation)
+            .filter(
+                WorkOrderOperation.id == blocker.operation_id,
+                WorkOrderOperation.company_id == blocker.company_id,
+            )
+            .first()
+        )
         if operation and operation.status == OperationStatus.ON_HOLD:
+            previous_status = _enum_value(operation.status)
             operation.status = OperationStatus.IN_PROGRESS if operation.actual_start else OperationStatus.READY
             operation.updated_at = datetime.utcnow()
+            return operation, previous_status
+        return None, None
 
     def _create_notification_logs(self, *, company_id: int, blocker: WorkOrderBlocker, work_order: WorkOrder) -> None:
         roles = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]

@@ -19,6 +19,30 @@ def _serialize_decimal_as_number(value: Optional[Decimal]) -> Optional[float]:
     return float(value)
 
 
+class QualityExceptionInfo(BaseModel):
+    """One unsatisfied quality gate / data-quality signal on a completion response.
+
+    WARN-AND-RECORD posture: the presence of these in a completion response means the
+    operation / work order completed while a quality gate was unsatisfied. Completion
+    still SUCCEEDED; the warning is here so the client can show it and the bypass is
+    also recorded in the tamper-evident audit trail. Backward-compatible: every
+    completion response defaults this to an empty list, so an all-clear completion is
+    indistinguishable from the pre-Batch-4 shape.
+
+    ``code`` values: ``inspection_incomplete``, ``open_ncr``, ``fai_not_passed``,
+    ``open_blocker`` (Batch 4 / rank 7 quality gates), and ``no_labor_recorded``
+    (Batch 7 / rank 10 data-quality signal: an operation completed with zero recorded
+    labor, so cost/hour actuals may be understated -- fires regardless of the
+    ``LABOR_COST_ROLLUP_ENABLED`` flag).
+    """
+
+    code: str
+    message: str
+    reference_type: str
+    reference_id: Optional[int] = None
+    severity: Optional[str] = None
+
+
 class WorkOrderOperationBase(BaseModel):
     work_center_id: int = Field(..., gt=0, description="Work center ID")
     sequence: int = Field(

@@ -331,6 +331,7 @@ def _broadcast_schedule_updates(
     operation_id: int,
     operation_work_center_id: Optional[int],
     work_center_ids: List[int],
+    company_id: int,
 ) -> None:
     safe_broadcast(
         broadcast_work_order_update,
@@ -340,6 +341,7 @@ def _broadcast_schedule_updates(
             "operation_id": operation_id,
             "work_center_id": operation_work_center_id,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -349,6 +351,7 @@ def _broadcast_schedule_updates(
             "operation_id": operation_id,
             "work_center_id": operation_work_center_id,
         },
+        company_id=company_id,
     )
     for wc_id in work_center_ids:
         safe_broadcast(
@@ -359,6 +362,7 @@ def _broadcast_schedule_updates(
                 "work_order_id": work_order_id,
                 "operation_id": operation_id,
             },
+            company_id=company_id,
         )
 
 
@@ -571,12 +575,13 @@ def schedule_work_order(
     db.commit()
 
     if work_center_ids:
-        SchedulingService(db).update_availability_rates(work_center_ids=work_center_ids, horizon_days=90)
+        SchedulingService(db, company_id).update_availability_rates(work_center_ids=work_center_ids, horizon_days=90)
     _broadcast_schedule_updates(
         work_order_id=work_order.id,
         operation_id=current_op.id,
         operation_work_center_id=current_op.work_center_id,
         work_center_ids=work_center_ids,
+        company_id=company_id,
     )
 
     return {
@@ -649,12 +654,13 @@ def schedule_work_order_earliest(
     db.commit()
 
     if work_center_ids:
-        SchedulingService(db).update_availability_rates(work_center_ids=work_center_ids, horizon_days=90)
+        SchedulingService(db, company_id).update_availability_rates(work_center_ids=work_center_ids, horizon_days=90)
     _broadcast_schedule_updates(
         work_order_id=work_order.id,
         operation_id=current_op.id,
         operation_work_center_id=current_op.work_center_id,
         work_center_ids=work_center_ids,
+        company_id=company_id,
     )
 
     return {
@@ -687,7 +693,9 @@ def schedule_operation(
     operation.scheduled_end = schedule.scheduled_end
     db.commit()
 
-    SchedulingService(db).update_availability_rates(work_center_ids=[operation.work_center_id], horizon_days=90)
+    SchedulingService(db, company_id).update_availability_rates(
+        work_center_ids=[operation.work_center_id], horizon_days=90
+    )
 
     safe_broadcast(
         broadcast_work_order_update,
@@ -697,6 +705,7 @@ def schedule_operation(
             "operation_id": operation.id,
             "work_center_id": operation.work_center_id,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -706,6 +715,7 @@ def schedule_operation(
             "operation_id": operation.id,
             "work_center_id": operation.work_center_id,
         },
+        company_id=company_id,
     )
     if operation.work_center_id:
         safe_broadcast(
@@ -716,6 +726,7 @@ def schedule_operation(
                 "work_order_id": operation.work_order_id,
                 "operation_id": operation.id,
             },
+            company_id=company_id,
         )
 
     return {"message": "Operation scheduled", "operation_id": operation_id}
@@ -745,7 +756,7 @@ def update_operation_work_center(
     operation.work_center_id = update.work_center_id
     db.commit()
 
-    SchedulingService(db).update_availability_rates(
+    SchedulingService(db, company_id).update_availability_rates(
         work_center_ids=list({old_wc_id, update.work_center_id}), horizon_days=90
     )
 
@@ -758,6 +769,7 @@ def update_operation_work_center(
             "old_work_center_id": old_wc_id,
             "new_work_center_id": update.work_center_id,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -768,6 +780,7 @@ def update_operation_work_center(
             "old_work_center_id": old_wc_id,
             "new_work_center_id": update.work_center_id,
         },
+        company_id=company_id,
     )
     if old_wc_id:
         safe_broadcast(
@@ -778,6 +791,7 @@ def update_operation_work_center(
                 "work_order_id": operation.work_order_id,
                 "operation_id": operation.id,
             },
+            company_id=company_id,
         )
     safe_broadcast(
         broadcast_shop_floor_update,
@@ -787,6 +801,7 @@ def update_operation_work_center(
             "work_order_id": operation.work_order_id,
             "operation_id": operation.id,
         },
+        company_id=company_id,
     )
 
     return {
@@ -1006,7 +1021,7 @@ def auto_schedule_operations(
     # Legacy endpoint - redirect to new constraint-based scheduling
     work_center_ids = [work_center_id] if work_center_id else None
 
-    scheduling_service = SchedulingService(db)
+    scheduling_service = SchedulingService(db, company_id)
     results = scheduling_service.run_scheduling(work_center_ids=work_center_ids, horizon_days=90, optimize_setup=False)
 
     return {
@@ -1025,7 +1040,7 @@ def run_scheduling(
 ):
     """Run constraint-based scheduling algorithm"""
 
-    scheduling_service = SchedulingService(db)
+    scheduling_service = SchedulingService(db, company_id)
     results = scheduling_service.run_scheduling(
         work_center_ids=request.work_center_ids,
         horizon_days=request.horizon_days,
@@ -1055,6 +1070,7 @@ def run_scheduling(
             "work_center_ids": request.work_center_ids,
             "horizon_days": request.horizon_days,
         },
+        company_id=company_id,
     )
 
     return results
@@ -1069,7 +1085,7 @@ def get_scheduling_conflicts(
 ):
     """Get current scheduling conflicts (over-capacity situations)"""
 
-    scheduling_service = SchedulingService(db)
+    scheduling_service = SchedulingService(db, company_id)
 
     # Initialize capacity for all work centers
     work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True, WorkCenter.company_id == company_id).all()
@@ -1089,10 +1105,14 @@ def get_load_chart(
 ):
     """Get work center load chart data"""
 
-    scheduling_service = SchedulingService(db)
+    scheduling_service = SchedulingService(db, company_id)
 
-    # Initialize capacity
-    wc = db.query(WorkCenter).filter(WorkCenter.id == request.work_center_id).first()
+    # Initialize capacity (tenant-scoped)
+    wc = (
+        db.query(WorkCenter)
+        .filter(WorkCenter.id == request.work_center_id, WorkCenter.company_id == company_id)
+        .first()
+    )
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
@@ -1132,10 +1152,18 @@ def unschedule_work_order(
     db.commit()
 
     if work_center_ids:
-        SchedulingService(db).update_availability_rates(work_center_ids=list(work_center_ids), horizon_days=90)
+        SchedulingService(db, company_id).update_availability_rates(
+            work_center_ids=list(work_center_ids), horizon_days=90
+        )
 
-    safe_broadcast(broadcast_work_order_update, work_order_id, {"event": "work_order_unscheduled"})
-    safe_broadcast(broadcast_dashboard_update, {"event": "work_order_unscheduled", "work_order_id": work_order_id})
+    safe_broadcast(
+        broadcast_work_order_update, work_order_id, {"event": "work_order_unscheduled"}, company_id=company_id
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {"event": "work_order_unscheduled", "work_order_id": work_order_id},
+        company_id=company_id,
+    )
 
     return {
         "message": f"Cleared schedule for {work_order.work_order_number}",
@@ -1320,9 +1348,13 @@ def bulk_schedule_earliest(
     # Update availability rates for all affected work centers
     affected_wc_ids = list({r["work_center_id"] for r in results})
     if affected_wc_ids:
-        SchedulingService(db).update_availability_rates(work_center_ids=affected_wc_ids, horizon_days=90)
+        SchedulingService(db, company_id).update_availability_rates(work_center_ids=affected_wc_ids, horizon_days=90)
 
-    safe_broadcast(broadcast_dashboard_update, {"event": "bulk_schedule_complete", "scheduled_count": len(results)})
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {"event": "bulk_schedule_complete", "scheduled_count": len(results)},
+        company_id=company_id,
+    )
 
     return {
         "scheduled_count": len(results),
@@ -1334,15 +1366,18 @@ def bulk_schedule_earliest(
 
 @router.post("/run-background")
 async def run_scheduling_background(
-    request: SchedulingRunRequest, current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))
+    request: SchedulingRunRequest,
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
 ):
-    """Queue scheduling run as background job"""
+    """Queue scheduling run as background job (scoped to the caller's tenant)"""
 
     await enqueue_job(
         "run_scheduling_job",
         work_center_ids=request.work_center_ids,
         horizon_days=request.horizon_days,
         optimize_setup=request.optimize_setup,
+        company_id=company_id,
     )
 
     return {"message": "Scheduling job queued"}

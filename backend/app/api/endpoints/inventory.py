@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import atomic_transaction, get_db
 from app.models.inventory import (
     CycleCount,
@@ -19,6 +19,7 @@ from app.models.inventory import (
 )
 from app.models.part import Part
 from app.models.user import User, UserRole
+from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
@@ -264,6 +265,7 @@ def receive_inventory(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Receive inventory into stock"""
     # Verify part exists
@@ -286,6 +288,8 @@ def receive_inventory(
         )
         .first()
     )
+
+    old_quantity_on_hand = existing.quantity_on_hand if existing else None
 
     with atomic_transaction(db):
         if existing:
@@ -314,6 +318,7 @@ def receive_inventory(
 
         # Create transaction
         txn = InventoryTransaction(
+            company_id=company_id,
             inventory_item_id=inv_item.id,
             part_id=receive_in.part_id,
             transaction_type=TransactionType.RECEIVE,
@@ -348,6 +353,28 @@ def receive_inventory(
             },
         )
 
+        # Tamper-evident audit trail (hash chain) for the stock movement. Flushed
+        # inside the atomic block so the audit row commits with the inventory write.
+        audit.log_create(
+            "inventory",
+            txn.id,
+            str(txn.id),
+            new_values=txn,
+            description=(
+                f"Received {receive_in.quantity} of part {part.part_number} "
+                f"into {receive_in.location_code}" + (f" lot {receive_in.lot_number}" if receive_in.lot_number else "")
+            ),
+        )
+        if old_quantity_on_hand is not None:
+            audit.log_update(
+                "inventory",
+                inv_item.id,
+                f"{part.part_number} @ {receive_in.location_code}",
+                old_values={"quantity_on_hand": old_quantity_on_hand},
+                new_values={"quantity_on_hand": inv_item.quantity_on_hand},
+                description=f"Receive: stock for part {part.part_number} at {receive_in.location_code}",
+            )
+
     return {"message": "Inventory received", "inventory_item_id": inv_item.id, "quantity": receive_in.quantity}
 
 
@@ -357,6 +384,7 @@ def issue_inventory(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Issue inventory to work order"""
     inv_item = (
@@ -370,11 +398,14 @@ def issue_inventory(
     if inv_item.quantity_available < issue_in.quantity:
         raise HTTPException(status_code=400, detail=f"Insufficient quantity. Available: {inv_item.quantity_available}")
 
+    old_quantity_on_hand = inv_item.quantity_on_hand
+
     with atomic_transaction(db):
         inv_item.quantity_on_hand -= issue_in.quantity
         inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
 
         txn = InventoryTransaction(
+            company_id=company_id,
             inventory_item_id=inv_item.id,
             part_id=inv_item.part_id,
             transaction_type=TransactionType.ISSUE,
@@ -408,6 +439,26 @@ def issue_inventory(
             },
         )
 
+        # Tamper-evident audit trail (hash chain) for the stock movement.
+        audit.log_create(
+            "inventory",
+            txn.id,
+            str(txn.id),
+            new_values=txn,
+            description=(
+                f"Issued {issue_in.quantity} from {inv_item.location}"
+                + (f" for work order {issue_in.work_order_number}" if issue_in.work_order_number else "")
+            ),
+        )
+        audit.log_update(
+            "inventory",
+            inv_item.id,
+            f"inventory_item {inv_item.id} @ {inv_item.location}",
+            old_values={"quantity_on_hand": old_quantity_on_hand},
+            new_values={"quantity_on_hand": inv_item.quantity_on_hand},
+            description=f"Issue: stock for inventory item {inv_item.id} at {inv_item.location}",
+        )
+
     return {"message": "Inventory issued", "quantity": issue_in.quantity}
 
 
@@ -417,6 +468,7 @@ def transfer_inventory(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Transfer inventory between locations"""
     inv_item = (
@@ -435,6 +487,7 @@ def transfer_inventory(
         raise HTTPException(status_code=400, detail="Insufficient quantity")
 
     from_location = inv_item.location
+    source_old_quantity = inv_item.quantity_on_hand
 
     with atomic_transaction(db):
         # Reduce from source
@@ -452,6 +505,7 @@ def transfer_inventory(
             .first()
         )
 
+        dest_old_quantity = dest_inv.quantity_on_hand if dest_inv else None
         if dest_inv:
             dest_inv.quantity_on_hand += transfer_in.quantity
             dest_inv.quantity_available = dest_inv.quantity_on_hand - dest_inv.quantity_allocated
@@ -472,6 +526,7 @@ def transfer_inventory(
 
         # Transaction record
         txn = InventoryTransaction(
+            company_id=company_id,
             inventory_item_id=inv_item.id,
             part_id=inv_item.part_id,
             transaction_type=TransactionType.TRANSFER,
@@ -501,6 +556,33 @@ def transfer_inventory(
             },
         )
 
+        # Tamper-evident audit trail (hash chain): the movement plus both stock-level
+        # changes (source decrement, destination increment).
+        audit.log_create(
+            "inventory",
+            txn.id,
+            str(txn.id),
+            new_values=txn,
+            description=(f"Transferred {transfer_in.quantity} from {from_location} to {transfer_in.to_location_code}"),
+        )
+        audit.log_update(
+            "inventory",
+            inv_item.id,
+            f"inventory_item {inv_item.id} @ {from_location}",
+            old_values={"quantity_on_hand": source_old_quantity},
+            new_values={"quantity_on_hand": inv_item.quantity_on_hand},
+            description=f"Transfer out: stock for inventory item {inv_item.id} at {from_location}",
+        )
+        if dest_old_quantity is not None:
+            audit.log_update(
+                "inventory",
+                dest_inv.id,
+                f"inventory_item {dest_inv.id} @ {transfer_in.to_location_code}",
+                old_values={"quantity_on_hand": dest_old_quantity},
+                new_values={"quantity_on_hand": dest_inv.quantity_on_hand},
+                description=(f"Transfer in: stock for inventory item {dest_inv.id} at {transfer_in.to_location_code}"),
+            )
+
     return {"message": "Transfer complete"}
 
 
@@ -510,6 +592,7 @@ def adjust_inventory(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Adjust inventory quantity"""
     inv_item = (
@@ -528,6 +611,7 @@ def adjust_inventory(
         inv_item.quantity_available = inv_item.quantity_on_hand - inv_item.quantity_allocated
 
         txn = InventoryTransaction(
+            company_id=company_id,
             inventory_item_id=inv_item.id,
             part_id=inv_item.part_id,
             transaction_type=TransactionType.ADJUST,
@@ -559,6 +643,27 @@ def adjust_inventory(
                 "location": inv_item.location,
                 "reason_code": adjust_in.reason_code,
             },
+        )
+
+        # Tamper-evident audit trail (hash chain): the adjustment movement plus the
+        # stock-level change it produced.
+        audit.log_create(
+            "inventory",
+            txn.id,
+            str(txn.id),
+            new_values=txn,
+            description=(
+                f"Adjusted inventory item {inv_item.id} at {inv_item.location} "
+                f"from {old_qty} to {adjust_in.new_quantity} (reason: {adjust_in.reason_code})"
+            ),
+        )
+        audit.log_update(
+            "inventory",
+            inv_item.id,
+            f"inventory_item {inv_item.id} @ {inv_item.location}",
+            old_values={"quantity_on_hand": old_qty},
+            new_values={"quantity_on_hand": adjust_in.new_quantity},
+            description=f"Adjust: stock for inventory item {inv_item.id} at {inv_item.location}",
         )
 
     return {"message": "Adjustment complete", "old_quantity": old_qty, "new_quantity": adjust_in.new_quantity}

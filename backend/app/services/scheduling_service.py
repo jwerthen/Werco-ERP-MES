@@ -48,10 +48,21 @@ class WorkCenterCapacity:
 
 
 class SchedulingService:
-    """Constraint-based scheduling service"""
+    """Constraint-based scheduling service.
 
-    def __init__(self, db: Session):
+    Tenant isolation: ``company_id`` is OPTIONAL for backward compatibility with
+    completion-path callers that already pass tenant-scoped ``work_center_ids``
+    (e.g. shop-floor / work-order op-completion). When ``company_id`` is set
+    (the API entry points ``/run``, ``/auto-schedule``, ``/run-background`` and
+    the per-tenant background job pass it), every WorkCenter / WorkOrderOperation
+    / WorkOrder query is additionally filtered to that company so a run never
+    schedules or overwrites another tenant's rows. When ``company_id`` is None,
+    behavior is unchanged.
+    """
+
+    def __init__(self, db: Session, company_id: Optional[int] = None):
         self.db = db
+        self.company_id = company_id
         self.capacity_map: Dict[int, WorkCenterCapacity] = {}
 
     def run_scheduling(
@@ -126,8 +137,11 @@ class SchedulingService:
         }
 
     def _get_work_centers(self, work_center_ids: List[int] = None) -> List[WorkCenter]:
-        """Get work centers for scheduling"""
+        """Get work centers for scheduling (tenant-scoped when company_id is set)"""
         query = self.db.query(WorkCenter).filter(WorkCenter.is_active == True)
+
+        if self.company_id is not None:
+            query = query.filter(WorkCenter.company_id == self.company_id)
 
         if work_center_ids:
             query = query.filter(WorkCenter.id.in_(work_center_ids))
@@ -145,17 +159,16 @@ class SchedulingService:
             start_date = date.today()
             end_date = start_date + timedelta(days=horizon_days)
 
-            scheduled_ops = (
-                self.db.query(WorkOrderOperation)
-                .filter(
-                    WorkOrderOperation.work_center_id == wc.id,
-                    WorkOrderOperation.scheduled_start != None,
-                    WorkOrderOperation.scheduled_start >= start_date,
-                    WorkOrderOperation.scheduled_start <= end_date,
-                    WorkOrderOperation.status != OperationStatus.COMPLETE,
-                )
-                .all()
+            op_query = self.db.query(WorkOrderOperation).filter(
+                WorkOrderOperation.work_center_id == wc.id,
+                WorkOrderOperation.scheduled_start != None,
+                WorkOrderOperation.scheduled_start >= start_date,
+                WorkOrderOperation.scheduled_start <= end_date,
+                WorkOrderOperation.status != OperationStatus.COMPLETE,
             )
+            if self.company_id is not None:
+                op_query = op_query.filter(WorkOrderOperation.company_id == self.company_id)
+            scheduled_ops = op_query.all()
 
             # Populate daily load from existing schedule
             for op in scheduled_ops:
@@ -177,6 +190,8 @@ class SchedulingService:
                 WorkOrderOperation.scheduled_start == None,  # Unscheduled
             )
         )
+        if self.company_id is not None:
+            query = query.filter(WorkOrder.company_id == self.company_id)
         open_blocker_subquery = select(WorkOrderBlocker.operation_id).where(
             WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),
             WorkOrderBlocker.operation_id.isnot(None),
@@ -267,16 +282,14 @@ class SchedulingService:
 
         # Check if there are predecessor operations in same work order
         if operation.sequence > 10:
-            # Find previous operation
-            prev_op = (
-                self.db.query(WorkOrderOperation)
-                .filter(
-                    WorkOrderOperation.work_order_id == operation.work_order_id,
-                    WorkOrderOperation.sequence < operation.sequence,
-                )
-                .order_by(WorkOrderOperation.sequence.desc())
-                .first()
+            # Find previous operation (scoped to this tenant when company_id is set)
+            prev_query = self.db.query(WorkOrderOperation).filter(
+                WorkOrderOperation.work_order_id == operation.work_order_id,
+                WorkOrderOperation.sequence < operation.sequence,
             )
+            if self.company_id is not None:
+                prev_query = prev_query.filter(WorkOrderOperation.company_id == self.company_id)
+            prev_op = prev_query.order_by(WorkOrderOperation.sequence.desc()).first()
 
             if prev_op and prev_op.scheduled_end:
                 prev_end = (
@@ -359,6 +372,9 @@ class SchedulingService:
             WorkOrderOperation.status != OperationStatus.COMPLETE,
         )
 
+        if self.company_id is not None:
+            query = query.filter(WorkOrderOperation.company_id == self.company_id)
+
         if work_center_ids:
             query = query.filter(WorkOrderOperation.work_center_id.in_(work_center_ids))
 
@@ -407,8 +423,11 @@ class SchedulingService:
         """
         capacity = self.capacity_map.get(work_center_id)
         if not capacity:
-            # Initialize if not already done
-            wc = self.db.query(WorkCenter).filter(WorkCenter.id == work_center_id).first()
+            # Initialize if not already done (tenant-scoped when company_id is set)
+            wc_query = self.db.query(WorkCenter).filter(WorkCenter.id == work_center_id)
+            if self.company_id is not None:
+                wc_query = wc_query.filter(WorkCenter.company_id == self.company_id)
+            wc = wc_query.first()
             if not wc:
                 return []
 

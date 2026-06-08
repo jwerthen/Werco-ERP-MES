@@ -24,7 +24,9 @@ import {
 import { formatCentralDate } from '../utils/centralTime';
 
 interface KPIValue {
-  value: number;
+  // null when the KPI is genuinely uncomputable (Batch 8 / OEE-4/OEE-6: no staffed time
+  // for OEE, empty denominator for OTD) — rendered as "n/a", not a misleading number.
+  value: number | null;
   target: number | null;
   prior_value: number | null;
   change_pct: number | null;
@@ -387,7 +389,11 @@ export default function Analytics() {
     return <MinusIcon className="h-4 w-4 text-slate-400" />;
   };
 
-  const formatKPIValue = (value: number, type: string) => {
+  const formatKPIValue = (value: number | null | undefined, type: string) => {
+    // Backend (Batch 8 / OEE-4/OEE-6) returns null for a genuinely-uncomputable KPI
+    // (no staffed time for OEE, empty denominator for OTD); show "n/a", never a
+    // misleading 0/100 or a crash on .toFixed of null.
+    if (value === null || value === undefined || Number.isNaN(value)) return 'n/a';
     if (type === 'percent') return `${value.toFixed(1)}%`;
     if (type === 'hours') return `${value.toFixed(0)}h`;
     if (type === 'count') return value.toFixed(0);
@@ -434,7 +440,7 @@ export default function Analytics() {
     isGoodUp?: boolean;
     onClick?: () => void;
   }) => {
-    const isOnTarget = kpi.target !== null && (
+    const isOnTarget = kpi.target !== null && kpi.value !== null && (
       isGoodUp ? kpi.value >= kpi.target : kpi.value <= kpi.target
     );
     

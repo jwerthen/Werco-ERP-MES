@@ -17,7 +17,7 @@ RATE_LIMIT = 100
 RATE_LIMIT_WINDOW = 60
 
 
-async def send_webhook_task(webhook_id: int, event: str, payload: dict):
+async def send_webhook_task(webhook_id: int, event: str, payload: dict, company_id: int = None):
     """
     Send webhook delivery
 
@@ -25,6 +25,11 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
         webhook_id: Webhook ID
         event: Event name
         payload: Event payload
+        company_id: Owning tenant of the webhook. COMPLIANCE (invariant #1): threaded
+            into ``record_delivery`` so the (TenantMixin, non-null) ``WebhookDelivery``
+            row is stamped tenant-consistently. ``record_delivery`` prefers the loaded
+            ``webhook.company_id``; this is the fallback when the webhook can't be
+            reloaded (e.g. rate-limited before load).
     """
     db = SessionLocal()
     try:
@@ -36,11 +41,19 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
             logger.warning(f"Webhook {webhook_id} not found or inactive")
             return {"delivered": False, "error": "Webhook not found or inactive"}
 
+        # The webhook's own tenant is authoritative; fall back to the passed value.
+        delivery_company_id = webhook.company_id if webhook.company_id is not None else company_id
+
         # Check rate limit
         if not await _check_rate_limit(webhook_id):
             logger.warning(f"Rate limit exceeded for webhook {webhook_id}")
             webhook_service.record_delivery(
-                webhook_id=webhook_id, event=event, payload=payload, error="Rate limit exceeded", delivered=False
+                webhook_id=webhook_id,
+                event=event,
+                payload=payload,
+                error="Rate limit exceeded",
+                delivered=False,
+                company_id=delivery_company_id,
             )
             return {"delivered": False, "error": "Rate limit exceeded"}
 
@@ -72,6 +85,7 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
                         status_code=response.status_code,
                         response_body=response.text[:1000],  # First 1000 chars
                         delivered=True,
+                        company_id=delivery_company_id,
                     )
 
                     # Reset failure count on success
@@ -91,6 +105,7 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
                         response_body=response.text[:1000],
                         error=f"HTTP {response.status_code}",
                         delivered=False,
+                        company_id=delivery_company_id,
                     )
 
                     logger.warning(f"Webhook {webhook_id} failed: HTTP {response.status_code}")
@@ -98,14 +113,24 @@ async def send_webhook_task(webhook_id: int, event: str, payload: dict):
 
             except httpx.TimeoutException as e:
                 webhook_service.record_delivery(
-                    webhook_id=webhook_id, event=event, payload=full_payload, error="Request timeout", delivered=False
+                    webhook_id=webhook_id,
+                    event=event,
+                    payload=full_payload,
+                    error="Request timeout",
+                    delivered=False,
+                    company_id=delivery_company_id,
                 )
                 logger.error(f"Webhook {webhook_id} timeout: {e}")
                 return {"delivered": False, "error": "timeout"}
 
             except httpx.RequestError as e:
                 webhook_service.record_delivery(
-                    webhook_id=webhook_id, event=event, payload=full_payload, error=str(e)[:500], delivered=False
+                    webhook_id=webhook_id,
+                    event=event,
+                    payload=full_payload,
+                    error=str(e)[:500],
+                    delivered=False,
+                    company_id=delivery_company_id,
                 )
                 logger.error(f"Webhook {webhook_id} request error: {e}")
                 return {"delivered": False, "error": str(e)}

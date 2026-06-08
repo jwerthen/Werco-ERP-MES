@@ -12,10 +12,9 @@ from sqlalchemy.orm import Session
 
 from app.models.mrp import MRPAction, PlanningAction
 from app.models.part import Part
-from app.models.purchase_order import POStatus, PurchaseOrder, PurchaseOrderLine
+from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.supplier_part import SupplierPartMapping
 from app.models.user import User
-from app.models.vendor import Vendor
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
 from app.services.notification_service import NotificationEvent, NotificationService
@@ -34,8 +33,14 @@ class MRPAutoMode:
 class MRPAutoService:
     """Service for auto-processing MRP actions"""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, company_id: int):
+        """Create an auto-processing service scoped to a single tenant.
+
+        Every PO/WO it creates is stamped with ``company_id`` and every lookup
+        (parts, vendors, supplier mappings, PO history) is confined to it.
+        """
         self.db = db
+        self.company_id = company_id
 
     def process_actions(
         self, actions: List[MRPAction], mode: str = MRPAutoMode.REVIEW, user_id: int = None
@@ -94,7 +99,7 @@ class MRPAutoService:
     def _create_po_from_action(self, action: MRPAction, mode: str, user_id: int = None) -> PurchaseOrder:
         """Create purchase order from MRP action"""
 
-        part = self.db.query(Part).filter(Part.id == action.part_id).first()
+        part = self.db.query(Part).filter(Part.id == action.part_id, Part.company_id == self.company_id).first()
         if not part:
             raise ValueError(f"Part {action.part_id} not found")
 
@@ -112,8 +117,9 @@ class MRPAutoService:
         else:
             status = POStatus.DRAFT
 
-        # Create PO
+        # Create PO (scoped to this tenant)
         po = PurchaseOrder(
+            company_id=self.company_id,
             po_number=po_number,
             vendor_id=vendor.id,
             status=status,
@@ -128,7 +134,12 @@ class MRPAutoService:
         # Create PO line
         unit_cost = self._get_part_cost(action.part_id, vendor.id)
         po_line = PurchaseOrderLine(
-            po_id=po.id, part_id=action.part_id, quantity=action.quantity, unit_cost=unit_cost, line_number=1
+            company_id=self.company_id,
+            po_id=po.id,
+            part_id=action.part_id,
+            quantity=action.quantity,
+            unit_cost=unit_cost,
+            line_number=1,
         )
         self.db.add(po_line)
 
@@ -147,7 +158,7 @@ class MRPAutoService:
     def _create_wo_from_action(self, action: MRPAction, mode: str, user_id: int = None) -> WorkOrder:
         """Create work order from MRP action"""
 
-        part = self.db.query(Part).filter(Part.id == action.part_id).first()
+        part = self.db.query(Part).filter(Part.id == action.part_id, Part.company_id == self.company_id).first()
         if not part:
             raise ValueError(f"Part {action.part_id} not found")
 
@@ -160,8 +171,9 @@ class MRPAutoService:
         else:
             status = WorkOrderStatus.DRAFT
 
-        # Create WO
+        # Create WO (scoped to this tenant)
         wo = WorkOrder(
+            company_id=self.company_id,
             wo_number=wo_number,
             part_id=action.part_id,
             quantity_ordered=action.quantity,
@@ -189,7 +201,7 @@ class MRPAutoService:
     def _flag_for_expedite(self, action: MRPAction, user_id: int = None):
         """Flag action for manual expedite"""
 
-        part = self.db.query(Part).filter(Part.id == action.part_id).first()
+        part = self.db.query(Part).filter(Part.id == action.part_id, Part.company_id == self.company_id).first()
         if not part:
             return
 
@@ -198,7 +210,7 @@ class MRPAutoService:
 
         from app.services.notification_service import get_notification_recipients
 
-        recipients = get_notification_recipients(self.db, department="Purchasing")
+        recipients = get_notification_recipients(self.db, department="Purchasing", company_id=self.company_id)
 
         # Use enqueue_job to avoid blocking
         import asyncio
@@ -231,16 +243,17 @@ class MRPAutoService:
         Returns:
             Vendor object or None if no active vendors exist
         """
-        # Priority 1: Check supplier part mappings for this part
+        # Priority 1: Check supplier part mappings for this part (scoped to this tenant)
         mapping = (
             self.db.query(SupplierPartMapping)
             .filter(
+                SupplierPartMapping.company_id == self.company_id,
                 SupplierPartMapping.part_id == part_id,
                 SupplierPartMapping.is_active == True,
                 SupplierPartMapping.vendor_id.isnot(None),
             )
             .join(Vendor)
-            .filter(Vendor.is_active == True)
+            .filter(Vendor.is_active == True, Vendor.company_id == self.company_id)
             .first()
         )
 
@@ -253,7 +266,12 @@ class MRPAutoService:
             self.db.query(Vendor, func.count(PurchaseOrderLine.id).label('order_count'))
             .join(PurchaseOrder, PurchaseOrder.vendor_id == Vendor.id)
             .join(PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
-            .filter(PurchaseOrderLine.part_id == part_id, Vendor.is_active == True)
+            .filter(
+                PurchaseOrderLine.part_id == part_id,
+                Vendor.is_active == True,
+                Vendor.company_id == self.company_id,
+                PurchaseOrder.company_id == self.company_id,
+            )
             .group_by(Vendor.id)
             .order_by(func.count(PurchaseOrderLine.id).desc())
             .first()
@@ -266,7 +284,7 @@ class MRPAutoService:
 
         # Priority 3: Fall back to first active vendor
         logger.debug(f"No specific vendor found for part {part_id}, using first active vendor")
-        vendor = self.db.query(Vendor).filter(Vendor.is_active == True).first()
+        vendor = self.db.query(Vendor).filter(Vendor.is_active == True, Vendor.company_id == self.company_id).first()
         return vendor
 
     def _get_part_cost(self, part_id: int, vendor_id: int) -> float:
@@ -293,6 +311,7 @@ class MRPAutoService:
                     PurchaseOrderLine.part_id == part_id,
                     PurchaseOrder.vendor_id == vendor_id,
                     PurchaseOrder.status != POStatus.CANCELLED,
+                    PurchaseOrder.company_id == self.company_id,
                 )
                 .order_by(PurchaseOrder.created_at.desc())
                 .first()
@@ -303,7 +322,7 @@ class MRPAutoService:
                 return recent_price[0]
 
         # Priority 2: Fall back to part standard cost
-        part = self.db.query(Part).filter(Part.id == part_id).first()
+        part = self.db.query(Part).filter(Part.id == part_id, Part.company_id == self.company_id).first()
         if part and part.standard_cost:
             logger.debug(f"Using standard cost ${part.standard_cost} for part {part_id}")
             return part.standard_cost
@@ -318,7 +337,7 @@ class MRPAutoService:
 
         last_po = (
             self.db.query(PurchaseOrder)
-            .filter(PurchaseOrder.po_number.like(f"{prefix}%"))
+            .filter(PurchaseOrder.company_id == self.company_id, PurchaseOrder.po_number.like(f"{prefix}%"))
             .order_by(PurchaseOrder.po_number.desc())
             .first()
         )
@@ -338,7 +357,7 @@ class MRPAutoService:
 
         last_wo = (
             self.db.query(WorkOrder)
-            .filter(WorkOrder.wo_number.like(f"{prefix}%"))
+            .filter(WorkOrder.company_id == self.company_id, WorkOrder.wo_number.like(f"{prefix}%"))
             .order_by(WorkOrder.wo_number.desc())
             .first()
         )

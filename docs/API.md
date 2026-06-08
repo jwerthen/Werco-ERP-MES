@@ -52,6 +52,93 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
 | POST | `/work-orders/{id}/complete` | Complete work order | Yes |
+| POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation | Yes |
+| POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
+| POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress) | Yes |
+
+> **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
+> endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
+> `/operations/{id}/complete`, `/operations`) and their shop-floor counterparts (see below) scope
+> every work-order / operation lookup to the caller's **active company** (`get_current_company_id`).
+> An id belonging to another tenant returns **404 before any mutation** (not 403, so a guessed id
+> can't be used to drive another company's operation or work order). State transitions on these
+> paths — operation/WO **start** and **complete**, manual `/work-orders/{id}/complete` (status +
+> the quantities it sets), and shipment-close — are recorded in the tamper-evident audit trail
+> (`GET /audit/`) in addition to the existing real-time operational events.
+>
+> **Concurrency on completion endpoints.** Operation/work-order **start** and **complete**
+> (`/operations/{id}/start`, `/operations/{id}/complete`, `/operations/{id}` update, and
+> `/work-orders/{id}/complete`) now enforce optimistic locking on the underlying operation / work
+> order row. A concurrent stale update returns **409 Conflict**
+> (`{"detail": "This … was modified concurrently. Refresh and retry…"}`) instead of silently losing
+> the update; the client should re-fetch and retry. The server also takes a row lock
+> (`SELECT … FOR UPDATE`) around the over-completion check so two simultaneous completions cannot
+> double-count quantity.
+>
+> **Completion contract (shared finalizer).** Operation completion rolls up into the work order
+> through one shared finalizer, so all completion paths behave identically. On the absolute
+> completion verbs (`/operations/{id}/complete`, both here and on the shop floor) the stored
+> `quantity_complete` is `clamp(max(existing, requested, recorded production evidence), 0, target)`:
+> it never drops below the value already recorded or below durable production evidence, and never
+> exceeds the operation target. The work order's `quantity_complete` only ever moves forward. Scrap
+> is **opt-in on update**: `quantity_scrapped` is optional on both `/work-orders/{id}/complete` and
+> `/work-orders/operations/{id}/complete` — omit it to leave previously-recorded scrap untouched;
+> send an explicit value (including `0`) to overwrite it. Completing an **on-hold** operation is
+> rejected with **409 Conflict** (`{"detail": "Operation is on hold and cannot be completed"}`);
+> `/work-orders/{id}/complete` likewise returns **409** if any open operation is on hold
+> (`"…is on hold; resolve the hold first"`) — resolve the hold before completing. A work order that
+> reaches `complete` always carries both an `actual_start` and an `actual_end`. Successful completion
+> responses carry a `quality_exceptions` array (default `[]`) listing any unsatisfied **quality gates**
+> — see "Quality gates on completion are warn-and-record" under Shop Floor; these warn, they do **not**
+> block the completion.
+>
+> **Completion signals.** When a work order reaches **COMPLETE** (operation/WO completion paths) or
+> **CLOSED** (shipment close), the system fires a uniform signal set: an internal `WO_COMPLETED`
+> notification to the tenant's recipients (supervisors, managers, and the WO creator) and an outbound
+> `work_order.completed` / `work_order.closed` **webhook** to the company's registered endpoints — see
+> [Webhooks](#webhooks). Both are dispatched asynchronously **after commit** and best-effort: a signal
+> failure never fails the completion, and nothing fires for a rolled-back completion.
+>
+> **Idempotent completion.** `/work-orders/{id}/complete` (and shipment `/{id}/ship`) are idempotent:
+> re-invoking on an already-terminal work order/shipment returns the current state
+> (`{"already_completed": true}` / `{"already_shipped": true}`) and fires no second audit row, event,
+> notification, or webhook.
+>
+> **Completion writes finished goods to inventory.** When a work order reaches **COMPLETE** (any
+> completion path, including reconcile-on-read), the system **always** performs a finished-goods
+> RECEIVE: it assigns the work order a lot number if it has none (`LOT-<work_order_number>`),
+> creates or increments an inventory item for the work order's part at warehouse **`MAIN`** /
+> location **`FINISHED-GOODS`** for the completed quantity, and writes a positive `RECEIVE`
+> `InventoryTransaction` (`reference_type='work_order'`) at the part's `standard_cost`. The receipt is
+> **audited** (`GET /audit/`) and **idempotent** — at most one finished-goods receipt per work order
+> (DB-enforced), so a re-completion or a reconcile re-read never double-receives. Receipts are lot-only
+> (no serial is assigned; the system has no part-serialization flag yet). A fully-scrapped work order
+> (zero completed quantity) receives nothing. The receipt's lot is reconstructable end-to-end via
+> [Traceability](#traceability).
+>
+> **Component backflush is opt-in per part (default off).** If the finished part has
+> `backflush_components = true` (see [Part Schema](#part-schema)), completion **auto-consumes** the
+> part's BOM components: one negative `ISSUE` `InventoryTransaction` per component (quantity scaled by
+> the produced quantity and each BOM item's `scrap_factor`), decrementing source stock and carrying the
+> consumed lot for genealogy — each **audited** and **idempotent** per component. When the flag is
+> **false** (the default) completion moves no components, so a shop that issues material manually is
+> never double-consumed. A backflush shortage (insufficient stock) **does not fail the completion** —
+> the source lot is driven negative and the shortfall is recorded as a tamper-evident
+> `BACKFLUSH_SHORTAGE` audit row plus a `backflush_shortage` warning event.
+>
+> **Labor-hour + cost rollup on completion is opt-in (global flag `LABOR_COST_ROLLUP_ENABLED`,
+> default OFF).** When the flag is **on**, a work order reaching **COMPLETE** (any path, including
+> reconcile-on-read) rolls op/WO `actual_hours` monotonic-up from time-entry evidence, computes
+> `actual_cost` = **labor + issued material + overhead** (labor at `WorkCenter.hourly_rate`, falling
+> back to `DEFAULT_LABOR_RATE`; overhead at `DEFAULT_OVERHEAD_RATE` — see
+> [Environment Variables](ENVIRONMENT_VARIABLES.md)), syncs any linked `JobCost` to status `COMPLETED`,
+> and writes one **audited** rollup row — all atomic with the completion, best-effort (a cost-side
+> error never fails the completion). Hours sum across **all operators'** time entries on an operation
+> (multiple operators are summed, not deduped). When the flag is **off** (the default), completion does
+> **not** auto-populate `actual_cost` / `actual_hours` and touches no `JobCost`; the on-demand
+> `POST /job-costs/{id}/calculate` is then the only way to materialize cost actuals. The
+> `no_labor_recorded` quality exception (above) fires regardless of this flag.
 
 #### Work Order Schema
 
@@ -93,9 +180,16 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
   "unit_of_measure": "EA",
   "material_type": "ST-304",
   "is_active": true,
+  "backflush_components": false,
   "created_at": "2024-01-01T10:00:00"
 }
 ```
+
+> `backflush_components` (boolean, default `false`) opts this part into **component backflush on
+> work-order completion**: when a work order for this part completes, its BOM components are
+> auto-consumed via negative `ISSUE` inventory transactions. Leave it `false` (the default) when
+> material is issued manually, to avoid double-consuming stock. See the completion-inventory notes
+> under [Work Orders](#work-orders).
 
 ### BOM (Bill of Materials)
 
@@ -177,7 +271,84 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | GET | `/shop-floor/my-active-job` | Get current user's active job | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation | Yes |
 | POST | `/shop-floor/clock-out/{id}` | Clock out with production data | Yes |
+| POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
+| POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
+| POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
+| POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue | Yes |
+
+> **Tenant isolation on clock/operation endpoints.** Clock-in, clock-out, and the shop-floor
+> operation start/complete endpoints scope every operation, work-order, and `TimeEntry` lookup to
+> the caller's **active company** (`get_current_company_id`). A `time_entry_id` / `operation_id`
+> belonging to another tenant returns **404 before any mutation** — a guessed foreign id can no
+> longer drive another company's operation or work order to IN_PROGRESS / COMPLETE. When a
+> clock-out (or an operation/WO start or completion) flips an operation or work order to a terminal
+> status, that transition is written to the tamper-evident audit trail (`GET /audit/`) as well as
+> the existing real-time operational event.
+>
+> **Concurrency on clock/completion endpoints.** Clock-out, production, and operation start/complete
+> (`/clock-out/{id}`, `/operations/{id}/production`, `/operations/{id}/start`,
+> `/operations/{id}/complete`) take a row lock (`SELECT … FOR UPDATE`) around the over-completion
+> read-modify-write and enforce optimistic locking on the operation / time-entry row. A concurrent
+> stale update returns **409 Conflict** ("This … was modified concurrently. Refresh and retry…")
+> rather than losing the update.
+>
+> **Duplicate open clock-in is DB-enforced.** `/clock-in` (and operation `/start`, which opens a
+> time entry) is backed by a partial unique index
+> (`uq_open_time_entry ON time_entries(user_id, operation_id) WHERE clock_out IS NULL`): at most one
+> open time entry can exist per user + operation. A racing double clock-in is rejected with
+> **400 Bad Request** (`"You are already clocked in to this operation."`) instead of creating a
+> second open entry that would double-count production.
+>
+> **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
+> the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores
+> `clamp(max(existing, requested, recorded production evidence), 0, target)`; the additive verbs
+> (`/clock-out/{id}`, `/operations/{id}/production`) add a delta floored at the same evidence and
+> capped at the target. Completing an **on-hold** operation is rejected with **409 Conflict**
+> (`{"detail": "Operation is on hold and cannot be completed"}`).
+>
+> **Reconcile-on-read is audited.** When a read endpoint (e.g. `/shop-floor/dashboard`, the operation
+> list, or a work-order detail) drives an operation or work order to `complete` from durable time-entry
+> evidence, that status change is now written to the tamper-evident audit trail (`GET /audit/`),
+> attributed to the requesting user and tagged `source = "reconcile_on_read"`. This reconcile is
+> best-effort: if its write fails it is rolled back silently and the read still returns **200**.
+
+> **Quality gates on completion are warn-and-record, not blocking.** Completing an operation or work
+> order while a quality gate is unsatisfied still **succeeds (200)** — the gates do not block. Instead,
+> the completion response carries a `quality_exceptions` array describing each unsatisfied gate, and
+> the system records a tamper-evident `audit_log` row (action `COMPLETED_WITH_QUALITY_EXCEPTION`) plus
+> a warning operational event for each. The gates are: `inspection_incomplete` (operation requires
+> inspection but `inspection_complete` is not set), `open_ncr` (an unresolved NCR on the work order),
+> `fai_not_passed` (a First Article Inspection on the work order that is not `PASSED`), `open_blocker`
+> (an open/acknowledged work-order blocker), and `no_labor_recorded` (severity `medium`: a work order
+> completed with one or more operations that recorded **zero** labor — no time entry, or only
+> zero-duration entries — so its cost/hour actuals may be understated; helps surface missed clock-ins).
+> The `no_labor_recorded` signal fires **regardless of the `LABOR_COST_ROLLUP_ENABLED` flag** (it is a
+> process/operator-accuracy signal, not a cost figure). This applies to both
+> `/work-orders/operations/{id}/complete` and `/shop-floor/operations/{id}/complete`,
+> `/work-orders/{id}/complete`, and `/shop-floor/clock-out/{id}` when it completes an operation or work
+> order (the field rides on that endpoint's `TimeEntryResponse`). Each entry is
+> `{ "code", "message", "reference_type", "reference_id", "severity" }`; the field defaults to `[]`, so
+> an all-clear completion is shape-compatible with the pre-existing response.
+>
+> _Limitation:_ on the **reconcile-on-read** path only `inspection_incomplete` is recorded (the
+> NCR/FAI/blocker gates are evaluated on the next live completion). And `fai_not_passed` only fires
+> when an FAI **exists** and is not passed — a required-but-missing FAI is not detectable (no
+> "FAI required" flag in the data model).
+
+#### Inspection Schema
+
+`POST /shop-floor/operations/{id}/inspection` records an operation's inspection as complete. It sets
+`inspection_complete = True` (clearing the `inspection_incomplete` gate above), records who/when in a
+tamper-evident audit row, and is **tenant-scoped** + role-gated to **Admin / Manager / Supervisor /
+Quality** (there is no separate Inspector role). Both fields are optional:
+
+```json
+{
+  "inspection_type": "final",
+  "notes": "All critical characteristics within tolerance"
+}
+```
 
 #### Clock Out Schema
 
@@ -333,8 +504,37 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/inventory/` | List inventory items | Yes |
-| POST | `/inventory/adjust` | Adjust inventory | Yes |
+| POST | `/inventory/receive` | Receive inventory into stock | Yes |
+| POST | `/inventory/issue` | Issue inventory to a work order | Yes |
+| POST | `/inventory/transfer` | Transfer inventory between locations | Yes |
+| POST | `/inventory/adjust` | Adjust inventory | Admin / Manager / Supervisor |
 | GET | `/inventory/{part_id}` | Get inventory for part | Yes |
+
+> **Stock movements are audited.** Each of `/receive`, `/issue`, `/transfer`, and `/adjust` writes
+> tamper-evident audit rows (`GET /audit/`) — one for the `InventoryTransaction` and one per
+> stock-level change it produces (a transfer logs both the source decrement and the destination
+> increment) — flushed inside the same atomic transaction as the inventory write so the audit row
+> commits with the movement. The new `InventoryTransaction` rows are tenant-tagged with the active
+> `company_id`.
+
+### Traceability
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/traceability/lot/{lot_number}` | Full lot trace (source, usage, as-built genealogy, history) | Yes |
+| GET | `/traceability/serial/{serial_number}` | Serial trace (transactions, work orders, NCRs) | Yes |
+
+> **As-built genealogy (`consumed_components`).** `GET /traceability/lot/{lot_number}` returns a
+> `consumed_components` array (default `[]`). When the traced lot is a finished-goods lot **produced by
+> a work order** (it has a work-order RECEIVE transaction), this section reconstructs the as-built
+> genealogy by enumerating that work order's component `ISSUE` transactions — so a single trace shows
+> the parent finished lot **and** the component part / lot / quantity consumed to build it. It is empty
+> for purchased/raw lots. Each entry carries `work_order_id`, `work_order_number`,
+> `component_part_id`, `component_part_number`, `component_part_name`, `lot_number`, and `quantity`
+> (reported positive). Component genealogy is populated by the **backflush** path, so a lot's
+> `consumed_components` is non-empty only when the producing part had `backflush_components = true`.
+> `GET /traceability/serial/{serial_number}` mirrors the lot trace's work-order and NCR collection.
+> Every query is scoped to the active company.
 
 ### Shipping
 
@@ -343,6 +543,10 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/shipping/orders/` | List shipping orders | Yes |
 | POST | `/shipping/orders/` | Create shipping order | Yes |
 | POST | `/shipping/orders/{id}/ship` | Mark as shipped | Yes |
+
+> **Shipment-close is audited.** Marking a shipment shipped closes its work order
+> (status → `CLOSED`); that terminal status change is recorded in the tamper-evident audit trail
+> (`GET /audit/`), flushed so the audit row commits atomically with the closure.
 
 ### Reports
 
@@ -358,8 +562,84 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/analytics/overview` | Analytics overview | Yes |
+| GET | `/analytics/kpis` | KPI dashboard (OEE, OTD, FPY, scrap, NCRs, …) | Yes |
 | GET | `/analytics/production-trends` | Production trends | Yes |
 | GET | `/analytics/quality-metrics` | Quality metrics | Yes |
+| GET | `/analytics/cost-analysis` | Job cost analysis (estimated vs. actual) | Yes |
+
+> **KPI values can be `null` ("n/a").** Each KPI on `GET /analytics/kpis` is a `KPIValue` whose
+> **`value` (and `prior_value` / `change_pct`) are nullable**. A genuinely-uncomputable metric returns
+> `null` rather than a misleading 0/100, and the frontend renders **"n/a"**:
+> - **OEE** is `null` when the work center (or plant) has **no staffed (clocked) time** in the window —
+>   there is no availability denominator, so it is uncomputable, not 0%.
+> - **On-time delivery (OTD)** is `null` when **no work order with a due date completed** in the window
+>   (empty denominator) — not a fabricated 100%.
+>
+> **OEE convention (`Availability × Performance × Quality`).** Computed per work center on the
+> **staffed-time** basis, identical on this headline and on the persisted `OEERecord` (see OEE Tracking
+> below): Availability = productive-run hours ÷ staffed (clocked) hours, productive run = (RUN+SETUP) −
+> UNPLANNED downtime; Performance = ideal hours ÷ productive run, ideal hours = Σ((produced + scrapped)
+> × routing `run_time_per_piece`) over RUN+REWORK (every piece run consumes a standard cycle, including
+> scrap); Quality = good ÷ (good + scrapped) over RUN+REWORK.
+>
+> **OTD rule.** On-time = `actual_end.date() <= due_date`. A **COMPLETE work order with a null
+> `actual_end` counts as NOT on time** (no verifiable completion date). The completed-set is
+> tenant-scoped and soft-delete-filtered (`is_deleted == False`).
+
+> **Cost-analysis labor/overhead is gated by `LABOR_COST_ROLLUP_ENABLED`.** `GET /analytics/cost-analysis`
+> derives each job's labor and overhead from the work order's actual hours at the shared work-center
+> rate — the **same** source the completion rollup uses, so the report and `WorkOrder.actual_cost` agree.
+> When the flag is **off** (the default) the computed **labor and overhead legs report `$0`** (not
+> tracked), uniformly across live- and reconcile-completed work orders. The **material leg is never
+> gated** — it is real issued-material from inventory (the completion ISSUE transactions), so it stays
+> accurate either way. The on-demand `POST /job-costs/{id}/calculate` recomputes job-cost labor from time
+> entries regardless of the flag and is **tenant-scoped** (a job cost is looked up by id **and**
+> company, closing a prior cross-tenant lookup).
+
+### OEE Tracking
+
+OEE = **Availability × Performance × Quality** per work center. **Reads** (dashboards/trends) are open
+to any authenticated user in the tenant so the shop floor can view them; **writes** (auto-calculate,
+records, targets) require **Admin / Manager / Supervisor**.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/oee/dashboard` | OEE per work center, plant-wide OEE, targets (`period` 7d/30d/90d/365d) | Yes |
+| GET | `/oee/trends` | OEE time-series for charts (`work_center_id`, `period`) | Yes |
+| GET | `/oee/six-big-losses/{work_center_id}` | Six-big-losses breakdown | Yes |
+| GET | `/oee/records` | List OEE records (filters: WC, date range, shift) | Yes |
+| GET | `/oee/records/{record_id}` | Get one OEE record | Yes |
+| POST | `/oee/calculate/{work_center_id}` | Auto-calculate the day/shift OEE record from data | Admin / Manager / Supervisor |
+| POST | `/oee/records` | Create an OEE record (manual inputs) | Admin / Manager / Supervisor |
+| PUT | `/oee/records/{record_id}` | Update + recalculate an OEE record | Admin / Manager / Supervisor |
+| DELETE | `/oee/records/{record_id}` | Delete an OEE record | Admin / Manager / Supervisor |
+| GET | `/oee/targets` | List OEE targets | Yes |
+| POST | `/oee/targets` | Create/update a work center's OEE target | Admin / Manager / Supervisor |
+| PUT | `/oee/targets/{target_id}` | Update an OEE target | Admin / Manager / Supervisor |
+| DELETE | `/oee/targets/{target_id}` | Delete an OEE target | Admin / Manager / Supervisor |
+
+> **RBAC split (read-broad / write-restricted).** The write/mutation endpoints depend on
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` (`OEE_WRITE_ROLES` in `app/api/endpoints/oee.py`); they
+> were previously open to any authenticated user. Read endpoints depend on `get_current_user` only, so
+> operators/viewers can still load dashboards. Superuser / Platform Admin bypass role checks, as
+> elsewhere. See `docs/RBAC_PERMISSIONS.md` → OEE.
+
+> **`POST /oee/calculate/{work_center_id}` (auto-calculate).** Builds (or upserts, per work center +
+> date + shift) a real `OEERecord` for `record_date` (default today) from the day's **closed**
+> `TimeEntry` rows, the routing standard cycle time, and reported `DowntimeEvent` rows — on the
+> **staffed-time** convention so it agrees with the `/analytics/kpis` headline:
+> - **Availability** = productive-run minutes ÷ **staffed (clocked)** minutes at the WC; productive run
+>   = (RUN+SETUP) minutes − **UNPLANNED** `DowntimeEvent` minutes. (Returns/stores 0 availability when
+>   there is no staffed time for that WC/day.)
+> - **Performance** = ideal hours ÷ productive run; ideal hours = Σ((`quantity_produced` +
+>   `quantity_scrapped`) × `WorkOrderOperation.run_time_per_piece`) over RUN+REWORK — derived from the
+>   routing, not a hardcoded cycle. Every piece run (including scrap) consumes a standard cycle.
+> - **Quality** = good ÷ (good + scrapped); good = Σ `quantity_produced`, scrapped =
+>   Σ `quantity_scrapped` over RUN+REWORK.
+>
+> This endpoint previously referenced `TimeEntry.start_time` / `end_time` (which do not exist) and
+> returned **500** on every call; it now uses `clock_in` / `clock_out`. All queries are tenant-scoped;
+> a foreign `work_center_id` returns **404**.
 
 ### Users (Admin)
 
@@ -413,6 +693,26 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > global sequence spanning every tenant, so its stats/issues (record counts, sequence ranges,
 > record ids) can't be scoped to a single company without leaking other tenants' data. A company
 > Admin's "are my records intact?" need is served by the per-record endpoint above.
+
+## Real-time Updates (WebSocket)
+
+Real-time work-order, dashboard, and shop-floor updates are delivered over WebSocket. **All three
+endpoints require a valid JWT**, passed as a `token` query parameter (the frontend's API client
+already attaches it). An unauthenticated or invalid-token connection is rejected with WebSocket
+close code **1008** (policy violation).
+
+| Endpoint | Purpose |
+|----------|---------|
+| `WS /ws/updates?token=<jwt>` | Dashboard and system-wide updates |
+| `WS /ws/shop-floor/{work_center_id}?token=<jwt>` | Shop-floor updates for one work center |
+| `WS /ws/work-orders/{work_order_id}?token=<jwt>` | Status updates for one work order |
+
+> **Tenant-scoped broadcasts.** Each connection is bound at connect time to the caller's **active
+> company** (resolved the same way as `get_current_company_id` — via the token's `cid` claim, with
+> a fallback to the user's own company for legacy tokens). Work-order / dashboard / shop-floor
+> completion broadcasts are delivered **only to that company's connections**, never globally, so a
+> client never sees another tenant's events. `/ws/updates` previously accepted unauthenticated
+> connections for general updates; that is no longer permitted (tenant isolation).
 
 ## Common Response Formats
 
@@ -484,6 +784,52 @@ Response:
 }
 ```
 
+## Webhooks
+
+The platform can POST outbound webhooks to per-tenant registered endpoints when a work order is
+completed or closed. Webhooks are **tenant-scoped**: a company only ever receives events for its own
+work orders, delivered only to endpoints registered under that company.
+
+> Webhook endpoints are currently provisioned via the backend service (seeded through
+> `WebhookService`); there is no self-service webhook-admin REST endpoint yet.
+
+### Events
+
+| Event | Fires when |
+|-------|------------|
+| `work_order.completed` | A work order reaches **COMPLETE** (operation/WO completion paths) |
+| `work_order.closed` | A work order reaches **CLOSED** (shipment is marked shipped) |
+
+### Payload
+
+The outbound payload is **intentionally minimal and redacted** — it carries only the structured
+identifiers a subscriber needs to react and then re-fetch full detail via the authenticated API
+(keyed on `work_order_id`). Free-text and customer-identifying fields are **deliberately excluded**:
+
+```json
+{
+  "work_order_id": 1,
+  "work_order_number": "WO-10001",
+  "part_id": 123,
+  "status": "COMPLETE",
+  "quantity_complete": 100.0,
+  "quantity_scrapped": 2.0,
+  "company_id": 42,
+  "completed_at": "2026-06-07T14:30:00"
+}
+```
+
+- `status` is the terminal work-order status: `"COMPLETE"` (for `work_order.completed`) or `"CLOSED"`
+  (for `work_order.closed`).
+- `customer_name` and any notes/free-text are **not** included by design (CUI minimization for an
+  egressing payload). To obtain customer or other detail, re-fetch the work order via
+  `GET /work-orders/{work_order_id}` with an authenticated request.
+
+Delivery is asynchronous (ARQ background worker), enqueued after the completion commits and
+best-effort — a webhook failure never affects the work-order completion. Note that the **internal**
+`WO_COMPLETED` notification (email to the tenant's own users) may carry richer context than the
+egressing webhook payload above.
+
 ## Rate Limiting
 
 API endpoints are rate limited:
@@ -537,6 +883,7 @@ Response:
 | 401 | Unauthorized |
 | 403 | Forbidden |
 | 404 | Not Found |
+| 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry) |
 | 422 | Validation Error |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error |

@@ -138,6 +138,42 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 | `PORT` | No | `8000` | Server port (Railway sets this automatically) |
 | `LOG_LEVEL` | No | `INFO` | Logging level: DEBUG, INFO, WARNING, ERROR |
 
+> **Not environment-configurable (intentional).** The work-order-completion finished-goods receipt
+> location is **not** an env var — the warehouse (`MAIN`) and location (`FINISHED-GOODS`) are module
+> constants (`FINISHED_GOODS_WAREHOUSE` / `FINISHED_GOODS_LOCATION` in
+> `app/services/completion_inventory_service.py`). Likewise, **component backflush on completion** is
+> not a global switch: it is a per-part database flag (`parts.backflush_components`, default `false`),
+> set on the part record, not via configuration. Neither has an environment variable.
+
+### Labor Cost Rollup (work-order completion)
+
+Batch-7 opt-in labor-hour + cost rollup. `LABOR_COST_ROLLUP_ENABLED` gates **all** automatic
+cost/hours surfacing on work-order completion; it ships **OFF** so cost stays opt-in until shop-floor
+labor check-in data is trusted. When **ON**, completing a work order rolls up `actual_hours` and
+`actual_cost` (= labor + issued material + overhead), syncs a linked `JobCost` to `COMPLETED`, and the
+`/analytics/cost-analysis` report computes labor/overhead at the resolved rate. When **OFF** (default),
+completion does not auto-populate cost/hours and the cost-analysis report shows `$0` computed
+labor/overhead (issued material is still shown — it is real inventory cost). The on-demand
+`POST /job-costs/{id}/calculate` endpoint recomputes from time entries regardless of the flag.
+
+The labor rate is resolved per work center from `WorkCenter.hourly_rate`, falling back to
+`DEFAULT_LABOR_RATE` when a work center has no positive rate; the same shared resolver
+(`app/services/labor_cost_service.py`) feeds both the completion rollup and the cost-analysis report,
+so the two can never disagree. This replaces the old hardcoded `$45`/`$50` labor rates.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `LABOR_COST_ROLLUP_ENABLED` | No | `false` | Master switch for the opt-in cost/hours rollup on WO completion (and the flag-gated labor/overhead legs of the cost-analysis report). Currently a **global** flag — see note below. |
+| `DEFAULT_LABOR_RATE` | No | `75.0` | Fallback labor rate ($/hour) used when a work center has no positive `WorkCenter.hourly_rate`. **Placeholder — a finance owner should set the real shop rate.** |
+| `DEFAULT_OVERHEAD_RATE` | No | `0.0` | Overhead/burden rate ($/hour) charged on actual labor hours when a work center carries no overhead rate. |
+
+> **Note:** `LABOR_COST_ROLLUP_ENABLED` is **global** today because the `Company` model has no
+> per-company settings/feature-flags column yet. The resolution helper
+> (`labor_cost_service.is_labor_cost_rollup_enabled`) already accepts a `company_id` and is the single
+> chokepoint to repoint at a per-company field when one is added — promoting the flag to per-tenant will
+> not require touching the rollup callers. The `no_labor_recorded` data-quality signal on completion
+> fires **regardless** of this flag.
+
 ### Redis Cache
 
 | Variable | Required | Default | Description |
