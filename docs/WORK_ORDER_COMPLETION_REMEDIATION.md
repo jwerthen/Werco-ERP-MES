@@ -27,6 +27,9 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **8** ☑ | 11 | OEE/OTD metric correctness + dead auto-OEE endpoint | no | **KPI values move**; OEE-write endpoints now role-gated |
 | **9** ☑ | 12 | Indexes + de-risk reconcile-on-read | **yes** (`042`) | bounded dashboard reconcile; cheap pre-reconcile ETag |
 | **10** ☑ | 13 | Frontend completion UX hardening | no | no API change (dashboard cache invalidation + double-submit guards + list memo) |
+| **11A** ☑ | G4-Fix1 / G3-scope / G6-A | Completeness-critic security/correctness (ECO tenant-scope+audit+RBAC, report tenant-scope, terminal-state lock) | no | ECO mutations now Admin/Manager; ECO + custom-report tenant-scoped; 422 on cross-tenant ECO ids; 409 resurrecting a terminal WO |
+| **11B** ☐ | G2 / G5-A / G3-content | Completeness-critic data integrity (FG decrement + over-ship guard, TimeEntry-approval costing, report honesty) | tbd | tbd |
+| **11C** ☐ | G1 / G5-B / G6-B | Completeness-critic compliance (parent/child rollup, operator-cert gate, CoC generation) | tbd | tbd |
 
 ## Ranked actions
 
@@ -741,15 +744,111 @@ Findings: FEPERF-1, FEPERF-4, FEPERF-5.
 > freshness behavior.
 >
 > **All 10 ranked batches are now implemented** (Batch 10 on `qa/full-pass-2026-06-04`, pending
-> tests/review/commit). The post-plan completeness-critic gaps below remain open as the proposed
-> **Batch 11** (follow-up), pending triage.
+> tests/review/commit). The post-plan completeness-critic gaps below have been triaged into **Batch 11**:
+> sub-batch **11A** (G4-Fix1 / G3-scope / G6-A) is landed on branch `feat/wo-completion-batch11`
+> (pending tests/compliance/review/merge); **11B** and **11C** are triaged-not-started, with two XL
+> items excluded. See "Completeness critic" → "Batch 11" below.
 
 ## Completeness critic — follow-up gaps the audit did NOT cover
-1. **[high] Parent/child assembly rollup entirely unimplemented** — completing child WOs never advances the parent; parent can complete with children open. (`work_order.py:47,98`, `laser_nest_service.py:98`)
-2. **[high] Shipping `mark_shipped` has no inventory decrement and no over-ship guard.** (`shipping.py:282-325`) — *The unaudited part is closed in Batch 1: the WO CLOSED transition now writes a tamper-evident `audit_log` row via `AuditService.log_status_change`. The missing FG decrement and over-ship guard remain.*
-3. **[high] Reports/exports surface the never-computed `actual_cost`/`actual_hours` as truth** — every WO cost/hours report is structurally zero. (`report_builder.py:38-52`)
-4. **[high] ECO complete/implement has zero effect on `affected_work_orders`** (revision-control gap); `get_affected_items` is cross-tenant. (`engineering_changes.py:543,717`)
-5. **[medium] TimeEntry approval is dead/disconnected** from costing; **no operator-certification gate** on clock-in/completion. (`time_entry.py:51`, `operator_certifications.py`)
-6. **[medium] `complete_work_order` can resurrect a CLOSED/shipped WO** (no terminal-state lock); **CoC is a bare boolean, never generated.**
 
-> These become Batch 11 (follow-up) after the ranked plan, pending triage.
+These six gaps (labelled **G1–G6**) are the post-plan completeness-critic findings; their triage into
+**Batch 11** sub-batches (11A landed, 11B/11C planned, two XL items excluded) follows below.
+
+1. **G1 · [high] Parent/child assembly rollup entirely unimplemented** — completing child WOs never advances the parent; parent can complete with children open. (`work_order.py:47,98`, `laser_nest_service.py:98`) → **11C** (parent/child rollup); the related **BOM child-WO spawn** is **EXCLUDED** (G1-general, XL).
+2. **G2 · [high] Shipping `mark_shipped` has no inventory decrement and no over-ship guard.** (`shipping.py:282-325`) — *The unaudited part is closed in Batch 1: the WO CLOSED transition now writes a tamper-evident `audit_log` row via `AuditService.log_status_change`. The missing FG decrement and over-ship guard remain.* → **11B**.
+3. **G3 · [high] Reports/exports surface the never-computed `actual_cost`/`actual_hours` as truth** — every WO cost/hours report is structurally zero. (`report_builder.py:38-52`) Split into **G3-scope** (tenant isolation — the report builder queried across all tenants) → **landed in 11A**; and **G3-content** (report honesty about uncomputed cost/hours) → **11B**.
+4. **G4 · [high] ECO complete/implement has zero effect on `affected_work_orders`** (revision-control gap); `get_affected_items` is cross-tenant. (`engineering_changes.py:543,717`) Split into **G4-Fix1** (ECO router tenant-scope + audit + RBAC, incl. the cross-tenant `affected-items` resolve and dashboard aggregate leak) → **landed in 11A**; and **G4-Fix2** (ECO actually drives revision/hold on `affected_work_orders`) → **EXCLUDED** (XL).
+5. **G5 · [medium] TimeEntry approval is dead/disconnected** from costing; **no operator-certification gate** on clock-in/completion. (`time_entry.py:51`, `operator_certifications.py`) Split into **G5-A** (TimeEntry approval → costing) → **11B**; and **G5-B** (operator-certification gate) → **11C**.
+6. **G6 · [medium] `complete_work_order` can resurrect a CLOSED/shipped/cancelled WO** (no terminal-state lock); **CoC is a bare boolean, never generated.** Split into **G6-A** (terminal-state lock) → **landed in 11A**; and **G6-B** (Certificate of Conformance generation) → **11C**.
+
+### Batch 11 (completeness-critic follow-up) — sub-batched
+
+Batch 11 is the post-plan completeness-critic effort, triaged into three sub-batches by theme/risk plus
+two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 11):
+
+| Sub-batch | Items | Theme | Status |
+|---|---|---|---|
+| **11A** | G4-Fix1, G3-scope, G6-A | Security / correctness (tenant isolation, audit, RBAC, terminal-state lock) | ☑ landed on branch `feat/wo-completion-batch11` |
+| **11B** | G2, G5-A, G3-content | Data integrity (FG decrement + over-ship guard, TimeEntry-approval costing, report honesty) | ☐ triaged, not started |
+| **11C** | G1 (parent/child rollup), G5-B, G6-B | Compliance (parent/child rollup, operator-cert gate, CoC generation) | ☐ triaged, not started |
+| **EXCLUDED** | G4-Fix2 (ECO revision/hold drive), G1-general (BOM child-WO spawn) | XL — own initiatives | — out of Batch 11 scope |
+
+> **Batch 11A status (2026-06-08, landed on branch `feat/wo-completion-batch11`, pending
+> tests/compliance/review/merge).** Three completeness-critic security/correctness fixes — no migration,
+> no schema change, no new env var. All three are tenant-isolation / audit / state-integrity hardening
+> (AS9100D/CMMC-relevant), consistent with Batch 1's isolation+audit posture.
+>
+> **G4-Fix1 — ECO router is now tenant-scoped, audited, and Admin/Manager-gated**
+> (`app/api/endpoints/engineering_changes.py`). The ECO router was a cross-tenant hole: `get_eco_or_404`
+> filtered on `id` alone, so **every by-id ECO endpoint (read and mutate) was cross-tenant**, and
+> `get_affected-items` resolved affected part/WO/document ids across **all** tenants.
+> - **Tenant scope.** `get_eco_or_404(db, eco_id, company_id)` now filters `company_id`; a mismatch
+>   returns **404** (never 403 — don't confirm another tenant's ECO exists). `update_task` re-verifies the
+>   parent ECO's company and scopes the task query by `company_id`. `/eco/eco/affected-items/{id}` resolves
+>   parts/WOs/documents **only within the active company** (and excludes soft-deleted parts/WOs;
+>   `Document` has no `is_deleted` column). The `/eco/eco/dashboard` aggregates (by-type, by-priority, and
+>   the completed-cycle-time set) are now all filtered by `company_id` — they previously **summed across
+>   every tenant**.
+> - **Cross-tenant affected ids → 422.** New `_validate_affected_ids_in_company` runs on create and
+>   update: each id in `affected_parts` / `affected_work_orders` / `affected_documents` must resolve to a
+>   live row in the active company, else **422** (`"Unknown or cross-tenant <label> id(s): […]"`). This
+>   stops a crafted payload from persisting another tenant's ids (which the affected-items endpoint would
+>   then resolve). `add_approval` likewise verifies the named approver belongs to the active company.
+> - **RBAC.** All mutating ECO endpoints — create, update, submit, approve, reject, implement, complete,
+>   add task, update task, add approval — now require `require_role([ADMIN, MANAGER])` (were any
+>   authenticated user). Reads (list/get/dashboard/list-approvals/affected-items) stay open to all
+>   authenticated users. New child rows (`ECOApproval`, `ECOImplementationTask`) are tenant-tagged
+>   (`company_id` set — both are `TenantMixin`, `NOT NULL`).
+> - **Audit.** ECO create/update and the status transitions (submit/approve/reject/implement/complete),
+>   plus task create/update and approval create, now write to the tamper-evident `audit_log` via
+>   `AuditService` (`db.flush()` before the log call so the audit row carries the assigned PK). The ECO
+>   lifecycle was previously unaudited.
+>
+> **G3-scope — custom-report builder is now tenant-scoped** (`app/services/report_builder.py`,
+> `app/api/endpoints/analytics.py`). `ReportBuilderService.execute_report` now takes `company_id` and
+> applies `tenant_filter(query, model, company_id)` **before** any user-supplied filters/group-by/sort.
+> Every supported data source (WorkOrder, Part, InventoryItem, NonConformanceReport, PurchaseOrder,
+> Quote) carries `company_id` via `TenantMixin`, so the report can never return another tenant's rows.
+> Both callers — `POST /analytics/custom-report` and `GET /analytics/custom-report/export` — pass the
+> active company. (The export's template fetch was already company-scoped; the **data** query was not, so
+> export returned every tenant's rows.) No request/response shape change — scoping only. This is the
+> **G3-scope** half; **G3-content** (the report honestly representing uncomputed `actual_cost`/
+> `actual_hours`) is deferred to 11B.
+>
+> **G6-A — terminal-state lock on work-order completion**
+> (`app/services/work_order_state_service.py`, `app/api/endpoints/work_orders.py`,
+> `app/api/endpoints/shop_floor.py`). A new module-level set `TERMINAL_WO_STATUSES = {COMPLETE, CLOSED,
+> CANCELLED}` is the single source of truth for "this WO has finished its lifecycle." The prior guards
+> checked only `COMPLETE`/`CLOSED`, so a **CANCELLED** WO could be driven to COMPLETE — re-firing
+> FG receipt / backflush / cost rollup (Batch 6/7) and writing a spurious COMPLETE row onto the
+> tamper-evident audit chain. Now:
+> - **Manual complete** (`POST /work-orders/{id}/complete`) of a **CANCELLED** WO → **409**
+>   (`"cannot complete a cancelled work order"`). (The existing COMPLETE/CLOSED no-op idempotency is
+>   unchanged — that completion already happened; CANCELLED is different, it was deliberately pulled.)
+> - **Operation complete** (`/work-orders/operations/{id}/complete` and
+>   `/shop-floor/operations/{id}/complete`) against an operation whose parent WO is in **any** terminal
+>   status → **409** (`"cannot complete operation: work order is <status>"`) before any mutation —
+>   mirroring the existing ON_HOLD 409.
+> - **Generic update** (`PUT /work-orders/{id}`) moving a **terminal → non-terminal** status → **409**
+>   (`"cannot move work order out of terminal status '<current>' to '<target>'"`). This handler applies
+>   `status` via a blind `setattr` with no transition validation; the guard is the minimal block on the
+>   one dangerous flip, not a full state machine.
+> - **Reconcile-on-read** (`_sync_work_order_status_from_operations`,
+>   `finalize_operation_completion`) early-returns / is gated on `TERMINAL_WO_STATUSES`, so operation
+>   evidence read on any GET can never reopen a terminal WO to IN_PROGRESS or resurrect a CANCELLED WO to
+>   COMPLETE. (The reconcile path has no actor, so a resurrection there would also mis-attribute the
+>   audit/inventory writes.)
+>
+> **Compliance note.** All three are isolation/audit/state-integrity hardening; none changes a
+> compliance **claim**, so no edit to `CMMC_LEVEL_2_COMPLIANCE.md` was required. The ECO lifecycle moving
+> onto the audit chain and the report/ECO tenant scoping *strengthen* the AS9100D traceability + CMMC
+> access-control posture already documented there.
+>
+> **Docs updated for 11A:** `docs/API.md` (new Engineering Change Orders section; `/analytics/custom-report*`
+> rows + tenant-scope callout; WO terminal-state 409s on the complete / operation-complete / update
+> endpoints), `docs/RBAC_PERMISSIONS.md` (new ECO permission matrix — mutations Admin/Manager), and this
+> doc.
+>
+> **11B / 11C remain triaged-not-started** (see table above), and **G4-Fix2** (ECO drives revision/hold
+> on `affected_work_orders`) and **G1-general** (BOM-driven child-WO spawn) are **EXCLUDED** from Batch 11
+> as XL items for their own initiatives.
