@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.queue import enqueue_job_best_effort
 from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,76 @@ def emit_work_order_completed_event(
         )
     except Exception:  # pragma: no cover - signal failure must not fail completion
         logger.exception("work_order_completed event emit failed for WO %s (company %s)", work_order.id, company_id)
+
+
+def record_parent_children_complete(
+    db: Session,
+    *,
+    parent_work_order: WorkOrder,
+    child_work_order: WorkOrder,
+    company_id: int,
+    user_id: Optional[int],
+    audit: AuditService,
+    source: str = "completion",
+) -> None:
+    """Record that the LAST laser child of a parent WO has completed (G1 advance).
+
+    Decision: this is a SIGNAL only -- we do NOT auto-complete the parent. Parent and
+    child work orders are NOT operation-coupled in the data model, so mutating the
+    parent's route from a child completion would be wrong. Instead we leave a
+    tamper-evident audit row + one ``child_work_orders_complete`` OperationalEvent so
+    the parent surfaces as "all children done, ready to advance".
+
+    No-double-fire: ``find_parent_to_advance`` returns the parent only when ALL laser
+    children are terminal, which becomes true exactly once (when the last child
+    flips). Completion handlers are idempotent and reconcile-on-read never re-flips a
+    terminal child, so this records at most once per parent.
+
+    Best-effort: ``audit.log`` already swallows its own failures and only flushes
+    (never commits) so the row commits atomically with the caller's unit of work; the
+    OperationalEvent emit is additionally wrapped so a signal failure can never break
+    the child completion the caller is committing.
+    """
+    audit.log(
+        action="CHILD_WORK_ORDERS_COMPLETE",
+        resource_type="work_order",
+        resource_id=parent_work_order.id,
+        resource_identifier=parent_work_order.work_order_number,
+        description=(
+            f"All child work orders of {parent_work_order.work_order_number} are complete "
+            f"(last child {child_work_order.work_order_number} reached terminal status)."
+        ),
+        extra_data={
+            "source": source,
+            "child_work_order_id": child_work_order.id,
+            "parent_work_order_id": parent_work_order.id,
+        },
+        company_id=company_id,
+    )
+
+    try:
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type="child_work_orders_complete",
+            source_module="completion_signal",
+            entity_type="work_order",
+            entity_id=parent_work_order.id,
+            work_order_id=parent_work_order.id,
+            user_id=user_id,
+            severity="info",
+            event_payload={
+                "source": source,
+                "parent_work_order_number": parent_work_order.work_order_number,
+                "child_work_order_id": child_work_order.id,
+                "child_work_order_number": child_work_order.work_order_number,
+            },
+        )
+    except Exception:  # pragma: no cover - a signal failure must not break completion
+        logger.exception(
+            "child_work_orders_complete event emit failed for parent WO %s (company %s)",
+            parent_work_order.id,
+            company_id,
+        )
 
 
 def enqueue_work_order_completion_signals(*, work_order_id: int, company_id: int, status: str) -> None:

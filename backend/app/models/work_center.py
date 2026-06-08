@@ -1,10 +1,13 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
 from app.db.mixins import TenantMixin
+from app.models.operator_certification import CertificationType
 
 
 class WorkCenter(Base, TenantMixin):
@@ -26,6 +29,12 @@ class WorkCenter(Base, TenantMixin):
     # Status
     is_active = Column(Boolean, default=True)
     current_status = Column(String(50), default="available")  # available, in_use, maintenance, offline
+
+    # Operator-qualification gate (G5-B): when set, only operators holding an active
+    # certification of this type may be assigned/clock in to this work center. NULL
+    # (the common case) means the work center has no certification requirement.
+    # Reuses the existing CertificationType native enum (created by operator_certifications).
+    required_certification_type = Column(SQLEnum(CertificationType), nullable=True)
 
     # Location tracking
     building = Column(String(50))

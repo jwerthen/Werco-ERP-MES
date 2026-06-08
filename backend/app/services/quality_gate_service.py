@@ -40,10 +40,15 @@ from app.models.quality import (
     NonConformanceReport,
 )
 from app.models.user import User
-from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+
+# G1: imported from work_order_state_service. No circular import: that module imports
+# only the work_order / time_entry models, never this one -- so quality_gate_service
+# may depend on it (one-directional).
+from app.services.work_order_state_service import incomplete_child_work_orders
 
 # Audit action verb stamped on the tamper-evident chain when a completion proceeds
 # despite an unsatisfied quality gate. Distinct from a plain COMPLETE so the bypass
@@ -220,6 +225,27 @@ def evaluate_completion_quality_exceptions(
                 reference_id=blocker.id,
             )
         )
+
+    # G1: a parent WO must not silently complete while a laser-nest child WO is still
+    # open. We only run this once THIS completion drove the WO terminal -- at every
+    # live eval call site the finalizer has already flipped status to COMPLETE -- so a
+    # mere progress/partial update never triggers it. Read-only + tenant-scoped (the
+    # child query filters company_id / is_deleted / LASER_CUTTING / non-terminal).
+    if work_order.status == WorkOrderStatus.COMPLETE:
+        incomplete = incomplete_child_work_orders(db, work_order, company_id)
+        if incomplete:
+            exceptions.append(
+                QualityException(
+                    code="child_work_orders_incomplete",
+                    severity="high",
+                    message=(
+                        f"Work order {work_order.work_order_number} completed with {len(incomplete)} "
+                        f"incomplete child work order(s): {', '.join(c.work_order_number for c in incomplete)}."
+                    ),
+                    reference_type="work_order",
+                    reference_id=work_order.id,
+                )
+            )
 
     return exceptions
 

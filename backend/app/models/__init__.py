@@ -114,7 +114,7 @@ from .routing_learning import (
     RoutingOperationPattern,
     RoutingWorkCenterPreference,
 )
-from .shipping import Shipment, ShipmentStatus
+from .shipping import CertificateOfConformance, Shipment, ShipmentStatus
 from .spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
 from .supplier_part import SupplierPartMapping
 from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
@@ -297,5 +297,6 @@ __all__ = [
     "RolePermission",
     "Shipment",
     "ShipmentStatus",
+    "CertificateOfConformance",
     "SupplierPartMapping",
 ]

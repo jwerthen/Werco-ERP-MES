@@ -68,6 +68,13 @@ class TimeEntryResponse(TimeEntryBase):
     # Warn-and-record (Batch 4 / rank 7): quality gates that were unsatisfied when a
     # clock-out completed the operation/WO. Backward-compatible -- defaults to empty.
     quality_exceptions: List[QualityExceptionInfo] = Field(default_factory=list)
+    # Warn-and-record (Batch 11C / G5-B): operator-qualification gates that were
+    # unsatisfied at clock-in (skill level below Basic, or a missing/expired required
+    # certification for the work center). Backward-compatible -- defaults to empty, so
+    # an all-clear clock-in is indistinguishable from the pre-G5-B response shape. The
+    # ``code`` values here are ``operator_not_skill_qualified`` /
+    # ``operator_certification_missing_or_expired``; reuses QualityExceptionInfo's shape.
+    qualification_exceptions: List[QualityExceptionInfo] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

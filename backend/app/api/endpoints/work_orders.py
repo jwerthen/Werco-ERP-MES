@@ -53,6 +53,7 @@ from app.services.completion_signal_service import (
     emit_operation_completed_event,
     emit_work_order_completed_event,
     enqueue_work_order_completion_signals,
+    record_parent_children_complete,
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import (
@@ -79,6 +80,7 @@ from app.services.work_order_state_service import (
     WorkOrderStateError,
     begin_operation_progress,
     finalize_operation_completion,
+    find_parent_to_advance,
     has_incomplete_predecessors,
     operation_target_quantity,
     reconcile_work_orders_from_completion_evidence,
@@ -186,7 +188,58 @@ def _emit_reconcile_events(
                 # emit() raises ValueError if the WO/op isn't in this company; a
                 # reconcile transition for another tenant must be skipped, not 500.
                 continue
+        # G1 ADVANCE on the reconcile path: for any WO this reconcile drove to COMPLETE
+        # that is a laser child, surface a signal on its parent iff every laser child is
+        # now terminal. Attributed to the requesting user, source="reconcile_on_read".
+        # FULLY best-effort: a parent-advance failure must never 500 a GET.
+        _emit_reconcile_parent_advance(db, company_id, current_user, transitions)
     except Exception:  # pragma: no cover - reads must never 500 on event-emit failure
+        pass
+
+
+def _emit_reconcile_parent_advance(
+    db: Session,
+    company_id: int,
+    current_user: User,
+    transitions: list[StatusTransition],
+) -> None:
+    """Record the G1 parent-children-complete signal for reconcile-driven WO completions.
+
+    Mirror of the shop_floor helper. For each ``work_order`` -> COMPLETE transition,
+    load the WO (company-scoped, not soft-deleted, has a parent) and, if its last laser
+    child just completed, leave the tamper-evident audit row + ``child_work_orders_complete``
+    event. Best-effort: wrapped so it can never 500 a GET; joined to this read's unit of
+    work (the caller commits); tenant-scoped via ``company_id``. Same no-double-fire
+    reasoning as the live paths (all-children-terminal becomes true exactly once).
+    """
+    completed_wo_ids = {tr.resource_id for tr in transitions if tr.resource_type == "work_order"}
+    if not completed_wo_ids:
+        return
+    try:
+        audit = AuditService(db, current_user)
+        completed_work_orders = (
+            db.query(WorkOrder)
+            .filter(
+                WorkOrder.id.in_(completed_wo_ids),
+                WorkOrder.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrder.parent_work_order_id.isnot(None),
+            )
+            .all()
+        )
+        for child in completed_work_orders:
+            parent = find_parent_to_advance(db, child, company_id)
+            if parent is not None:
+                record_parent_children_complete(
+                    db,
+                    parent_work_order=parent,
+                    child_work_order=child,
+                    company_id=company_id,
+                    user_id=current_user.id,
+                    audit=audit,
+                    source="reconcile_on_read",
+                )
+    except Exception:  # pragma: no cover - reads must never 500 on parent-advance failure
         pass
 
 
@@ -2769,6 +2822,23 @@ def complete_operation(
             user=current_user,
             source="complete_operation",
         )
+    # G1 ADVANCE: when THIS WO (a laser child) just completed, surface a signal on its
+    # parent iff every laser child is now terminal. Signal-only -- we do NOT
+    # auto-complete the parent (parent/child WOs are not operation-coupled). Fires only
+    # when ALL children are terminal, which becomes true exactly once (last child
+    # flips); idempotent completion + non-reopening reconcile => records at most once.
+    if work_order_completed and work_order:
+        parent = find_parent_to_advance(db, work_order, company_id)
+        if parent is not None:
+            record_parent_children_complete(
+                db,
+                parent_work_order=parent,
+                child_work_order=work_order,
+                company_id=company_id,
+                user_id=current_user.id,
+                audit=audit,
+                source="completion",
+            )
 
     try:
         db.commit()

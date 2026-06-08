@@ -1,18 +1,25 @@
 from datetime import date, datetime
+from io import BytesIO
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_audit_service, get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.realtime import safe_broadcast
 from app.core.websocket import broadcast_dashboard_update, broadcast_work_order_update
 from app.db.database import get_db
-from app.models.shipping import Shipment, ShipmentStatus
-from app.models.user import User
+from app.models.shipping import CertificateOfConformance, Shipment, ShipmentStatus
+from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.coc_service import (
+    coc_required_for_shipment,
+    generate_coc_for_shipment,
+    render_coc_pdf,
+)
 from app.services.completion_inventory_service import (
     decrement_finished_goods_for_shipment,
     record_over_ship_if_needed,
@@ -66,6 +73,27 @@ class ShipmentResponse(BaseModel):
     class Config:
         from_attributes = True
         use_enum_values = True
+
+
+class CertificateOfConformanceResponse(BaseModel):
+    """Metadata for an issued Certificate of Conformance (the PDF is a separate endpoint)."""
+
+    id: int
+    coc_number: str
+    shipment_id: int
+    work_order_id: int
+    customer_name: Optional[str] = None
+    customer_po: Optional[str] = None
+    part_number: Optional[str] = None
+    part_name: Optional[str] = None
+    revision: Optional[str] = None
+    quantity: Optional[float] = None
+    lot_number: Optional[str] = None
+    issued_by: Optional[int] = None
+    issued_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 def generate_shipment_number(db: Session) -> str:
@@ -422,6 +450,40 @@ def mark_shipped(
             audit=audit,
         )
 
+        # G6-B: auto-issue a Certificate of Conformance when one is required (the shipment
+        # was flagged or the customer master requires it). The CoC row + its audit entry
+        # join THIS unit of work so they commit atomically with the ship below. CoC
+        # generation is BEST-EFFORT and idempotent (DB-enforced per shipment): a failure
+        # here must never fail the ship, so it is wrapped and recorded as a warning
+        # OperationalEvent (mirrors the warn-and-record posture of the FG/over-ship guards).
+        if coc_required_for_shipment(db, work_order=wo, shipment=shipment, company_id=company_id):
+            try:
+                generate_coc_for_shipment(
+                    db,
+                    shipment=shipment,
+                    company_id=company_id,
+                    user_id=current_user.id,
+                    audit=audit,
+                )
+            except Exception:  # pragma: no cover - CoC issuance must never fail a ship
+                try:
+                    OperationalEventService(db).emit(
+                        company_id=company_id,
+                        event_type="coc_generation_failed",
+                        source_module="shipping",
+                        entity_type="shipment",
+                        entity_id=shipment.id,
+                        work_order_id=wo.id,
+                        user_id=current_user.id,
+                        severity="warning",
+                        event_payload={
+                            "shipment_number": shipment.shipment_number,
+                            "work_order_number": wo.work_order_number,
+                        },
+                    )
+                except Exception:  # the warning signal itself must never fail the ship
+                    pass
+
     db.commit()
 
     # EVT-1: realtime + outbound signals for the closure. After commit (so we never
@@ -508,4 +570,80 @@ def update_shipment(
         quantity_shipped=shipment.quantity_shipped,
         ship_date=shipment.ship_date,
         created_at=shipment.created_at,
+    )
+
+
+def _coc_for_shipment(db: Session, shipment_id: int, company_id: int) -> Optional[CertificateOfConformance]:
+    """Tenant-scoped lookup of the CoC issued for a shipment (None if not yet issued)."""
+    return (
+        db.query(CertificateOfConformance)
+        .filter(
+            CertificateOfConformance.company_id == company_id,
+            CertificateOfConformance.shipment_id == shipment_id,
+        )
+        .first()
+    )
+
+
+@router.post("/{shipment_id}/coc", response_model=CertificateOfConformanceResponse)
+def issue_certificate_of_conformance(
+    shipment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Issue (or return the existing) Certificate of Conformance for a shipment.
+
+    Idempotent: re-issuing returns the same CoC without a second audit row. RBAC is
+    restricted to ADMIN / MANAGER / QUALITY (quality artifact). Tenant-scoped.
+    """
+    shipment = db.query(Shipment).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+
+    coc = generate_coc_for_shipment(
+        db,
+        shipment=shipment,
+        company_id=company_id,
+        user_id=current_user.id,
+        audit=audit,
+    )
+    db.commit()
+    db.refresh(coc)
+    return CertificateOfConformanceResponse.model_validate(coc)
+
+
+@router.get("/{shipment_id}/coc", response_model=CertificateOfConformanceResponse)
+def get_certificate_of_conformance(
+    shipment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Return the metadata for a shipment's issued CoC (404 if none has been issued)."""
+    coc = _coc_for_shipment(db, shipment_id, company_id)
+    if not coc:
+        raise HTTPException(status_code=404, detail="Certificate of Conformance not found")
+    return CertificateOfConformanceResponse.model_validate(coc)
+
+
+@router.get("/{shipment_id}/coc/pdf")
+def download_certificate_of_conformance_pdf(
+    shipment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Render and stream the CoC PDF (deterministically, from the frozen snapshot)."""
+    coc = _coc_for_shipment(db, shipment_id, company_id)
+    if not coc:
+        raise HTTPException(status_code=404, detail="Certificate of Conformance not found")
+
+    pdf_bytes = render_coc_pdf(coc, db)
+    filename = f"{coc.coc_number}.pdf"
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
