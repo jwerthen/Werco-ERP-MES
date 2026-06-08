@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import Date, and_, case, cast, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.part import Part
@@ -37,6 +37,7 @@ from app.schemas.analytics import (
     TrendDirection,
     VendorQuality,
 )
+from app.services.labor_cost_service import is_labor_cost_rollup_enabled, resolve_labor_rates, resolve_overhead_rate
 
 logger = logging.getLogger(__name__)
 
@@ -889,7 +890,27 @@ class AnalyticsService:
     def get_cost_analysis(
         self, start_date: date, end_date: date, work_order_id: Optional[int] = None
     ) -> CostAnalysisResponse:
-        """Get cost analysis for jobs."""
+        """Get cost analysis for jobs.
+
+        COST-5: the labor-cost breakdown is derived from each operation's actual hours
+        at the SHARED work-center labor rate (``labor_cost_service``) -- the SAME source
+        the completion cost rollup uses -- replacing the old hardcoded
+        ``actual_hours * 50``. The material leg reads the issued-material cost the rollup
+        computed (Batch-6 ISSUE txns), so this report and ``WorkOrder.actual_cost`` agree.
+
+        OPT-IN gating (Batch 7): the computed labor + overhead legs only surface when
+        ``LABOR_COST_ROLLUP_ENABLED`` is ON for this company. Flag-OFF (the default), the
+        labor/overhead figures are reported as 0 (not tracked) -- the SAME stance the
+        live and reconcile completion paths take, so a WO completed under either path
+        surfaces $0 computed labor here regardless of how it completed. The material leg
+        is NOT gated: it is real issued-material from inventory (Batch-6 ISSUE txns), not
+        a labor-estimate-derived figure, so it stays accurate either way. Tenant-scoped on
+        ``self.company_id`` throughout (the flag is also resolved for that company).
+        """
+        # Resolve the OPT-IN cost-rollup flag for THIS company. Flag-OFF: surface no
+        # computed labor/overhead so the report is consistently zero across live- and
+        # reconcile-completed WOs (no path leaks a non-zero labor figure flag-OFF).
+        rollup_enabled = is_labor_cost_rollup_enabled(self.company_id)
         query = self.db.query(WorkOrder).filter(
             WorkOrder.company_id == self.company_id,
             WorkOrder.status.in_([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED]),
@@ -903,7 +924,19 @@ class AnalyticsService:
                 WorkOrder.actual_end <= datetime.combine(end_date, datetime.max.time()),
             )
 
-        work_orders = query.all()
+        work_orders = query.options(joinedload(WorkOrder.operations), joinedload(WorkOrder.part)).all()
+
+        # Batch-resolve labor rates for every work center the operations touch in ONE
+        # query (COST-5 shared resolver), so the per-operation labor cost reflects WHERE
+        # the work happened and the report agrees with the completion rollup. Only needed
+        # when the rollup flag is ON; flag-OFF we skip the rate resolution entirely (the
+        # labor/overhead legs are reported as 0, so no rate is consulted).
+        labor_rates: dict[Optional[int], float] = {}
+        overhead_rate = 0.0
+        if rollup_enabled:
+            all_wc_ids = [op.work_center_id for wo in work_orders for op in (wo.operations or [])]
+            labor_rates = resolve_labor_rates(self.db, self.company_id, all_wc_ids)
+            overhead_rate = resolve_overhead_rate(self.db, self.company_id, None)
 
         jobs = []
         total_estimated = 0
@@ -912,6 +945,21 @@ class AnalyticsService:
         for wo in work_orders:
             variance = wo.actual_cost - wo.estimated_cost
             variance_pct = (variance / wo.estimated_cost * 100) if wo.estimated_cost > 0 else 0
+
+            # Labor + overhead are surfaced ONLY when the cost-rollup flag is ON for this
+            # company; flag-OFF they report 0 (not tracked), uniformly across live- and
+            # reconcile-completed WOs. Material is always real issued-material -- not gated.
+            labor_cost = 0.0
+            overhead_cost = 0.0
+            if rollup_enabled:
+                for op in wo.operations or []:
+                    op_hours = float(op.actual_setup_hours or 0) + float(op.actual_run_hours or 0)
+                    if op_hours <= 0:
+                        continue
+                    rate = labor_rates.get(op.work_center_id, labor_rates[None])
+                    labor_cost += op_hours * rate
+                    overhead_cost += op_hours * overhead_rate
+            material_cost = self._issued_material_cost(wo.id)
 
             jobs.append(
                 JobCostAnalysis(
@@ -924,9 +972,9 @@ class AnalyticsService:
                     variance=variance,
                     variance_pct=variance_pct,
                     cost_breakdown=CostBreakdown(
-                        material_cost=0,  # Would need detailed tracking
-                        labor_cost=wo.actual_hours * 50,  # Estimated hourly rate
-                        overhead_cost=0,
+                        material_cost=material_cost,
+                        labor_cost=labor_cost,
+                        overhead_cost=overhead_cost,
                         outside_services=0,
                         total_cost=wo.actual_cost,
                     ),
@@ -949,6 +997,25 @@ class AnalyticsService:
             avg_variance_pct=avg_variance,
             time_series=[],
         )
+
+    def _issued_material_cost(self, work_order_id: int) -> float:
+        """Cost of material ISSUEd to a WO (Batch-6 ISSUE txns), tenant-scoped.
+
+        Mirrors ``completion_cost_service._issued_material_cost`` so the analytics
+        material leg equals the rollup's material leg. ISSUE quantities/costs are stored
+        negative, so the magnitude is summed.
+        """
+        total = (
+            self.db.query(func.coalesce(func.sum(func.abs(InventoryTransaction.total_cost)), 0.0))
+            .filter(
+                InventoryTransaction.company_id == self.company_id,
+                InventoryTransaction.reference_type == "work_order",
+                InventoryTransaction.reference_id == work_order_id,
+                InventoryTransaction.transaction_type == TransactionType.ISSUE,
+            )
+            .scalar()
+        )
+        return float(total or 0.0)
 
     # ============ QUALITY METRICS ============
 

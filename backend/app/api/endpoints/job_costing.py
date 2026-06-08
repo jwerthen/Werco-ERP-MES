@@ -8,9 +8,9 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
 from app.models.job_costing import CostEntry, CostEntrySource, CostEntryType, JobCost, JobCostStatus
-from app.models.time_entry import TimeEntry
 from app.models.user import User
 from app.models.work_order import WorkOrder
+from app.services.job_costing_service import recompute_from_time_entries
 
 router = APIRouter()
 
@@ -544,80 +544,42 @@ def calculate_costs(
     job_cost_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
-    """Recalculate actual costs from time entries and existing cost entries."""
+    """Recalculate actual costs from time entries and existing cost entries.
+
+    Delegates the TimeEntry -> labor recompute to the shared
+    ``job_costing_service.recompute_from_time_entries`` (COST-2) so the on-demand
+    endpoint and the completion cost rollup use ONE implementation and the SAME
+    configurable labor rate (COST-5: per work center via ``WorkCenter.hourly_rate``,
+    falling back to ``settings.DEFAULT_LABOR_RATE`` -- no more hardcoded $45). Now
+    tenant-scoped on ``company_id``.
+    """
     job_cost = (
         db.query(JobCost)
         .options(
             joinedload(JobCost.work_order).joinedload(WorkOrder.part),
             joinedload(JobCost.entries),
         )
-        .filter(JobCost.id == job_cost_id)
+        .filter(JobCost.id == job_cost_id, JobCost.company_id == company_id)
         .first()
     )
 
     if not job_cost:
         raise HTTPException(status_code=404, detail="Job cost not found")
 
-    # Pull time entries for this work order and create labor cost entries
-    time_entries = (
-        db.query(TimeEntry)
-        .filter(
-            TimeEntry.work_order_id == job_cost.work_order_id,
-            TimeEntry.clock_out.isnot(None),
-        )
-        .all()
-    )
+    recompute_from_time_entries(db, job_cost=job_cost, company_id=company_id, user_id=current_user.id)
+    db.commit()
 
-    # Remove existing auto-generated labor entries (from time entries)
-    existing_auto = (
-        db.query(CostEntry)
-        .filter(
-            CostEntry.job_cost_id == job_cost_id,
-            CostEntry.source == CostEntrySource.TIME_ENTRY,
-        )
-        .all()
-    )
-    for e in existing_auto:
-        db.delete(e)
-    db.flush()
-
-    # Default labor rate (could be made configurable)
-    labor_rate = 45.0
-
-    for te in time_entries:
-        if te.duration_hours and te.duration_hours > 0:
-            entry = CostEntry(
-                job_cost_id=job_cost_id,
-                entry_type=CostEntryType.LABOR,
-                description=f"Labor - {te.entry_type.value if hasattr(te.entry_type, 'value') else te.entry_type}",
-                quantity=te.duration_hours,
-                unit_cost=labor_rate,
-                total_cost=te.duration_hours * labor_rate,
-                work_order_operation_id=te.operation_id,
-                source=CostEntrySource.TIME_ENTRY,
-                reference=f"TE-{te.id}",
-                entry_date=te.clock_in.date() if te.clock_in else date.today(),
-                created_by=current_user.id,
-            )
-            db.add(entry)
-
-    db.flush()
-
-    # Reload entries and recalculate
     job_cost = (
         db.query(JobCost)
         .options(
             joinedload(JobCost.work_order).joinedload(WorkOrder.part),
             joinedload(JobCost.entries),
         )
-        .filter(JobCost.id == job_cost_id)
+        .filter(JobCost.id == job_cost_id, JobCost.company_id == company_id)
         .first()
     )
-
-    recalculate_job_cost(job_cost)
-    db.commit()
-
     return build_job_cost_response(job_cost)
 
 

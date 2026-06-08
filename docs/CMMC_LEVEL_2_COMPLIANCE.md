@@ -51,6 +51,13 @@
   pre-existing duplicate open entries is non-destructive (closes the older rows, preserves
   `quantity_produced`) and logs the altered labor-record ids to the deploy output for AS9100D
   traceability rather than to the tamper-evident `audit_log`.
+- [x] Cross-tenant job-cost recompute closed (AC-3.1.3 boundary control, Batch 7 / rank 10):
+  `POST /job-costs/{id}/calculate` now looks up the job cost by id **and** active `company_id` and
+  returns **404 before any recompute** on a foreign id — previously it resolved a `JobCost` by id
+  alone and could recompute another tenant's job. The `WorkOrderOperation` lookup inside the shared
+  recompute helper (`recompute_from_time_entries`) is likewise company-scoped, and the labor-rate
+  resolver (`labor_cost_service`) filters every work-center lookup by company, so no cross-tenant rate
+  or labor record can leak into a cost figure.
 
 **GAPS:**
 - [ ] **AC-3.1.10 - Session Inactivity Timeout** ⚠️ HIGH
@@ -123,6 +130,16 @@
   tenant-scoped. **DB-enforced idempotency** (migration `041`, two partial UNIQUE indexes) guarantees
   at most one receipt per work order and one issue per component, so a re-completion or reconcile
   re-read cannot duplicate a regulated inventory/traceability record.
+  AU-3.3.1 coverage also now records **completion cost/hours rollup and job-cost status changes**
+  (Batch 7 / rank 10), which surface in compliance-facing cost reports. The labor-hour + actual-cost
+  rollup is opt-in (global flag `LABOR_COST_ROLLUP_ENABLED`, default OFF); **when enabled**, a
+  completing work order writes one tamper-evident `audit_log` row recording the rolled-up actuals
+  (action `cost_rollup`: old/new `actual_hours` and `actual_cost`), and the linked `JobCost` flip to
+  status `COMPLETED` writes its own tamper-evident row — both via `AuditService`, flushed atomically
+  with the completion. Separately, and **regardless of the flag**, a work order completed with one or
+  more operations that recorded **zero** labor writes a tamper-evident `COMPLETED_WITH_QUALITY_EXCEPTION`
+  row (code `no_labor_recorded`) plus a `quality_exception_on_completion` warning event, so a
+  potentially understated cost/hour record is attributable rather than silent.
   *Known gap (tracked):* the root `audit_log.sequence_number` (`max()+1`) allocation is still not
   serialized under concurrent writes — see follow-up A1 in `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`
   (amplified in Batch 6 by the additional read-path inventory audit rows).

@@ -36,12 +36,22 @@ from app.models.work_order_blocker import (
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
+from app.services.completion_cost_service import (
+    apply_completion_cost_rollup,
+    rollup_labor_hours_for_closed_entries,
+    rollup_labor_hours_from_evidence,
+)
 from app.services.completion_inventory_service import apply_completion_inventory_effects
+from app.services.completion_quality_service import (
+    evaluate_and_record_labor_data_quality,
+    record_reconcile_labor_data_quality,
+)
 from app.services.completion_signal_service import (
     emit_operation_completed_event,
     emit_work_order_completed_event,
     enqueue_work_order_completion_signals,
 )
+from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import sync_laser_nest_from_operation
 from app.services.operational_event_service import OperationalEventService
 from app.services.quality_gate_service import (
@@ -209,6 +219,54 @@ def _apply_reconcile_inventory_effects(
         pass
 
 
+def _apply_reconcile_cost_rollup(
+    db: Session,
+    company_id: int,
+    current_user: User,
+    work_orders: list[WorkOrder],
+    transitions: list[StatusTransition],
+) -> None:
+    """Labor hour + cost + JobCost rollup for reconcile-driven WO completions (Batch 7).
+
+    COST-4: a WO that completes implicitly on a GET (reconcile-on-read) must roll labor
+    hours/cost the SAME way the live completion paths do. ALL of the Batch-7 rollup -- the
+    evidence-sourced HOUR rollup AND the cost/JobCost rollup -- is gated behind
+    ``LABOR_COST_ROLLUP_ENABLED`` so the OPT-IN flag governs cost/hours surfacing
+    consistently across the live and reconcile paths: flag-OFF, a reconcile completion
+    surfaces NO computed Batch-7 hours/cost (the live paths also gate their hour rollup);
+    flag-ON, both roll up identically and monotonic-up. (The pre-existing clock_out hour
+    accumulation is a separate mechanism and is unaffected.) READ-SAFE: the whole block is
+    wrapped so an error can never 500 a GET; joined to this read's unit of work (the caller
+    commits) and tenant-scoped. (rank 12 will move reconcile off the read path;
+    re-attribute to a system actor then -- same caveat as the events.)
+    """
+    completed_wo_ids = {tr.resource_id for tr in transitions if tr.resource_type == "work_order"}
+    if not completed_wo_ids:
+        return
+    rollup_enabled = is_labor_cost_rollup_enabled(company_id)
+    try:
+        audit = AuditService(db, current_user)
+        for work_order in work_orders:
+            if work_order.id in completed_wo_ids:
+                # The Batch-7 hour rollup is now flag-gated on the reconcile path too (it
+                # was previously unconditional). apply_completion_cost_rollup is itself a
+                # no-op when the flag is OFF, but we hoist the same guard so the NEW hour
+                # rollup never runs flag-OFF either -- keeping cost/hours surfacing
+                # consistent between the live and reconcile paths.
+                if rollup_enabled:
+                    rollup_labor_hours_from_evidence(db, work_order)
+                    apply_completion_cost_rollup(
+                        db, work_order, company_id=company_id, user_id=current_user.id, audit=audit
+                    )
+                # no_labor_recorded data-quality signal on the read path (read-safe,
+                # flag-independent).
+                record_reconcile_labor_data_quality(
+                    db, work_order=work_order, company_id=company_id, audit=audit, user=current_user
+                )
+    except Exception:  # pragma: no cover - reads must never 500 on cost-rollup failure
+        pass
+
+
 def _audit_reconcile_transitions(
     db: Session,
     current_user: User,
@@ -304,6 +362,10 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
             # this reconcile drove to COMPLETE, joined to this read's unit of work.
             # Read-safe (best-effort) + idempotent -- see helper.
             _apply_reconcile_inventory_effects(db, company_id, current_user, work_orders, transitions)
+            # Batch 7 / rank 10 (COST-4): labor hour rollup (monotonic-up, always) +
+            # OPT-IN cost/JobCost rollup + no_labor_recorded signal for reconcile-driven
+            # completions. Read-safe + idempotent -- see helper.
+            _apply_reconcile_cost_rollup(db, company_id, current_user, work_orders, transitions)
             db.commit()
     except SQLAlchemyError:
         # Best-effort reconcile lost a version race OR its commit failed on a
@@ -848,6 +910,12 @@ def clock_out(
             apply_completion_inventory_effects(
                 db, work_order, user_id=current_user.id, company_id=company_id, audit=audit
             )
+            # Batch 7 / rank 10 (COST-1/COST-2/COST-4/COST-5): OPT-IN labor hour +
+            # actual-cost + JobCost rollup, atomic with this clock-out completion. No-op
+            # + pre-Batch-7 behavior when the flag is OFF. (The single-entry hour rollup
+            # for the entry being clocked out is applied above, flag-independent, as it
+            # always was; this evidence-sourced rollup reconciles the full WO totals.)
+            apply_completion_cost_rollup(db, work_order, company_id=company_id, user_id=current_user.id, audit=audit)
         # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record. Completion has already
         # mutated state and is about to commit -- evaluate the (read-only, locked-row)
         # quality gates and, for each unsatisfied one, leave a tamper-evident audit
@@ -859,6 +927,18 @@ def clock_out(
                 company_id=company_id,
                 work_order=work_order,
                 operation=operation,
+                audit=audit,
+                user=current_user,
+                source="clock_out",
+            )
+        # Batch 7 data-quality signal (no_labor_recorded): fires REGARDLESS of the
+        # cost-rollup flag when the WO completes with any zero-labor operation. Same
+        # quality_exceptions channel; warn-only.
+        if work_order_completed:
+            quality_exceptions = quality_exceptions + evaluate_and_record_labor_data_quality(
+                db,
+                company_id=company_id,
+                work_order=work_order,
                 audit=audit,
                 user=current_user,
                 source="clock_out",
@@ -2005,6 +2085,16 @@ def complete_operation(
         if open_entries and completion_delta > 0:
             open_entries[0].quantity_produced = float(open_entries[0].quantity_produced or 0) + completion_delta
 
+        # COST-3 (Batch 7, OPT-IN): this path auto-closes the open TimeEntries above by
+        # writing clock_out + duration_hours, but historically dropped those hours from
+        # the rollups (data loss vs. an explicit clock-out). When the rollup flag is ON,
+        # accumulate each just-closed entry's duration into operation setup/run hours and
+        # work_order.actual_hours -- summed across ALL operators (each operator has its
+        # own entry; they are summed, not deduped). Atomic with the completion; the
+        # evidence-sourced WO rollup below reconciles totals monotonic-up.
+        if is_labor_cost_rollup_enabled(company_id):
+            rollup_labor_hours_for_closed_entries(work_order, operation, open_entries)
+
     # Create audit log
     audit = AuditService(db, current_user)
     audit.log(
@@ -2041,6 +2131,11 @@ def complete_operation(
         # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): FG receipt (always,
         # lot-only, idempotent) + gated backflush, atomic with this completion.
         apply_completion_inventory_effects(db, work_order, user_id=current_user.id, company_id=company_id, audit=audit)
+        # Batch 7 / rank 10 (COST-1/COST-2/COST-4/COST-5): OPT-IN (default OFF) labor
+        # hour + actual-cost + JobCost rollup. No-op + pre-Batch-7 behavior when the flag
+        # is OFF; when ON, rolls op/WO hours monotonic-up from durable evidence, computes
+        # actual_cost, syncs the linked JobCost (-> COMPLETED), all atomic with completion.
+        apply_completion_cost_rollup(db, work_order, company_id=company_id, user_id=current_user.id, audit=audit)
 
     # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record on a true completion only.
     # Read-only evaluation against the locked op + WO; each unsatisfied gate gets a
@@ -2052,6 +2147,19 @@ def complete_operation(
             company_id=company_id,
             work_order=work_order,
             operation=operation,
+            audit=audit,
+            user=current_user,
+            source="complete_operation",
+        )
+    # Batch 7 data-quality signal (no_labor_recorded): when the WO completes with one or
+    # more operations that recorded ZERO labor, surface it on the SAME quality_exceptions
+    # channel (audit + warning event). Fires REGARDLESS of the cost-rollup flag (a
+    # process signal, not a cost figure). Warn-only, never blocks.
+    if work_order_completed:
+        quality_exceptions = quality_exceptions + evaluate_and_record_labor_data_quality(
+            db,
+            company_id=company_id,
+            work_order=work_order,
             audit=audit,
             user=current_user,
             source="complete_operation",

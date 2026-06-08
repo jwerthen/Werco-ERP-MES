@@ -126,6 +126,19 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > never double-consumed. A backflush shortage (insufficient stock) **does not fail the completion** —
 > the source lot is driven negative and the shortfall is recorded as a tamper-evident
 > `BACKFLUSH_SHORTAGE` audit row plus a `backflush_shortage` warning event.
+>
+> **Labor-hour + cost rollup on completion is opt-in (global flag `LABOR_COST_ROLLUP_ENABLED`,
+> default OFF).** When the flag is **on**, a work order reaching **COMPLETE** (any path, including
+> reconcile-on-read) rolls op/WO `actual_hours` monotonic-up from time-entry evidence, computes
+> `actual_cost` = **labor + issued material + overhead** (labor at `WorkCenter.hourly_rate`, falling
+> back to `DEFAULT_LABOR_RATE`; overhead at `DEFAULT_OVERHEAD_RATE` — see
+> [Environment Variables](ENVIRONMENT_VARIABLES.md)), syncs any linked `JobCost` to status `COMPLETED`,
+> and writes one **audited** rollup row — all atomic with the completion, best-effort (a cost-side
+> error never fails the completion). Hours sum across **all operators'** time entries on an operation
+> (multiple operators are summed, not deduped). When the flag is **off** (the default), completion does
+> **not** auto-populate `actual_cost` / `actual_hours` and touches no `JobCost`; the on-demand
+> `POST /job-costs/{id}/calculate` is then the only way to materialize cost actuals. The
+> `no_labor_recorded` quality exception (above) fires regardless of this flag.
 
 #### Work Order Schema
 
@@ -306,8 +319,12 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > the system records a tamper-evident `audit_log` row (action `COMPLETED_WITH_QUALITY_EXCEPTION`) plus
 > a warning operational event for each. The gates are: `inspection_incomplete` (operation requires
 > inspection but `inspection_complete` is not set), `open_ncr` (an unresolved NCR on the work order),
-> `fai_not_passed` (a First Article Inspection on the work order that is not `PASSED`), and
-> `open_blocker` (an open/acknowledged work-order blocker). This applies to both
+> `fai_not_passed` (a First Article Inspection on the work order that is not `PASSED`), `open_blocker`
+> (an open/acknowledged work-order blocker), and `no_labor_recorded` (severity `medium`: a work order
+> completed with one or more operations that recorded **zero** labor — no time entry, or only
+> zero-duration entries — so its cost/hour actuals may be understated; helps surface missed clock-ins).
+> The `no_labor_recorded` signal fires **regardless of the `LABOR_COST_ROLLUP_ENABLED` flag** (it is a
+> process/operator-accuracy signal, not a cost figure). This applies to both
 > `/work-orders/operations/{id}/complete` and `/shop-floor/operations/{id}/complete`,
 > `/work-orders/{id}/complete`, and `/shop-floor/clock-out/{id}` when it completes an operation or work
 > order (the field rides on that endpoint's `TimeEntryResponse`). Each entry is
@@ -547,6 +564,17 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/analytics/overview` | Analytics overview | Yes |
 | GET | `/analytics/production-trends` | Production trends | Yes |
 | GET | `/analytics/quality-metrics` | Quality metrics | Yes |
+| GET | `/analytics/cost-analysis` | Job cost analysis (estimated vs. actual) | Yes |
+
+> **Cost-analysis labor/overhead is gated by `LABOR_COST_ROLLUP_ENABLED`.** `GET /analytics/cost-analysis`
+> derives each job's labor and overhead from the work order's actual hours at the shared work-center
+> rate — the **same** source the completion rollup uses, so the report and `WorkOrder.actual_cost` agree.
+> When the flag is **off** (the default) the computed **labor and overhead legs report `$0`** (not
+> tracked), uniformly across live- and reconcile-completed work orders. The **material leg is never
+> gated** — it is real issued-material from inventory (the completion ISSUE transactions), so it stays
+> accurate either way. The on-demand `POST /job-costs/{id}/calculate` recomputes job-cost labor from time
+> entries regardless of the flag and is **tenant-scoped** (a job cost is looked up by id **and**
+> company, closing a prior cross-tenant lookup).
 
 ### Users (Admin)
 

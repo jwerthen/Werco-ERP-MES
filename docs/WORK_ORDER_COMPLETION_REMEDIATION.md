@@ -23,7 +23,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **4** ☑ | 7 | Quality gates on completion (warn-and-record) | no | records a tamper-evident exception, does not block |
 | **5** ☑ | 8 | Uniform completion signal set (events/notify/webhook/sched) | no | new outbound signals |
 | **6** ☑ | 9 | FG receipt + backflush + as-built genealogy | **yes** (`040`/`041`) | inventory now moves |
-| **7** | 10 | Labor-hour + job/actual-cost rollup | maybe (drop cols) | cost reports populate |
+| **7** ☑ | 10 | Labor-hour + job/actual-cost rollup | no | opt-in (flag default OFF); cost/hours roll up only when enabled |
 | **8** | 11 | OEE/OTD metric correctness + dead auto-OEE endpoint | no | **KPI values move** |
 | **9** | 12 | Indexes + de-risk reconcile-on-read | **yes** | reconcile may move off read path |
 | **10** | 13 | Frontend completion UX hardening | no | optimistic updates |
@@ -408,9 +408,77 @@ Findings: INV-1, INV-2, INV-3, TRACE-2, TRACE-3, TRACE-4, TRACE-5, MS-4.
 > recorded — but a negative on-hand is a material-trail condition a quality/compliance owner should
 > review and explicitly accept for AS9100D/CMMC-L2.
 
-### Rank 10 — Labor-hour + job/actual-cost rollup ☐ (Batch 7)
+### Rank 10 — Labor-hour + job/actual-cost rollup ☑ (Batch 7 · opt-in)
 Accumulate auto-closed TimeEntry `duration_hours` into op/WO actual hours; extract `JobCostingService.recompute_from_time_entries`; set `JobCost.status=COMPLETED`; populate `WorkOrder.actual_cost`/`estimated_cost` (or repoint report to JobCost); single configurable labor rate replacing hardcoded $45/$50.
 Findings: COST-1, COST-2, COST-3, COST-4, COST-5.
+
+> **Batch 7 status (2026-06-07, rank 10 landed — OPT-IN, default OFF).** Labor-hour and
+> actual/estimated-cost rollup on completion now exists but is gated by a global feature flag
+> **`LABOR_COST_ROLLUP_ENABLED`** (env var in `app/core/config.py`, default **`false`**). The flag's
+> single resolution chokepoint is `labor_cost_service.is_labor_cost_rollup_enabled`. Rationale: cost
+> stays opt-in until shop-floor labor check-in data is trusted — no untrusted labor figures surface as
+> cost truth before a shop validates them.
+>
+> **Flag-OFF (the default).** Completion does **not** auto-populate `actual_hours` / `actual_cost`,
+> does **not** touch a linked `JobCost`, and the `/analytics/cost-analysis` report reports **$0**
+> computed labor/overhead — uniformly across the live and reconcile-on-read completion paths, so no path
+> leaks a non-zero labor figure flag-OFF. The on-demand `POST /job-costs/{id}/calculate` still
+> recomputes from time entries regardless of the flag (the only way to materialize cost actuals
+> flag-OFF).
+>
+> **Flag-ON.** On WO COMPLETE the finalizer rolls op/WO `actual_hours` **monotonic-up** from durable
+> TimeEntry evidence (`app/services/completion_cost_service.py`), computes `WorkOrder.actual_cost` =
+> **labor + issued material + overhead**, syncs the linked `JobCost` (TIME_ENTRY labor regenerated,
+> variances recomputed, **status → `COMPLETED`**) via `job_costing_service.sync_job_cost_on_completion`,
+> and writes ONE tamper-evident audit row for the rolled-up actuals — all atomic with the completion
+> (joins the caller's unit of work). The cost-analysis report then computes labor/overhead from the same
+> actuals at the same rate. **Best-effort:** a cost-side error can never fail an otherwise-valid
+> completion. Wired into all four live completion paths and the reconcile-on-read path (read-safe).
+>
+> **Labor rate source (COST-5 — replaces hardcoded $45/$50).** ONE shared resolver
+> (`app/services/labor_cost_service.py`) feeds BOTH the completion rollup and the cost-analysis report
+> so the two can never disagree: labor rate is `WorkCenter.hourly_rate` per work center (cost reflects
+> WHERE the work happened), falling back to env **`DEFAULT_LABOR_RATE`** (default `75.0`); overhead is
+> env **`DEFAULT_OVERHEAD_RATE`** (default `0.0`), charged on actual labor hours. Hours are the **sum of
+> `duration_hours` across ALL operators'** TimeEntries on an operation (multiple welders on one WO are
+> summed, never deduped).
+>
+> **`no_labor_recorded` data-quality signal (fires regardless of the flag).** Completing a WO whose
+> operation recorded **zero** labor (no TimeEntry, or only zero-duration entries) emits the Batch-4
+> warn-and-record set — a tamper-evident `COMPLETED_WITH_QUALITY_EXCEPTION` audit row + a
+> `quality_exception_on_completion` warning `OperationalEvent` + a `QualityException` (code
+> `no_labor_recorded`, severity `medium`) on the existing `quality_exceptions` response field. It rides
+> the existing Batch-4 channel rather than a parallel one, is evaluated whether or not the cost flag is
+> on (it is a process/operator-accuracy signal, not a cost figure), and **never blocks** a completion.
+> Helps surface missed clock-ins that would understate cost/hours.
+>
+> **Tenant fix (COST-2 cross-tenant hole closed).** `POST /job-costs/{id}/calculate` is now
+> **tenant-scoped** (`JobCost.id == … AND JobCost.company_id == company_id`) — it previously looked up a
+> JobCost by id alone and could recompute another tenant's job. The `WorkOrderOperation` lookup inside
+> `recompute_from_time_entries` is likewise company-scoped.
+>
+> **Follow-ups (tracked, not fixed in Batch 7):**
+> 1. **Promote the global flag to per-company.** `LABOR_COST_ROLLUP_ENABLED` is global because the
+>    `Company` model has no settings/feature-flags column yet (see `app/models/company.py`).
+>    `is_labor_cost_rollup_enabled` already accepts a `company_id` and is the single chokepoint to
+>    repoint at a per-company field when one exists — a trusted shop could then enable cost rollup
+>    without forcing it on every tenant.
+> 2. **`estimated_cost` BOM material is best-effort.** The estimated-cost leg explodes the active BOM at
+>    standard cost; when routing/BOM data is thin the corresponding leg is simply `0` (acceptable per
+>    COST-1's best-effort note).
+> 3. **Per-work-center overhead column is a future option.** Overhead is a single configurable default
+>    today; `resolve_overhead_rate` already takes a `work_center_id` so a per-WC overhead column can be
+>    threaded in without touching the rollup callers.
+> 4. **Reconcile-off-read caveat (rank 12) applies to the new reconcile cost helpers too.** The
+>    flag-gated hour/cost/JobCost rollup and the `no_labor_recorded` signal run inline (read-safe,
+>    best-effort) on reconcile-on-read; when rank 12 / Batch 9 moves reconcile to a debounced ARQ job
+>    these should move with it and re-attribute to a system actor — the same AUD-3 / EVT-4 / Batch-6
+>    reconcile follow-up.
+>
+> ⚠️ **Finance sign-off — `DEFAULT_LABOR_RATE = 75.0` is a placeholder.** The chosen $75/hr default and
+> the `$0` default overhead rate are engineering placeholders so a rate is always resolved when a work
+> center has none; a finance owner should set the real shop labor + overhead rates (per work center via
+> `WorkCenter.hourly_rate`, and the env fallbacks) before cost figures are relied on.
 
 ### Rank 11 — OEE/OTD metric correctness + dead auto-OEE endpoint ☐ (Batch 8 · KPIs move)
 Fix `oee.py` `TimeEntry.start_time→clock_in`/`end_time→clock_out` (endpoint dead today); derive ideal cycle/good/defect properly; availability on staffed time; consistent produced/scrapped; OTD returns n/a on empty set not 100%.

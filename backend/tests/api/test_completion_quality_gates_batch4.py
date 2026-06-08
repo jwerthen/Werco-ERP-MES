@@ -364,6 +364,21 @@ def test_no_quality_exceptions_when_gates_clear(client: TestClient, db_session: 
         requires_inspection=True,
         inspection_complete=True,  # gate satisfied
     )
+    # Batch 7: record CLOSED labor on the op so the no_labor_recorded data-quality
+    # signal does not fire (this test asserts the Batch-4 quality gates are clear, not
+    # the labor signal -- with zero labor the WO would legitimately raise it).
+    db_session.add(
+        TimeEntry(
+            user_id=admin.id,
+            work_order_id=wo.id,
+            operation_id=op.id,
+            entry_type=TimeEntryType.RUN,
+            clock_in=datetime.utcnow() - timedelta(hours=1),
+            clock_out=datetime.utcnow(),
+            duration_hours=1.0,
+            company_id=COMPANY_A,
+        )
+    )
     db_session.commit()
 
     resp = client.post(
@@ -965,6 +980,20 @@ def test_all_gates_satisfied_no_exception_recorded(client: TestClient, db_sessio
     make_ncr(db_session, wo, status_=NCRStatus.CLOSED, disposition=NCRDisposition.USE_AS_IS)  # NCR resolved
     make_fai(db_session, wo, part, status_=FAIStatus.PASSED)  # FAI passed
     make_blocker(db_session, wo, op, status_=WorkOrderBlockerStatus.RESOLVED.value)  # blocker cleared
+    # Batch 7: record CLOSED labor so the no_labor_recorded data-quality signal does not
+    # fire (this test asserts the Batch-4 gates are clear, not the labor signal).
+    db_session.add(
+        TimeEntry(
+            user_id=admin.id,
+            work_order_id=wo.id,
+            operation_id=op.id,
+            entry_type=TimeEntryType.RUN,
+            clock_in=datetime.utcnow() - timedelta(hours=1),
+            clock_out=datetime.utcnow(),
+            duration_hours=1.0,
+            company_id=COMPANY_A,
+        )
+    )
     db_session.commit()
 
     resp = client.post(

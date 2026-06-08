@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import tempfile
@@ -37,12 +38,22 @@ from app.schemas.work_order import (
     WorkOrderUpdate,
 )
 from app.services.audit_service import AuditService
+from app.services.completion_cost_service import (
+    apply_completion_cost_rollup,
+    compute_and_store_estimated_cost,
+    rollup_labor_hours_from_evidence,
+)
 from app.services.completion_inventory_service import apply_completion_inventory_effects
+from app.services.completion_quality_service import (
+    evaluate_and_record_labor_data_quality,
+    record_reconcile_labor_data_quality,
+)
 from app.services.completion_signal_service import (
     emit_operation_completed_event,
     emit_work_order_completed_event,
     enqueue_work_order_completion_signals,
 )
+from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import (
     build_laser_nest_child_work_order,
     copy_laser_nest_folder,
@@ -75,6 +86,8 @@ from app.services.work_order_state_service import (
     validate_operation_quantity,
     work_order_operation_progress,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -230,6 +243,50 @@ def _apply_reconcile_inventory_effects(
         pass
 
 
+def _apply_reconcile_cost_rollup(
+    db: Session,
+    company_id: int,
+    current_user: User,
+    work_orders: list[WorkOrder],
+    transitions: list[StatusTransition],
+) -> None:
+    """Labor hour + cost + JobCost rollup for reconcile-driven WO completions (Batch 7).
+
+    Mirror of the shop_floor helper (COST-4): a WO that completes implicitly on a
+    list/detail GET must roll labor hours/cost the SAME way the live paths do. ALL of the
+    Batch-7 rollup -- the evidence-sourced HOUR rollup AND the cost/JobCost rollup -- is
+    gated behind ``LABOR_COST_ROLLUP_ENABLED`` so the OPT-IN flag governs cost surfacing
+    consistently: flag-OFF, a reconcile completion surfaces NO computed Batch-7
+    hours/cost (matching the live paths, which also gate the hour rollup); flag-ON, both
+    paths roll up identically. (The pre-existing clock_out hour accumulation is a separate
+    mechanism and is unaffected.) READ-SAFE (wrapped) + idempotent; joined to this read's
+    unit of work; tenant-scoped.
+    """
+    completed_wo_ids = {tr.resource_id for tr in transitions if tr.resource_type == "work_order"}
+    if not completed_wo_ids:
+        return
+    rollup_enabled = is_labor_cost_rollup_enabled(company_id)
+    try:
+        audit = AuditService(db, current_user)
+        for work_order in work_orders:
+            if work_order.id in completed_wo_ids:
+                # Batch-7 hour rollup is now flag-gated on the reconcile path too (it was
+                # previously unconditional). apply_completion_cost_rollup is itself a
+                # no-op when the flag is OFF, but we hoist the same guard so the NEW hour
+                # rollup never runs flag-OFF either -- keeping cost/hours surfacing
+                # consistent across the live and reconcile paths.
+                if rollup_enabled:
+                    rollup_labor_hours_from_evidence(db, work_order)
+                    apply_completion_cost_rollup(
+                        db, work_order, company_id=company_id, user_id=current_user.id, audit=audit
+                    )
+                record_reconcile_labor_data_quality(
+                    db, work_order=work_order, company_id=company_id, audit=audit, user=current_user
+                )
+    except Exception:  # pragma: no cover - reads must never 500 on cost-rollup failure
+        pass
+
+
 def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_user: User, company_id: int) -> None:
     """Reconcile operation rows from completion evidence and commit, tolerating
     ANY failure of that best-effort write on a READ/list path.
@@ -269,6 +326,9 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
             # Batch 6 / rank 9 (INV-1/INV-2): FG receipt + gated backflush for any WO
             # this reconcile drove to COMPLETE. Read-safe (best-effort) + idempotent.
             _apply_reconcile_inventory_effects(db, company_id, current_user, work_orders, transitions)
+            # Batch 7 / rank 10 (COST-4): labor hour rollup (monotonic-up) + OPT-IN
+            # cost/JobCost rollup + no_labor_recorded signal. Read-safe + idempotent.
+            _apply_reconcile_cost_rollup(db, company_id, current_user, work_orders, transitions)
             db.commit()
     except SQLAlchemyError:
         # Best-effort reconcile lost a version race OR its commit failed on a
@@ -1718,6 +1778,17 @@ def release_work_order(
     work_order.released_by = current_user.id
     work_order.released_at = datetime.utcnow()
 
+    # COST-1/COST-5 (Batch 7): when the labor-cost rollup is enabled, populate
+    # estimated_cost at release from routing standard hours x shared WC rate + BOM
+    # material (best-effort). Gated behind the same OPT-IN flag so a flag-OFF shop sees
+    # the pre-Batch-7 behavior (estimated_cost stays at its default). Best-effort: an
+    # estimate failure must never block a release.
+    if is_labor_cost_rollup_enabled(company_id):
+        try:
+            compute_and_store_estimated_cost(db, work_order, company_id)
+        except Exception:  # pragma: no cover - an estimate must never fail a release
+            logger.exception("estimated_cost compute failed on release of WO %s", work_order.id)
+
     release_first_ready_operation(work_order)
     _emit_work_order_event(
         db,
@@ -2105,6 +2176,10 @@ def complete_work_order(
     # lot-only, idempotent) and backflush components (only if part.backflush_components).
     # Atomic with the manual completion below; a backflush shortage never fails it.
     apply_completion_inventory_effects(db, work_order, user_id=current_user.id, company_id=company_id, audit=audit)
+    # Batch 7 / rank 10 (COST-1/COST-2/COST-4/COST-5): OPT-IN labor hour + actual-cost +
+    # JobCost rollup for this privileged manual completion. No-op + pre-Batch-7 behavior
+    # when the flag is OFF; atomic with the manual completion when ON.
+    apply_completion_cost_rollup(db, work_order, company_id=company_id, user_id=current_user.id, audit=audit)
 
     # Audit this privileged manual completion (status change + the quantities it set)
     # on the tamper-evident chain. Logged BEFORE the terminal commit so the audit rows
@@ -2154,6 +2229,18 @@ def complete_work_order(
             user=current_user,
             source="complete_work_order",
         )
+    # Batch 7 data-quality signal (no_labor_recorded): the manual override force-completes
+    # EVERY open operation, so a zero-labor op is especially likely here. Flag it on the
+    # SAME quality_exceptions channel (its own audit row + warning event). Fires
+    # REGARDLESS of the cost-rollup flag; warn-only, never blocks.
+    quality_exceptions = quality_exceptions + evaluate_and_record_labor_data_quality(
+        db,
+        company_id=company_id,
+        work_order=work_order,
+        audit=audit,
+        user=current_user,
+        source="complete_work_order",
+    )
 
     try:
         db.commit()
@@ -2570,6 +2657,12 @@ def complete_operation(
         # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): FG receipt (always,
         # lot-only, idempotent) + gated backflush, atomic with this completion.
         apply_completion_inventory_effects(db, work_order, user_id=current_user.id, company_id=company_id, audit=audit)
+        # Batch 7 / rank 10 (COST-1/COST-2/COST-4/COST-5): OPT-IN labor hour +
+        # actual-cost + JobCost rollup, atomic with this completion. No-op + pre-Batch-7
+        # behavior when the flag is OFF. (This office path does NOT auto-close open
+        # TimeEntries -- they are rolled up by a later clock_out -- so the rollup here is
+        # purely evidence-sourced from already-closed entries.)
+        apply_completion_cost_rollup(db, work_order, company_id=company_id, user_id=current_user.id, audit=audit)
 
     # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record on a true completion only.
     # Read-only evaluation against the locked op + WO; each unsatisfied gate gets a
@@ -2581,6 +2674,18 @@ def complete_operation(
             company_id=company_id,
             work_order=work_order,
             operation=operation,
+            audit=audit,
+            user=current_user,
+            source="complete_operation",
+        )
+    # Batch 7 data-quality signal (no_labor_recorded): on WO COMPLETE, flag any
+    # zero-labor operation on the SAME quality_exceptions channel. Fires REGARDLESS of
+    # the cost-rollup flag; warn-only.
+    if work_order_completed and work_order:
+        quality_exceptions = quality_exceptions + evaluate_and_record_labor_data_quality(
+            db,
+            company_id=company_id,
+            work_order=work_order,
             audit=audit,
             user=current_user,
             source="complete_operation",
