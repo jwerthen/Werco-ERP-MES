@@ -38,7 +38,12 @@ from app.schemas.analytics import (
     TrendDirection,
     VendorQuality,
 )
-from app.services.labor_cost_service import is_labor_cost_rollup_enabled, resolve_labor_rates, resolve_overhead_rate
+from app.services.labor_cost_service import (
+    is_approved_labor_required,
+    is_labor_cost_rollup_enabled,
+    resolve_labor_rates,
+    resolve_overhead_rate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +256,13 @@ class AnalyticsService:
             TimeEntry.clock_in <= end_dt,
             TimeEntry.clock_out.isnot(None),
         )
+
+        # G5-A opt-in: when REQUIRE_APPROVED_LABOR_FOR_COST is ON, the staffed/run hours
+        # that feed this OEE/labor leg count ONLY supervisor-approved entries (uniform
+        # with the job-costing recompute + completion cost rollup, so the metrics agree
+        # on which labor is "counted"). Default OFF -> no predicate -> byte-identical OEE.
+        if is_approved_labor_required(self.company_id):
+            time_entry_stats = time_entry_stats.filter(TimeEntry.approved.isnot(None))
 
         if work_center_id:
             time_entry_stats = time_entry_stats.filter(TimeEntry.work_center_id == work_center_id)

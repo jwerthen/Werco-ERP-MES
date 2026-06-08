@@ -47,6 +47,20 @@ def is_labor_cost_rollup_enabled(company_id: Optional[int] = None) -> bool:
     return bool(settings.LABOR_COST_ROLLUP_ENABLED)
 
 
+def is_approved_labor_required(company_id: Optional[int] = None) -> bool:
+    """Whether labor-cost legs may count ONLY supervisor-approved TimeEntries (G5-A).
+
+    OPT-IN, default OFF (so the labor-cost legs are byte-identical to pre-flag behavior
+    when this is OFF). Currently a GLOBAL setting
+    (``settings.REQUIRE_APPROVED_LABOR_FOR_COST``) for the same reason
+    ``is_labor_cost_rollup_enabled`` is global (the Company model has no per-company
+    settings column yet). ``company_id`` is accepted now so callers don't change when
+    this becomes a per-company flag -- this is the single chokepoint to repoint at a
+    Company settings field later, alongside ``is_labor_cost_rollup_enabled``.
+    """
+    return bool(settings.REQUIRE_APPROVED_LABOR_FOR_COST)
+
+
 def resolve_labor_rate(db: Session, company_id: int, work_center_id: Optional[int]) -> float:
     """Labor rate ($/hr) for a work center: ``WorkCenter.hourly_rate`` else the default.
 

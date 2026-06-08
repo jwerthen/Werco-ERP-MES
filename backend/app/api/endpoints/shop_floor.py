@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.cache import invalidate_work_centers_cache
 from app.core.config import settings
 from app.core.realtime import safe_broadcast
@@ -507,6 +507,10 @@ def get_my_active_job(
                 "quantity_complete": (
                     float(operation.quantity_complete) if operation and operation.quantity_complete else 0
                 ),
+                # G5-A: surface approval state on the active-job list serializer (these
+                # are open entries so typically null, but kept uniform with TimeEntryResponse).
+                "approved": to_utc_iso(entry.approved) if entry.approved else None,
+                "approved_by": entry.approved_by,
                 "laser_nest": _laser_nest_payload(operation) if operation else None,
             }
         )
@@ -1070,6 +1074,140 @@ def clock_out(
     time_entry.quality_exceptions = [exc.as_dict() for exc in quality_exceptions]
 
     return time_entry
+
+
+# Roles allowed to approve/unapprove shop-floor labor (G5-A). Admin + manager +
+# supervisor + quality -- matches the documented approver set used elsewhere (the
+# shop-floor inspection sign-off and the Quality/ECO approvals all grant MANAGER), so a
+# Manager isn't anomalously locked out of labor sign-off. Reads stay broad; only the
+# approve/unapprove writes gate. All four names verified in app/models/user.py UserRole.
+_TIME_ENTRY_APPROVAL_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY]
+
+
+def _set_time_entry_approval(
+    time_entry_id: int,
+    *,
+    approve: bool,
+    db: Session,
+    current_user: User,
+    company_id: int,
+    audit: AuditService,
+) -> TimeEntry:
+    """Shared approve/unapprove body (G5-A).
+
+    Tenant-scoped lookup (``company_id``). Forbids self-approval (a user cannot approve
+    their OWN TimeEntry -> 403; segregation of duties for the labor-cost gate). Sets/clears
+    ``approved`` (timestamp) + ``approved_by`` and writes ONE tamper-evident
+    ``AuditService.log_update`` row. Respects the model's optimistic-lock ``version`` column
+    -- a concurrent stale write raises ``StaleDataError`` on flush, surfaced as HTTP 409.
+    Joins the request's unit of work; commits at the end (this IS the unit of work).
+    """
+    time_entry = db.query(TimeEntry).filter(TimeEntry.id == time_entry_id, TimeEntry.company_id == company_id).first()
+    if not time_entry:
+        raise HTTPException(status_code=404, detail="Time entry not found")
+
+    # Segregation of duties: you cannot approve your own labor (even if you hold an
+    # approver role). Unapprove is gated the same way for symmetry.
+    if time_entry.user_id == current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot approve or unapprove your own time entry")
+
+    old_approved = time_entry.approved
+    old_approved_by = time_entry.approved_by
+
+    if approve:
+        if time_entry.approved is not None:
+            # Idempotent: already approved -> return current state (no second audit row).
+            return time_entry
+        time_entry.approved = datetime.utcnow()
+        time_entry.approved_by = current_user.id
+        action = "time_entry_approve"
+        description = f"Approved time entry {time_entry.id} (user {time_entry.user_id})"
+    else:
+        if time_entry.approved is None:
+            # Idempotent: already un-approved -> no-op.
+            return time_entry
+        time_entry.approved = None
+        time_entry.approved_by = None
+        action = "time_entry_unapprove"
+        description = f"Unapproved time entry {time_entry.id} (user {time_entry.user_id})"
+
+    # Tamper-evident audit (hash chain), flushed inside this unit of work so it commits
+    # atomically with the approval flip. log_update computes the field-level diff.
+    audit.log_update(
+        resource_type="time_entry",
+        resource_id=time_entry.id,
+        resource_identifier=str(time_entry.id),
+        old_values={
+            "approved": old_approved.isoformat() if old_approved else None,
+            "approved_by": old_approved_by,
+        },
+        new_values={
+            "approved": time_entry.approved.isoformat() if time_entry.approved else None,
+            "approved_by": time_entry.approved_by,
+        },
+        description=description,
+        action=action,
+        extra_data={"work_order_id": time_entry.work_order_id, "operation_id": time_entry.operation_id},
+    )
+
+    try:
+        db.commit()
+    except StaleDataError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This time entry was modified concurrently. Refresh and retry.",
+        ) from exc
+    db.refresh(time_entry)
+    return time_entry
+
+
+@router.post("/time-entries/{time_entry_id}/approve", response_model=TimeEntryResponse)
+def approve_time_entry(
+    time_entry_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_TIME_ENTRY_APPROVAL_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Approve a shop-floor TimeEntry (G5-A).
+
+    Sets ``approved`` (now) + ``approved_by`` (the approver). Role-gated to
+    ADMIN / MANAGER / SUPERVISOR / QUALITY; forbids self-approval; tenant-scoped; respects the
+    optimistic-lock ``version`` column; audited. Approval is what the opt-in
+    ``REQUIRE_APPROVED_LABOR_FOR_COST`` flag keys on for the labor-cost legs.
+    """
+    return _set_time_entry_approval(
+        time_entry_id,
+        approve=True,
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+    )
+
+
+@router.post("/time-entries/{time_entry_id}/unapprove", response_model=TimeEntryResponse)
+def unapprove_time_entry(
+    time_entry_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_TIME_ENTRY_APPROVAL_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Clear approval on a shop-floor TimeEntry (G5-A).
+
+    Clears ``approved`` + ``approved_by``. Same role gate / self-approval ban /
+    tenant scope / optimistic-lock handling / audit as approve.
+    """
+    return _set_time_entry_approval(
+        time_entry_id,
+        approve=False,
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+    )
 
 
 @router.get("/work-center-queue/{work_center_id}")
