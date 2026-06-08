@@ -28,7 +28,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **9** ☑ | 12 | Indexes + de-risk reconcile-on-read | **yes** (`042`) | bounded dashboard reconcile; cheap pre-reconcile ETag |
 | **10** ☑ | 13 | Frontend completion UX hardening | no | no API change (dashboard cache invalidation + double-submit guards + list memo) |
 | **11A** ☑ | G4-Fix1 / G3-scope / G6-A | Completeness-critic security/correctness (ECO tenant-scope+audit+RBAC, report tenant-scope, terminal-state lock) | no | ECO mutations now Admin/Manager; ECO + custom-report tenant-scoped; 422 on cross-tenant ECO ids; 409 resurrecting a terminal WO |
-| **11B** ☐ | G2 / G5-A / G3-content | Completeness-critic data integrity (FG decrement + over-ship guard, TimeEntry-approval costing, report honesty) | tbd | tbd |
+| **11B** ☑ | G2 / G5-A / G3-content | Completeness-critic data integrity (FG decrement + over-ship guard, TimeEntry-approval costing, report honesty) | no | ship decrements FG inventory + warn-and-records over-ship / missing-FG-lot; new TimeEntry approve/unapprove endpoints (no self-approval); opt-in `REQUIRE_APPROVED_LABOR_FOR_COST`; report drops phantom `estimated_hours` + flag-OFF labor-not-tracked headers |
 | **11C** ☐ | G1 / G5-B / G6-B | Completeness-critic compliance (parent/child rollup, operator-cert gate, CoC generation) | tbd | tbd |
 
 ## Ranked actions
@@ -745,20 +745,21 @@ Findings: FEPERF-1, FEPERF-4, FEPERF-5.
 >
 > **All 10 ranked batches are now implemented** (Batch 10 on `qa/full-pass-2026-06-04`, pending
 > tests/review/commit). The post-plan completeness-critic gaps below have been triaged into **Batch 11**:
-> sub-batch **11A** (G4-Fix1 / G3-scope / G6-A) is landed on branch `feat/wo-completion-batch11`
-> (pending tests/compliance/review/merge); **11B** and **11C** are triaged-not-started, with two XL
-> items excluded. See "Completeness critic" → "Batch 11" below.
+> sub-batch **11A** (G4-Fix1 / G3-scope / G6-A) is landed on branch `feat/wo-completion-batch11`;
+> sub-batch **11B** (G2 / G5-A / G3-content) is landed on branch `feat/wo-completion-batch11b`
+> (both pending tests/compliance/review/merge); **11C** is triaged-not-started, with two XL items
+> excluded. See "Completeness critic" → "Batch 11" below.
 
 ## Completeness critic — follow-up gaps the audit did NOT cover
 
 These six gaps (labelled **G1–G6**) are the post-plan completeness-critic findings; their triage into
-**Batch 11** sub-batches (11A landed, 11B/11C planned, two XL items excluded) follows below.
+**Batch 11** sub-batches (11A + 11B landed, 11C planned, two XL items excluded) follows below.
 
 1. **G1 · [high] Parent/child assembly rollup entirely unimplemented** — completing child WOs never advances the parent; parent can complete with children open. (`work_order.py:47,98`, `laser_nest_service.py:98`) → **11C** (parent/child rollup); the related **BOM child-WO spawn** is **EXCLUDED** (G1-general, XL).
-2. **G2 · [high] Shipping `mark_shipped` has no inventory decrement and no over-ship guard.** (`shipping.py:282-325`) — *The unaudited part is closed in Batch 1: the WO CLOSED transition now writes a tamper-evident `audit_log` row via `AuditService.log_status_change`. The missing FG decrement and over-ship guard remain.* → **11B**.
-3. **G3 · [high] Reports/exports surface the never-computed `actual_cost`/`actual_hours` as truth** — every WO cost/hours report is structurally zero. (`report_builder.py:38-52`) Split into **G3-scope** (tenant isolation — the report builder queried across all tenants) → **landed in 11A**; and **G3-content** (report honesty about uncomputed cost/hours) → **11B**.
+2. **G2 · [high] Shipping `mark_shipped` has no inventory decrement and no over-ship guard.** (`shipping.py:282-325`) — *The unaudited part is closed in Batch 1: the WO CLOSED transition now writes a tamper-evident `audit_log` row via `AuditService.log_status_change`. The missing FG decrement and over-ship guard remain.* → **landed in 11B** (FG decrement on ship + warn-and-record over-ship / missing-FG-lot).
+3. **G3 · [high] Reports/exports surface the never-computed `actual_cost`/`actual_hours` as truth** — every WO cost/hours report is structurally zero. (`report_builder.py:38-52`) Split into **G3-scope** (tenant isolation — the report builder queried across all tenants) → **landed in 11A**; and **G3-content** (report honesty about uncomputed cost/hours) → **landed in 11B**.
 4. **G4 · [high] ECO complete/implement has zero effect on `affected_work_orders`** (revision-control gap); `get_affected_items` is cross-tenant. (`engineering_changes.py:543,717`) Split into **G4-Fix1** (ECO router tenant-scope + audit + RBAC, incl. the cross-tenant `affected-items` resolve and dashboard aggregate leak) → **landed in 11A**; and **G4-Fix2** (ECO actually drives revision/hold on `affected_work_orders`) → **EXCLUDED** (XL).
-5. **G5 · [medium] TimeEntry approval is dead/disconnected** from costing; **no operator-certification gate** on clock-in/completion. (`time_entry.py:51`, `operator_certifications.py`) Split into **G5-A** (TimeEntry approval → costing) → **11B**; and **G5-B** (operator-certification gate) → **11C**.
+5. **G5 · [medium] TimeEntry approval is dead/disconnected** from costing; **no operator-certification gate** on clock-in/completion. (`time_entry.py:51`, `operator_certifications.py`) Split into **G5-A** (TimeEntry approval → costing) → **landed in 11B**; and **G5-B** (operator-certification gate) → **11C**.
 6. **G6 · [medium] `complete_work_order` can resurrect a CLOSED/shipped/cancelled WO** (no terminal-state lock); **CoC is a bare boolean, never generated.** Split into **G6-A** (terminal-state lock) → **landed in 11A**; and **G6-B** (Certificate of Conformance generation) → **11C**.
 
 ### Batch 11 (completeness-critic follow-up) — sub-batched
@@ -769,7 +770,7 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 | Sub-batch | Items | Theme | Status |
 |---|---|---|---|
 | **11A** | G4-Fix1, G3-scope, G6-A | Security / correctness (tenant isolation, audit, RBAC, terminal-state lock) | ☑ landed on branch `feat/wo-completion-batch11` |
-| **11B** | G2, G5-A, G3-content | Data integrity (FG decrement + over-ship guard, TimeEntry-approval costing, report honesty) | ☐ triaged, not started |
+| **11B** | G2, G5-A, G3-content | Data integrity (FG decrement + over-ship guard, TimeEntry-approval costing, report honesty) | ☑ landed on branch `feat/wo-completion-batch11b` |
 | **11C** | G1 (parent/child rollup), G5-B, G6-B | Compliance (parent/child rollup, operator-cert gate, CoC generation) | ☐ triaged, not started |
 | **EXCLUDED** | G4-Fix2 (ECO revision/hold drive), G1-general (BOM child-WO spawn) | XL — own initiatives | — out of Batch 11 scope |
 
@@ -852,3 +853,101 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 > **11B / 11C remain triaged-not-started** (see table above), and **G4-Fix2** (ECO drives revision/hold
 > on `affected_work_orders`) and **G1-general** (BOM-driven child-WO spawn) are **EXCLUDED** from Batch 11
 > as XL items for their own initiatives.
+
+> **Batch 11B status (2026-06-08, landed on branch `feat/wo-completion-batch11b`, pending
+> tests/compliance/review/merge).** Three completeness-critic data-integrity fixes — no migration, no
+> schema change. One new env flag (opt-in, default OFF). Two new endpoints. All three close the
+> material-trail / cost-trail honesty gaps the completeness critic flagged, consistent with the
+> warn-and-record posture established in Batches 4 and 6.
+>
+> **G2 — shipping now decrements finished-goods inventory + warn-and-records over-ship**
+> (`app/api/endpoints/shipping.py`, `app/services/completion_inventory_service.py`). Marking a
+> shipment shipped previously wrote nothing to inventory — the Batch-6 FG receipt on completion had no
+> offset, so finished goods accrued on-hand forever. Now `mark_shipped` writes the mirror of that
+> receipt:
+> - **FG decrement.** A `SHIP` `InventoryTransaction` (`quantity = -quantity_shipped`,
+>   `reference_type = "shipment"`, `reference_id = shipment.id`) and a decrement of the finished-goods
+>   lot's `quantity_on_hand` / `quantity_available`. The lot is matched on `company_id` + `part_id` +
+>   the finished-goods location + `work_order.lot_number` — exactly the row the receipt created (the
+>   location constant is imported, not re-declared, so the two sides stay in lock-step). The SHIP txn,
+>   the on-hand decrement, and both audit rows (`log_create` on the txn, `log_update` on the lot) join
+>   the **same unit of work** as the SHIPPED status change + WO close, so they commit atomically.
+> - **Idempotent under concurrency.** The shipment row is locked `with_for_update` while status is
+>   re-checked, and a prior SHIP txn for the shipment short-circuits the decrement
+>   (`_existing_shipment_ship_txn`); the txn insert is under a savepoint. A re-submitted or concurrent
+>   double-ship can never double-decrement on-hand. (FOLLOW-UP, deferred — this batch is
+>   migration-free: a DB partial-unique index on `(company_id, reference_type='shipment',
+>   reference_id, SHIP)` would harden this the way `uq_wo_inventory_receipt` hardens the receipt.)
+> - **Warn-and-record, never blocking** (mirrors the backflush-shortage posture):
+>   - **Over-ship** (`record_over_ship_if_needed`): cumulative `quantity_shipped` across the WO's
+>     non-cancelled shipments beyond `WorkOrder.quantity_complete` (the produced quantity — there is no
+>     SalesOrder table to ship against) records a tamper-evident `audit_log` row (action `OVER_SHIP`)
+>     + a warning `OperationalEvent`. The ship still proceeds (no 400).
+>   - **FG lot not found** (`decrement_finished_goods_for_shipment`): no matching finished-goods lot
+>     row (receipt skipped / lot changed / stock already moved) records action `SHIP_FG_LOT_MISSING` +
+>     a warning event; on-hand is left untouched and the ship/close still proceeds.
+>   - The warning-event emit is wrapped so a transient signal failure can never fail an in-flight ship
+>     (the audit row is the compliance record).
+> - **No new request/response field** — the decrement and discrepancy recording are side effects of
+>   marking shipped.
+>
+> **G5-A — TimeEntry approval, wired to an opt-in labor-cost filter**
+> (`app/api/endpoints/shop_floor.py`, `app/core/config.py`, `app/services/labor_cost_service.py`,
+> `app/services/job_costing_service.py`, `app/services/completion_cost_service.py`,
+> `app/services/analytics_service.py`). The `TimeEntry.approved` / `approved_by` columns existed but
+> were dead — nothing set them and nothing read them. Now:
+> - **Two new endpoints.** `POST /shop-floor/time-entries/{id}/approve` (sets `approved` now +
+>   `approved_by`) and `POST /shop-floor/time-entries/{id}/unapprove` (clears both). Both are
+>   role-gated to **SUPERVISOR / QUALITY / ADMIN** (note: **not Manager**), tenant-scoped (cross-tenant
+>   id → **404** before any mutation), idempotent (re-approving / re-unapproving is a no-op with no
+>   second audit row), respect the `version` optimistic-lock column (concurrent stale write → **409**),
+>   and write **one** tamper-evident `audit_log` row (`time_entry_approve` / `time_entry_unapprove`).
+> - **Self-approval forbidden.** A user cannot approve or unapprove their **own** TimeEntry — **403**
+>   even for an approver-role user (segregation of duties for the labor-cost gate). Unapprove is gated
+>   the same way for symmetry. `approved` / `approved_by` also now surface on `TimeEntryResponse` and
+>   `GET /shop-floor/my-active-job`.
+> - **Opt-in cost filter `REQUIRE_APPROVED_LABOR_FOR_COST`** (default **OFF**). When ON, the three
+>   labor-cost consumers — the job-costing recompute (`recompute_from_time_entries`), the completion
+>   cost rollup (`_operation_duration_by_type`), and the analytics OEE/labor leg — additionally require
+>   `TimeEntry.approved IS NOT NULL`, so un-approved labor is excluded from cost until a supervisor
+>   signs off. Default OFF → no predicate added → **byte-identical** to pre-flag behavior. Resolved
+>   through a new shared chokepoint `labor_cost_service.is_approved_labor_required(company_id)` (global
+>   today for the same reason as `is_labor_cost_rollup_enabled`; promotable to per-tenant in one place).
+>
+> **G3-content — custom-report honesty about uncomputed labor** (`app/services/report_builder.py`,
+> `app/api/endpoints/analytics.py`). The 11A G3-scope fix made the report tenant-isolated; this is the
+> content-honesty half:
+> - **Phantom `estimated_hours` column dropped.** `WorkOrder.estimated_hours` has no writer anywhere
+>   (structurally 0 in every tenant), so it has been removed from the report builder `FIELD_MAPPINGS`
+>   **and** from the `GET /analytics/data-sources` selectable catalog. It silently dropped out of
+>   results before; it can no longer be selected. Computing it would need a routing/operations join
+>   (out of scope).
+> - **Labor-not-tracked headers.** When `LABOR_COST_ROLLUP_ENABLED` is **OFF** (default) **and** the
+>   report selects any labor-derived WORK_ORDERS column (`actual_hours` / `actual_cost` /
+>   `estimated_cost`) — which then render a literal `0` meaning "not tracked", not a measured zero —
+>   `POST /analytics/custom-report` sets `X-Report-Labor-Not-Tracked` (JSON array of affected columns)
+>   and `X-Report-Labor-Note` (human-readable note) response headers so a consumer can tell the two
+>   apart. The **response body is unchanged** (the bare-list contract the export + clients rely on);
+>   headers are set only when applicable. Resolved via the same flag chokepoint
+>   (`labor_cost_service.is_labor_cost_rollup_enabled`) — mirroring the documented flag-OFF stance of
+>   `get_cost_analysis`.
+>
+> **Compliance note.** G2's FG decrement + over-ship/missing-lot recording *strengthens* the AS9100D
+> material-traceability and CMMC audit-trail posture (outbound stock movements now leave a
+> tamper-evident trail; discrepancies are recorded, not silently dropped). G5-A's approval +
+> segregation-of-duties gate strengthens the CMMC access-control / accountability posture for the
+> labor-cost record. None of the three changes a compliance **claim** in
+> `CMMC_LEVEL_2_COMPLIANCE.md`, so no edit to that audit artifact was required pre-merge — but the
+> reviewer may want to add a changelog line noting the new `SHIP`/`OVER_SHIP`/`SHIP_FG_LOT_MISSING`
+> audit actions and the `time_entry_approve` / `time_entry_unapprove` actions now on the hash chain
+> (the audit artifact should not be edited pre-merge / without sign-off).
+>
+> **Docs updated for 11B:** `docs/API.md` (Shop Floor — two new time-entry approve/unapprove endpoints
+> + callout; Shipping — FG decrement + warn-and-record over-ship/missing-lot callout; Analytics —
+> custom-report labor-not-tracked headers + `estimated_hours` removed from the selectable catalog),
+> `docs/ENVIRONMENT_VARIABLES.md` (new `REQUIRE_APPROVED_LABOR_FOR_COST` flag + relationship to
+> `LABOR_COST_ROLLUP_ENABLED`), `docs/RBAC_PERMISSIONS.md` (new "Approve labor (TimeEntry)" row under
+> Work Orders — SUPERVISOR/QUALITY/ADMIN, no self-approval), and this doc.
+>
+> **11C remains triaged-not-started** (G1 parent/child rollup, G5-B operator-cert gate, G6-B CoC
+> generation — see table above); **G4-Fix2** and **G1-general** remain **EXCLUDED**.

@@ -164,6 +164,7 @@ so the two can never disagree. This replaces the old hardcoded `$45`/`$50` labor
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `LABOR_COST_ROLLUP_ENABLED` | No | `false` | Master switch for the opt-in cost/hours rollup on WO completion (and the flag-gated labor/overhead legs of the cost-analysis report). Currently a **global** flag — see note below. |
+| `REQUIRE_APPROVED_LABOR_FOR_COST` | No | `false` | Opt-in: when **ON**, labor-cost rollups count **only supervisor-approved** TimeEntries (`approved IS NOT NULL`). Default **OFF** → behavior byte-identical to before this flag existed. Currently a **global** flag — see note below. |
 | `DEFAULT_LABOR_RATE` | No | `75.0` | Fallback labor rate ($/hour) used when a work center has no positive `WorkCenter.hourly_rate`. **Placeholder — a finance owner should set the real shop rate.** |
 | `DEFAULT_OVERHEAD_RATE` | No | `0.0` | Overhead/burden rate ($/hour) charged on actual labor hours when a work center carries no overhead rate. |
 
@@ -173,6 +174,18 @@ so the two can never disagree. This replaces the old hardcoded `$45`/`$50` labor
 > chokepoint to repoint at a per-company field when one is added — promoting the flag to per-tenant will
 > not require touching the rollup callers. The `no_labor_recorded` data-quality signal on completion
 > fires **regardless** of this flag.
+
+> **`REQUIRE_APPROVED_LABOR_FOR_COST` (Batch-11B / G5-A) is an approval *filter*, not a master
+> switch.** It does not turn cost rollup on or off — that is `LABOR_COST_ROLLUP_ENABLED`'s job. It only
+> changes **which** closed TimeEntries are counted once rollup is happening. When **ON**, the three
+> labor-cost consumers — the job-costing recompute (`POST /job-costs/{id}/calculate`), the completion
+> cost rollup, and the analytics OEE/labor leg — additionally require `TimeEntry.approved IS NOT NULL`,
+> so un-approved shop-floor labor is excluded from cost until a supervisor/quality lead signs off via
+> `POST /shop-floor/time-entries/{id}/approve` (sets `approved` / `approved_by`). When **OFF** (the
+> default), every closed TimeEntry feeds the labor-cost legs exactly as before — byte-identical
+> behavior. Like `LABOR_COST_ROLLUP_ENABLED` it is **global** today and resolved through the same
+> chokepoint module (`labor_cost_service.is_approved_labor_required`, which accepts a `company_id`) so
+> it can be promoted to a per-tenant flag in one place later.
 
 ### Shop-Floor Dashboard Reconcile (work-order completion read path)
 
