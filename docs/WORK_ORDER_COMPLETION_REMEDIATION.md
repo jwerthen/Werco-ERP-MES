@@ -26,7 +26,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **7** ☑ | 10 | Labor-hour + job/actual-cost rollup | no | opt-in (flag default OFF); cost/hours roll up only when enabled |
 | **8** ☑ | 11 | OEE/OTD metric correctness + dead auto-OEE endpoint | no | **KPI values move**; OEE-write endpoints now role-gated |
 | **9** ☑ | 12 | Indexes + de-risk reconcile-on-read | **yes** (`042`) | bounded dashboard reconcile; cheap pre-reconcile ETag |
-| **10** | 13 | Frontend completion UX hardening | no | optimistic updates |
+| **10** ☑ | 13 | Frontend completion UX hardening | no | no API change (dashboard cache invalidation + double-submit guards + list memo) |
 
 ## Ranked actions
 
@@ -681,9 +681,68 @@ Findings: PERF-1, PERF-2, PERF-3, PERF-4, PERF-5.
 >    audit writers; the fast-304 path reduces *how often* the dashboard read does any audited work, but
 >    the dedicated fix (serialize sequence allocation or catch-and-retry the collision) is still open.
 
-### Rank 13 — Frontend completion UX hardening ☐ (Batch 10)
+### Rank 13 — Frontend completion UX hardening ☑ (Batch 10)
 Invalidate `/shop-floor/dashboard` cache after completion mutations; in-flight guards on Complete buttons; memoize/window the WO list.
 Findings: FEPERF-1, FEPERF-4, FEPERF-5.
+
+> **Batch 10 status (2026-06-08, rank 13 landed — frontend-only).** The final ranked batch hardens the
+> shop-floor / work-order completion UX on the client. It touches **only** `frontend/src/` — **no** API
+> endpoint, request/response shape, env var, role/permission, or deploy step changed (the plan table's
+> "behavior change?" column reads as a client-side UX change, not an API change). Implemented on
+> `qa/full-pass-2026-06-04`, **pending tests / review / commit** (not yet merged), mirroring the Batch 9
+> landed-but-unmerged posture. All three FEPERF findings landed.
+>
+> **FEPERF-1 — client ETag cache invalidated after every WO/operation mutation.** The Axios client
+> (`frontend/src/services/api.ts`) keeps an in-memory ETag/conditional-request cache, and
+> `/shop-floor/dashboard` is the **only** ETag-cached endpoint. A new private
+> `invalidateDashboardCache()` (a thin wrapper over the existing `invalidateCache('/shop-floor/dashboard')`)
+> now drops that cached entry after **each** state-changing work-order / operation / clock mutation:
+> `releaseWorkOrder`, `startWorkOrder`, `completeWorkOrder`, `startWOOperation`, `completeWOOperation`,
+> `clockIn`, `clockOut`, `startOperation`, `completeOperation`, `reportOperationProduction`, and
+> `holdOperation`. So immediately after a completion / clock-out the next dashboard fetch **revalidates**
+> instead of replaying a stale cached 304 body. This is **defense-in-depth on top of Batch 9's
+> backend pre-reconcile state-fingerprint ETag (PERF-2)** — the server already moves the ETag when the
+> state changes, but dropping the client entry also closes the **stale-cache-on-error fallback window**
+> (the client serving its last cached body when a conditional request errors). No new dependency; no
+> change to the request/response contract.
+>
+> **FEPERF-4 — double-submit guards on `WorkOrderDetail`'s Complete buttons.**
+> `frontend/src/pages/WorkOrderDetail.tsx` previously let a fast double-click fire two completion POSTs.
+> It now carries in-flight guards: a `completing` boolean for the WO-level **Complete** button and a
+> `completingOpId` (keyed by operation id) for the per-operation **Complete** buttons. While a request
+> is in flight the corresponding button is **disabled**, shows a spinning `ArrowPathIcon` + "Completing…"
+> label, and the handler **early-returns on re-entry** — so a completion is submitted at most once. The
+> guard wraps only the API call (set just before the `try`, cleared in `finally`), **not** the blocking
+> `prompt()` quantity dialogs that precede it. (The shop-floor screens already had this pattern;
+> `WorkOrderDetail` was the gap.) Backend completion is already idempotent / concurrency-safe (Batch 2
+> 409, Batch 3 finalizer, Batch 6 DB-enforced idempotency) — this is the client-side complement that
+> stops the duplicate request at the source.
+>
+> **FEPERF-5 — render-perf hardening of the work-order list (memoization, no virtualization).**
+> `frontend/src/pages/WorkOrders.tsx` is **render-perf only — no visible change, no behavior change.**
+> The per-row markup was extracted into a `React.memo`-wrapped `WorkOrderRow`, and
+> `WorkOrderTable` / `WorkOrderMobileList` / `WorkOrderMobileCard` are now memoized too; `handleDelete`
+> and `handleRelease` are wrapped in `useCallback` (stable identities so the memo holds). Crucially, rows
+> now receive a **boolean `isReleasing`** prop instead of the shared `releasingIds` `Set` — passing the
+> mutable Set defeated `React.memo` (every render is a new reference), so deriving a per-row boolean is
+> what actually makes the memoization effective and stops the whole table re-rendering on every poll /
+> release.
+>
+> **Deliberate scope decision — memoize, do NOT add list virtualization.** List
+> windowing / virtualization (e.g. `react-window`) was **intentionally not** done: it would add a new
+> runtime dependency, against this batch's dependency-free, low-risk precedent. Memoization captures the
+> bulk of the re-render cost with zero new dependencies. **Windowing remains a deferred follow-up** if
+> real-world list sizes grow enough to warrant it.
+>
+> **Docs check.** Frontend-only, so no API / env / RBAC / deploy doc needed touching. `docs/API.md`'s
+> `/shop-floor/dashboard` caching note documents the **server-side** ETag/304 + bounded-reconcile
+> contract (Batch 9, PERF-2/PERF-3) and stays accurate — the FEPERF-1 client-side cache invalidation is
+> complementary and does not change that contract. No other doc references the frontend ETag-cache
+> freshness behavior.
+>
+> **All 10 ranked batches are now implemented** (Batch 10 on `qa/full-pass-2026-06-04`, pending
+> tests/review/commit). The post-plan completeness-critic gaps below remain open as the proposed
+> **Batch 11** (follow-up), pending triage.
 
 ## Completeness critic — follow-up gaps the audit did NOT cover
 1. **[high] Parent/child assembly rollup entirely unimplemented** — completing child WOs never advances the parent; parent can complete with children open. (`work_order.py:47,98`, `laser_nest_service.py:98`)

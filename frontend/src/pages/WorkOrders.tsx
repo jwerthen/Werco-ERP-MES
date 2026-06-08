@@ -181,7 +181,7 @@ export default function WorkOrders() {
     };
   }, [loadWorkOrders]);
 
-  const handleDelete = async (wo: WorkOrderSummary) => {
+  const handleDelete = useCallback(async (wo: WorkOrderSummary) => {
     const isCurrent = CURRENT_WORK_ORDER_STATUSES.includes(wo.status);
     const message = isCurrent
       ? `Delete current work order ${wo.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
@@ -193,9 +193,9 @@ export default function WorkOrders() {
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to delete work order');
     }
-  };
+  }, [loadWorkOrders]);
 
-  const handleRelease = async (wo: WorkOrderSummary) => {
+  const handleRelease = useCallback(async (wo: WorkOrderSummary) => {
     if (wo.status !== 'draft') return;
     setReleasingIds((prev) => new Set(prev).add(wo.id));
     try {
@@ -210,7 +210,7 @@ export default function WorkOrders() {
         return next;
       });
     }
-  };
+  }, [loadWorkOrders]);
 
   const customers = useMemo(() => {
     const unique = new Set(workOrders.map(wo => wo.customer_name).filter(Boolean));
@@ -535,7 +535,7 @@ interface WorkOrderMobileListProps {
   className?: string;
 }
 
-function WorkOrderMobileList({ workOrders, onDelete, onRelease, releasingIds, className = '' }: WorkOrderMobileListProps) {
+const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onDelete, onRelease, releasingIds, className = '' }: WorkOrderMobileListProps) {
   if (workOrders.length === 0) return null;
 
   return (
@@ -551,7 +551,7 @@ function WorkOrderMobileList({ workOrders, onDelete, onRelease, releasingIds, cl
       ))}
     </div>
   );
-}
+});
 
 interface WorkOrderMobileCardProps {
   workOrder: WorkOrderSummary;
@@ -560,7 +560,7 @@ interface WorkOrderMobileCardProps {
   isReleasing?: boolean;
 }
 
-function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }: WorkOrderMobileCardProps) {
+const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }: WorkOrderMobileCardProps) {
   const status = statusConfig[wo.status] || statusConfig.draft;
   const priority = priorityConfig[wo.priority] || priorityConfig[4];
   const overdue = isWorkOrderOverdue(wo);
@@ -656,7 +656,7 @@ function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }
       </div>
     </article>
   );
-}
+});
 
 // Work Order Table Component
 interface WorkOrderTableProps {
@@ -667,11 +667,7 @@ interface WorkOrderTableProps {
   releasingIds?: Set<number>;
 }
 
-function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasingIds }: WorkOrderTableProps) {
-  const isOverdue = (wo: WorkOrderSummary) => {
-    return isWorkOrderOverdue(wo);
-  };
-
+const WorkOrderTable = React.memo(function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasingIds }: WorkOrderTableProps) {
   return (
     <div className="table-container border-0">
       <table className="table">
@@ -688,100 +684,118 @@ function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasing
           </tr>
         </thead>
         <tbody>
-          {workOrders.map((wo) => {
-            const status = statusConfig[wo.status] || statusConfig.draft;
-            const priority = priorityConfig[wo.priority] || priorityConfig[4];
-            const overdue = isOverdue(wo);
-            const isReleasing = releasingIds?.has(wo.id);
-            const progress = getWorkOrderProgress(wo);
-            
-            return (
-              <tr key={wo.id} className={overdue ? 'bg-red-500/10' : ''}>
-                <td>
-                  <Link 
-                    to={`/work-orders/${wo.id}`} 
-                    className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
-                  >
-                    {wo.work_order_number}
-                  </Link>
-                </td>
-                {hideColumn !== 'part' && (
-                  <td>
-                    <div>
-                      <p className="font-medium text-surface-900">{wo.part_number}</p>
-                      <p className="text-sm text-surface-500 line-clamp-1">{wo.part_name}</p>
-                    </div>
-                  </td>
-                )}
-                {hideColumn !== 'customer' && (
-                  <td className="text-surface-600">{wo.customer_name || '—'}</td>
-                )}
-                <td>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 h-2 bg-surface-200 rounded-full overflow-hidden w-20">
-                      <div 
-                        className="h-full bg-werco-500 rounded-full transition-all"
-                        style={{ width: `${progress.percent}%` }}
-                      />
-                    </div>
-                    <span className="text-sm font-medium text-surface-700 tabular-nums">
-                      {progress.label}
-                    </span>
-                  </div>
-                </td>
-                <td>
-                  <span className={`text-sm font-medium ${overdue ? 'text-red-600' : 'text-surface-700'}`}>
-                    {wo.due_date ? formatCentralDate(wo.due_date) : '—'}
-                  </span>
-                  {overdue && (
-                    <span className="ml-2 badge badge-danger text-[10px] py-0.5">OVERDUE</span>
-                  )}
-                </td>
-                <td>
-                  <span className={`badge ${priority.bg} ${priority.text}`}>
-                    P{wo.priority}
-                  </span>
-                </td>
-                <td>
-                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${status.bg} ${status.text}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`}></span>
-                    {formatStatusLabel(wo.status)}
-                  </span>
-                </td>
-                <td>
-                  <div className="flex items-center gap-1">
-                    {onRelease && wo.status === 'draft' && (
-                      <button
-                        onClick={() => onRelease(wo)}
-                        disabled={isReleasing}
-                        className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Release"
-                      >
-                        <CheckCircleIcon className="h-4 w-4" />
-                      </button>
-                    )}
-                    {onDelete && (
-                      <button 
-                        onClick={() => onDelete(wo)}
-                        className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors"
-                        title="Delete"
-                      >
-                        <TrashIcon className="h-4 w-4" />
-                      </button>
-                    )}
-                    <Link 
-                      to={`/work-orders/${wo.id}`}
-                      className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
-                    >
-                      <ChevronRightIcon className="h-5 w-5" />
-                    </Link>
-                  </div>
-                </td>
-              </tr>
-            );
-          })}
+          {workOrders.map((wo) => (
+            <WorkOrderRow
+              key={wo.id}
+              wo={wo}
+              hideColumn={hideColumn}
+              onDelete={onDelete}
+              onRelease={onRelease}
+              isReleasing={Boolean(releasingIds?.has(wo.id))}
+            />
+          ))}
         </tbody>
       </table>
     </div>
   );
+});
+
+interface WorkOrderRowProps {
+  wo: WorkOrderSummary;
+  hideColumn?: 'customer' | 'part';
+  onDelete?: (wo: WorkOrderSummary) => void;
+  onRelease?: (wo: WorkOrderSummary) => void;
+  isReleasing: boolean;
 }
+
+const WorkOrderRow = React.memo(function WorkOrderRow({ wo, hideColumn, onDelete, onRelease, isReleasing }: WorkOrderRowProps) {
+  const status = statusConfig[wo.status] || statusConfig.draft;
+  const priority = priorityConfig[wo.priority] || priorityConfig[4];
+  const overdue = isWorkOrderOverdue(wo);
+  const progress = getWorkOrderProgress(wo);
+
+  return (
+    <tr className={overdue ? 'bg-red-500/10' : ''}>
+      <td>
+        <Link
+          to={`/work-orders/${wo.id}`}
+          className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
+        >
+          {wo.work_order_number}
+        </Link>
+      </td>
+      {hideColumn !== 'part' && (
+        <td>
+          <div>
+            <p className="font-medium text-surface-900">{wo.part_number}</p>
+            <p className="text-sm text-surface-500 line-clamp-1">{wo.part_name}</p>
+          </div>
+        </td>
+      )}
+      {hideColumn !== 'customer' && (
+        <td className="text-surface-600">{wo.customer_name || '—'}</td>
+      )}
+      <td>
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-2 bg-surface-200 rounded-full overflow-hidden w-20">
+            <div
+              className="h-full bg-werco-500 rounded-full transition-all"
+              style={{ width: `${progress.percent}%` }}
+            />
+          </div>
+          <span className="text-sm font-medium text-surface-700 tabular-nums">
+            {progress.label}
+          </span>
+        </div>
+      </td>
+      <td>
+        <span className={`text-sm font-medium ${overdue ? 'text-red-600' : 'text-surface-700'}`}>
+          {wo.due_date ? formatCentralDate(wo.due_date) : '—'}
+        </span>
+        {overdue && (
+          <span className="ml-2 badge badge-danger text-[10px] py-0.5">OVERDUE</span>
+        )}
+      </td>
+      <td>
+        <span className={`badge ${priority.bg} ${priority.text}`}>
+          P{wo.priority}
+        </span>
+      </td>
+      <td>
+        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${status.bg} ${status.text}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`}></span>
+          {formatStatusLabel(wo.status)}
+        </span>
+      </td>
+      <td>
+        <div className="flex items-center gap-1">
+          {onRelease && wo.status === 'draft' && (
+            <button
+              onClick={() => onRelease(wo)}
+              disabled={isReleasing}
+              className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Release"
+            >
+              <CheckCircleIcon className="h-4 w-4" />
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={() => onDelete(wo)}
+              className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors"
+              title="Delete"
+            >
+              <TrashIcon className="h-4 w-4" />
+            </button>
+          )}
+          <Link
+            to={`/work-orders/${wo.id}`}
+            className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
+          >
+            <ChevronRightIcon className="h-5 w-5" />
+          </Link>
+        </div>
+      </td>
+    </tr>
+  );
+});
