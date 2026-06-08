@@ -6,11 +6,27 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
+from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.oee import OEERecord, OEETarget
-from app.models.user import User
+from app.models.time_entry import TimeEntry, TimeEntryType
+from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.models.work_order import WorkOrderOperation
+
+# Production-bearing time-entry types (OEE-5): pieces/scrap counted from these
+# uniformly across the auto-calc, matching ``analytics_service`` so a quantity logged
+# on a REWORK clock-out is never silently dropped.
+PRODUCTION_BEARING_ENTRY_TYPES = [TimeEntryType.RUN, TimeEntryType.REWORK]
+# RUN + SETUP are the productive-run portion of clocked time (availability numerator).
+PRODUCTIVE_RUN_ENTRY_TYPES = [TimeEntryType.RUN, TimeEntryType.SETUP]
+
+# RBAC: OEE WRITE/mutation endpoints (records, targets, auto-calculate) are gated to the
+# same role set as the sibling Analytics router — Operators/Viewers can VIEW dashboards
+# but must not create/overwrite OEE records or targets. READ endpoints stay on
+# ``get_current_user`` so the shop floor can still see OEE dashboards.
+OEE_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
 
 router = APIRouter()
 
@@ -279,7 +295,7 @@ def get_oee_record(
 def create_oee_record(
     record_in: OEERecordCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
 ):
     """Create a new OEE record with auto-calculated OEE metrics."""
@@ -324,7 +340,7 @@ def update_oee_record(
     record_id: int,
     record_in: OEERecordUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
 ):
     """Update an OEE record and recalculate OEE metrics."""
@@ -364,7 +380,7 @@ def update_oee_record(
 def delete_oee_record(
     record_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
 ):
     """Delete an OEE record."""
@@ -386,13 +402,25 @@ def auto_calculate_oee(
     record_date: date = None,
     shift: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
 ):
     """Auto-calculate OEE for a work center on a given date from existing data.
 
-    Uses time entries and downtime events already in the system.
-    Falls back to work center defaults if no data is found.
+    Computes a real OEERecord from the day's clocked TimeEntries, the routing standard
+    cycle time, and reported DowntimeEvents — on the STAFFED-time convention (Batch 8 /
+    rank 11). Previously this endpoint referenced ``TimeEntry.start_time``/``end_time``
+    (which DO NOT EXIST) and 500'd on every call (OEE-1); it also hardcoded a 60 s ideal
+    cycle and assumed all parts good (OEE-7).
+
+    Convention (mirrors ``analytics_service``):
+      * Availability = productive run (clocked RUN+SETUP minus reported DowntimeEvent
+        time) ÷ STAFFED (clocked) minutes at the WC that day (OEE-4) — NOT the plant
+        calendar, so idle/un-clocked time is excluded and availability is not pinned ~1.
+      * Performance = ideal cycle (routing ``run_time_per_piece``) × pieces ÷ productive
+        run time, ideal cycle DERIVED, not assumed (OEE-7).
+      * Quality = good ÷ total, where scrap comes from ``TimeEntry.quantity_scrapped``
+        on the production-bearing entry types (OEE-7), not assumed all-good.
     """
     if record_date is None:
         record_date = date.today()
@@ -401,51 +429,112 @@ def auto_calculate_oee(
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
 
-    # Planned production time from work center capacity
-    planned_time = (wc.capacity_hours_per_day or 8.0) * 60.0  # minutes
-
-    # Try to gather data from time entries for this date
-    from app.models.time_entry import TimeEntry
-
+    # Gather the day's CLOSED clocked entries for this WC (tenant-scoped). Use clock_in/
+    # clock_out (OEE-1 fix: there is no start_time/end_time on TimeEntry).
     time_entries = (
         db.query(TimeEntry)
         .filter(
             TimeEntry.company_id == company_id,
             TimeEntry.work_center_id == work_center_id,
-            func.date(TimeEntry.start_time) == record_date,
+            func.date(TimeEntry.clock_in) == record_date,
+            TimeEntry.clock_out.isnot(None),
         )
         .all()
     )
 
-    actual_run_minutes = 0.0
-    total_parts = 0
+    def _entry_minutes(te: TimeEntry) -> float:
+        # Prefer the stored duration_hours; fall back to the clock span.
+        if te.duration_hours is not None:
+            return float(te.duration_hours) * 60.0
+        if te.clock_in and te.clock_out:
+            return (te.clock_out - te.clock_in).total_seconds() / 60.0
+        return 0.0
+
+    staffed_minutes = 0.0  # ALL clocked entries -> availability denominator (OEE-4)
+    run_minutes = 0.0  # RUN+SETUP -> productive run (availability numerator)
+    good_count = 0  # production-bearing good pieces (quantity_produced, OEE-5)
+    scrap_count = 0  # production-bearing scrapped pieces (OEE-7)
     for te in time_entries:
-        if te.start_time and te.end_time:
-            delta = (te.end_time - te.start_time).total_seconds() / 60.0
-            actual_run_minutes += delta
-        if te.quantity_produced:
-            total_parts += int(te.quantity_produced)
+        minutes = _entry_minutes(te)
+        staffed_minutes += minutes
+        if te.entry_type in PRODUCTIVE_RUN_ENTRY_TYPES:
+            run_minutes += minutes
+        if te.entry_type in PRODUCTION_BEARING_ENTRY_TYPES:
+            good_count += int(te.quantity_produced or 0)
+            scrap_count += int(te.quantity_scrapped or 0)
 
-    downtime = max(0.0, planned_time - actual_run_minutes)
+    # quantity_produced is the GOOD count (it increments quantity_complete on clock-out),
+    # so total pieces cycled = good + scrap. Quality = good / (good + scrap) (OEE-7).
+    total_parts = good_count + scrap_count  # all pieces cycled (perf + quality denom)
 
-    # Default ideal cycle time if we have parts info
-    ideal_cycle_time_seconds = 60.0  # 1 minute default
+    # Reported machine downtime for this WC/day (OEE-7) — DowntimeEvent was never read
+    # by this endpoint before despite the docstring's claim.
+    downtime_minutes = float(
+        db.query(func.coalesce(func.sum(DowntimeEvent.duration_minutes), 0.0))
+        .filter(
+            DowntimeEvent.company_id == company_id,
+            DowntimeEvent.work_center_id == work_center_id,
+            func.date(DowntimeEvent.start_time) == record_date,
+            DowntimeEvent.planned_type == DowntimePlannedType.UNPLANNED,
+        )
+        .scalar()
+        or 0.0
+    )
 
-    # Quality: assume all good if no NCR data
-    good_parts = total_parts
-    defect_parts = 0
+    # Productive run = clocked RUN+SETUP minus reported downtime.
+    productive_run_minutes = max(0.0, run_minutes - downtime_minutes)
+
+    # Ideal cycle DERIVED from routing run_time_per_piece (OEE-7), quantity-weighted
+    # over the production-bearing pieces (good + scrap) cycled at this WC today; every
+    # piece run consumes a standard cycle, so weight by (produced + scrapped).
+    # run_time_per_piece is stored in hours alongside run_time_hours.
+    ideal_run_hours = float(
+        db.query(
+            func.coalesce(
+                func.sum(
+                    (TimeEntry.quantity_produced + TimeEntry.quantity_scrapped) * WorkOrderOperation.run_time_per_piece
+                ),
+                0.0,
+            )
+        )
+        .select_from(TimeEntry)
+        .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
+        .filter(
+            TimeEntry.company_id == company_id,
+            TimeEntry.work_center_id == work_center_id,
+            func.date(TimeEntry.clock_in) == record_date,
+            TimeEntry.clock_out.isnot(None),
+            TimeEntry.entry_type.in_(PRODUCTION_BEARING_ENTRY_TYPES),
+        )
+        .scalar()
+        or 0.0
+    )
+    # Per-piece ideal cycle in seconds for the stored OEERecord (0 when no standard/no
+    # parts -> performance leg degrades to 0, not a misleading 60 s assumption).
+    ideal_cycle_time_seconds = (ideal_run_hours * 3600.0 / total_parts) if total_parts > 0 else 0.0
+
+    # Quality from real scrap (OEE-7): good = produced (good count); defect = scrapped.
+    good_parts = good_count
+    defect_parts = scrap_count
     rework_parts = 0
 
-    # Calculate OEE
+    # Availability basis = STAFFED minutes (OEE-4): feed calculate_oee planned=staffed,
+    # actual_run=productive_run so availability = productive_run / staffed.
+    planned_time = staffed_minutes
+
+    # Calculate OEE on the staffed-time basis. Performance basis = productive run.
     oee_calcs = calculate_oee(
         planned_production_time_minutes=planned_time,
-        actual_run_time_minutes=actual_run_minutes,
+        actual_run_time_minutes=productive_run_minutes,
         total_parts_produced=total_parts,
         ideal_cycle_time_seconds=ideal_cycle_time_seconds,
-        actual_operating_time_minutes=actual_run_minutes,
+        actual_operating_time_minutes=productive_run_minutes,
         good_parts=good_parts,
         total_parts=total_parts,
     )
+    # Stored on the record as the availability denominator / numerator and the loss split.
+    actual_run_minutes = productive_run_minutes
+    downtime = downtime_minutes
 
     # Check for existing record
     existing = (
@@ -470,6 +559,10 @@ def auto_calculate_oee(
         existing.total_parts = total_parts
         existing.defect_parts = defect_parts
         existing.rework_parts = rework_parts
+        # Six-big-losses: reported machine downtime is an unplanned-stop loss; scrap is a
+        # production reject (so the loss/dashboard breakdown reflects real data, OEE-7).
+        existing.unplanned_stop_minutes = downtime
+        existing.production_reject_count = defect_parts
         for field, value in oee_calcs.items():
             setattr(existing, field, value)
         db.commit()
@@ -490,6 +583,8 @@ def auto_calculate_oee(
             total_parts=total_parts,
             defect_parts=defect_parts,
             rework_parts=rework_parts,
+            unplanned_stop_minutes=downtime,
+            production_reject_count=defect_parts,
             **oee_calcs,
             created_by=current_user.id,
         )
@@ -790,7 +885,7 @@ def list_oee_targets(
 def create_oee_target(
     target_in: OEETargetCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
 ):
     """Create or update an OEE target for a work center."""
@@ -845,7 +940,7 @@ def update_oee_target(
     target_id: int,
     target_in: OEETargetUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
 ):
     """Update an OEE target."""
@@ -885,7 +980,7 @@ def update_oee_target(
 def delete_oee_target(
     target_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
 ):
     """Delete an OEE target."""

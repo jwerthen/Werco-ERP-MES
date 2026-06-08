@@ -24,7 +24,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **5** ☑ | 8 | Uniform completion signal set (events/notify/webhook/sched) | no | new outbound signals |
 | **6** ☑ | 9 | FG receipt + backflush + as-built genealogy | **yes** (`040`/`041`) | inventory now moves |
 | **7** ☑ | 10 | Labor-hour + job/actual-cost rollup | no | opt-in (flag default OFF); cost/hours roll up only when enabled |
-| **8** | 11 | OEE/OTD metric correctness + dead auto-OEE endpoint | no | **KPI values move** |
+| **8** ☑ | 11 | OEE/OTD metric correctness + dead auto-OEE endpoint | no | **KPI values move**; OEE-write endpoints now role-gated |
 | **9** | 12 | Indexes + de-risk reconcile-on-read | **yes** | reconcile may move off read path |
 | **10** | 13 | Frontend completion UX hardening | no | optimistic updates |
 
@@ -480,9 +480,78 @@ Findings: COST-1, COST-2, COST-3, COST-4, COST-5.
 > center has none; a finance owner should set the real shop labor + overhead rates (per work center via
 > `WorkCenter.hourly_rate`, and the env fallbacks) before cost figures are relied on.
 
-### Rank 11 — OEE/OTD metric correctness + dead auto-OEE endpoint ☐ (Batch 8 · KPIs move)
+### Rank 11 — OEE/OTD metric correctness + dead auto-OEE endpoint ☑ (Batch 8 · KPIs move)
 Fix `oee.py` `TimeEntry.start_time→clock_in`/`end_time→clock_out` (endpoint dead today); derive ideal cycle/good/defect properly; availability on staffed time; consistent produced/scrapped; OTD returns n/a on empty set not 100%.
 Findings: OEE-1, OEE-4, OEE-5, OEE-6, OEE-7, COST-5, MS-5.
+
+> **Batch 8 status (2026-06-07, rank 11 landed — KPI values move).** OEE and OTD now compute on one
+> honest, consistent convention, and the dead auto-OEE endpoint is alive.
+>
+> **OEE-1 — the auto-OEE endpoint was dead; now it works.** `POST /api/v1/oee/calculate/{work_center_id}`
+> (`auto_calculate_oee` in `app/api/endpoints/oee.py`) referenced `TimeEntry.start_time` / `end_time`,
+> which **do not exist** on the model — every call **500'd**. It now reads `clock_in` / `clock_out`
+> (preferring the stored `duration_hours`), actually consults `DowntimeEvent` (the old docstring claimed
+> it did but never did), derives the ideal cycle from the routing instead of a hardcoded 60 s, and counts
+> real scrap instead of assuming all-good (OEE-7). It writes/updates a real `OEERecord` for the day/shift.
+>
+> **OEE convention (now identical on the `/analytics/kpis` headline and the persisted `OEERecord`).**
+> `OEE = Availability × Performance × Quality`, per work center, on the **staffed-time** basis:
+> - **Availability** = productive-run hours ÷ **staffed (clocked) hours** at the work center. Staffed =
+>   Σ `duration_hours` of **every** closed `TimeEntry` at the WC in the window (operators on the clock
+>   there) — **not** the plant calendar, so idle/un-clocked time is excluded and availability is no
+>   longer pinned near 1.0 (OEE-4). Productive run = (RUN+SETUP hours) − **UNPLANNED** `DowntimeEvent`
+>   hours. **n/a when there is no staffed time** (genuinely uncomputable).
+> - **Performance** = ideal hours ÷ productive run, cap 100%. ideal hours =
+>   Σ((`quantity_produced` + `quantity_scrapped`) × `WorkOrderOperation.run_time_per_piece`) over the
+>   production-bearing entries (RUN+REWORK) — i.e. **every piece run consumes a standard cycle, including
+>   scrap** (scrap is discounted separately in Quality), derived from the routing, not a hardcoded
+>   60 s (OEE-7). Weighting by produced+scrapped is what makes the `/analytics/kpis` headline and the
+>   stored `OEERecord` agree for identical data.
+> - **Quality** = good ÷ (good + scrapped), good = Σ `quantity_produced`, scrapped =
+>   Σ `quantity_scrapped`, both over the production-bearing entries (RUN+REWORK) — not assumed all-good
+>   (OEE-7). Pieces/scrap are counted from `PRODUCTION_BEARING_ENTRY_TYPES = [RUN, REWORK]` uniformly
+>   across the availability/performance/quality/ideal-hours legs so a quantity logged on a REWORK
+>   clock-out is never silently dropped (OEE-5).
+>
+> **OEE-6 — OTD honesty.** On-time-delivery (`_get_otd_value` in `app/services/analytics_service.py`)
+> now returns **n/a (null) on an empty completed-set** instead of a fabricated 100% (no completed WO
+> with a due date in the window → genuinely uncomputable, not perfect). On-time =
+> `actual_end.date() <= due_date`; a **COMPLETE WO with a NULL `actual_end` counts as NOT on time** (no
+> verifiable completion date), so a late job can no longer read as on-time by lacking a stamp. The
+> completed-set query is now also soft-delete-filtered (`is_deleted == False`).
+>
+> **`KPIValue.value` is now `Optional[float]`** (`app/schemas/analytics.py`). The n/a OEE and OTD
+> headlines serialize as `null`; the frontend null-guards and renders **"n/a"**. (The `OEEComponents` /
+> `OEEDataPoint` chart series stay `float` and coalesce an uncomputable window to `0.0` — the honest
+> n/a is surfaced on the `/analytics/kpis` headline `KPIValue`, not the chart glyph.)
+>
+> **MS-5 — capacity reservation released by data.** An operation reaching COMPLETE now clears its
+> `scheduled_start` / `scheduled_end` (`release_operation_schedule_reservation` in
+> `app/services/work_order_state_service.py`). Scheduling capacity is computed from non-COMPLETE
+> operations; nulling the schedule on completion frees the reservation by **data** rather than relying on
+> every reader to remember the `status != COMPLETE` predicate, so any future/third-party query over
+> scheduled operations can't double-count finished work as still-reserved capacity.
+>
+> **OEE-write RBAC tightened (closes the review follow-up).** The OEE **write/mutation** endpoints —
+> `POST /oee/calculate/{wc}`, `POST/PUT/DELETE /oee/records`, `POST/PUT/DELETE /oee/targets` — now
+> require **ADMIN / MANAGER / SUPERVISOR** (`require_role(OEE_WRITE_ROLES)`), matching the sibling
+> Analytics-write posture; they were previously open to **any** authenticated user. OEE **read**
+> endpoints (`/oee/dashboard`, `/oee/trends`, `/oee/six-big-losses/{wc}`, list/get `/oee/records` and
+> `/oee/targets`) stay on `get_current_user` so operators can still view dashboards (read-broad /
+> write-restricted, per `docs/RBAC_PERMISSIONS.md`). See `docs/API.md` → OEE Tracking and
+> `docs/RBAC_PERMISSIONS.md` → OEE.
+>
+> **Follow-ups (tracked, not fixed in Batch 8):**
+> 1. **`OEERecord` writes are not audited.** The auto-calc and manual `/oee/records` create/update/delete
+>    do not write a tamper-evident `audit_log` row (OEE records are a derived daily snapshot, not a
+>    primary production record). The OEE-write RBAC gate added here closes the access-control half of the
+>    original concern; an audit-trail pass on `OEERecord` mutation remains a tracked standing item.
+> 2. **Manual `POST /oee/records` keeps the legacy planned-time availability formula.** The *manual*
+>    record-entry path (`calculate_oee` helper) still computes Availability = `actual_run_time ÷
+>    planned_production_time` from the operator-supplied fields, because those are hand-entered inputs,
+>    not the staffed-time derivation. Only the **auto-calc** path and the `/analytics/kpis` headline use
+>    the staffed-time convention. A shop that enters OEE records by hand should understand the two paths
+>    use different availability bases.
 
 ### Rank 12 — Indexes + de-risk reconcile-on-read ☐ (Batch 9 · migration)
 Migration: `ix_time_entries_operation_clock_out`, `ix_woo_work_order_sequence` (CONCURRENTLY, idempotent). Bound the dashboard reconcile (no `.limit()` today) / move to debounced ARQ; compute ETag before reconcile; grouped predecessor query; `commit=False` on `update_availability_rates`.

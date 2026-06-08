@@ -27,7 +27,10 @@ class TrendDirection(str, Enum):
 
 
 class KPIValue(BaseModel):
-    value: float
+    # ``value`` is Optional so a genuinely-uncomputable KPI (no staffed time for OEE,
+    # empty denominator for OTD — Batch 8 / OEE-4/OEE-6) returns null ("n/a") instead
+    # of a misleading 0/100. Frontend must null-guard before formatting.
+    value: Optional[float] = None
     target: Optional[float] = None
     prior_value: Optional[float] = None
     change_pct: Optional[float] = None

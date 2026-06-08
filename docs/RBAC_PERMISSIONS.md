@@ -152,6 +152,24 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Export | ✓ | ✓ | | | | | |
 
+### OEE
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (dashboard / trends / six-big-losses / list records & targets) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Write (auto-calculate / create-edit-delete records & targets) | ✓ | ✓ | ✓ | | | | |
+
+> **Write enforcement (read-broad / write-restricted).** The OEE **write/mutation** endpoints —
+> `POST /api/v1/oee/calculate/{work_center_id}`, `POST`/`PUT`/`DELETE /oee/records`, and
+> `POST`/`PUT`/`DELETE /oee/targets` — are now enforced **in code** to the Write row via
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` (`OEE_WRITE_ROLES` in `app/api/endpoints/oee.py`),
+> matching the sibling Analytics-write posture. **This is a permission change:** these endpoints were
+> previously open to any authenticated user. OEE **read** endpoints (`/oee/dashboard`, `/oee/trends`,
+> `/oee/six-big-losses/{wc}`, and the list/get GETs for records and targets) depend on
+> `get_current_user` only — they are tenant-scoped but not role-restricted, so operators/viewers can
+> still load OEE dashboards. The **View** row therefore reflects intended UI visibility; the **Write**
+> row is a server-enforced control. Superuser / Platform Admin bypass role checks, as elsewhere.
+
 ### Admin
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

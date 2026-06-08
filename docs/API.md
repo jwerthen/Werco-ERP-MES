@@ -562,9 +562,29 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/analytics/overview` | Analytics overview | Yes |
+| GET | `/analytics/kpis` | KPI dashboard (OEE, OTD, FPY, scrap, NCRs, …) | Yes |
 | GET | `/analytics/production-trends` | Production trends | Yes |
 | GET | `/analytics/quality-metrics` | Quality metrics | Yes |
 | GET | `/analytics/cost-analysis` | Job cost analysis (estimated vs. actual) | Yes |
+
+> **KPI values can be `null` ("n/a").** Each KPI on `GET /analytics/kpis` is a `KPIValue` whose
+> **`value` (and `prior_value` / `change_pct`) are nullable**. A genuinely-uncomputable metric returns
+> `null` rather than a misleading 0/100, and the frontend renders **"n/a"**:
+> - **OEE** is `null` when the work center (or plant) has **no staffed (clocked) time** in the window —
+>   there is no availability denominator, so it is uncomputable, not 0%.
+> - **On-time delivery (OTD)** is `null` when **no work order with a due date completed** in the window
+>   (empty denominator) — not a fabricated 100%.
+>
+> **OEE convention (`Availability × Performance × Quality`).** Computed per work center on the
+> **staffed-time** basis, identical on this headline and on the persisted `OEERecord` (see OEE Tracking
+> below): Availability = productive-run hours ÷ staffed (clocked) hours, productive run = (RUN+SETUP) −
+> UNPLANNED downtime; Performance = ideal hours ÷ productive run, ideal hours = Σ((produced + scrapped)
+> × routing `run_time_per_piece`) over RUN+REWORK (every piece run consumes a standard cycle, including
+> scrap); Quality = good ÷ (good + scrapped) over RUN+REWORK.
+>
+> **OTD rule.** On-time = `actual_end.date() <= due_date`. A **COMPLETE work order with a null
+> `actual_end` counts as NOT on time** (no verifiable completion date). The completed-set is
+> tenant-scoped and soft-delete-filtered (`is_deleted == False`).
 
 > **Cost-analysis labor/overhead is gated by `LABOR_COST_ROLLUP_ENABLED`.** `GET /analytics/cost-analysis`
 > derives each job's labor and overhead from the work order's actual hours at the shared work-center
@@ -575,6 +595,51 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > accurate either way. The on-demand `POST /job-costs/{id}/calculate` recomputes job-cost labor from time
 > entries regardless of the flag and is **tenant-scoped** (a job cost is looked up by id **and**
 > company, closing a prior cross-tenant lookup).
+
+### OEE Tracking
+
+OEE = **Availability × Performance × Quality** per work center. **Reads** (dashboards/trends) are open
+to any authenticated user in the tenant so the shop floor can view them; **writes** (auto-calculate,
+records, targets) require **Admin / Manager / Supervisor**.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/oee/dashboard` | OEE per work center, plant-wide OEE, targets (`period` 7d/30d/90d/365d) | Yes |
+| GET | `/oee/trends` | OEE time-series for charts (`work_center_id`, `period`) | Yes |
+| GET | `/oee/six-big-losses/{work_center_id}` | Six-big-losses breakdown | Yes |
+| GET | `/oee/records` | List OEE records (filters: WC, date range, shift) | Yes |
+| GET | `/oee/records/{record_id}` | Get one OEE record | Yes |
+| POST | `/oee/calculate/{work_center_id}` | Auto-calculate the day/shift OEE record from data | Admin / Manager / Supervisor |
+| POST | `/oee/records` | Create an OEE record (manual inputs) | Admin / Manager / Supervisor |
+| PUT | `/oee/records/{record_id}` | Update + recalculate an OEE record | Admin / Manager / Supervisor |
+| DELETE | `/oee/records/{record_id}` | Delete an OEE record | Admin / Manager / Supervisor |
+| GET | `/oee/targets` | List OEE targets | Yes |
+| POST | `/oee/targets` | Create/update a work center's OEE target | Admin / Manager / Supervisor |
+| PUT | `/oee/targets/{target_id}` | Update an OEE target | Admin / Manager / Supervisor |
+| DELETE | `/oee/targets/{target_id}` | Delete an OEE target | Admin / Manager / Supervisor |
+
+> **RBAC split (read-broad / write-restricted).** The write/mutation endpoints depend on
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` (`OEE_WRITE_ROLES` in `app/api/endpoints/oee.py`); they
+> were previously open to any authenticated user. Read endpoints depend on `get_current_user` only, so
+> operators/viewers can still load dashboards. Superuser / Platform Admin bypass role checks, as
+> elsewhere. See `docs/RBAC_PERMISSIONS.md` → OEE.
+
+> **`POST /oee/calculate/{work_center_id}` (auto-calculate).** Builds (or upserts, per work center +
+> date + shift) a real `OEERecord` for `record_date` (default today) from the day's **closed**
+> `TimeEntry` rows, the routing standard cycle time, and reported `DowntimeEvent` rows — on the
+> **staffed-time** convention so it agrees with the `/analytics/kpis` headline:
+> - **Availability** = productive-run minutes ÷ **staffed (clocked)** minutes at the WC; productive run
+>   = (RUN+SETUP) minutes − **UNPLANNED** `DowntimeEvent` minutes. (Returns/stores 0 availability when
+>   there is no staffed time for that WC/day.)
+> - **Performance** = ideal hours ÷ productive run; ideal hours = Σ((`quantity_produced` +
+>   `quantity_scrapped`) × `WorkOrderOperation.run_time_per_piece`) over RUN+REWORK — derived from the
+>   routing, not a hardcoded cycle. Every piece run (including scrap) consumes a standard cycle.
+> - **Quality** = good ÷ (good + scrapped); good = Σ `quantity_produced`, scrapped =
+>   Σ `quantity_scrapped` over RUN+REWORK.
+>
+> This endpoint previously referenced `TimeEntry.start_time` / `end_time` (which do not exist) and
+> returned **500** on every call; it now uses `clock_in` / `clock_out`. All queries are tenant-scoped;
+> a foreign `work_center_id` returns **404**.
 
 ### Users (Admin)
 

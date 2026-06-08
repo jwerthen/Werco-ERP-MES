@@ -257,6 +257,32 @@ def _active_operation_id(work_order: WorkOrder) -> Optional[int]:
     return None
 
 
+def release_operation_schedule_reservation(operation: WorkOrderOperation) -> bool:
+    """Free a completed operation's capacity reservation by clearing its schedule (MS-5).
+
+    Scheduling capacity is recomputed from operations where ``status !=
+    OperationStatus.COMPLETE`` (``scheduling_service._initialize_capacity`` /
+    ``_get_scheduled_hours_by_work_center``). A completed op that still carries
+    ``scheduled_start``/``scheduled_end`` is correct ONLY as long as every reader
+    remembers that status predicate; any future/third-party query over scheduled
+    operations that omits it would double-count finished work as still-reserved
+    capacity. Nulling the schedule on completion frees the reservation by DATA rather
+    than by every consumer remembering the filter, so the in-tree status filters and
+    any new reader agree. Returns True if it changed anything (for the reconcile
+    change-tracking). No-op if the op is not COMPLETE or already cleared.
+    """
+    if operation.status != OperationStatus.COMPLETE:
+        return False
+    changed = False
+    if operation.scheduled_start is not None:
+        operation.scheduled_start = None
+        changed = True
+    if operation.scheduled_end is not None:
+        operation.scheduled_end = None
+        changed = True
+    return changed
+
+
 def _remaining_incomplete_operation_ids(
     work_order: WorkOrder,
     completed_operation: WorkOrderOperation,
@@ -310,6 +336,12 @@ def finalize_operation_completion(
     affected_work_centers: set[int] = set()
     if operation.work_center_id:
         affected_work_centers.add(operation.work_center_id)
+
+    # MS-5: the just-completed operation no longer reserves capacity -- free it by data
+    # (clear its schedule) so it cannot be double-counted by any reader that forgets the
+    # ``status != COMPLETE`` predicate. The caller refreshes availability for the WCs we
+    # return, so the persisted availability_rate stays in step with the freed reservation.
+    release_operation_schedule_reservation(operation)
 
     if all_operations_complete_hint is not None:
         remaining_ids: list[int] = [] if all_operations_complete_hint else [-1]
@@ -624,6 +656,8 @@ def _sync_operation_status_from_quantity(
         operation.completed_by = operation.completed_by or (latest_entry.user_id if latest_entry else None)
         operation.actual_start = operation.actual_start or (latest_entry.clock_in if latest_entry else None)
         operation.started_by = operation.started_by or (latest_entry.user_id if latest_entry else None)
+        # MS-5: free the schedule reservation for a reconcile-driven completion too.
+        release_operation_schedule_reservation(operation)
         changed = True
     elif quantity_complete > 0 and operation.status in (OperationStatus.PENDING, OperationStatus.READY):
         operation.status = OperationStatus.IN_PROGRESS
@@ -660,6 +694,7 @@ def _copy_slot_completion_evidence(
             if operation.status != OperationStatus.COMPLETE:
                 old_op_status = operation.status.value if operation.status else None
                 operation.status = OperationStatus.COMPLETE
+                release_operation_schedule_reservation(operation)  # MS-5
                 changed = True
                 _record_transition(
                     transitions,
