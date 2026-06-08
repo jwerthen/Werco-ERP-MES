@@ -48,12 +48,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.inventory import InventoryItem, InventoryTransaction, TransactionType
 from app.models.operational_event import OperationalEvent  # noqa: F401  (imported for type/test discoverability)
 from app.models.part import Part
+from app.models.shipping import Shipment, ShipmentStatus
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
@@ -66,6 +68,17 @@ logger = logging.getLogger(__name__)
 # the hash chain AND emitted as a warning OperationalEvent (item 3).
 BACKFLUSH_SHORTAGE_AUDIT_ACTION = "BACKFLUSH_SHORTAGE"
 BACKFLUSH_SHORTAGE_EVENT_TYPE = "backflush_shortage"
+
+# Tamper-evident audit actions + operational-event types for ship-side discrepancies
+# (G2). A ship with no matching finished-good lot row (receipt skipped / lot changed /
+# stock already moved) and a ship that drives cumulative shipped beyond what was
+# produced are both regulated material-trail control gaps. Each is recorded on the hash
+# chain AND emitted as a warning OperationalEvent -- but NEITHER fails the ship/close
+# (mirrors the warn-and-record backflush-shortage posture).
+SHIP_FG_MISSING_AUDIT_ACTION = "SHIP_FG_LOT_MISSING"
+SHIP_FG_MISSING_EVENT_TYPE = "ship_fg_lot_missing"
+OVER_SHIP_AUDIT_ACTION = "OVER_SHIP"
+OVER_SHIP_EVENT_TYPE = "over_ship"
 
 
 def _insert_txn_with_savepoint(db: Session, txn: InventoryTransaction) -> bool:
@@ -697,3 +710,307 @@ def apply_completion_inventory_effects(
     """
     receive_finished_goods_for_work_order(db, work_order, user_id=user_id, company_id=company_id, audit=audit)
     return backflush_components_for_work_order(db, work_order, user_id=user_id, company_id=company_id, audit=audit)
+
+
+def _existing_shipment_ship_txn(db: Session, shipment_id: int, company_id: int) -> bool:
+    """True if a SHIP txn for this shipment already exists (idempotency key, G2).
+
+    The offsetting finished-goods decrement on ship is keyed on a prior SHIP
+    ``InventoryTransaction`` with ``reference_type='shipment', reference_id=shipment.id``
+    so a re-submitted / concurrent double-ship can never double-decrement. (There is no
+    DB partial-unique index for SHIP txns this batch -- see the follow-up note in
+    ``decrement_finished_goods_for_shipment`` -- so this application check, combined with
+    the caller's ``with_for_update`` row lock on the shipment, is the idempotency guard.)
+    """
+    return (
+        db.query(InventoryTransaction.id)
+        .filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.reference_type == "shipment",
+            InventoryTransaction.reference_id == shipment_id,
+            InventoryTransaction.transaction_type == TransactionType.SHIP,
+        )
+        .first()
+        is not None
+    )
+
+
+def _record_ship_discrepancy(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    shipment: Shipment,
+    audit_action: str,
+    event_type: str,
+    description: str,
+    extra: dict,
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+) -> None:
+    """Persist a ship-side discrepancy as a tamper-evident audit row + warning event (G2).
+
+    Mirrors ``_record_backflush_shortage``: ONE ``audit_log`` row on the immutable hash
+    chain (never written directly) + a warning ``OperationalEvent`` for AI/realtime
+    consumers. Tenant-scoped. Both only flush (never commit), so the records land
+    atomically with the ship/close on the caller's unit of work; the event emit is
+    wrapped so a transient signal failure can never fail an in-flight ship (the audit
+    row is the compliance record). Used for BOTH the FG-not-found case and the over-ship
+    case -- neither fails the ship (warn-and-record posture).
+    """
+    audit.log(
+        action=audit_action,
+        resource_type="shipment",
+        resource_id=shipment.id,
+        resource_identifier=shipment.shipment_number,
+        description=description,
+        new_values={"shipment_number": shipment.shipment_number},
+        extra_data=extra,
+        company_id=company_id,
+    )
+    try:
+        OperationalEventService(db).emit(
+            company_id=company_id,
+            event_type=event_type,
+            source_module="shipping",
+            entity_type="shipment",
+            entity_id=shipment.id,
+            work_order_id=work_order.id,
+            user_id=user_id,
+            severity="warning",
+            event_payload=extra,
+        )
+    except Exception:  # pragma: no cover - a warning signal must never fail a ship
+        logger.exception(
+            "%s event emit failed for shipment %s WO %s (company %s)",
+            event_type,
+            shipment.id,
+            work_order.id,
+            company_id,
+        )
+
+
+def record_over_ship_if_needed(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    shipment: Shipment,
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+) -> Optional[float]:
+    """Warn-and-record over-ship (G2): cumulative shipped beyond produced quantity.
+
+    Ceiling = ``WorkOrder.quantity_complete`` (what was actually produced/received into
+    FG; there is no SalesOrder table). Cumulative shipped = SUM(``quantity_shipped``)
+    over this WO's NON-CANCELLED shipments (this shipment is already SHIPPED at the call
+    site, so it is included). If cumulative shipped exceeds the produced quantity, the
+    ship is ALLOWED (no 400) but a warning ``OperationalEvent`` + tamper-evident audit
+    row record the over-ship (mirrors the backflush-shortage recording). Tenant-scoped;
+    joins the caller's unit of work (no commit). Returns the overage when one was
+    recorded, else ``None``.
+    """
+    produced = float(work_order.quantity_complete or 0)
+    cumulative = (
+        db.query(func.coalesce(func.sum(Shipment.quantity_shipped), 0.0))
+        .filter(
+            Shipment.company_id == company_id,
+            Shipment.work_order_id == work_order.id,
+            Shipment.status != ShipmentStatus.CANCELLED,
+        )
+        .scalar()
+    )
+    cumulative_shipped = float(cumulative or 0.0)
+    overage = cumulative_shipped - produced
+    if overage <= 1e-9:
+        return None
+
+    extra = {
+        "work_order_id": work_order.id,
+        "work_order_number": work_order.work_order_number,
+        "shipment_number": shipment.shipment_number,
+        "quantity_shipped": float(shipment.quantity_shipped or 0),
+        "cumulative_shipped": cumulative_shipped,
+        "quantity_complete": produced,
+        "overage": overage,
+    }
+    _record_ship_discrepancy(
+        db,
+        work_order=work_order,
+        shipment=shipment,
+        audit_action=OVER_SHIP_AUDIT_ACTION,
+        event_type=OVER_SHIP_EVENT_TYPE,
+        description=(
+            f"Over-ship on WO {work_order.work_order_number}: cumulative shipped {cumulative_shipped} "
+            f"exceeds produced {produced} by {overage} (shipment {shipment.shipment_number})"
+        ),
+        extra=extra,
+        company_id=company_id,
+        user_id=user_id,
+        audit=audit,
+    )
+    logger.warning(
+        "Over-ship on WO %s (company %s): cumulative %s > produced %s by %s",
+        work_order.id,
+        company_id,
+        cumulative_shipped,
+        produced,
+        overage,
+    )
+    return overage
+
+
+def decrement_finished_goods_for_shipment(
+    db: Session,
+    *,
+    work_order: WorkOrder,
+    shipment: Shipment,
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+) -> Optional[InventoryTransaction]:
+    """Write the offsetting finished-goods decrement when a shipment ships (G2).
+
+    The mirror of Batch-6's ``receive_finished_goods_for_work_order``: that RECEIVEs the
+    produced quantity into the FG lot on completion; this writes the negative SHIP txn
+    and decrements on-hand/available when those finished goods leave on a shipment. The
+    decremented row is located by ``company_id + part_id == work_order.part_id +
+    location == FINISHED_GOODS_LOCATION + lot_number == work_order.lot_number`` -- exactly
+    the row the receipt created (the constants are imported, not re-declared, so the two
+    sides stay in lock-step).
+
+    Idempotency + concurrency: the caller holds a ``with_for_update`` row lock on the
+    shipment when it re-checks status, serializing concurrent double-ship; here we ALSO
+    short-circuit if a SHIP txn for this shipment already exists
+    (``_existing_shipment_ship_txn``) and insert under a savepoint so a duplicate is a
+    clean no-op rather than aborting the ship/close. (FOLLOW-UP: a DB partial-unique
+    index on ``(company_id, reference_type='shipment', reference_id, SHIP)`` would harden
+    this the way ``uq_wo_inventory_receipt`` hardens the receipt; deferred -- this batch
+    is migration-free.)
+
+    FG-not-found: if no matching FINISHED-GOODS lot row exists (receipt skipped, lot
+    changed, stock already moved), DO NOT fail the ship -- record a discrepancy warning
+    (audit row + OperationalEvent) and return ``None``, leaving the caller to proceed
+    with the ship/close (mirrors ``_record_backflush_shortage``).
+
+    Does NOT commit -- joins the caller's unit of work so the decrement + audit land
+    atomically with the SHIPPED status change + WO close. Returns the SHIP txn, or
+    ``None`` on a no-op (already shipped, nothing to ship, or FG row not found).
+    """
+    if _existing_shipment_ship_txn(db, shipment.id, company_id):
+        return None
+
+    quantity = float(shipment.quantity_shipped or 0)
+    if quantity <= 0:
+        # Nothing to decrement (a zero-quantity shipment); not a discrepancy.
+        return None
+
+    lot_number = work_order.lot_number
+
+    inv_item = (
+        db.query(InventoryItem)
+        .filter(
+            InventoryItem.company_id == company_id,
+            InventoryItem.part_id == work_order.part_id,
+            InventoryItem.location == FINISHED_GOODS_LOCATION,
+            InventoryItem.lot_number == lot_number,
+        )
+        .first()
+        if lot_number
+        else None
+    )
+
+    if inv_item is None:
+        # FG-not-found: receipt was skipped, the lot changed, or stock already moved.
+        # Warn-and-record (audit + event) and proceed with the ship/close -- never fail.
+        part = db.query(Part).filter(Part.id == work_order.part_id, Part.company_id == company_id).first()
+        extra = {
+            "work_order_id": work_order.id,
+            "work_order_number": work_order.work_order_number,
+            "shipment_number": shipment.shipment_number,
+            "part_id": work_order.part_id,
+            "part_number": part.part_number if part else None,
+            "lot_number": lot_number,
+            "location": FINISHED_GOODS_LOCATION,
+            "quantity_shipped": quantity,
+        }
+        _record_ship_discrepancy(
+            db,
+            work_order=work_order,
+            shipment=shipment,
+            audit_action=SHIP_FG_MISSING_AUDIT_ACTION,
+            event_type=SHIP_FG_MISSING_EVENT_TYPE,
+            description=(
+                f"Ship of {quantity} for WO {work_order.work_order_number} found no finished-good lot "
+                f"{lot_number or '(none)'} at {FINISHED_GOODS_LOCATION}; on-hand not decremented "
+                f"(shipment {shipment.shipment_number})"
+            ),
+            extra=extra,
+            company_id=company_id,
+            user_id=user_id,
+            audit=audit,
+        )
+        logger.warning(
+            "Ship FG lot missing for WO %s lot %s (company %s); on-hand not decremented",
+            work_order.id,
+            lot_number,
+            company_id,
+        )
+        return None
+
+    part = db.query(Part).filter(Part.id == work_order.part_id, Part.company_id == company_id).first()
+    part_number = part.part_number if part else None
+    unit_cost = float(inv_item.unit_cost or (part.standard_cost if part else 0) or 0)
+
+    # Insert the SHIP txn FIRST under a savepoint; the decrement applies ONLY when the
+    # insert actually committed (mirrors the receipt/issue order). The savepoint also keeps
+    # the outer ship/close transaction usable if a future DB unique index ever fires.
+    txn = InventoryTransaction(
+        company_id=company_id,
+        inventory_item_id=inv_item.id,
+        part_id=work_order.part_id,
+        transaction_type=TransactionType.SHIP,
+        quantity=-quantity,
+        from_location=FINISHED_GOODS_LOCATION,
+        lot_number=lot_number,
+        reference_type="shipment",
+        reference_id=shipment.id,
+        reference_number=shipment.shipment_number,
+        unit_cost=unit_cost,
+        total_cost=quantity * unit_cost,
+        notes=(f"Finished-goods shipment {shipment.shipment_number} for work order " f"{work_order.work_order_number}"),
+        created_by=user_id,
+    )
+    if not _insert_txn_with_savepoint(db, txn):
+        # A concurrent ship already wrote this shipment's SHIP txn -> idempotent no-op
+        # (do NOT decrement; the winning txn owns the movement).
+        return None
+
+    old_quantity_on_hand = inv_item.quantity_on_hand
+    inv_item.quantity_on_hand = float(inv_item.quantity_on_hand or 0) - quantity
+    inv_item.quantity_available = inv_item.quantity_on_hand - float(inv_item.quantity_allocated or 0)
+    db.flush()
+
+    # Tamper-evident audit (hash chain) for the outbound stock movement (mirrors the
+    # FG-receipt audit). Flushed inside the caller's unit of work.
+    audit.log_create(
+        "inventory",
+        txn.id,
+        str(txn.id),
+        new_values=txn,
+        description=(
+            f"Shipped {quantity} of part {part_number or work_order.part_id} from {FINISHED_GOODS_LOCATION} "
+            f"lot {lot_number} on shipment {shipment.shipment_number} (WO {work_order.work_order_number})"
+        ),
+    )
+    if old_quantity_on_hand is not None:
+        audit.log_update(
+            "inventory",
+            inv_item.id,
+            f"{part_number or work_order.part_id} @ {FINISHED_GOODS_LOCATION}",
+            old_values={"quantity_on_hand": old_quantity_on_hand},
+            new_values={"quantity_on_hand": inv_item.quantity_on_hand},
+            description=f"Shipment decrement: stock for part {part_number or work_order.part_id}",
+        )
+
+    return txn

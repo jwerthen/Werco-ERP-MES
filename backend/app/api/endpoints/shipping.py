@@ -13,6 +13,10 @@ from app.models.shipping import Shipment, ShipmentStatus
 from app.models.user import User
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.completion_inventory_service import (
+    decrement_finished_goods_for_shipment,
+    record_over_ship_if_needed,
+)
 from app.services.completion_signal_service import enqueue_work_order_completion_signals
 from app.services.operational_event_service import OperationalEventService
 
@@ -293,19 +297,27 @@ def mark_shipped(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Mark shipment as shipped"""
-    shipment = db.query(Shipment).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).first()
+    # G2: lock the shipment row while we re-check status + write the offsetting FG
+    # decrement, so a concurrent double-ship can't both pass the idempotency guard and
+    # double-decrement on-hand. (with_for_update is a no-op on SQLite used by tests.)
+    shipment = (
+        db.query(Shipment)
+        .filter(Shipment.id == shipment_id, Shipment.company_id == company_id)
+        .with_for_update()
+        .first()
+    )
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
 
-    # Idempotency guard (EVT-1 / e2): a re-submitted ship must not re-run the terminal
-    # close. Without this, calling /ship twice re-flips the WO to CLOSED, writes a
-    # second CLOSED->CLOSED audit row on the tamper-evident chain, re-emits the
-    # work_order_closed event, and re-enqueues the CLOSED completion signal. If the
-    # shipment is already SHIPPED (or its WO already CLOSED), the close already
-    # happened on the first call -- return the current state as a clean no-op so the
-    # close/audit/event/enqueue block below fires exactly ONCE per real transition.
-    wo_already_closed = bool(shipment.work_order and shipment.work_order.status == WorkOrderStatus.CLOSED)
-    if shipment.status == ShipmentStatus.SHIPPED or wo_already_closed:
+    # Idempotency guard (EVT-1 / e2): a re-submitted ship of the SAME shipment must not
+    # re-run. Only an already-SHIPPED shipment is a no-op here. A *distinct*, not-yet-
+    # shipped shipment on a WO that an EARLIER shipment already CLOSED must still ship
+    # and decrement finished goods -- partial / multi-shipment WOs are allowed (the FG
+    # decrement + cumulative over-ship guard below exist precisely for that case). The
+    # WO close is separately gated (below) so it fires exactly ONCE per WO; keying this
+    # early return on the WO being closed (the old behavior) made the G2 decrement +
+    # over-ship guard unreachable for every 2nd-or-later shipment.
+    if shipment.status == ShipmentStatus.SHIPPED:
         return {
             "message": "Shipment already marked as shipped",
             "shipment_number": shipment.shipment_number,
@@ -318,10 +330,15 @@ def mark_shipped(
     if tracking_number:
         shipment.tracking_number = tracking_number
 
-    # Close work order (terminal compliance status change)
+    # Close work order (terminal compliance status change) -- ONCE per WO. A later
+    # shipment on an already-CLOSED WO ships its units (and decrements FG below) without
+    # re-closing / re-auditing / re-emitting / re-enqueueing the closure: wo_previous_status
+    # stays None when the WO is already CLOSED, so every close-once side effect (the
+    # work_order_closed event, the close audit row, and the post-commit broadcast +
+    # completion-signal enqueue) is guarded on `wo_previous_status is not None` and skips.
     wo = shipment.work_order
     wo_previous_status = None
-    if wo:
+    if wo and wo.status != WorkOrderStatus.CLOSED:
         wo_previous_status = wo.status.value if hasattr(wo.status, "value") else wo.status
         wo.status = WorkOrderStatus.CLOSED
 
@@ -380,6 +397,29 @@ def mark_shipped(
             wo_previous_status,
             new_status,
             description=(f"Work order {wo.work_order_number} closed on shipment {shipment.shipment_number}"),
+        )
+
+    # G2: finished-goods decrement on ship + over-ship guard. Both join THIS unit of work
+    # (no commit) so the SHIP InventoryTransaction + on-hand decrement and any
+    # discrepancy/over-ship audit rows land ATOMICALLY with the SHIPPED status change and
+    # the WO close above. Neither fails the ship (warn-and-record posture): a missing FG
+    # lot row or an over-ship is recorded tamper-evidently and the ship/close proceeds.
+    if wo is not None:
+        decrement_finished_goods_for_shipment(
+            db,
+            work_order=wo,
+            shipment=shipment,
+            company_id=company_id,
+            user_id=current_user.id,
+            audit=audit,
+        )
+        record_over_ship_if_needed(
+            db,
+            work_order=wo,
+            shipment=shipment,
+            company_id=company_id,
+            user_id=current_user.id,
+            audit=audit,
         )
 
     db.commit()
