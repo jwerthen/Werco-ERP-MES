@@ -162,13 +162,16 @@ def run_custom_report(
     request: CustomReportRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Execute a custom report query."""
     # Build dynamic query based on data source
     from app.services.report_builder import ReportBuilderService
 
     service = ReportBuilderService(db)
-    return service.execute_report(request)
+    # G3-scope: pass the active company so the report is tenant-isolated; without it
+    # the builder queried across all tenants.
+    return service.execute_report(request, company_id)
 
 
 @router.get("/custom-report/export")
@@ -205,7 +208,10 @@ def export_custom_report(
         sort=template.sort,
     )
 
-    data = service.execute_report(request)
+    # G3-scope: scope the report data to the active company. The template fetch above
+    # was already company-scoped, but the data query was not -- export returned every
+    # tenant's rows.
+    data = service.execute_report(request, company_id)
 
     if format == "csv":
         return _export_csv(data, template.name)
