@@ -31,6 +31,7 @@ fixture overrides ``get_db`` to yield that same session.
 
 import importlib.util
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -55,6 +56,10 @@ from app.models.work_order import (
 from tests.conftest import engine as test_engine
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
+
+# Resolve the migration relative to this test file (backend/tests/api/) so the suite
+# is portable across checkouts — parents[2] is the backend/ package root.
+MIGRATION_042_PATH = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "042_wo_completion_perf_indexes.py"
 
 COMPANY_A = 1
 TEST_PASSWORD_HASH = "$2b$12$abcdefghijklmnopqrstuv"  # tokens minted directly; never used for login
@@ -256,7 +261,7 @@ def test_perf1_migration_and_model_columns_in_lockstep():
 
     spec = importlib.util.spec_from_file_location(
         "mig042",
-        "/Users/jonwerthen/Werco-ERP-MES/backend/alembic/versions/042_wo_completion_perf_indexes.py",
+        str(MIGRATION_042_PATH),
     )
     mig = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mig)
@@ -1163,7 +1168,7 @@ def test_fixD_same_company_presence_still_surfaces_and_moves_etag(client: TestCl
 def _load_migration_042():
     spec = importlib.util.spec_from_file_location(
         "mig042_fixE",
-        "/Users/jonwerthen/Werco-ERP-MES/backend/alembic/versions/042_wo_completion_perf_indexes.py",
+        str(MIGRATION_042_PATH),
     )
     mig = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mig)
