@@ -294,6 +294,8 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue | Yes |
 
 > **Tenant isolation on clock/operation endpoints.** Clock-in, clock-out, and the shop-floor
@@ -376,6 +378,30 @@ Quality** (there is no separate Inspector role). Both fields are optional:
   "notes": "All critical characteristics within tolerance"
 }
 ```
+
+#### Time-entry approval
+
+`POST /shop-floor/time-entries/{id}/approve` and `POST /shop-floor/time-entries/{id}/unapprove`
+let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (timestamp) +
+`approved_by` (the approver); unapprove clears both. Both:
+
+> - are **role-gated to Admin / Manager / Supervisor / Quality** — any other role is **403**;
+> - **forbid self-approval**: a user cannot approve or unapprove their **own** TimeEntry (segregation
+>   of duties for the labor-cost gate) — **403** (`"You cannot approve or unapprove your own time
+>   entry"`), even if the caller holds an approver role;
+> - are **tenant-scoped**: an id belonging to another company returns **404** before any mutation;
+> - are **idempotent** (approving an already-approved entry, or unapproving an already-unapproved one,
+>   is a no-op that returns the current state with **no second audit row**);
+> - respect the TimeEntry's optimistic-lock `version` column — a concurrent stale write returns
+>   **409 Conflict** (`"This time entry was modified concurrently. Refresh and retry."`);
+> - write **one** tamper-evident `audit_log` row (action `time_entry_approve` / `time_entry_unapprove`).
+>
+> Both return the updated `TimeEntryResponse` (now carrying `approved` / `approved_by`; these also
+> surface on `GET /shop-floor/my-active-job`). Approval is what the opt-in
+> `REQUIRE_APPROVED_LABOR_FOR_COST` flag keys on: when that flag is **on**, only approved TimeEntries
+> feed the labor-cost legs (job costing, completion cost rollup, and the analytics OEE/labor leg).
+> When the flag is **off** (the default), approval is recorded but does not affect costing. See
+> `docs/ENVIRONMENT_VARIABLES.md`.
 
 #### Clock Out Schema
 
@@ -619,6 +645,30 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > **Shipment-close is audited.** Marking a shipment shipped closes its work order
 > (status → `CLOSED`); that terminal status change is recorded in the tamper-evident audit trail
 > (`GET /audit/`), flushed so the audit row commits atomically with the closure.
+>
+> **Marking shipped decrements finished-goods inventory (G2).** `POST /shipping/orders/{id}/ship`
+> now writes the offsetting outbound stock movement for the goods leaving the building — the mirror of
+> the Batch-6 finished-goods receipt on completion. It writes a `SHIP` `InventoryTransaction`
+> (`quantity = -quantity_shipped`, `reference_type = "shipment"`) and decrements the finished-goods
+> lot's on-hand / available (the lot is matched on `part_id` + finished-goods location +
+> `work_order.lot_number`, exactly the row the receipt created). Both the SHIP transaction and its
+> audit rows join the same unit of work as the SHIPPED status change + WO close, so they commit
+> atomically. The decrement is **idempotent**: a re-submitted or concurrent double-ship (the shipment
+> row is locked `FOR UPDATE` and a prior SHIP transaction for the shipment short-circuits) never
+> double-decrements on-hand. **No new request/response field** — this is a side effect of marking
+> shipped.
+>
+> **Over-ship and missing-FG-lot are warn-and-record, not blocking (G2).** Neither condition fails
+> the ship — the ship/close still proceeds (mirrors the warn-and-record posture of the completion
+> backflush-shortage and quality gates):
+> - **Over-ship:** if cumulative `quantity_shipped` across the work order's non-cancelled shipments
+>   exceeds what was produced (`WorkOrder.quantity_complete`), the ship is **allowed** but a
+>   tamper-evident `audit_log` row (action `OVER_SHIP`) + a warning operational event record the
+>   overage. There is no sales-order quantity to ship against; produced quantity is the ceiling.
+> - **FG lot not found:** if no matching finished-goods lot row exists (the receipt was skipped, the
+>   lot changed, or the stock was already moved), on-hand is **not** decremented and a tamper-evident
+>   `audit_log` row (action `SHIP_FG_LOT_MISSING`) + a warning operational event record the
+>   discrepancy; the ship/close still proceeds.
 
 ### Reports
 
@@ -647,6 +697,22 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > user-supplied filters/group-by/sort. Every supported data source (work orders, parts, inventory, NCRs,
 > purchase orders, quotes) carries `company_id`, so a report can never return another tenant's rows. This
 > is a scoping-only fix — the request/response shape is unchanged.
+>
+> **Custom-report labor honesty (G3-content).** Two changes make labor columns read truthfully when
+> labor cost is not being tracked:
+> - **`estimated_hours` is no longer a selectable WORK_ORDERS column.** It has no writer anywhere in
+>   the system (it is structurally 0 in every tenant), so it has been dropped from
+>   `GET /analytics/data-sources` and from the report builder's field map. Selecting it is no longer
+>   possible (it silently dropped out before).
+> - **Labor-not-tracked response headers on `POST /analytics/custom-report`.** When
+>   `LABOR_COST_ROLLUP_ENABLED` is **off** (the default) **and** the report selects any labor-derived
+>   WORK_ORDERS column (`actual_hours`, `actual_cost`, `estimated_cost`) — which then render a literal
+>   `0` meaning "not tracked", not a measured zero — the response sets two headers so a consumer can
+>   tell the two apart: `X-Report-Labor-Not-Tracked` (a JSON array of the affected column names) and
+>   `X-Report-Labor-Note` (a human-readable explanation). The **response body is unchanged** (the
+>   bare-list contract the export + clients rely on); the headers are set only when applicable. When
+>   the flag is on, the data source isn't WORK_ORDERS, or no labor-derived column is selected, no
+>   headers are set.
 >
 > **KPI values can be `null` ("n/a").** Each KPI on `GET /analytics/kpis` is a `KPIValue` whose
 > **`value` (and `prior_value` / `change_pct`) are nullable**. A genuinely-uncomputable metric returns

@@ -376,6 +376,21 @@ class Settings(BaseSettings):
     # is the single chokepoint to repoint at that field.
     LABOR_COST_ROLLUP_ENABLED: bool = False
 
+    # Whether labor-cost rollups count ONLY supervisor-approved TimeEntries (G5-A).
+    #
+    # OPT-IN, default OFF. When OFF (the default) every CLOSED TimeEntry feeds the labor
+    # cost legs exactly as before this flag existed -- byte-identical behavior. When ON,
+    # the three labor-cost consumers (job_costing recompute, completion cost rollup, and
+    # the analytics cost leg) additionally require ``TimeEntry.approved IS NOT NULL`` so
+    # un-approved shop-floor labor is excluded from cost until a supervisor/quality lead
+    # signs off (the approve/unapprove endpoints set ``approved`` / ``approved_by``).
+    #
+    # GLOBAL for the same reason as ``LABOR_COST_ROLLUP_ENABLED`` (no per-company
+    # settings column yet); resolved through the SAME chokepoint
+    # (services/labor_cost_service.is_approved_labor_required) so it can be promoted to a
+    # per-tenant flag in one place later.
+    REQUIRE_APPROVED_LABOR_FOR_COST: bool = False
+
     # Default labor rate ($/hour) used when a work center has no ``hourly_rate``
     # (COST-5). The shared rate resolver prefers ``WorkCenter.hourly_rate`` so labor
     # cost reflects WHERE the work happened, and falls back to this single

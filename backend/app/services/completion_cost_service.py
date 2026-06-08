@@ -42,6 +42,7 @@ from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.job_costing_service import sync_job_cost_on_completion
 from app.services.labor_cost_service import (
+    is_approved_labor_required,
     is_labor_cost_rollup_enabled,
     resolve_labor_rates,
     resolve_overhead_rate,
@@ -100,7 +101,7 @@ def _operation_duration_by_type(db: Session, operation_ids: list[int]) -> dict[i
     result: dict[int, tuple[float, float]] = {}
     if not operation_ids:
         return result
-    rows = (
+    rows_query = (
         db.query(
             TimeEntry.operation_id,
             TimeEntry.entry_type,
@@ -111,8 +112,14 @@ def _operation_duration_by_type(db: Session, operation_ids: list[int]) -> dict[i
             TimeEntry.clock_out.isnot(None),
         )
         .group_by(TimeEntry.operation_id, TimeEntry.entry_type)
-        .all()
     )
+    # G5-A opt-in: when REQUIRE_APPROVED_LABOR_FOR_COST is ON, only supervisor-approved
+    # entries feed the monotonic-up hour rollup (and thus actual_cost). The flag is
+    # GLOBAL (resolved via the shared chokepoint); company_id is informational so this
+    # function need not thread it. Default OFF -> no predicate -> identical to before.
+    if is_approved_labor_required():
+        rows_query = rows_query.filter(TimeEntry.approved.isnot(None))
+    rows = rows_query.all()
     for row in rows:
         if row.operation_id is None:
             continue

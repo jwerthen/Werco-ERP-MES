@@ -35,7 +35,7 @@ from app.models.job_costing import CostEntry, CostEntrySource, CostEntryType, Jo
 from app.models.time_entry import TimeEntry
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
-from app.services.labor_cost_service import resolve_labor_rates
+from app.services.labor_cost_service import is_approved_labor_required, resolve_labor_rates
 
 logger = logging.getLogger(__name__)
 
@@ -99,15 +99,16 @@ def recompute_from_time_entries(
     query is tenant-scoped on ``company_id``. Joins the caller's unit of work (no commit).
     """
     # Closed time entries for this work order, tenant-scoped.
-    time_entries = (
-        db.query(TimeEntry)
-        .filter(
-            TimeEntry.work_order_id == job_cost.work_order_id,
-            TimeEntry.company_id == company_id,
-            TimeEntry.clock_out.isnot(None),
-        )
-        .all()
+    te_query = db.query(TimeEntry).filter(
+        TimeEntry.work_order_id == job_cost.work_order_id,
+        TimeEntry.company_id == company_id,
+        TimeEntry.clock_out.isnot(None),
     )
+    # G5-A opt-in: when REQUIRE_APPROVED_LABOR_FOR_COST is ON, exclude un-approved
+    # labor from cost. Default OFF -> no extra predicate -> byte-identical to before.
+    if is_approved_labor_required(company_id):
+        te_query = te_query.filter(TimeEntry.approved.isnot(None))
+    time_entries = te_query.all()
 
     # Resolve a labor rate per work center the entries touched (per WC -- COST-5). An
     # entry's work_center is its own column; fall back to its operation's work center

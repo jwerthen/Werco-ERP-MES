@@ -38,6 +38,17 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Delete | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | ✓ | | | | |
 | Complete | ✓ | ✓ | ✓ | ✓ | ✓ | | |
+| Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
+
+> **Approve labor — endpoint mapping (Batch 11B / G5-A).** The shop-floor labor sign-off
+> `POST /api/v1/shop-floor/time-entries/{id}/approve` and `…/unapprove` (which set / clear
+> `TimeEntry.approved` + `approved_by`, the field the opt-in `REQUIRE_APPROVED_LABOR_FOR_COST` flag
+> keys labor-cost rollups on) are enforced **in code** to this row:
+> `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])` (`app/api/endpoints/shop_floor.py`). In
+> addition to the role gate, **self-approval is
+> forbidden**: a user cannot approve or unapprove their **own** TimeEntry (segregation of duties for
+> the labor-cost gate) — that returns **403** even for an approver-role user. A cross-tenant id returns
+> **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`).
 
 ### Parts
 
