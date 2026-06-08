@@ -10,6 +10,7 @@ import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ArrowLeftIcon,
   ArrowDownTrayIcon,
+  ArrowPathIcon,
   PlayIcon,
   CheckCircleIcon,
   ExclamationTriangleIcon,
@@ -236,6 +237,8 @@ export default function WorkOrderDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [completingOpId, setCompletingOpId] = useState<number | null>(null);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
   const [blockers, setBlockers] = useState<WorkOrderBlocker[]>([]);
   const [blockerForm, setBlockerForm] = useState<{
@@ -599,6 +602,7 @@ export default function WorkOrderDetail() {
   };
 
   const handleComplete = async () => {
+    if (completing) return;
     const ordered = workOrder!.quantity_ordered;
     const qtyCompleteRaw = prompt(`Enter quantity completed (ordered: ${ordered}):`, ordered.toString());
     const qtyComplete = parseQty(qtyCompleteRaw, 'Quantity completed', ordered);
@@ -608,15 +612,20 @@ export default function WorkOrderDetail() {
     const qtyScrapped = parseQty(qtyScrappedRaw ?? '0', 'Quantity scrapped');
     if (qtyScrapped === null) return;
 
+    // Only guard the API call itself — not the blocking prompt() dialogs above.
+    setCompleting(true);
     try {
       await api.completeWorkOrder(workOrder!.id, qtyComplete, qtyScrapped);
       loadWorkOrder();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to complete work order');
+    } finally {
+      setCompleting(false);
     }
   };
 
   const handleCompleteOperation = async (operation: WorkOrderOperation) => {
+    if (completingOpId === operation.id) return;
     const targetQty = Number(operation.component_quantity || workOrder!.quantity_ordered || 0);
     const qtyCompleteRaw = prompt(
       `Complete operation "${operation.name}"\nEnter quantity completed (target: ${targetQty}):`,
@@ -629,11 +638,15 @@ export default function WorkOrderDetail() {
     const qtyScrapped = parseQty(qtyScrappedRaw ?? '0', 'Quantity scrapped');
     if (qtyScrapped === null) return;
 
+    // Only guard the API call itself — not the blocking prompt() dialogs above.
+    setCompletingOpId(operation.id);
     try {
       await api.completeWOOperation(operation.id, qtyComplete, qtyScrapped);
       loadWorkOrder();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to complete operation');
+    } finally {
+      setCompletingOpId(null);
     }
   };
 
@@ -840,9 +853,17 @@ export default function WorkOrderDetail() {
             </button>
           )}
           {workOrder.status === 'in_progress' && (
-            <button onClick={handleComplete} className="btn-primary flex items-center">
-              <CheckCircleIcon className="h-5 w-5 mr-2" />
-              Complete
+            <button
+              onClick={handleComplete}
+              disabled={completing}
+              className="btn-primary flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {completing ? (
+                <ArrowPathIcon className="h-5 w-5 mr-2 animate-spin" />
+              ) : (
+                <CheckCircleIcon className="h-5 w-5 mr-2" />
+              )}
+              {completing ? 'Completing...' : 'Complete'}
             </button>
           )}
           <button 
@@ -1513,10 +1534,19 @@ export default function WorkOrderDetail() {
                           {op.status !== 'complete' && workOrder.status !== 'draft' && (
                             <button
                               onClick={() => handleCompleteOperation(op)}
-                              className="text-green-600 hover:text-green-300 text-sm font-medium"
+                              disabled={completingOpId === op.id}
+                              className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                               title="Complete Operation"
                             >
-                              <CheckCircleIcon className="h-5 w-5 inline" /> Complete
+                              {completingOpId === op.id ? (
+                                <>
+                                  <ArrowPathIcon className="h-5 w-5 inline animate-spin" /> Completing...
+                                </>
+                              ) : (
+                                <>
+                                  <CheckCircleIcon className="h-5 w-5 inline" /> Complete
+                                </>
+                              )}
                             </button>
                           )}
                           {op.status === 'complete' && (

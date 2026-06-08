@@ -312,6 +312,14 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > evidence, that status change is now written to the tamper-evident audit trail (`GET /audit/`),
 > attributed to the requesting user and tagged `source = "reconcile_on_read"`. This reconcile is
 > best-effort: if its write fails it is rolled back silently and the read still returns **200**.
+>
+> **`/shop-floor/dashboard` caching + bounded reconcile.** The dashboard supports conditional requests:
+> send the previous response's `ETag` back as `If-None-Match` to get a **304 Not Modified** (and no
+> body) when nothing changed. The `ETag` is a cheap state fingerprint computed **before** the reconcile,
+> so an unchanged dashboard 304s without running the reconcile or building the payload. The dashboard's
+> reconcile scan is bounded to the most-recently-touched `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT` open
+> work orders (default 250; see `docs/ENVIRONMENT_VARIABLES.md`) — any WO beyond the cap is still
+> reconciled when opened in its own detail / operations-list view.
 
 > **Quality gates on completion are warn-and-record, not blocking.** Completing an operation or work
 > order while a quality gate is unsatisfied still **succeeds (200)** — the gates do not block. Instead,

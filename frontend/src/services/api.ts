@@ -284,6 +284,12 @@ class ApiService {
     keysToDelete.forEach(key => etagCache.delete(key));
   }
 
+  /** Drop cached shop-floor dashboard state after a mutation that changes it,
+   *  so the next dashboard fetch revalidates instead of serving a stale 304 body. */
+  private invalidateDashboardCache() {
+    this.invalidateCache('/shop-floor/dashboard');
+  }
+
   setToken(token: string) {
     this.token = token;
     sessionStorage.setItem('token', token);
@@ -682,11 +688,13 @@ class ApiService {
 
   async releaseWorkOrder(id: number) {
     const response = await this.api.post(`/work-orders/${id}/release`);
+    this.invalidateDashboardCache();
     return response.data;
   }
 
   async startWorkOrder(id: number) {
     const response = await this.api.post(`/work-orders/${id}/start`);
+    this.invalidateDashboardCache();
     return response.data;
   }
 
@@ -694,6 +702,7 @@ class ApiService {
     const response = await this.api.post(`/work-orders/${id}/complete`, null, {
       params: { quantity_complete: quantityComplete, quantity_scrapped: quantityScrapped }
     });
+    this.invalidateDashboardCache();
     return response.data;
   }
 
@@ -769,6 +778,7 @@ class ApiService {
 
   async startWOOperation(operationId: number) {
     const response = await this.api.post(`/work-orders/operations/${operationId}/start`);
+    this.invalidateDashboardCache();
     return response.data;
   }
 
@@ -776,6 +786,7 @@ class ApiService {
     const response = await this.api.post(`/work-orders/operations/${operationId}/complete`, null, {
       params: { quantity_complete: quantityComplete, quantity_scrapped: quantityScrapped }
     });
+    this.invalidateDashboardCache();
     return response.data;
   }
 
@@ -787,11 +798,13 @@ class ApiService {
 
   async clockIn(data: { work_order_id: number; operation_id: number; work_center_id: number; entry_type?: string; notes?: string }) {
     const response = await this.api.post('/shop-floor/clock-in', data);
+    this.invalidateDashboardCache();
     return response.data;
   }
 
   async clockOut(timeEntryId: number, data: { quantity_produced: number; quantity_scrapped?: number; scrap_reason?: string; notes?: string }) {
     const response = await this.api.post(`/shop-floor/clock-out/${timeEntryId}`, data);
+    this.invalidateDashboardCache();
     return response.data;
   }
 
@@ -887,16 +900,19 @@ class ApiService {
 
   async startOperation(operationId: number) {
     const response = await this.api.put(`/shop-floor/operations/${operationId}/start`);
+    this.invalidateDashboardCache();
     return response.data;
   }
 
   async completeOperation(operationId: number, data: { quantity_complete: number; notes?: string }) {
     const response = await this.api.post(`/shop-floor/operations/${operationId}/complete`, data);
+    this.invalidateDashboardCache();
     return response.data;
   }
 
   async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string }) {
     const response = await this.api.post(`/shop-floor/operations/${operationId}/production`, data);
+    this.invalidateDashboardCache();
     return response.data;
   }
 
@@ -907,6 +923,7 @@ class ApiService {
 
   async holdOperation(operationId: number) {
     const response = await this.api.put(`/shop-floor/operations/${operationId}/hold`);
+    this.invalidateDashboardCache();
     return response.data;
   }
 

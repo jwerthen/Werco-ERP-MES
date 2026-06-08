@@ -388,6 +388,16 @@ class Settings(BaseSettings):
     # overhead leg of ``actual_cost`` / JobCost overhead.
     DEFAULT_OVERHEAD_RATE: float = 0.0
 
+    # Shop-floor dashboard reconcile cap (PERF-3 / rank 12). The dashboard read
+    # path reconciles every RELEASED/IN_PROGRESS/ON_HOLD WO from durable shop-floor
+    # evidence; that scan is unbounded and write-amplifying as the open-WO set grows.
+    # Bound it to the most-recently-touched N WOs (most likely to carry new
+    # completion evidence). Reconcile is best-effort and idempotent -- any WO beyond
+    # the cap is still reconciled when opened in its detail/operations-list views;
+    # the durable fix is the deferred ARQ reconcile job. When a run hits this cap the
+    # handler logs a WARNING that the shop has outgrown read-path reconcile.
+    SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT: int = 250
+
     # Audit Log Retention / Archival (CMMC AU-3.3.8 + AS9100D)
     # Audit logs are immutable (DB triggers block UPDATE/DELETE) and must NOT be
     # row-deleted by maintenance jobs. Aged rows are exported to cold storage by

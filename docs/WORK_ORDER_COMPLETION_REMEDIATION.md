@@ -25,8 +25,8 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **6** ☑ | 9 | FG receipt + backflush + as-built genealogy | **yes** (`040`/`041`) | inventory now moves |
 | **7** ☑ | 10 | Labor-hour + job/actual-cost rollup | no | opt-in (flag default OFF); cost/hours roll up only when enabled |
 | **8** ☑ | 11 | OEE/OTD metric correctness + dead auto-OEE endpoint | no | **KPI values move**; OEE-write endpoints now role-gated |
-| **9** | 12 | Indexes + de-risk reconcile-on-read | **yes** | reconcile may move off read path |
-| **10** | 13 | Frontend completion UX hardening | no | optimistic updates |
+| **9** ☑ | 12 | Indexes + de-risk reconcile-on-read | **yes** (`042`) | bounded dashboard reconcile; cheap pre-reconcile ETag |
+| **10** ☑ | 13 | Frontend completion UX hardening | no | no API change (dashboard cache invalidation + double-submit guards + list memo) |
 
 ## Ranked actions
 
@@ -553,13 +553,196 @@ Findings: OEE-1, OEE-4, OEE-5, OEE-6, OEE-7, COST-5, MS-5.
 >    the staffed-time convention. A shop that enters OEE records by hand should understand the two paths
 >    use different availability bases.
 
-### Rank 12 — Indexes + de-risk reconcile-on-read ☐ (Batch 9 · migration)
+### Rank 12 — Indexes + de-risk reconcile-on-read ☑ (Batch 9 · migration)
 Migration: `ix_time_entries_operation_clock_out`, `ix_woo_work_order_sequence` (CONCURRENTLY, idempotent). Bound the dashboard reconcile (no `.limit()` today) / move to debounced ARQ; compute ETag before reconcile; grouped predecessor query; `commit=False` on `update_availability_rates`.
 Findings: PERF-1, PERF-2, PERF-3, PERF-4, PERF-5.
 
-### Rank 13 — Frontend completion UX hardening ☐ (Batch 10)
+> **Batch 9 status (2026-06-08, rank 12 landed).** The work-order completion / reconcile-on-read read
+> path is now indexed, cheaper to poll, atomicity-corrected, and bounded — without moving reconcile
+> off the read path (that remains the deferred initiative; see below). All five PERF findings landed.
+>
+> **PERF-1 — supporting indexes (migration `042`).** New migration
+> `042_wo_completion_perf_indexes` adds two **non-unique** btree indexes that back the hot completion
+> query shapes that previously fell to sequential scans on high-row tables:
+> - `ix_time_entries_operation_clock_out` on `time_entries(operation_id, clock_out)` — backs
+>   `reconcile_work_orders_from_completion_evidence`'s per-operation production/scrap rollups
+>   (`WHERE operation_id IN (…) GROUP BY operation_id`), the closed-only rollup
+>   (`… AND clock_out IS NOT NULL` — covered by the trailing column), and the latest-entry scan
+>   (`… ORDER BY operation_id, clock_out DESC` — both ORDER BY columns covered, no sort).
+> - `ix_woo_work_order_sequence` on `work_order_operations(work_order_id, sequence)` — backs
+>   `has_incomplete_predecessors` (`WHERE work_order_id = ? AND sequence < ?`) and
+>   `release_next_ready_operation` (`WHERE work_order_id = ? ORDER BY sequence`).
+>
+> Unlike `041`'s partial UNIQUE indexes these enforce **no invariant** (pure read-path speedups), so
+> there is **no pre-flight duplicate guard** — there is nothing to validate and the build cannot fail
+> on existing data. Both are built with `CREATE INDEX CONCURRENTLY` inside an `autocommit_block()` to
+> avoid the ACCESS EXCLUSIVE lock a plain `CREATE INDEX` would take on these high-write tables during
+> deploy; the downgrade drops them CONCURRENTLY too. Idempotent and reversible, and **self-healing**
+> against an interrupted CONCURRENTLY build: `_index_validity` reads `pg_index.indisvalid` (an aborted
+> build leaves an INVALID index that a plain existence probe — and `if_not_exists` — would mask and
+> never rebuild), and `_ensure_index` drops a found-INVALID index CONCURRENTLY before recreating it,
+> so a killed deploy can't latch the table onto a dead index (no read speedup, write-time cost). The
+> SQLite local-create_all / pytest path is skipped
+> gracefully (CONCURRENTLY is Postgres-only; `create_all` already emits both indexes). The indexes are
+> declared **in lock-step on the model `__table_args__`** — `TimeEntry.__table_args__`
+> (`app/models/time_entry.py`) and `WorkOrderOperation.__table_args__` (`app/models/work_order.py`) —
+> so the `create_all` bootstrap path produces them byte-for-byte (the `041` precedent). No
+> deploy-ordering constraint (metadata-only; touches no tenant-isolation / audit / soft-delete
+> behavior). See `docs/DEVELOPMENT.md` → Database Migrations.
+>
+> **PERF-2 — cheap pre-reconcile ETag + fast 304.** `GET /shop-floor/dashboard`'s ETag is now a cheap
+> **state fingerprint computed BEFORE the reconcile** (`_dashboard_state_fingerprint` in
+> `app/api/endpoints/shop_floor.py`), replacing the old "md5 of the fully-built payload" ETag that
+> forced every poll — even an unchanged one destined to 304 — to pay for the write-amplifying reconcile
+> AND the whole payload build before it could short-circuit. The fingerprint is an md5 over
+> `{ today (UTC date.today()); central_today (Central-Time date); per-table (count, max(updated_at)) for
+> WorkOrder (is_deleted == False) / WorkOrderOperation / TimeEntry / WorkCenter / User / Part
+> (is_deleted == False), every aggregate filtered by company_id; and a sorted, company-scoped
+> websocket-presence list (connected user ids + connected_since) }`. An INSERT bumps `count`, an
+> in-place UPDATE / soft-delete bumps `max(updated_at)`, so together they dominate every payload field.
+> The time keys are split deliberately: `today` (UTC) covers the due-today / overdue rollups, while
+> `central_today` covers `completed_today` — a Central-Time rolling window that ages a completion OUT at
+> **Central** midnight (hours after the UTC date rolls over) with **no row change**, so UTC `today`
+> alone would serve a stale 304 across that boundary. `Part` is folded in because `active_assignments`
+> surfaces `part_number` / `part_name` (dereferenced via the WO), so a part rename must move the ETag —
+> a stale floor display of a part identity is an AS9100D traceability hazard. If `If-None-Match` matches
+> the **pre-reconcile** fingerprint the handler returns **304 immediately**, having touched only the
+> cheap aggregates — skipping the reconcile and the payload build. On a changed dashboard it runs the
+> (bounded) reconcile, then computes the served ETag from the **post-reconcile committed snapshot
+> BEFORE building the payload** (so the ETag describes the same snapshot the body is built from — a
+> concurrent same-tenant commit during the build then merely forces a safe 200 on the next poll rather
+> than a stale 304), and builds the payload reusing the company-scoped websocket presence captured
+> **once** up front so the served `signed_in_users` matches the ETag exactly. The next poll over the
+> now-stable state 304s with no extra round-trip. Tenant-scoped via `company_id` on every aggregate
+> (invariant #1) — and scoping the websocket presence set (which `ConnectionManager` keeps **globally**
+> across tenants) to the active company both keeps cross-tenant presence churn from spuriously moving
+> this tenant's ETag **and closes a pre-existing cross-tenant leak** where another tenant's connected
+> users could appear in this dashboard's `signed_in_users`.
+>
+> **PERF-3 — bounded dashboard reconcile + truncation warning (new setting).** The dashboard reconcile
+> WO scan is now bounded:
+> `.order_by(WorkOrder.updated_at.desc(), WorkOrder.id.desc()).limit(settings.SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT)`
+> (the `id.desc()` secondary key is a stable tiebreak so two WOs with equal `updated_at` don't swap
+> across the cap boundary between polls; new setting in `app/core/config.py`, type `int`,
+> **default 250**) — the most-recently-touched open
+> (RELEASED / IN_PROGRESS / ON_HOLD) WOs are the most likely to carry new completion evidence.
+> Reconcile is best-effort and idempotent, so any WO **beyond the cap is still reconciled when opened
+> in its detail / operations-list views** (both reconcile a single / page-bounded set); nothing is
+> permanently stranded. When the scan **fills the cap exactly** the handler logs a **WARNING** that the
+> open-WO set has outgrown read-path reconcile and to switch to the deferred ARQ reconcile job. (The
+> list reconcile was already page-bounded and the detail reconcile is a single WO — both unchanged.)
+> See `docs/ENVIRONMENT_VARIABLES.md`.
+>
+> **PERF-4 — grouped / in-memory predecessor gate.** `release_next_ready_operation`
+> (`app/services/work_order_state_service.py`) now loads the WO's operations **once** (ordered by
+> sequence) and runs the predecessor gate **in memory**
+> (`blocked = any(op.sequence < candidate.sequence and op.id != candidate.id for op in non-COMPLETE ops)`)
+> instead of issuing one `has_incomplete_predecessors` COUNT per PENDING candidate — the old N+1 that
+> turned quadratic inside `complete_work_order`'s force-complete loop. The in-memory test replicates
+> `has_incomplete_predecessors(...)` **exactly**, so the release / start / complete order gate is
+> unchanged in behavior; `has_incomplete_predecessors` itself is untouched.
+>
+> **PERF-5 — `commit=False` atomicity fix + cache-invalidate-after-commit.** The four **live**
+> completion handlers — `clock_out` and `complete_operation` in `shop_floor.py`, `complete_work_order`
+> and `complete_operation` in `work_orders.py` — now call
+> `SchedulingService.update_availability_rates(..., commit=False)`. Previously the default
+> `commit=True` committed the WO / op state change **mid-handler**, before the audit rows / FG receipt /
+> cost rollup / quality exceptions were written and committed separately — a two-transaction atomicity
+> hole where a crash between the two commits left a completed WO with no audit / inventory / cost.
+> `commit=False` joins the scheduling refresh into the handler's **single unit of work**. Because
+> `commit=False` skips the in-service `invalidate_work_centers_cache()`, each handler now calls
+> `invalidate_work_centers_cache()` **after** its terminal `db.commit()` succeeds (guarded by a
+> `work_centers_refreshed` bool; success path only, never the rollback branch) so the cache reflects
+> the freed capacity. Both `_reconcile_and_commit` paths (`shop_floor.py` + `work_orders.py`) likewise
+> `invalidate_work_centers_cache()` after their `db.commit()` when any reconcile transition carried
+> `work_center_ids` — the reconcile scheduling refresh already ran with `commit=False`. A cache
+> invalidate is post-commit best-effort and can never 500 a read (invariant: reconcile-on-read stays
+> read-safe).
+>
+> **DEFERRED — reconcile-on-read → debounced ARQ job (still its own initiative).** Batch 9 **bounds and
+> de-risks** the read-path reconcile (PERF-3 cap + warning, PERF-2 fast-304, PERF-5 atomicity); it does
+> **not** move reconcile off the read path. The full "move reconcile-on-read to a debounced ARQ
+> reconcile job" remains a separate, deferred initiative — and when it lands it must **carry the
+> system-actor re-attribution** flagged repeatedly upstream: under a background job reconcile has no
+> requesting user, so the `reconcile_on_read` status-change audit rows (AUD-3 / Batch 3), the in-process
+> reconcile events (EVT-4 / Batch 5), and the reconcile-path FG-receipt / backflush (Batch 6) and
+> hour / cost / JobCost + `no_labor_recorded` writes (Batch 7) must all re-attribute to a **system
+> actor** rather than `current_user`. This Batch-9 work **resolves the rank-12 follow-ups** noted in the
+> Batch 3 (follow-up 2 — "bound the dashboard reconcile"), Batch 5 (follow-up 1), Batch 6 (follow-up 3),
+> and Batch 7 (follow-up 4) status notes **to the extent of the index + bound + ETag + atomicity work**;
+> the reconcile-off-read move (and its system-actor re-attribution) is what those notes carry forward.
+>
+> **Follow-ups (tracked, not fixed in Batch 9):**
+> 1. **Reconcile-on-read → debounced ARQ job (with system-actor re-attribution).** As above — the full
+>    move off the read path is the remaining rank-12 initiative; the PERF-3 truncation WARNING is the
+>    operational trigger for when a shop has outgrown read-path reconcile.
+> 2. **A1 — root `audit_log.sequence_number` race (carried over from Batch 2/3/6).** Unchanged by Batch 9.
+>    The unserialized `max()+1` sequence allocation can still collide under concurrent completion-path
+>    audit writers; the fast-304 path reduces *how often* the dashboard read does any audited work, but
+>    the dedicated fix (serialize sequence allocation or catch-and-retry the collision) is still open.
+
+### Rank 13 — Frontend completion UX hardening ☑ (Batch 10)
 Invalidate `/shop-floor/dashboard` cache after completion mutations; in-flight guards on Complete buttons; memoize/window the WO list.
 Findings: FEPERF-1, FEPERF-4, FEPERF-5.
+
+> **Batch 10 status (2026-06-08, rank 13 landed — frontend-only).** The final ranked batch hardens the
+> shop-floor / work-order completion UX on the client. It touches **only** `frontend/src/` — **no** API
+> endpoint, request/response shape, env var, role/permission, or deploy step changed (the plan table's
+> "behavior change?" column reads as a client-side UX change, not an API change). Implemented on
+> `qa/full-pass-2026-06-04`, **pending tests / review / commit** (not yet merged), mirroring the Batch 9
+> landed-but-unmerged posture. All three FEPERF findings landed.
+>
+> **FEPERF-1 — client ETag cache invalidated after every WO/operation mutation.** The Axios client
+> (`frontend/src/services/api.ts`) keeps an in-memory ETag/conditional-request cache, and
+> `/shop-floor/dashboard` is the **only** ETag-cached endpoint. A new private
+> `invalidateDashboardCache()` (a thin wrapper over the existing `invalidateCache('/shop-floor/dashboard')`)
+> now drops that cached entry after **each** state-changing work-order / operation / clock mutation:
+> `releaseWorkOrder`, `startWorkOrder`, `completeWorkOrder`, `startWOOperation`, `completeWOOperation`,
+> `clockIn`, `clockOut`, `startOperation`, `completeOperation`, `reportOperationProduction`, and
+> `holdOperation`. So immediately after a completion / clock-out the next dashboard fetch **revalidates**
+> instead of replaying a stale cached 304 body. This is **defense-in-depth on top of Batch 9's
+> backend pre-reconcile state-fingerprint ETag (PERF-2)** — the server already moves the ETag when the
+> state changes, but dropping the client entry also closes the **stale-cache-on-error fallback window**
+> (the client serving its last cached body when a conditional request errors). No new dependency; no
+> change to the request/response contract.
+>
+> **FEPERF-4 — double-submit guards on `WorkOrderDetail`'s Complete buttons.**
+> `frontend/src/pages/WorkOrderDetail.tsx` previously let a fast double-click fire two completion POSTs.
+> It now carries in-flight guards: a `completing` boolean for the WO-level **Complete** button and a
+> `completingOpId` (keyed by operation id) for the per-operation **Complete** buttons. While a request
+> is in flight the corresponding button is **disabled**, shows a spinning `ArrowPathIcon` + "Completing…"
+> label, and the handler **early-returns on re-entry** — so a completion is submitted at most once. The
+> guard wraps only the API call (set just before the `try`, cleared in `finally`), **not** the blocking
+> `prompt()` quantity dialogs that precede it. (The shop-floor screens already had this pattern;
+> `WorkOrderDetail` was the gap.) Backend completion is already idempotent / concurrency-safe (Batch 2
+> 409, Batch 3 finalizer, Batch 6 DB-enforced idempotency) — this is the client-side complement that
+> stops the duplicate request at the source.
+>
+> **FEPERF-5 — render-perf hardening of the work-order list (memoization, no virtualization).**
+> `frontend/src/pages/WorkOrders.tsx` is **render-perf only — no visible change, no behavior change.**
+> The per-row markup was extracted into a `React.memo`-wrapped `WorkOrderRow`, and
+> `WorkOrderTable` / `WorkOrderMobileList` / `WorkOrderMobileCard` are now memoized too; `handleDelete`
+> and `handleRelease` are wrapped in `useCallback` (stable identities so the memo holds). Crucially, rows
+> now receive a **boolean `isReleasing`** prop instead of the shared `releasingIds` `Set` — passing the
+> mutable Set defeated `React.memo` (every render is a new reference), so deriving a per-row boolean is
+> what actually makes the memoization effective and stops the whole table re-rendering on every poll /
+> release.
+>
+> **Deliberate scope decision — memoize, do NOT add list virtualization.** List
+> windowing / virtualization (e.g. `react-window`) was **intentionally not** done: it would add a new
+> runtime dependency, against this batch's dependency-free, low-risk precedent. Memoization captures the
+> bulk of the re-render cost with zero new dependencies. **Windowing remains a deferred follow-up** if
+> real-world list sizes grow enough to warrant it.
+>
+> **Docs check.** Frontend-only, so no API / env / RBAC / deploy doc needed touching. `docs/API.md`'s
+> `/shop-floor/dashboard` caching note documents the **server-side** ETag/304 + bounded-reconcile
+> contract (Batch 9, PERF-2/PERF-3) and stays accurate — the FEPERF-1 client-side cache invalidation is
+> complementary and does not change that contract. No other doc references the frontend ETag-cache
+> freshness behavior.
+>
+> **All 10 ranked batches are now implemented** (Batch 10 on `qa/full-pass-2026-06-04`, pending
+> tests/review/commit). The post-plan completeness-critic gaps below remain open as the proposed
+> **Batch 11** (follow-up), pending triage.
 
 ## Completeness critic — follow-up gaps the audit did NOT cover
 1. **[high] Parent/child assembly rollup entirely unimplemented** — completing child WOs never advances the parent; parent can complete with children open. (`work_order.py:47,98`, `laser_nest_service.py:98`)
