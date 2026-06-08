@@ -65,6 +65,7 @@ from app.services.quality_gate_service import (
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 from app.services.work_order_state_service import (
+    TERMINAL_WO_STATUSES,
     StatusTransition,
     WorkOrderStateError,
     begin_operation_progress,
@@ -758,9 +759,20 @@ def clock_out(
             detail="Work order for this time entry no longer exists",
         )
 
-    if operation is not None:
+    # G6-A: an operator can be clocked into a WO that gets CANCELLED/CLOSED/COMPLETE
+    # mid-operation. We must NEVER trap their open TimeEntry, so clock_out ALWAYS
+    # closes the entry (the durable, auditable labor record). But when the parent WO
+    # is terminal we MUST NOT drive its operations toward completion or accrue cost
+    # onto a finished/cancelled job, so every production-rollup + completion side
+    # effect below is gated on `not wo_is_terminal`. A plain 409 here would be wrong:
+    # it would strand the open time entry forever.
+    wo_is_terminal = work_order.status in TERMINAL_WO_STATUSES
+
+    if operation is not None and not wo_is_terminal:
         # Re-evaluate the over-completion guard against the freshly locked row so
-        # a concurrent producer's committed quantity is seen here.
+        # a concurrent producer's committed quantity is seen here. Skipped for a
+        # terminal WO -- we don't roll the produced qty up onto it anyway, and the
+        # operator must still be allowed to close out regardless of quantity.
         target_qty = operation_target_quantity(operation, work_order)
         additional_good_qty = float(clock_out_data.quantity_produced or 0)
         if (float(operation.quantity_complete or 0) + additional_good_qty) > target_qty:
@@ -778,7 +790,10 @@ def clock_out(
     time_entry.scrap_reason = clock_out_data.scrap_reason
     time_entry.notes = clock_out_data.notes or time_entry.notes
 
-    if operation:
+    # G6-A: terminal WO -> close the labor entry (above) but never roll its hours /
+    # produced / scrapped quantities up onto the operation. The TimeEntry remains the
+    # durable labor record; we simply don't drive a finished/cancelled job's op state.
+    if operation and not wo_is_terminal:
         if time_entry.entry_type == TimeEntryType.SETUP:
             operation.actual_setup_hours += time_entry.duration_hours
         else:
@@ -798,7 +813,17 @@ def clock_out(
         )
         sync_laser_nest_from_operation(operation)
 
-    work_order.actual_hours += time_entry.duration_hours
+    # G6-A: never accrue cost/hours onto a terminal WO.
+    if not wo_is_terminal:
+        work_order.actual_hours += time_entry.duration_hours
+    else:
+        logger.warning(
+            "clock_out closed time entry %s against terminal WO %s (%s) without rollup: "
+            "labor recorded on the TimeEntry only, no op/cost accrual",
+            time_entry.id,
+            work_order.work_order_number,
+            work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        )
     OperationalEventService(db).emit(
         company_id=company_id,
         event_type="labor_clock_out",
@@ -815,6 +840,9 @@ def clock_out(
             "quantity_produced": clock_out_data.quantity_produced,
             "quantity_scrapped": clock_out_data.quantity_scrapped,
             "scrap_reason": clock_out_data.scrap_reason,
+            # G6-A: flag so AI/realtime consumers know this labor closed against a
+            # terminal WO and was deliberately NOT rolled up into op/cost.
+            "wo_terminal": wo_is_terminal,
         },
     )
 
@@ -832,7 +860,13 @@ def clock_out(
     # stamping, qty sync, current_operation_id) so this path can never drift from
     # the office / scan twins (DUP-5). The caller still owns the row locks (held),
     # the audit rows below, and the scheduling refresh of the returned WCs.
-    if operation:
+    #
+    # G6-A: SKIP the entire finalize/advance block for a terminal WO. We never drive a
+    # finished/cancelled job's operation toward COMPLETE nor lift it to IN_PROGRESS.
+    # operation_completed / work_order_completed therefore stay False, so no spurious
+    # completion audit row, completion OperationalEvent, FG receipt/backflush/cost
+    # rollup, or scheduling refresh fires below for a terminal WO.
+    if operation and not wo_is_terminal:
         target_qty = operation_target_quantity(operation, work_order)
         is_fully_complete = operation.quantity_complete >= target_qty
 
@@ -1772,6 +1806,16 @@ def start_operation(
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
+    # G6-A: refuse to START new work on a TERMINAL parent WO (CANCELLED/CLOSED/COMPLETE)
+    # before any mutation -- mirrors the guard in complete_operation. You can never
+    # legitimately begin a new operation on a finished/cancelled job, and refusing it
+    # traps nothing (no open time entry is created yet).
+    if work_order.status in TERMINAL_WO_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot start operation: work order is {work_order.status.value}",
+        )
+
     if has_incomplete_predecessors(
         db,
         operation.work_order_id,
@@ -2156,6 +2200,17 @@ def complete_operation(
     )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found for this operation")
+
+    # G6-A: refuse to complete an operation against a TERMINAL parent WO
+    # (CANCELLED/CLOSED/COMPLETE) before any mutation -- mirrors the ON_HOLD 409 this
+    # handler already enforces. Without this, finalizing the last op of a CANCELLED WO
+    # would resurrect it to COMPLETE via the shared finalizer and re-fire FG
+    # receipt/backflush/cost rollup plus a COMPLETE audit row.
+    if work_order.status in TERMINAL_WO_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot complete operation: work order is {work_order.status.value}",
+        )
 
     # Validate operation state (re-checked under the lock so a concurrent
     # completer that already flipped this op to COMPLETE is rejected here).

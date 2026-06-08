@@ -16,6 +16,19 @@ from app.models.work_order import (
     WorkOrderStatus,
 )
 
+# G6-A: the set of work-order statuses that are *terminal* -- a WO in any of
+# these states has finished its lifecycle and must never be reopened or
+# resurrected (esp. CANCELLED, which previously slipped through guards that only
+# checked COMPLETE/CLOSED, letting a cancelled job be driven to COMPLETE and
+# re-fire FG receipt / backflush / cost rollup and write a COMPLETE row onto the
+# tamper-evident audit chain). Reuse this set everywhere a completion guard or a
+# reconcile-on-read needs to refuse touching a finished WO.
+TERMINAL_WO_STATUSES = {
+    WorkOrderStatus.COMPLETE,
+    WorkOrderStatus.CLOSED,
+    WorkOrderStatus.CANCELLED,
+}
+
 
 class WorkOrderStateError(ValueError):
     """Raised when a requested work-order transition is not valid."""
@@ -365,14 +378,19 @@ def finalize_operation_completion(
         # at actual_end so actual_start <= actual_end always holds.
         if not work_order.actual_start:
             work_order.actual_start = min(start_dates) if start_dates else min(now, work_order.actual_end)
-        if work_order.status not in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED):
+        # G6-A: refuse to (re)flip a terminal WO. CANCELLED/CLOSED/COMPLETE are all
+        # final -- a CANCELLED WO must not be resurrected to COMPLETE from operation
+        # evidence (that would re-fire FG receipt/backflush/cost rollup and write a
+        # COMPLETE audit row). Was COMPLETE/CLOSED only, which let CANCELLED through.
+        if work_order.status not in TERMINAL_WO_STATUSES:
             work_order.status = WorkOrderStatus.COMPLETE
         sync_work_order_quantity_complete(work_order, operation, all_operations_complete=True)
         # RUP-1: the WO is no longer sitting on any operation.
         work_order.current_operation_id = None
-    else:
+    elif work_order.status not in TERMINAL_WO_STATUSES:
         # More operations remain: lift the WO to IN_PROGRESS on first progress and
-        # self-heal the next READY operation.
+        # self-heal the next READY operation. G6-A: gated so a terminal (esp.
+        # CANCELLED) WO can never be reopened to IN_PROGRESS from operation evidence.
         if work_order.status == WorkOrderStatus.RELEASED:
             work_order.status = WorkOrderStatus.IN_PROGRESS
             if not work_order.actual_start:
@@ -475,7 +493,15 @@ def reconcile_work_orders_from_completion_evidence(
     behavior for callers that have no actor (e.g. a brand-new WO POST where this is
     a documented no-op).
     """
-    operations = [op for wo in work_orders for op in (wo.operations or [])]
+    # G6-A: skip the OPERATION-level reconcile for any TERMINAL parent WO
+    # (CANCELLED/CLOSED/COMPLETE). The WO-level _sync_work_order_status_from_operations
+    # already early-returns for terminal WOs, but this op-level loop ran over ALL
+    # operations regardless -- so a CANCELLED WO with closed TimeEntry evidence could
+    # still have operation.quantity_complete bumped or an op flipped to COMPLETE during
+    # a read-path reconcile. Excluding terminal WOs' operations from the candidate set
+    # leaves their committed op state untouched. Read-safe: never raises.
+    non_terminal_work_orders = [wo for wo in work_orders if wo.status not in TERMINAL_WO_STATUSES]
+    operations = [op for wo in non_terminal_work_orders for op in (wo.operations or [])]
     operation_ids = [op.id for op in operations if op.id is not None]
     if not operation_ids:
         return False
@@ -567,6 +593,13 @@ def reconcile_work_orders_from_completion_evidence(
         changed = op_changed or changed
 
     for work_order in work_orders:
+        # G6-A: a terminal WO is done -- never copy slot completion evidence onto its
+        # operations (which would flip ops to COMPLETE / bump quantity_complete) nor
+        # re-derive its WO status. _sync_work_order_status_from_operations already
+        # self-guards for terminal WOs; _copy_slot_completion_evidence did NOT, so
+        # skipping the whole pair here closes that op-level hole. Read-safe.
+        if work_order.status in TERMINAL_WO_STATUSES:
+            continue
         changed = _copy_slot_completion_evidence(work_order, transitions, entry_ids_by_operation) or changed
         changed = _sync_work_order_status_from_operations(work_order, transitions, entry_ids_by_operation) or changed
 
@@ -735,6 +768,15 @@ def _sync_work_order_status_from_operations(
     if not operations:
         return False
 
+    # G6-A: reconcile-on-read has no actor and runs on every WO GET. A terminal WO
+    # (CANCELLED/CLOSED/COMPLETE) has finished its lifecycle; never let operation
+    # evidence reopen it to IN_PROGRESS or resurrect a CANCELLED job to COMPLETE
+    # (which would re-fire FG receipt/backflush/cost rollup and write a COMPLETE row
+    # onto the tamper-evident audit chain). Leave a terminal WO's status and
+    # current_operation_id exactly as committed.
+    if work_order.status in TERMINAL_WO_STATUSES:
+        return False
+
     changed = False
     all_operations_complete = all(operation.status == OperationStatus.COMPLETE for operation in operations)
     any_operation_progress = any(
@@ -759,7 +801,10 @@ def _sync_work_order_status_from_operations(
             started_dates = [operation.actual_start for operation in operations if operation.actual_start]
             work_order.actual_start = min(started_dates) if started_dates else min(now, work_order.actual_end)
             changed = True
-        if work_order.status not in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED):
+        # G6-A: TERMINAL_WO_STATUSES (not just COMPLETE/CLOSED) -- the early terminal
+        # guard above already returns before here, so this is defense-in-depth that
+        # keeps this check identical to finalize_operation_completion's COMPLETE flip.
+        if work_order.status not in TERMINAL_WO_STATUSES:
             old_wo_status = work_order.status.value if work_order.status else None
             work_order.status = WorkOrderStatus.COMPLETE
             changed = True

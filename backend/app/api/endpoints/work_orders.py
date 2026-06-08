@@ -74,6 +74,7 @@ from app.services.quality_gate_service import (
 )
 from app.services.scheduling_service import SchedulingService
 from app.services.work_order_state_service import (
+    TERMINAL_WO_STATUSES,
     StatusTransition,
     WorkOrderStateError,
     begin_operation_progress,
@@ -1483,6 +1484,22 @@ def update_work_order(
     old_values = {c.key: getattr(work_order, c.key) for c in work_order.__table__.columns}
 
     update_data = work_order_in.model_dump(exclude_unset=True)
+
+    # G6-A: this generic update applies `status` via a blind setattr with no
+    # transition validation. Block the one dangerous transition -- resurrecting a
+    # terminal WO (CANCELLED/CLOSED/COMPLETE) back to a non-terminal status -- with a
+    # 409, consistent with how the release/start endpoints gate transitions. This is
+    # intentionally minimal (not a full state machine); it only stops a terminal->
+    # non-terminal flip that would reopen a finished/cancelled job.
+    new_status = update_data.get("status")
+    if new_status is not None and work_order.status in TERMINAL_WO_STATUSES and new_status not in TERMINAL_WO_STATUSES:
+        current = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
+        target = new_status.value if hasattr(new_status, "value") else new_status
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot move work order out of terminal status '{current}' to '{target}'",
+        )
+
     for field, value in update_data.items():
         setattr(work_order, field, value)
 
@@ -2054,6 +2071,14 @@ def complete_work_order(
             "quality_exceptions": [],
         }
 
+    # G6-A: a CANCELLED WO is terminal and must NOT be silently completed. Unlike the
+    # COMPLETE/CLOSED no-op above (the completion already happened), a CANCELLED WO was
+    # deliberately taken out of production -- driving it to COMPLETE here would
+    # resurrect a cancelled job, re-fire FG receipt/backflush/cost rollup, and write a
+    # COMPLETE row onto the tamper-evident audit chain. Refuse with a 409 state conflict.
+    if work_order.status == WorkOrderStatus.CANCELLED:
+        raise HTTPException(status_code=409, detail="cannot complete a cancelled work order")
+
     # Bound the manager-supplied quantities (DUP-4): non-negative and not above the
     # quantity ordered. quantity_ordered is the natural cap for a finished WO.
     # quantity_complete is required; quantity_scrapped is optional (DUP-3) and only
@@ -2533,6 +2558,17 @@ def complete_operation(
             )
             .with_for_update()
             .first()
+        )
+
+    # G6-A: refuse to complete an operation against a TERMINAL parent WO
+    # (CANCELLED/CLOSED/COMPLETE) before any mutation -- mirrors the ON_HOLD 409 the
+    # op-complete handlers already enforce. Without this, finalizing the last op of a
+    # CANCELLED WO would resurrect it to COMPLETE via the shared finalizer and re-fire
+    # FG receipt/backflush/cost rollup plus a COMPLETE audit row.
+    if work_order and work_order.status in TERMINAL_WO_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot complete operation: work order is {work_order.status.value}",
         )
 
     if work_order and has_incomplete_predecessors(

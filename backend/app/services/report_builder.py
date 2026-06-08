@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 from sqlalchemy import asc, desc, func
 from sqlalchemy.orm import Session
 
+from app.db.tenant_filter import tenant_filter
 from app.models.inventory import InventoryItem
 from app.models.part import Part
 from app.models.purchasing import PurchaseOrder
@@ -107,8 +108,16 @@ class ReportBuilderService:
     def __init__(self, db: Session):
         self.db = db
 
-    def execute_report(self, request: CustomReportRequest) -> List[Dict[str, Any]]:
-        """Execute a custom report query and return results."""
+    def execute_report(self, request: CustomReportRequest, company_id: int) -> List[Dict[str, Any]]:
+        """Execute a custom report query and return results, scoped to ``company_id``.
+
+        Tenant isolation (G3-scope): the report runs ``self.db.query(*columns)`` over a
+        single base model selected by ``request.data_source``. Every supported base
+        model (WorkOrder, Part, InventoryItem, NonConformanceReport, PurchaseOrder,
+        Quote) carries ``company_id`` via ``TenantMixin``, so we ALWAYS apply a
+        ``model.company_id == company_id`` filter before any user-supplied filters.
+        Without it the report returned every tenant's rows.
+        """
         model = DATA_SOURCE_MODELS.get(request.data_source)
         if not model:
             raise ValueError(f"Unknown data source: {request.data_source}")
@@ -143,6 +152,11 @@ class ReportBuilderService:
 
         # Build query
         query = self.db.query(*columns)
+
+        # G3-scope: tenant isolation -- restrict to the active company BEFORE any
+        # user-supplied filters/group-by/sort. The base model carries company_id
+        # (TenantMixin); a report must never return another tenant's rows.
+        query = tenant_filter(query, model, company_id)
 
         # Apply filters
         for f in request.filters:

@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.engineering_change import (
     ECOApproval,
@@ -17,7 +17,8 @@ from app.models.engineering_change import (
     ECOType,
     EngineeringChangeOrder,
 )
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.services.audit_service import AuditService
 
 router = APIRouter()
 
@@ -203,7 +204,14 @@ def generate_eco_number(db: Session) -> str:
     return f"{prefix}{num:03d}"
 
 
-def get_eco_or_404(db: Session, eco_id: int) -> EngineeringChangeOrder:
+def get_eco_or_404(db: Session, eco_id: int, company_id: int) -> EngineeringChangeOrder:
+    """Load an ECO by id, scoped to the active company.
+
+    Tenant isolation (G4-Fix1): the lookup MUST filter ``company_id`` -- previously
+    it matched on ``id`` alone, making every by-id ECO endpoint cross-tenant
+    readable/mutable. A mismatch returns 404 (never reveal that another tenant's ECO
+    exists).
+    """
     eco = (
         db.query(EngineeringChangeOrder)
         .options(
@@ -213,13 +221,50 @@ def get_eco_or_404(db: Session, eco_id: int) -> EngineeringChangeOrder:
             joinedload(EngineeringChangeOrder.approvals).joinedload(ECOApproval.approver),
             joinedload(EngineeringChangeOrder.implementation_tasks).joinedload(ECOImplementationTask.assignee),
         )
-        .filter(EngineeringChangeOrder.id == eco_id)
+        .filter(
+            EngineeringChangeOrder.id == eco_id,
+            EngineeringChangeOrder.company_id == company_id,
+        )
         .first()
     )
 
     if not eco:
         raise HTTPException(status_code=404, detail="ECO not found")
     return eco
+
+
+def _validate_affected_ids_in_company(db: Session, company_id: int, eco_in) -> None:
+    """Reject any affected part/work-order/document id that is not in the active company.
+
+    Tenant isolation (G4-Fix1): ``affected_parts``/``affected_work_orders``/
+    ``affected_documents`` are free-form id lists persisted as JSON. Without this
+    check a crafted payload could store another tenant's ids, which the
+    affected-items endpoint would then resolve. Each referenced id must resolve to a
+    live row WITHIN ``company_id`` (Part/WorkOrder are soft-deletable, so exclude
+    deleted rows). Raises 422 on the first foreign/nonexistent id.
+    """
+    from app.models.document import Document
+    from app.models.part import Part
+    from app.models.work_order import WorkOrder
+
+    def _check(model, ids, label, soft_delete):
+        if not ids:
+            return
+        unique_ids = list({int(i) for i in ids})
+        query = db.query(model.id).filter(model.id.in_(unique_ids), model.company_id == company_id)
+        if soft_delete:
+            query = query.filter(model.is_deleted == False)  # noqa: E712
+        found = {row[0] for row in query.all()}
+        missing = [i for i in unique_ids if i not in found]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown or cross-tenant {label} id(s): {sorted(missing)}",
+            )
+
+    _check(Part, eco_in.affected_parts, "part", soft_delete=True)
+    _check(WorkOrder, eco_in.affected_work_orders, "work order", soft_delete=True)
+    _check(Document, eco_in.affected_documents, "document", soft_delete=False)
 
 
 # ============== CRUD Endpoints ==============
@@ -277,7 +322,10 @@ def get_eco_dashboard(
     # By type breakdown
     type_counts = (
         db.query(EngineeringChangeOrder.eco_type, func.count(EngineeringChangeOrder.id))
-        .filter(EngineeringChangeOrder.status.notin_([ECOStatus.CANCELLED]))
+        .filter(
+            EngineeringChangeOrder.company_id == company_id,
+            EngineeringChangeOrder.status.notin_([ECOStatus.CANCELLED]),
+        )
         .group_by(EngineeringChangeOrder.eco_type)
         .all()
     )
@@ -286,7 +334,10 @@ def get_eco_dashboard(
     # By priority breakdown
     priority_counts = (
         db.query(EngineeringChangeOrder.priority, func.count(EngineeringChangeOrder.id))
-        .filter(EngineeringChangeOrder.status.notin_([ECOStatus.COMPLETED, ECOStatus.CANCELLED]))
+        .filter(
+            EngineeringChangeOrder.company_id == company_id,
+            EngineeringChangeOrder.status.notin_([ECOStatus.COMPLETED, ECOStatus.CANCELLED]),
+        )
         .group_by(EngineeringChangeOrder.priority)
         .all()
     )
@@ -297,7 +348,9 @@ def get_eco_dashboard(
         db.query(EngineeringChangeOrder)
         .filter(
             and_(
-                EngineeringChangeOrder.status == ECOStatus.COMPLETED, EngineeringChangeOrder.completed_date.isnot(None)
+                EngineeringChangeOrder.company_id == company_id,
+                EngineeringChangeOrder.status == ECOStatus.COMPLETED,
+                EngineeringChangeOrder.completed_date.isnot(None),
             )
         )
         .all()
@@ -367,19 +420,29 @@ def list_ecos(
 
 
 @router.get("/eco/{eco_id}", response_model=ECOResponse)
-def get_eco(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_eco(
+    eco_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Get ECO details"""
-    return get_eco_or_404(db, eco_id)
+    return get_eco_or_404(db, eco_id, company_id)
 
 
 @router.post("/eco/", response_model=ECOResponse)
 def create_eco(
     eco_in: ECOCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Create a new Engineering Change Order"""
+    # G4-Fix1: every affected id must resolve within the active company before persist,
+    # so a crafted payload cannot store cross-tenant references.
+    _validate_affected_ids_in_company(db, company_id, eco_in)
+
     data = eco_in.model_dump(exclude={"affected_parts", "affected_work_orders", "affected_documents"})
 
     eco = EngineeringChangeOrder(
@@ -392,20 +455,34 @@ def create_eco(
     )
     eco.company_id = company_id
     db.add(eco)
+    db.flush()  # assign PK without committing so the audit row carries resource_id
+
+    audit.log_create("engineering_change_order", eco.id, eco.eco_number, new_values=eco)
+
     db.commit()
     db.refresh(eco)
-    return get_eco_or_404(db, eco.id)
+    return get_eco_or_404(db, eco.id, company_id)
 
 
 @router.put("/eco/{eco_id}", response_model=ECOResponse)
 def update_eco(
-    eco_id: int, eco_in: ECOUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    eco_id: int,
+    eco_in: ECOUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update an ECO"""
-    eco = get_eco_or_404(db, eco_id)
+    eco = get_eco_or_404(db, eco_id, company_id)
 
     if eco.status in [ECOStatus.COMPLETED, ECOStatus.REJECTED, ECOStatus.CANCELLED]:
         raise HTTPException(status_code=400, detail="Cannot update a completed, rejected, or cancelled ECO")
+
+    # G4-Fix1: validate affected ids against the active company before persisting.
+    _validate_affected_ids_in_company(db, company_id, eco_in)
+
+    old_values = {c.key: getattr(eco, c.key) for c in eco.__table__.columns}
 
     update_data = eco_in.model_dump(
         exclude_unset=True, exclude={"affected_parts", "affected_work_orders", "affected_documents"}
@@ -422,26 +499,50 @@ def update_eco(
     if eco_in.affected_documents is not None:
         eco.affected_documents = json.dumps(eco_in.affected_documents)
 
+    db.flush()
+    audit.log_update(
+        resource_type="engineering_change_order",
+        resource_id=eco.id,
+        resource_identifier=eco.eco_number,
+        old_values=old_values,
+        new_values=eco,
+    )
+
     db.commit()
     db.refresh(eco)
-    return get_eco_or_404(db, eco.id)
+    return get_eco_or_404(db, eco.id, company_id)
 
 
 # ============== Status Transition Endpoints ==============
 
 
 @router.post("/eco/{eco_id}/submit", response_model=ECOResponse)
-def submit_eco(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def submit_eco(
+    eco_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
     """Submit ECO for review"""
-    eco = get_eco_or_404(db, eco_id)
+    eco = get_eco_or_404(db, eco_id, company_id)
 
     if eco.status != ECOStatus.DRAFT:
         raise HTTPException(status_code=400, detail="Only draft ECOs can be submitted")
 
+    old_status = eco.status.value if eco.status else None
     eco.status = ECOStatus.SUBMITTED
+    db.flush()
+    audit.log_status_change(
+        resource_type="engineering_change_order",
+        resource_id=eco.id,
+        resource_identifier=eco.eco_number,
+        old_status=old_status,
+        new_status=ECOStatus.SUBMITTED.value,
+    )
     db.commit()
     db.refresh(eco)
-    return get_eco_or_404(db, eco.id)
+    return get_eco_or_404(db, eco.id, company_id)
 
 
 @router.post("/eco/{eco_id}/approve", response_model=ECOResponse)
@@ -449,15 +550,20 @@ def approve_eco(
     eco_id: int,
     decision: ApprovalDecision,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Add an approval decision to an ECO"""
-    eco = get_eco_or_404(db, eco_id)
+    eco = get_eco_or_404(db, eco_id, company_id)
 
     if eco.status not in [ECOStatus.SUBMITTED, ECOStatus.UNDER_REVIEW]:
         raise HTTPException(status_code=400, detail="ECO is not pending approval")
 
-    # Find the user's pending approval record
+    old_status = eco.status.value if eco.status else None
+
+    # Find the user's pending approval record (the ECO is already company-verified,
+    # so its child approvals are implicitly tenant-scoped via eco_id).
     approval = (
         db.query(ECOApproval)
         .filter(
@@ -494,8 +600,19 @@ def approve_eco(
         eco.approved_by = current_user.id
         eco.approved_date = datetime.utcnow()
 
+    db.flush()
+    new_status = eco.status.value if eco.status else None
+    if new_status != old_status:
+        audit.log_status_change(
+            resource_type="engineering_change_order",
+            resource_id=eco.id,
+            resource_identifier=eco.eco_number,
+            old_status=old_status,
+            new_status=new_status,
+            description=f"ECO {eco.eco_number} approval decision '{decision.status}' by user {current_user.id}",
+        )
     db.commit()
-    return get_eco_or_404(db, eco.id)
+    return get_eco_or_404(db, eco.id, company_id)
 
 
 @router.post("/eco/{eco_id}/reject", response_model=ECOResponse)
@@ -503,17 +620,21 @@ def reject_eco(
     eco_id: int,
     decision: ApprovalDecision,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Reject an ECO"""
-    eco = get_eco_or_404(db, eco_id)
+    eco = get_eco_or_404(db, eco_id, company_id)
 
     if eco.status in [ECOStatus.COMPLETED, ECOStatus.CANCELLED]:
         raise HTTPException(status_code=400, detail="Cannot reject a completed or cancelled ECO")
 
+    old_status = eco.status.value if eco.status else None
     eco.status = ECOStatus.REJECTED
 
-    # Record the rejection as an approval record
+    # Record the rejection as an approval record (tenant-tag it -- ECOApproval is a
+    # TenantMixin model with a NOT NULL company_id).
     approval = ECOApproval(
         eco_id=eco_id,
         approver_id=current_user.id,
@@ -522,33 +643,64 @@ def reject_eco(
         comments=decision.comments,
         decision_date=datetime.utcnow(),
     )
+    approval.company_id = company_id
     db.add(approval)
+    db.flush()
+    audit.log_status_change(
+        resource_type="engineering_change_order",
+        resource_id=eco.id,
+        resource_identifier=eco.eco_number,
+        old_status=old_status,
+        new_status=ECOStatus.REJECTED.value,
+    )
     db.commit()
-    return get_eco_or_404(db, eco.id)
+    return get_eco_or_404(db, eco.id, company_id)
 
 
 @router.post("/eco/{eco_id}/implement", response_model=ECOResponse)
-def start_implementation(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def start_implementation(
+    eco_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
     """Start implementation of an approved ECO"""
-    eco = get_eco_or_404(db, eco_id)
+    eco = get_eco_or_404(db, eco_id, company_id)
 
     if eco.status != ECOStatus.APPROVED:
         raise HTTPException(status_code=400, detail="Only approved ECOs can be implemented")
 
+    old_status = eco.status.value if eco.status else None
     eco.status = ECOStatus.IN_IMPLEMENTATION
+    db.flush()
+    audit.log_status_change(
+        resource_type="engineering_change_order",
+        resource_id=eco.id,
+        resource_identifier=eco.eco_number,
+        old_status=old_status,
+        new_status=ECOStatus.IN_IMPLEMENTATION.value,
+    )
     db.commit()
-    return get_eco_or_404(db, eco.id)
+    return get_eco_or_404(db, eco.id, company_id)
 
 
 @router.post("/eco/{eco_id}/complete", response_model=ECOResponse)
-def complete_eco(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def complete_eco(
+    eco_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
     """Mark an ECO as completed"""
-    eco = get_eco_or_404(db, eco_id)
+    eco = get_eco_or_404(db, eco_id, company_id)
 
     if eco.status != ECOStatus.IN_IMPLEMENTATION:
         raise HTTPException(status_code=400, detail="Only in-implementation ECOs can be completed")
 
-    # Check if all tasks are completed or skipped
+    # Check if all tasks are completed or skipped (the ECO is company-verified, so its
+    # child tasks are implicitly tenant-scoped via eco_id).
     incomplete_tasks = (
         db.query(ECOImplementationTask)
         .filter(
@@ -560,19 +712,33 @@ def complete_eco(eco_id: int, db: Session = Depends(get_db), current_user: User 
     if incomplete_tasks > 0:
         raise HTTPException(status_code=400, detail=f"{incomplete_tasks} implementation task(s) still incomplete")
 
+    old_status = eco.status.value if eco.status else None
     eco.status = ECOStatus.COMPLETED
     eco.completed_date = date.today()
+    db.flush()
+    audit.log_status_change(
+        resource_type="engineering_change_order",
+        resource_id=eco.id,
+        resource_identifier=eco.eco_number,
+        old_status=old_status,
+        new_status=ECOStatus.COMPLETED.value,
+    )
     db.commit()
-    return get_eco_or_404(db, eco.id)
+    return get_eco_or_404(db, eco.id, company_id)
 
 
 # ============== Approval Endpoints ==============
 
 
 @router.get("/eco/{eco_id}/approvals", response_model=List[ApprovalResponse])
-def list_approvals(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_approvals(
+    eco_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """List all approvals for an ECO"""
-    get_eco_or_404(db, eco_id)
+    get_eco_or_404(db, eco_id, company_id)
     return db.query(ECOApproval).options(joinedload(ECOApproval.approver)).filter(ECOApproval.eco_id == eco_id).all()
 
 
@@ -581,13 +747,16 @@ def add_approval(
     eco_id: int,
     approval_in: ApprovalCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Add an approval requirement to an ECO"""
-    get_eco_or_404(db, eco_id)
+    get_eco_or_404(db, eco_id, company_id)
 
-    # Check that approver user exists
-    approver = db.query(User).filter(User.id == approval_in.approver_id).first()
+    # Check that the approver user exists WITHIN the active company (G4-Fix1: an
+    # unscoped lookup let another tenant's user be attached as an approver).
+    approver = db.query(User).filter(User.id == approval_in.approver_id, User.company_id == company_id).first()
     if not approver:
         raise HTTPException(status_code=404, detail="Approver user not found")
 
@@ -597,7 +766,15 @@ def add_approval(
         role=approval_in.role,
         status="pending",
     )
+    approval.company_id = company_id
     db.add(approval)
+    db.flush()
+    audit.log_create(
+        "eco_approval",
+        approval.id,
+        f"ECO {eco_id} approval ({approval_in.role})",
+        new_values=approval,
+    )
     db.commit()
     db.refresh(approval)
     return db.query(ECOApproval).options(joinedload(ECOApproval.approver)).filter(ECOApproval.id == approval.id).first()
@@ -608,10 +785,15 @@ def add_approval(
 
 @router.post("/eco/{eco_id}/tasks", response_model=TaskResponse)
 def add_task(
-    eco_id: int, task_in: TaskCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    eco_id: int,
+    task_in: TaskCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Add an implementation task to an ECO"""
-    get_eco_or_404(db, eco_id)
+    get_eco_or_404(db, eco_id, company_id)
 
     # Determine next task number
     max_task = (
@@ -628,7 +810,15 @@ def add_task(
         due_date=task_in.due_date,
         status="pending",
     )
+    task.company_id = company_id
     db.add(task)
+    db.flush()
+    audit.log_create(
+        "eco_implementation_task",
+        task.id,
+        f"ECO {eco_id} task #{next_num}",
+        new_values=task,
+    )
     db.commit()
     db.refresh(task)
     return (
@@ -645,17 +835,31 @@ def update_task(
     task_id: int,
     task_in: TaskUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update an implementation task"""
+    # G4-Fix1: verify the parent ECO belongs to the active company (404 otherwise),
+    # then scope the task query by company too -- previously this query filtered only
+    # on id + eco_id, making any tenant's task mutable by id.
+    get_eco_or_404(db, eco_id, company_id)
     task = (
         db.query(ECOImplementationTask)
-        .filter(and_(ECOImplementationTask.id == task_id, ECOImplementationTask.eco_id == eco_id))
+        .filter(
+            and_(
+                ECOImplementationTask.id == task_id,
+                ECOImplementationTask.eco_id == eco_id,
+                ECOImplementationTask.company_id == company_id,
+            )
+        )
         .first()
     )
 
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    old_values = {c.key: getattr(task, c.key) for c in task.__table__.columns}
 
     update_data = task_in.model_dump(exclude_unset=True)
 
@@ -668,6 +872,14 @@ def update_task(
     for field, value in update_data.items():
         setattr(task, field, value)
 
+    db.flush()
+    audit.log_update(
+        resource_type="eco_implementation_task",
+        resource_id=task.id,
+        resource_identifier=f"ECO {eco_id} task #{task.task_number}",
+        old_values=old_values,
+        new_values=task,
+    )
     db.commit()
     db.refresh(task)
     return (
@@ -682,9 +894,14 @@ def update_task(
 
 
 @router.get("/eco/affected-items/{eco_id}")
-def get_affected_items(eco_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_affected_items(
+    eco_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Get details of all affected parts, work orders, and documents for an ECO"""
-    eco = get_eco_or_404(db, eco_id)
+    eco = get_eco_or_404(db, eco_id, company_id)
 
     result = {
         "parts": [],
@@ -692,14 +909,23 @@ def get_affected_items(eco_id: int, db: Session = Depends(get_db), current_user:
         "documents": [],
     }
 
-    # Parse affected parts
+    # Parse affected parts (G4-Fix1: scope to the active company and exclude
+    # soft-deleted rows; previously this resolved ids across ALL tenants).
     if eco.affected_parts:
         try:
             part_ids = json.loads(eco.affected_parts)
             if part_ids:
                 from app.models.part import Part
 
-                parts = db.query(Part).filter(Part.id.in_(part_ids)).all()
+                parts = (
+                    db.query(Part)
+                    .filter(
+                        Part.id.in_(part_ids),
+                        Part.company_id == company_id,
+                        Part.is_deleted == False,  # noqa: E712
+                    )
+                    .all()
+                )
                 result["parts"] = [
                     {"id": p.id, "part_number": p.part_number, "name": p.name, "revision": getattr(p, 'revision', None)}
                     for p in parts
@@ -707,29 +933,38 @@ def get_affected_items(eco_id: int, db: Session = Depends(get_db), current_user:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Parse affected work orders
+    # Parse affected work orders (scoped + soft-delete filtered).
     if eco.affected_work_orders:
         try:
             wo_ids = json.loads(eco.affected_work_orders)
             if wo_ids:
                 from app.models.work_order import WorkOrder
 
-                wos = db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()
+                wos = (
+                    db.query(WorkOrder)
+                    .filter(
+                        WorkOrder.id.in_(wo_ids),
+                        WorkOrder.company_id == company_id,
+                        WorkOrder.is_deleted == False,  # noqa: E712
+                    )
+                    .all()
+                )
                 result["work_orders"] = [
-                    {"id": w.id, "wo_number": w.wo_number, "status": str(w.status.value) if w.status else None}
+                    {"id": w.id, "wo_number": w.work_order_number, "status": str(w.status.value) if w.status else None}
                     for w in wos
                 ]
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Parse affected documents
+    # Parse affected documents (Document is TenantMixin only -- scope by company_id;
+    # it has no is_deleted column, so no soft-delete filter applies).
     if eco.affected_documents:
         try:
             doc_ids = json.loads(eco.affected_documents)
             if doc_ids:
                 from app.models.document import Document
 
-                docs = db.query(Document).filter(Document.id.in_(doc_ids)).all()
+                docs = db.query(Document).filter(Document.id.in_(doc_ids), Document.company_id == company_id).all()
                 result["documents"] = [
                     {
                         "id": d.id,

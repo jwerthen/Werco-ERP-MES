@@ -47,15 +47,15 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | GET | `/work-orders/` | List all work orders | Yes |
 | POST | `/work-orders/` | Create work order | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
-| PUT | `/work-orders/{id}` | Update work order | Yes |
+| PUT | `/work-orders/{id}` | Update work order (409 if it moves a terminal WO back to a non-terminal status) | Yes |
 | DELETE | `/work-orders/{id}` | Delete work order | Admin |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
-| POST | `/work-orders/{id}/complete` | Complete work order | Yes |
+| POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
 | PUT | `/work-orders/operations/{id}` | Update an operation | Yes |
 | POST | `/work-orders/operations/{id}/start` | Start an operation | Yes |
-| POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress) | Yes |
+| POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal) | Yes |
 
 > **Tenant isolation on operation/completion endpoints.** The operation- and completion-level
 > endpoints above (`/start`, `/complete`, `/operations/{id}`, `/operations/{id}/start`,
@@ -104,6 +104,25 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > re-invoking on an already-terminal work order/shipment returns the current state
 > (`{"already_completed": true}` / `{"already_shipped": true}`) and fires no second audit row, event,
 > notification, or webhook.
+>
+> **Terminal-state lock (a finished/cancelled WO can't be resurrected).** The terminal statuses are
+> **COMPLETE**, **CLOSED**, and **CANCELLED**. The idempotent no-op above applies only to a WO that has
+> already completed (COMPLETE/CLOSED); a **CANCELLED** WO was deliberately taken out of production and is
+> not silently completed:
+> - `POST /work-orders/{id}/complete` on a **CANCELLED** WO returns **409 Conflict**
+>   (`{"detail": "cannot complete a cancelled work order"}`).
+> - `POST /work-orders/operations/{id}/complete` (and the shop-floor equivalent) against an operation
+>   whose parent WO is in **any** terminal status returns **409 Conflict**
+>   (`{"detail": "cannot complete operation: work order is <status>"}`) before any mutation — so
+>   finalizing the last operation of a cancelled/closed WO can't drive it to COMPLETE.
+> - `PUT /work-orders/{id}` that moves a **terminal** WO back to a **non-terminal** status returns
+>   **409 Conflict** (`{"detail": "cannot move work order out of terminal status '<current>' to '<target>'"}`).
+>   (This is a targeted guard on the one dangerous transition, not a full state machine.)
+> - **Reconcile-on-read leaves terminal WOs untouched** — operation evidence read on any GET will not
+>   reopen a terminal WO to IN_PROGRESS or resurrect a CANCELLED WO to COMPLETE.
+>
+> Resurrecting a terminal WO would re-fire finished-goods receipt / backflush / cost rollup and write a
+> spurious COMPLETE row onto the tamper-evident audit chain; the lock prevents that.
 >
 > **Completion writes finished goods to inventory.** When a work order reaches **COMPLETE** (any
 > completion path, including reconcile-on-read), the system **always** performs a finished-goods
@@ -479,6 +498,51 @@ in `RBAC_PERMISSIONS.md`.
 }
 ```
 
+### Engineering Change Orders (ECO)
+
+Engineering-change endpoints are mounted under `/eco`; the router's own routes are also `/eco/…`, so
+the public paths are `/eco/eco/…`.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/eco/eco/dashboard` | ECO dashboard aggregates (counts by type/priority, cycle time) | Yes |
+| GET | `/eco/eco/` | List ECOs | Yes |
+| GET | `/eco/eco/{id}` | Get an ECO | Yes |
+| POST | `/eco/eco/` | Create an ECO | Admin / Manager |
+| PUT | `/eco/eco/{id}` | Update an ECO | Admin / Manager |
+| POST | `/eco/eco/{id}/submit` | Submit a draft ECO for review | Admin / Manager |
+| POST | `/eco/eco/{id}/approve` | Record an approval decision | Admin / Manager |
+| POST | `/eco/eco/{id}/reject` | Reject an ECO | Admin / Manager |
+| POST | `/eco/eco/{id}/implement` | Start implementation of an approved ECO | Admin / Manager |
+| POST | `/eco/eco/{id}/complete` | Mark an ECO completed | Admin / Manager |
+| GET | `/eco/eco/{id}/approvals` | List an ECO's approvals | Yes |
+| POST | `/eco/eco/{id}/approvals` | Add an approval requirement | Admin / Manager |
+| POST | `/eco/eco/{id}/tasks` | Add an implementation task | Admin / Manager |
+| PUT | `/eco/eco/{id}/tasks/{task_id}` | Update an implementation task | Admin / Manager |
+| GET | `/eco/eco/affected-items/{id}` | Resolve the ECO's affected parts / work orders / documents | Yes |
+
+> **Tenant isolation (all ECO endpoints).** Every ECO lookup is scoped to the caller's **active
+> company** (`get_current_company_id`). An ECO id (or a child task id) belonging to another tenant
+> returns **404 before any read or mutation** (not 403, so a guessed id can't confirm another tenant's
+> ECO exists). The `/eco/eco/dashboard` aggregates (counts by type/priority, average cycle time) are
+> likewise company-scoped, and `/eco/eco/affected-items/{id}` resolves affected parts / work orders /
+> documents **only within the active company** (and excludes soft-deleted parts/WOs).
+>
+> **Cross-tenant affected ids are rejected with 422.** `affected_parts`, `affected_work_orders`, and
+> `affected_documents` are id lists. On create and update, every referenced id must resolve to a live row
+> **in the active company**; the first unknown or cross-tenant id returns **422 Unprocessable Entity**
+> (`{"detail": "Unknown or cross-tenant <part|work order|document> id(s): [...]"}`).
+>
+> **Mutations require Admin / Manager.** All state-changing ECO endpoints (create, update, submit,
+> approve, reject, implement, complete, add/update task, add approval) require role **ADMIN or
+> MANAGER**; any other authenticated user receives **403**. The read endpoints (list, get, dashboard,
+> list approvals, affected items) remain available to any authenticated user. Adding an approval also
+> verifies the named approver belongs to the active company (else **404**).
+>
+> **ECO state changes are audited.** Create, update, submit, approve, reject, implement, and complete —
+> plus task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`),
+> so the engineering-change lifecycle is fully traceable for AS9100D.
+
 ### Purchasing
 
 | Method | Endpoint | Description | Auth Required |
@@ -574,7 +638,16 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/analytics/production-trends` | Production trends | Yes |
 | GET | `/analytics/quality-metrics` | Quality metrics | Yes |
 | GET | `/analytics/cost-analysis` | Job cost analysis (estimated vs. actual) | Yes |
+| POST | `/analytics/custom-report` | Run a custom-report query (returns rows) | Admin / Manager |
+| GET | `/analytics/custom-report/export` | Export a saved report template (csv / xlsx / pdf) | Admin / Manager |
 
+> **Custom reports are tenant-scoped.** Both `POST /analytics/custom-report` and
+> `GET /analytics/custom-report/export` run the report through the shared `ReportBuilderService`, which
+> now **always restricts the query to the caller's active company** (`company_id`) before applying any
+> user-supplied filters/group-by/sort. Every supported data source (work orders, parts, inventory, NCRs,
+> purchase orders, quotes) carries `company_id`, so a report can never return another tenant's rows. This
+> is a scoping-only fix — the request/response shape is unchanged.
+>
 > **KPI values can be `null` ("n/a").** Each KPI on `GET /analytics/kpis` is a `KPIValue` whose
 > **`value` (and `prior_value` / `change_pct`) are nullable**. A genuinely-uncomputable metric returns
 > `null` rather than a misleading 0/100, and the frontend renders **"n/a"**:

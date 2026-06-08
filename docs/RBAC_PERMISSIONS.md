@@ -135,6 +135,25 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > `mark_operation_inspected`). The role set matches the matrix exactly — this repo has no separate
 > `INSPECTOR` role, so operation inspection is performed by Admin / Manager / Supervisor / Quality.
 
+### Engineering Change Orders (ECO)
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create / Edit | ✓ | ✓ | | | | | |
+| Submit / Approve / Reject | ✓ | ✓ | | | | | |
+| Implement / Complete | ✓ | ✓ | | | | | |
+| Add / Edit task, Add approval | ✓ | ✓ | | | | | |
+
+> **ECO mutations are Admin / Manager (enforced in code).** Every state-changing ECO endpoint
+> (`POST /eco/eco/`, `PUT /eco/eco/{id}`, and the `submit` / `approve` / `reject` / `implement` /
+> `complete` transitions, plus `tasks` create/update and `approvals` create) is gated with
+> `require_role([ADMIN, MANAGER])` (`app/api/endpoints/engineering_changes.py`). Any other authenticated
+> role receives **403**. The read endpoints (list, get, dashboard, list approvals, affected items) remain
+> open to all authenticated users. Previously these mutations were available to **any** authenticated
+> user — this row records the tightened authorization landed in WO-completion remediation Batch 11A
+> (G4-Fix1), alongside the ECO router's tenant scoping and audit logging.
+
 ### Users
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
