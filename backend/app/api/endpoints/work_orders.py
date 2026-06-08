@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.core.cache import invalidate_work_centers_cache
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
     broadcast_dashboard_update,
@@ -330,6 +331,16 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
             # cost/JobCost rollup + no_labor_recorded signal. Read-safe + idempotent.
             _apply_reconcile_cost_rollup(db, company_id, current_user, work_orders, transitions)
             db.commit()
+            # PERF-5: _refresh_reconcile_scheduling ran with commit=False (joined to
+            # this read's unit of work), so it SKIPPED the in-service WC cache
+            # invalidation -- without this the cache would serve a stale
+            # availability_rate after a reconcile-driven WO completion. Invalidate
+            # only when scheduling was actually refreshed (a WO->COMPLETE transition
+            # carried a non-falsy work_center_id) and only on the post-commit success
+            # path (never in the rollback branch). This matches _refresh_reconcile_scheduling's
+            # own refresh condition exactly. A cache invalidate cannot 500 a read.
+            if any(wc for tr in transitions for wc in tr.work_center_ids):
+                invalidate_work_centers_cache()
     except SQLAlchemyError:
         # Best-effort reconcile lost a version race OR its commit failed on a
         # poisoned session (audit INSERT collision). Either way, drop our
@@ -2097,6 +2108,9 @@ def complete_work_order(
     # ops). The last force-complete drives the WO to COMPLETE via the finalizer.
     now = datetime.utcnow()
     affected_work_centers: set[int] = set()
+    # PERF-5: tracks whether the scheduling refresh ran (it runs with commit=False,
+    # so the WC cache must be invalidated by us after the terminal commit succeeds).
+    work_centers_refreshed = False
     for operation in operations:
         if operation.status == OperationStatus.COMPLETE:
             continue
@@ -2158,9 +2172,19 @@ def complete_work_order(
     # Release capacity for every affected work center (DUP-4: this override used to
     # emit no scheduling refresh, stranding capacity for the still-open operations).
     if affected_work_centers:
+        # PERF-5: commit=False joins this scheduling refresh into the handler's single
+        # unit of work, so the WO/op state change is committed atomically with the
+        # audit rows / FG receipt / cost rollup written below (the old default
+        # commit=True committed the state change mid-handler -- a crash before the
+        # terminal commit left a completed WO with no audit/inventory/cost).
+        # commit=False skips the in-service WC cache invalidation, so we do it
+        # ourselves after the terminal commit succeeds.
         SchedulingService(db, company_id).update_availability_rates(
-            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
+            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id],
+            horizon_days=90,
+            commit=False,
         )
+        work_centers_refreshed = True
 
     _emit_work_order_event(
         db,
@@ -2252,6 +2276,12 @@ def complete_work_order(
             status_code=409,
             detail="This work order was modified concurrently. Refresh and retry the completion.",
         ) from exc
+
+    # PERF-5: the scheduling refresh ran with commit=False (joined to this handler's
+    # unit of work), so it skipped the in-service WC cache invalidation -- do it here,
+    # after the terminal commit succeeded, so the cache reflects the freed capacity.
+    if work_centers_refreshed:
+        invalidate_work_centers_cache()
 
     # EVT-3: enqueue the tenant-scoped notification + webhook dispatch in the ARQ
     # worker. After commit + best-effort so it can never fail the completion.
@@ -2540,6 +2570,9 @@ def complete_operation(
     old_work_order_status = work_order.status.value if work_order and work_order.status else None
     old_quantity_complete = float(operation.quantity_complete or 0)
     work_order_completed = False
+    # PERF-5: tracks whether the scheduling refresh ran (it runs with commit=False,
+    # so the WC cache must be invalidated by us after the terminal commit succeeds).
+    work_centers_refreshed = False
 
     # Auto-start a READY op (consistent with the shop_floor twin). ON_HOLD is no
     # longer reachable here -- it was refused above.
@@ -2589,9 +2622,19 @@ def complete_operation(
 
     if is_fully_complete:
         scheduling_service = SchedulingService(db, company_id)
+        # PERF-5: commit=False joins this scheduling refresh into the handler's single
+        # unit of work, so the WO/op state change is committed atomically with the
+        # audit rows / FG receipt / cost rollup / quality exceptions written below (the
+        # old default commit=True committed the state change mid-handler -- a crash
+        # before the terminal commit left a completed WO with no audit/inventory/cost).
+        # commit=False skips the in-service WC cache invalidation, so we do it
+        # ourselves after the terminal commit succeeds.
         scheduling_service.update_availability_rates(
-            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
+            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id],
+            horizon_days=90,
+            commit=False,
         )
+        work_centers_refreshed = True
 
     # Audit completion transitions on the tamper-evident chain. This office/admin
     # op-complete path previously emitted neither an OperationalEvent nor an audit
@@ -2701,6 +2744,12 @@ def complete_operation(
             status_code=409,
             detail="This operation was modified concurrently. Refresh and retry the completion.",
         ) from exc
+
+    # PERF-5: the scheduling refresh ran with commit=False (joined to this handler's
+    # unit of work), so it skipped the in-service WC cache invalidation -- do it here,
+    # after the terminal commit succeeded, so the cache reflects the freed capacity.
+    if work_centers_refreshed:
+        invalidate_work_centers_cache()
 
     # EVT-3: on WO COMPLETE, enqueue the tenant-scoped notification + webhook
     # dispatch in the ARQ worker. After commit + best-effort.

@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -23,6 +23,12 @@ class TimeEntry(Base, TenantMixin):
     """Time tracking for shop floor labor"""
 
     __tablename__ = "time_entries"
+    # Lock-step with migration 042_wo_completion_perf_indexes: backs the
+    # reconcile_work_orders_from_completion_evidence rollups
+    # (WHERE operation_id IN (...) [AND clock_out IS NOT NULL] GROUP BY operation_id)
+    # and its ORDER BY operation_id, clock_out DESC latest-entry scan in
+    # app/services/work_order_state_service.py.
+    __table_args__ = (Index("ix_time_entries_operation_clock_out", "operation_id", "clock_out"),)
 
     id = Column(Integer, primary_key=True, index=True)
 

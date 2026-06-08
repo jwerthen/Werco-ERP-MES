@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import math
 from collections import defaultdict
 from datetime import date, datetime, timezone
@@ -13,6 +14,8 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.core.cache import invalidate_work_centers_cache
+from app.core.config import settings
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
 from app.core.websocket import (
@@ -106,6 +109,8 @@ class OperationInspectionRequest(BaseModel):
 
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 def _emit_reconcile_events(
@@ -367,6 +372,16 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
             # completions. Read-safe + idempotent -- see helper.
             _apply_reconcile_cost_rollup(db, company_id, current_user, work_orders, transitions)
             db.commit()
+            # PERF-5: _refresh_reconcile_scheduling ran with commit=False (joined to
+            # this read's unit of work), so it SKIPPED the in-service WC cache
+            # invalidation -- without this the cache would serve a stale
+            # availability_rate after a reconcile-driven WO completion. Invalidate
+            # only when scheduling was actually refreshed (a WO->COMPLETE transition
+            # carried a non-falsy work_center_id) and only on the post-commit success
+            # path (never in the rollback branch). This matches _refresh_reconcile_scheduling's
+            # own refresh condition exactly. A cache invalidate cannot 500 a read.
+            if any(wc for tr in transitions for wc in tr.work_center_ids):
+                invalidate_work_centers_cache()
     except SQLAlchemyError:
         # Best-effort reconcile lost a version race OR its commit failed on a
         # poisoned session (audit INSERT collision). Either way, drop our
@@ -808,6 +823,9 @@ def clock_out(
     old_work_order_status = work_order.status.value if work_order.status else None
     operation_completed = False
     work_order_completed = False
+    # PERF-5: tracks whether the scheduling refresh ran (it runs with commit=False,
+    # so the WC cache must be invalidated by us after the terminal commit succeeds).
+    work_centers_refreshed = False
 
     # Update statuses if operation complete. The shared finalizer owns the rollup
     # (remaining-ops decision, COMPLETE-vs-release branch, actual_start/actual_end
@@ -840,9 +858,19 @@ def clock_out(
 
             affected_work_centers = finalize_operation_completion(db, work_order, operation)
             work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
+            # PERF-5: commit=False joins this scheduling refresh into the handler's
+            # single unit of work, so the WO/op state change is committed atomically
+            # with the audit rows / cost rollup / quality exceptions written below
+            # (the old default commit=True committed the state change mid-handler --
+            # a crash before the terminal commit left a completed WO with no audit).
+            # commit=False skips the in-service WC cache invalidation, so we do it
+            # ourselves after the terminal commit succeeds.
             SchedulingService(db, company_id).update_availability_rates(
-                work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
+                work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id],
+                horizon_days=90,
+                commit=False,
             )
+            work_centers_refreshed = True
         else:
             # Partial production on an unfinished operation: still lift a RELEASED
             # WO to IN_PROGRESS / stamp actual_start and roll partial qty up (DUP-2,
@@ -957,6 +985,12 @@ def clock_out(
         ) from exc
     db.refresh(time_entry)
 
+    # PERF-5: the scheduling refresh ran with commit=False (joined to this handler's
+    # unit of work), so it skipped the in-service WC cache invalidation -- do it here,
+    # after the terminal commit succeeded, so the cache reflects the freed capacity.
+    if work_centers_refreshed:
+        invalidate_work_centers_cache()
+
     if operation and operation.work_center_id:
         safe_broadcast(
             broadcast_shop_floor_update,
@@ -1057,6 +1091,80 @@ def get_work_center_queue(
     return {"queue": queue}
 
 
+def _dashboard_state_fingerprint(
+    db: Session,
+    company_id: int,
+    connected_user_ids: set[int],
+    connected_since_by_id: dict[int, Optional[str]],
+) -> str:
+    """Cheap state fingerprint for the dashboard ETag (PERF-2).
+
+    REPLACES the old ETag that md5-hashed the FULLY-BUILT payload, which forced
+    every poll -- even an unchanged one that 304s -- to pay for the write-amplifying
+    reconcile AND the whole payload build before it could short-circuit. This
+    fingerprint is computed from a handful of cheap aggregate queries instead, so an
+    unchanged dashboard can 304 having touched only these aggregates.
+
+    For every source table the payload reads, we hash ``(count, max(updated_at))``.
+    All six models carry ``updated_at`` (``onupdate=datetime.utcnow``), so an INSERT
+    bumps ``count`` and any in-place UPDATE/soft-delete bumps ``max(updated_at)`` --
+    together they faithfully DOMINATE every payload field derived from those rows
+    (counts, statuses, quantities, timestamps). ``Part`` is included because
+    ``active_assignments`` surfaces ``part_number``/``part_name`` (dereferenced via the
+    WO), so a part rename MUST move the ETag -- a stale floor display of a part identity
+    is an AS9100D traceability hazard. ``today`` (UTC) is folded in for the
+    ``due_today``/``overdue`` rollups; ``central_today`` is folded in SEPARATELY for
+    ``completed_today``, which is a Central-Time rolling window that ages a completion
+    OUT at Central midnight with NO row change -- and Central midnight is hours after the
+    UTC date already rolled over, so UTC ``today`` alone would miss that boundary and
+    serve a stale 304. ``presence`` mirrors the (company-scoped) websocket presence the
+    payload's ``signed_in_users`` depends on, so the fingerprint moves when presence does
+    even though it is not a DB row. Tenant-scoped via ``company_id`` on every aggregate.
+    """
+    from app.models.part import Part
+
+    wo_count, wo_max = (
+        db.query(func.count(WorkOrder.id), func.max(WorkOrder.updated_at))
+        .filter(WorkOrder.company_id == company_id, WorkOrder.is_deleted == False)  # noqa: E712
+        .one()
+    )
+    op_count, op_max = (
+        db.query(func.count(WorkOrderOperation.id), func.max(WorkOrderOperation.updated_at))
+        .filter(WorkOrderOperation.company_id == company_id)
+        .one()
+    )
+    te_count, te_max = (
+        db.query(func.count(TimeEntry.id), func.max(TimeEntry.updated_at))
+        .filter(TimeEntry.company_id == company_id)
+        .one()
+    )
+    wc_count, wc_max = (
+        db.query(func.count(WorkCenter.id), func.max(WorkCenter.updated_at))
+        .filter(WorkCenter.company_id == company_id)
+        .one()
+    )
+    user_count, user_max = (
+        db.query(func.count(User.id), func.max(User.updated_at)).filter(User.company_id == company_id).one()
+    )
+    part_count, part_max = (
+        db.query(func.count(Part.id), func.max(Part.updated_at))
+        .filter(Part.company_id == company_id, Part.is_deleted == False)  # noqa: E712
+        .one()
+    )
+    fingerprint = {
+        "today": date.today().isoformat(),
+        "central_today": datetime.now(CENTRAL_TIME_ZONE).date().isoformat(),
+        "work_orders": (int(wo_count or 0), wo_max.isoformat() if wo_max else None),
+        "operations": (int(op_count or 0), op_max.isoformat() if op_max else None),
+        "time_entries": (int(te_count or 0), te_max.isoformat() if te_max else None),
+        "work_centers": (int(wc_count or 0), wc_max.isoformat() if wc_max else None),
+        "users": (int(user_count or 0), user_max.isoformat() if user_max else None),
+        "parts": (int(part_count or 0), part_max.isoformat() if part_max else None),
+        "presence": sorted([user_id, connected_since_by_id.get(user_id)] for user_id in connected_user_ids),
+    }
+    return hashlib.md5(json.dumps(fingerprint, sort_keys=True, default=str).encode(), usedforsecurity=False).hexdigest()
+
+
 @router.get("/dashboard")
 def shop_floor_dashboard(
     response: Response,
@@ -1071,13 +1179,53 @@ def shop_floor_dashboard(
     Supports If-None-Match header for cache validation.
     Returns 304 Not Modified if data hasn't changed, saving bandwidth.
 
+    PERF-2: the ETag is a CHEAP state fingerprint computed BEFORE the reconcile (see
+    ``_dashboard_state_fingerprint``), so an unchanged dashboard returns 304 having
+    paid only for the fingerprint aggregates -- it skips both the write-amplifying
+    reconcile and the entire payload build. On a changed dashboard we run the reconcile
+    + build the payload, then RECOMPUTE the fingerprint (the reconcile may have mutated
+    rows / bumped ``updated_at``) so the next poll over the now-stable state 304s with
+    no extra round-trip.
+
+    PERF-3: the reconcile scan is bounded to the most-recently-touched
+    ``SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`` open WOs; anything beyond the cap is still
+    reconciled when opened in its detail/operations-list views (the durable fix is the
+    deferred ARQ reconcile job).
+
     OPTIMIZATION: Uses aggregation queries to avoid N+1 query problem.
     Before: 1 query for work centers + 2 queries per work center (N+1 pattern)
             For 25 work centers = 51 queries
     After:  3 queries total (work centers + aggregated operation counts + summary stats)
     """
-    from datetime import date
+    # PERF-2 + tenant isolation (invariant #1): capture websocket presence ONCE up front
+    # and reuse it for BOTH the fingerprint and the served ``signed_in_users`` payload
+    # below, so the returned ETag is always consistent with the body it describes. The
+    # websocket manager's presence set is GLOBAL across tenants, so SCOPE it to this
+    # company first -- otherwise (a) another tenant's connect/disconnect would churn this
+    # dashboard's ETag (spurious 200s, defeating the 304), and (b) ``signed_in_users``
+    # could surface another tenant's connected users (a pre-existing cross-tenant leak,
+    # closed here).
+    global_connected_ids = {int(uid) for uid in manager.get_connected_user_ids() if str(uid).isdigit()}
+    connected_user_ids: set[int] = set()
+    if global_connected_ids:
+        connected_user_ids = {
+            row[0]
+            for row in db.query(User.id).filter(User.id.in_(global_connected_ids), User.company_id == company_id).all()
+        }
+    connected_since_by_id = {uid: manager.get_connected_since(str(uid)) for uid in connected_user_ids}
 
+    # PERF-2: cheap pre-reconcile fingerprint -> fast 304 short-circuit. An unchanged
+    # dashboard returns here WITHOUT running the reconcile or building the payload.
+    etag = _dashboard_state_fingerprint(db, company_id, connected_user_ids, connected_since_by_id)
+    if if_none_match and if_none_match.strip('"') == etag:
+        return Response(status_code=304)
+
+    # PERF-3: ONLY the dashboard reconcile is unbounded (the list reconcile is
+    # page-bounded, detail is a single WO). Bound it to the most-recently-touched open
+    # WOs -- those are the most likely to carry new completion evidence. Reconcile is
+    # best-effort and idempotent, so any WO beyond the cap is still reconciled when
+    # viewed in its detail/operations-list (both reconcile); nothing is permanently
+    # stranded. The full fix is the deferred ARQ reconcile job.
     work_orders_to_reconcile = (
         db.query(WorkOrder)
         .options(selectinload(WorkOrder.operations))
@@ -1086,13 +1234,39 @@ def shop_floor_dashboard(
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]),
         )
+        # PERF-3: id.desc() is a stable secondary tiebreak so two WOs with equal
+        # updated_at don't swap across the cap boundary between polls.
+        .order_by(WorkOrder.updated_at.desc(), WorkOrder.id.desc())
+        .limit(settings.SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT)
         .all()
     )
+    # PERF-3: no silent cap. When the scan fills the cap exactly, the open-WO set has
+    # outgrown read-path reconcile -- warn so we know to switch to the deferred ARQ
+    # reconcile job (rank 12 / PERF-3).
+    if len(work_orders_to_reconcile) == settings.SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT:
+        logger.warning(
+            "Shop-floor dashboard reconcile truncated to the cap of %d open work orders for company %d; "
+            "the shop has outgrown read-path reconcile -- switch to the deferred ARQ reconcile job "
+            "(rank 12 / PERF-3).",
+            settings.SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT,
+            company_id,
+        )
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the dashboard -- _reconcile_and_commit swallows StaleDataError.
     # AUD-3: terminal reconcile-driven transitions are audited, attributed to the
     # requesting user, without failing the read if the audit write fails.
     _reconcile_and_commit(db, work_orders_to_reconcile, current_user, company_id)
+
+    # PERF-2: compute the served ETag from the post-reconcile committed state HERE --
+    # BEFORE building the payload -- so it describes the same snapshot the body is built
+    # from. Computing it AFTER the build would open a TOCTOU window: a concurrent
+    # same-tenant commit during the build would land in the ETag but not in the body, so
+    # the client would store a newer ETag than its body and 304 (stale) on the next poll.
+    # Pre-build is the SAFE direction -- a concurrent write merely makes the next poll's
+    # fingerprint differ -> a 200 that re-serves the fresh body. The reconcile (the only
+    # in-request mutator) has already committed, so this fingerprint is stable for the
+    # next poll's fast-304 match.
+    etag = _dashboard_state_fingerprint(db, company_id, connected_user_ids, connected_since_by_id)
 
     # Active work orders
     active_wos = (
@@ -1268,10 +1442,13 @@ def shop_floor_dashboard(
             }
         )
 
-    connected_user_ids = {int(user_id) for user_id in manager.get_connected_user_ids() if str(user_id).isdigit()}
+    # PERF-2: reuse the presence captured at the top of the handler (NOT a fresh
+    # manager.get_* call) so the served payload matches the fingerprint/ETag exactly.
+    # connected_user_ids is already company-scoped above; the company_id filter here is
+    # belt-and-suspenders tenant isolation (invariant #1).
     signed_in_users: list[dict] = []
     if connected_user_ids:
-        connected_users = db.query(User).filter(User.id.in_(connected_user_ids)).all()
+        connected_users = db.query(User).filter(User.id.in_(connected_user_ids), User.company_id == company_id).all()
         signed_in_users = [
             {
                 "id": user.id,
@@ -1279,7 +1456,7 @@ def shop_floor_dashboard(
                 "name": user.full_name,
                 "role": user.role.value if hasattr(user.role, "value") else user.role,
                 "department": user.department,
-                "connected_since": manager.get_connected_since(str(user.id)),
+                "connected_since": connected_since_by_id.get(user.id),
                 "has_active_job": bool(assignments_by_user.get(user.id)),
                 "active_job_count": len(assignments_by_user.get(user.id, [])),
                 "active_work_centers": sorted(
@@ -1377,16 +1554,10 @@ def shop_floor_dashboard(
         ],
     }
 
-    # Generate ETag from response data
-    etag = hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode(), usedforsecurity=False).hexdigest()
-    etag_header = f'"{etag}"'
-
-    # Check If-None-Match header for conditional request
-    if if_none_match and if_none_match.strip('"') == etag:
-        return Response(status_code=304)
-
-    # Set cache headers
-    response.headers["ETag"] = etag_header
+    # PERF-2: serve the ETag computed from the post-reconcile snapshot above (the same
+    # snapshot the body was built from). The fast-304 short-circuit already happened
+    # before the reconcile/payload build.
+    response.headers["ETag"] = f'"{etag}"'
     response.headers["Cache-Control"] = "private, max-age=10"
 
     return data
@@ -2039,6 +2210,9 @@ def complete_operation(
     # Check if fully complete (against the resolved, evidence-floored quantity).
     is_fully_complete = resolved_quantity >= ordered_qty
     work_order_completed = False
+    # PERF-5: tracks whether the scheduling refresh ran (it runs with commit=False,
+    # so the WC cache must be invalidated by us after the terminal commit succeeds).
+    work_centers_refreshed = False
 
     if is_fully_complete:
         operation.status = OperationStatus.COMPLETE
@@ -2050,9 +2224,18 @@ def complete_operation(
         # current_operation_id. Returns the WCs whose capacity to refresh.
         affected_work_centers = finalize_operation_completion(db, work_order, operation)
         work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
+        # PERF-5: commit=False joins this scheduling refresh into the handler's single
+        # unit of work, so the WO/op state change is committed atomically with the
+        # audit rows / cost rollup / quality exceptions written below (the old default
+        # commit=True committed the state change mid-handler -- a crash before the
+        # terminal commit left a completed WO with no audit). commit=False skips the
+        # in-service WC cache invalidation, so we do it after the terminal commit.
         SchedulingService(db, company_id).update_availability_rates(
-            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id], horizon_days=90
+            work_center_ids=[wc_id for wc_id in affected_work_centers if wc_id],
+            horizon_days=90,
+            commit=False,
         )
+        work_centers_refreshed = True
     else:
         # Partial completion: lift a RELEASED WO to IN_PROGRESS / stamp actual_start
         # and roll partial qty up without forcing a completion rollup.
@@ -2174,6 +2357,12 @@ def complete_operation(
             detail="This operation was modified concurrently. Refresh and retry the completion.",
         ) from exc
     db.refresh(operation)
+
+    # PERF-5: the scheduling refresh ran with commit=False (joined to this handler's
+    # unit of work), so it skipped the in-service WC cache invalidation -- do it here,
+    # after the terminal commit succeeded, so the cache reflects the freed capacity.
+    if work_centers_refreshed:
+        invalidate_work_centers_cache()
 
     # EVT-3: on WO COMPLETE, enqueue the tenant-scoped notification + webhook
     # dispatch in the ARQ worker. After commit + best-effort so it can never fail

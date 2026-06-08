@@ -124,26 +124,29 @@ def release_next_ready_operation(
     The session runs with ``autoflush=False``, so flush the just-completed
     operation's status first -- otherwise the predecessor gate below would query
     its stale (pre-COMPLETE) row and refuse to release the successor.
+
+    PERF-4: load every operation of this WO ONCE and run the predecessor gate
+    in memory, instead of calling ``has_incomplete_predecessors`` (one COUNT(*)
+    query) per PENDING candidate. The old shape was an N+1 that turned quadratic
+    inside ``complete_work_order``'s force-complete loop (each force-completed op
+    re-walks the route). The in-memory ``blocked`` test below replicates
+    ``has_incomplete_predecessors(db, work_order.id, candidate.sequence,
+    current_operation_id=candidate.id)`` EXACTLY -- "exists an op of THIS work
+    order with ``sequence < candidate.sequence`` AND ``status != COMPLETE`` AND
+    ``id != candidate.id``" -- so release/start/complete keep the same order gate.
     """
     db.flush()
-    pending_ops = (
+    all_ops = (
         db.query(WorkOrderOperation)
-        .filter(
-            and_(
-                WorkOrderOperation.work_order_id == work_order.id,
-                WorkOrderOperation.status == OperationStatus.PENDING,
-            )
-        )
+        .filter(WorkOrderOperation.work_order_id == work_order.id)
         .order_by(WorkOrderOperation.sequence)
         .all()
     )
+    incomplete = [op for op in all_ops if op.status != OperationStatus.COMPLETE]
+    pending_ops = [op for op in all_ops if op.status == OperationStatus.PENDING]
     for candidate in pending_ops:
-        if not has_incomplete_predecessors(
-            db,
-            work_order.id,
-            candidate.sequence,
-            current_operation_id=candidate.id,
-        ):
+        blocked = any(op.sequence < candidate.sequence and op.id != candidate.id for op in incomplete)
+        if not blocked:
             candidate.status = OperationStatus.READY
             return candidate
     return None

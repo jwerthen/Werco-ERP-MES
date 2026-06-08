@@ -174,6 +174,25 @@ so the two can never disagree. This replaces the old hardcoded `$45`/`$50` labor
 > not require touching the rollup callers. The `no_labor_recorded` data-quality signal on completion
 > fires **regardless** of this flag.
 
+### Shop-Floor Dashboard Reconcile (work-order completion read path)
+
+Batch-9 (rank 12) bound on the `GET /api/v1/shop-floor/dashboard` reconcile-on-read scan. The dashboard
+reconciles open (RELEASED / IN_PROGRESS / ON_HOLD) work orders from durable shop-floor evidence on every
+load; that scan was previously unbounded and write-amplifying as the open-WO set grew. It is now capped
+to the most-recently-touched (`ORDER BY updated_at DESC`) N open WOs — those are the most likely to carry
+new completion evidence. Reconcile is **best-effort and idempotent**, so any WO beyond the cap is still
+reconciled when opened in its detail / operations-list views; nothing is permanently stranded.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT` | No | `250` | Max number of open work orders the dashboard read path reconciles per request (the most-recently-touched first). Bounds the reconcile cost/write-amplification on a large open-WO set. |
+
+> **Note:** when a single dashboard run **fills this cap exactly**, the handler logs a **WARNING**
+> ("the shop has outgrown read-path reconcile") — that is the operational signal that the open-WO set has
+> grown past what read-path reconcile should carry. Raising this value increases per-request reconcile
+> cost; the **durable fix is the deferred ARQ reconcile job** (move reconcile off the read path
+> entirely), not an ever-higher cap. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` → Rank 12.
+
 ### Redis Cache
 
 | Variable | Required | Default | Description |

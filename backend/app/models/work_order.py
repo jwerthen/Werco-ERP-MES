@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -104,6 +104,11 @@ class WorkOrderOperation(Base, TenantMixin):
     """Individual operation/step in a work order routing"""
 
     __tablename__ = "work_order_operations"
+    # Lock-step with migration 042_wo_completion_perf_indexes: backs
+    # has_incomplete_predecessors (WHERE work_order_id=? AND sequence<?) and
+    # release_next_ready_operation (WHERE work_order_id=? ORDER BY sequence) in
+    # app/services/work_order_state_service.py.
+    __table_args__ = (Index("ix_woo_work_order_sequence", "work_order_id", "sequence"),)
 
     id = Column(Integer, primary_key=True, index=True)
 

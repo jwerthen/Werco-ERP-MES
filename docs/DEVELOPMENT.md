@@ -369,6 +369,29 @@ Two migrations back the work-order-completion inventory side-effects (see
   guard) and reversible; Postgres-only (skipped on SQLite, where `create_all` still emits a full unique
   index from the model and the app-level guard applies).
 
+### Completion-path performance indexes (Batch 9 — reconcile/predecessor read paths)
+
+One migration backs the work-order-completion read-path speedups (see
+`docs/WORK_ORDER_COMPLETION_REMEDIATION.md`, Rank 12 / Batch 9):
+
+- **`042_wo_completion_perf_indexes`** — adds **two non-unique btree indexes** that back the hot
+  completion / reconcile query shapes (previously sequential scans on high-row tables):
+  `ix_time_entries_operation_clock_out` on `time_entries(operation_id, clock_out)` (backs
+  `reconcile_work_orders_from_completion_evidence`'s per-operation production/scrap rollups, the
+  `clock_out IS NOT NULL` closed-only rollup, and the `ORDER BY operation_id, clock_out DESC`
+  latest-entry scan), and `ix_woo_work_order_sequence` on `work_order_operations(work_order_id,
+  sequence)` (backs `has_incomplete_predecessors` and `release_next_ready_operation`). Unlike `041`'s
+  partial UNIQUE indexes these enforce **no invariant** — they are pure read-path speedups, so there is
+  **no pre-flight duplicate guard** (nothing to validate; the build cannot fail on existing data). Both
+  are built with `CREATE INDEX CONCURRENTLY` inside an autocommit block (so they can't run in a
+  transaction) to avoid the `ACCESS EXCLUSIVE` lock a plain `CREATE INDEX` would take on the high-write
+  `time_entries` / `work_order_operations` tables; the `downgrade` drops them `CONCURRENTLY` too. The
+  models (`TimeEntry.__table_args__` in `app/models/time_entry.py`, `WorkOrderOperation.__table_args__`
+  in `app/models/work_order.py`) declare the identical indexes so the `create_all` bootstrap path
+  produces them byte-for-byte — keep the migration and the model declarations in lock-step. Idempotent
+  (`_index_exists` / `if_not_exists`) and reversible; Postgres-only (skipped on SQLite, where
+  `create_all` already emits both indexes from the model declarations).
+
 ## Work-order completion rollup (shared finalizer)
 
 Completion is consolidated in **one** place: `finalize_operation_completion(db, wo, op)` in
