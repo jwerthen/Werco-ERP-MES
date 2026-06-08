@@ -50,6 +50,15 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > the labor-cost gate) — that returns **403** even for an approver-role user. A cross-tenant id returns
 > **404**. Both actions are audited (`time_entry_approve` / `time_entry_unapprove`).
 
+> **Operator-qualification gate is record-only (Batch 11C / G5-B).** `POST /api/v1/shop-floor/clock-in`
+> and `POST /api/v1/shop-floor/operations/{id}/start` stay **operator-facing** — open to **any
+> authenticated user** (`get_current_user`), no new role gate. The G5-B qualification gate (no active
+> `SkillMatrix` entry at level ≥ 2 for the work center, or a missing/expired required
+> `OperatorCertification`) **only records** a tamper-evident `audit_log` row
+> (`OPERATOR_QUALIFICATION_EXCEPTION`) + a warning event and surfaces a `qualification_exceptions`
+> array on the response; it does **not** gate the operator's role or block the clock-in / start. The
+> gate's lookups are tenant-scoped (every skill/cert/work-center query filters the active company).
+
 ### Parts
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -128,6 +137,19 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | | | ✓ | ✓ |
 | Create | ✓ | ✓ | ✓ | | | ✓ | |
 | Complete | ✓ | ✓ | ✓ | | | ✓ | |
+| Issue Certificate of Conformance | ✓ | ✓ | | | ✓ | | |
+
+> **Certificate of Conformance — endpoint mapping (Batch 11C / G6-B).** Issuing a CoC
+> `POST /api/v1/shipping/{shipment_id}/coc` (mint or return the existing frozen-snapshot CoC) is
+> enforced **in code** to `require_role([ADMIN, MANAGER, QUALITY])`
+> (`app/api/endpoints/shipping.py`) — a quality artifact, so the write is restricted (this is why the
+> matrix row above does **not** include the **Shipping** role, which otherwise holds Shipping
+> Create/Complete). Reading the CoC — `GET /shipping/{shipment_id}/coc` (metadata) and
+> `GET /shipping/{shipment_id}/coc/pdf` (rendered PDF) — is open to **any authenticated user** in the
+> active company (read-broad / write-restricted, like the other shipping reads). All three are
+> tenant-scoped (cross-tenant `shipment_id` → **404**). A CoC is also **auto-issued on ship** when
+> required; the auto-issue runs in the ship handler's context and is not separately role-gated beyond
+> the existing ship permission.
 
 ### Quality
 

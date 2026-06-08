@@ -144,6 +144,14 @@ ALLOWED_HOSTS=api.werco.com,erp.werco.com,*.up.railway.app,healthcheck.railway.a
 > `app/services/completion_inventory_service.py`). Likewise, **component backflush on completion** is
 > not a global switch: it is a per-part database flag (`parts.backflush_components`, default `false`),
 > set on the part record, not via configuration. Neither has an environment variable.
+>
+> The **operator-qualification gate** (Batch 11C / G5-B) adds **no** env var either: its minimum
+> `SkillMatrix` skill level is the module constant `MIN_SKILL_LEVEL = 2` in
+> `app/services/operator_qualification_service.py`, and the per-work-center certification requirement
+> is the database column `work_centers.required_certification_type` (nullable; set on the work-center
+> record). **Certificate of Conformance** issuance (G6-B) likewise has no env var — whether a CoC is
+> required is driven by the per-shipment `cert_of_conformance` flag and the per-customer
+> `customers.requires_coc` flag (default `true`), not by configuration.
 
 ### Labor Cost Rollup (work-order completion)
 
