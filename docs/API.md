@@ -676,9 +676,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/shipping/orders/` | List shipping orders | Yes |
-| POST | `/shipping/orders/` | Create shipping order | Yes |
-| POST | `/shipping/orders/{id}/ship` | Mark as shipped | Yes |
+| GET | `/shipping/` | List shipments | Yes |
+| POST | `/shipping/` | Create shipment | Yes |
+| POST | `/shipping/{shipment_id}/ship` | Mark as shipped (decrements FG, closes WO, auto-issues CoC when required) | Yes |
 | POST | `/shipping/{shipment_id}/coc` | Issue / generate the Certificate of Conformance (idempotent) | Admin / Manager / Quality |
 | GET | `/shipping/{shipment_id}/coc` | Get CoC metadata (404 if none issued) | Yes |
 | GET | `/shipping/{shipment_id}/coc/pdf` | Download the rendered CoC PDF (`application/pdf`) | Yes |
@@ -687,7 +687,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > (status → `CLOSED`); that terminal status change is recorded in the tamper-evident audit trail
 > (`GET /audit/`), flushed so the audit row commits atomically with the closure.
 >
-> **Marking shipped decrements finished-goods inventory (G2).** `POST /shipping/orders/{id}/ship`
+> **Marking shipped decrements finished-goods inventory (G2).** `POST /shipping/{shipment_id}/ship`
 > now writes the offsetting outbound stock movement for the goods leaving the building — the mirror of
 > the Batch-6 finished-goods receipt on completion. It writes a `SHIP` `InventoryTransaction`
 > (`quantity = -quantity_shipped`, `reference_type = "shipment"`) and decrements the finished-goods
