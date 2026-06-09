@@ -14,6 +14,7 @@ from app.models.work_order import (
     WorkOrder,
     WorkOrderOperation,
     WorkOrderStatus,
+    WorkOrderType,
 )
 
 # G6-A: the set of work-order statuses that are *terminal* -- a WO in any of
@@ -63,6 +64,74 @@ class StatusTransition:
     # scheduled-load query, so the persisted availability_rate would otherwise stay
     # understated). Empty for operation transitions and non-completion transitions.
     work_center_ids: list[int] = field(default_factory=list)
+
+
+def incomplete_child_work_orders(
+    db: Session,
+    work_order: WorkOrder,
+    company_id: int,
+) -> list[WorkOrder]:
+    """Laser-nest child WOs of ``work_order`` that have NOT reached a terminal state.
+
+    G1 gate scope (chosen): only ``LASER_CUTTING`` children are tracked for the
+    parent rollup (a parent WO with a laser nest spawns one child per nest; those
+    must finish before the parent is treated as legitimately complete). Read-only
+    and tenant-scoped -- always filters ``company_id`` and ``is_deleted == False`` so
+    it can never surface another tenant's or a soft-deleted child. A child counts as
+    "incomplete" while its status is NOT in ``TERMINAL_WO_STATUSES``
+    (COMPLETE/CLOSED/CANCELLED) -- a CANCELLED child is intentionally treated as
+    resolved, not as a blocker.
+    """
+    if work_order is None or work_order.id is None:
+        return []
+    return (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.parent_work_order_id == work_order.id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrder.work_order_type == WorkOrderType.LASER_CUTTING.value,
+            WorkOrder.status.notin_(TERMINAL_WO_STATUSES),
+        )
+        .all()
+    )
+
+
+def find_parent_to_advance(
+    db: Session,
+    completed_work_order: WorkOrder,
+    company_id: int,
+) -> Optional[WorkOrder]:
+    """Return the parent WO whose LAST laser child just completed, else ``None`` (G1).
+
+    Advance signal (NOT an auto-complete): parent and child work orders are NOT
+    operation-coupled in the data model, so we never mutate the parent's route here.
+    The caller uses the returned parent only to record a surfacing flag + audit/event.
+
+    Tenant-scoped and read-only on the parent lookup (``company_id`` +
+    ``is_deleted == False``). Flushes first so the just-completed child's terminal
+    status is visible to the ``incomplete_child_work_orders`` query (the session runs
+    autoflush=False on the completion paths). Returns the parent ONLY when, after this
+    completion, NO laser child remains non-terminal -- which becomes true exactly once
+    (when the last child flips), so the advance fires at most once per parent.
+    """
+    if completed_work_order is None or completed_work_order.parent_work_order_id is None:
+        return None
+    db.flush()
+    parent = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.id == completed_work_order.parent_work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if parent is None:
+        return None
+    if incomplete_child_work_orders(db, parent, company_id):
+        return None
+    return parent
 
 
 def operation_target_quantity(

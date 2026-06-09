@@ -29,7 +29,7 @@ Work-order completion is a **status-only event**. Completing an operation/WO fli
 | **10** ☑ | 13 | Frontend completion UX hardening | no | no API change (dashboard cache invalidation + double-submit guards + list memo) |
 | **11A** ☑ | G4-Fix1 / G3-scope / G6-A | Completeness-critic security/correctness (ECO tenant-scope+audit+RBAC, report tenant-scope, terminal-state lock) | no | ECO mutations now Admin/Manager; ECO + custom-report tenant-scoped; 422 on cross-tenant ECO ids; 409 resurrecting a terminal WO |
 | **11B** ☑ | G2 / G5-A / G3-content | Completeness-critic data integrity (FG decrement + over-ship guard, TimeEntry-approval costing, report honesty) | no | ship decrements FG inventory + warn-and-records over-ship / missing-FG-lot; new TimeEntry approve/unapprove endpoints (no self-approval); opt-in `REQUIRE_APPROVED_LABOR_FOR_COST`; report drops phantom `estimated_hours` + flag-OFF labor-not-tracked headers |
-| **11C** ☐ | G1 / G5-B / G6-B | Completeness-critic compliance (parent/child rollup, operator-cert gate, CoC generation) | tbd | tbd |
+| **11C** ☑ | G1 / G5-B / G6-B | Completeness-critic compliance (parent/child rollup, operator-cert gate, CoC generation) | **yes** (`043`/`044`) | parent completes + records `child_work_orders_incomplete` while laser children open (warn-only); last-laser-child-done emits `CHILD_WORK_ORDERS_COMPLETE` signal (no auto-complete); clock-in/start warn-and-record operator-qualification gaps (`qualification_exceptions`); per-shipment CoC artifact + auto-issue-on-ship (Admin/Manager/Quality issue) |
 
 ## Ranked actions
 
@@ -745,22 +745,22 @@ Findings: FEPERF-1, FEPERF-4, FEPERF-5.
 >
 > **All 10 ranked batches are now implemented** (Batch 10 on `qa/full-pass-2026-06-04`, pending
 > tests/review/commit). The post-plan completeness-critic gaps below have been triaged into **Batch 11**:
-> sub-batch **11A** (G4-Fix1 / G3-scope / G6-A) is landed on branch `feat/wo-completion-batch11`;
-> sub-batch **11B** (G2 / G5-A / G3-content) is landed on branch `feat/wo-completion-batch11b`
-> (both pending tests/compliance/review/merge); **11C** is triaged-not-started, with two XL items
-> excluded. See "Completeness critic" → "Batch 11" below.
+> sub-batch **11A** (G4-Fix1 / G3-scope / G6-A) merged to main (PR #27); sub-batch **11B**
+> (G2 / G5-A / G3-content) merged to main (PR #28); sub-batch **11C** (G1 / G5-B / G6-B) is landed on
+> branch `feat/wo-completion-batch11c` (one combined PR; tests green, review READY, compliance
+> PASS-WITH-NOTES), with two XL items excluded. See "Completeness critic" → "Batch 11" below.
 
 ## Completeness critic — follow-up gaps the audit did NOT cover
 
 These six gaps (labelled **G1–G6**) are the post-plan completeness-critic findings; their triage into
 **Batch 11** sub-batches (11A + 11B landed, 11C planned, two XL items excluded) follows below.
 
-1. **G1 · [high] Parent/child assembly rollup entirely unimplemented** — completing child WOs never advances the parent; parent can complete with children open. (`work_order.py:47,98`, `laser_nest_service.py:98`) → **11C** (parent/child rollup); the related **BOM child-WO spawn** is **EXCLUDED** (G1-general, XL).
+1. **G1 · [high] Parent/child assembly rollup entirely unimplemented** — completing child WOs never advances the parent; parent can complete with children open. (`work_order.py:47,98`, `laser_nest_service.py:98`) → **landed in 11C** (laser-nest parent/child rollup: warn-and-record `child_work_orders_incomplete` on parent completion + `CHILD_WORK_ORDERS_COMPLETE` surface-flag signal, no auto-complete); the related **BOM child-WO spawn** is **EXCLUDED** (G1-general, XL).
 2. **G2 · [high] Shipping `mark_shipped` has no inventory decrement and no over-ship guard.** (`shipping.py:282-325`) — *The unaudited part is closed in Batch 1: the WO CLOSED transition now writes a tamper-evident `audit_log` row via `AuditService.log_status_change`. The missing FG decrement and over-ship guard remain.* → **landed in 11B** (FG decrement on ship + warn-and-record over-ship / missing-FG-lot).
 3. **G3 · [high] Reports/exports surface the never-computed `actual_cost`/`actual_hours` as truth** — every WO cost/hours report is structurally zero. (`report_builder.py:38-52`) Split into **G3-scope** (tenant isolation — the report builder queried across all tenants) → **landed in 11A**; and **G3-content** (report honesty about uncomputed cost/hours) → **landed in 11B**.
 4. **G4 · [high] ECO complete/implement has zero effect on `affected_work_orders`** (revision-control gap); `get_affected_items` is cross-tenant. (`engineering_changes.py:543,717`) Split into **G4-Fix1** (ECO router tenant-scope + audit + RBAC, incl. the cross-tenant `affected-items` resolve and dashboard aggregate leak) → **landed in 11A**; and **G4-Fix2** (ECO actually drives revision/hold on `affected_work_orders`) → **EXCLUDED** (XL).
-5. **G5 · [medium] TimeEntry approval is dead/disconnected** from costing; **no operator-certification gate** on clock-in/completion. (`time_entry.py:51`, `operator_certifications.py`) Split into **G5-A** (TimeEntry approval → costing) → **landed in 11B**; and **G5-B** (operator-certification gate) → **11C**.
-6. **G6 · [medium] `complete_work_order` can resurrect a CLOSED/shipped/cancelled WO** (no terminal-state lock); **CoC is a bare boolean, never generated.** Split into **G6-A** (terminal-state lock) → **landed in 11A**; and **G6-B** (Certificate of Conformance generation) → **11C**.
+5. **G5 · [medium] TimeEntry approval is dead/disconnected** from costing; **no operator-certification gate** on clock-in/completion. (`time_entry.py:51`, `operator_certifications.py`) Split into **G5-A** (TimeEntry approval → costing) → **landed in 11B**; and **G5-B** (operator-qualification gate at clock-in / op start, warn-and-record) → **landed in 11C**.
+6. **G6 · [medium] `complete_work_order` can resurrect a CLOSED/shipped/cancelled WO** (no terminal-state lock); **CoC is a bare boolean, never generated.** Split into **G6-A** (terminal-state lock) → **landed in 11A**; and **G6-B** (Certificate of Conformance generation — per-shipment DB frozen-snapshot artifact + auto-issue-on-ship) → **landed in 11C**.
 
 ### Batch 11 (completeness-critic follow-up) — sub-batched
 
@@ -771,7 +771,7 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 |---|---|---|---|
 | **11A** | G4-Fix1, G3-scope, G6-A | Security / correctness (tenant isolation, audit, RBAC, terminal-state lock) | ☑ landed on branch `feat/wo-completion-batch11` |
 | **11B** | G2, G5-A, G3-content | Data integrity (FG decrement + over-ship guard, TimeEntry-approval costing, report honesty) | ☑ landed on branch `feat/wo-completion-batch11b` |
-| **11C** | G1 (parent/child rollup), G5-B, G6-B | Compliance (parent/child rollup, operator-cert gate, CoC generation) | ☐ triaged, not started |
+| **11C** | G1 (parent/child rollup), G5-B, G6-B | Compliance (parent/child rollup, operator-cert gate, CoC generation) | ☑ landed on branch `feat/wo-completion-batch11c` (one combined PR) |
 | **EXCLUDED** | G4-Fix2 (ECO revision/hold drive), G1-general (BOM child-WO spawn) | XL — own initiatives | — out of Batch 11 scope |
 
 > **Batch 11A status (2026-06-08, landed on branch `feat/wo-completion-batch11`, pending
@@ -949,5 +949,121 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 > `LABOR_COST_ROLLUP_ENABLED`), `docs/RBAC_PERMISSIONS.md` (new "Approve labor (TimeEntry)" row under
 > Work Orders — SUPERVISOR/QUALITY/ADMIN, no self-approval), and this doc.
 >
-> **11C remains triaged-not-started** (G1 parent/child rollup, G5-B operator-cert gate, G6-B CoC
-> generation — see table above); **G4-Fix2** and **G1-general** remain **EXCLUDED**.
+> **11C now landed** (G1 parent/child rollup, G5-B operator-cert gate, G6-B CoC generation — see the
+> Batch 11C status note below); **G4-Fix2** and **G1-general** remain **EXCLUDED**.
+
+> **Batch 11C status (2026-06-08, landed on branch `feat/wo-completion-batch11c`, tests green, review
+> READY, compliance PASS-WITH-NOTES).** Three completeness-critic compliance features, delivered as
+> **one combined PR**. Two new migrations (`043`, `044`); two new tenant-scoped non-env config surfaces
+> (a work-center column + a customer/shipment flag — no new env var; G5-B's threshold is the module
+> constant `MIN_SKILL_LEVEL = 2`). All three follow the **warn-and-record** posture established in
+> Batches 4 and 6 — they record/surface, they never block — and strengthen the AS9100D
+> traceability / CMMC accountability posture.
+>
+> **G1 — parent/child laser-nest completion rollup (warn-and-record)**
+> (`app/services/work_order_state_service.py`, `app/services/quality_gate_service.py`,
+> `app/services/completion_signal_service.py`, `app/api/endpoints/shop_floor.py`,
+> `app/api/endpoints/work_orders.py`). Scope is **laser-only** by decision: only `LASER_CUTTING`
+> children (linked by `parent_work_order_id`) are tracked for the rollup; the general BOM-driven
+> child-WO spawn is the EXCLUDED **G1-general** item. Two halves:
+> - **Parent completes with open children → recorded, not blocked.** When a parent WO is driven to
+>   COMPLETE while one or more laser children are still non-terminal, the completion **still succeeds**
+>   and records a `child_work_orders_incomplete` entry on the existing `quality_exceptions` response
+>   field (severity `high`) + a `COMPLETED_WITH_QUALITY_EXCEPTION` audit row. A CANCELLED child counts
+>   as resolved, not a blocker. The gate runs only once the WO is already COMPLETE (read-only,
+>   tenant-scoped child query), so a mere progress/partial update never triggers it.
+> - **Last child done → surface a signal, do not auto-complete.** When the **last** laser child reaches
+>   a terminal status, the system emits a `child_work_orders_complete` OperationalEvent + a
+>   tamper-evident `CHILD_WORK_ORDERS_COMPLETE` audit row attributed to the parent. Locked decision:
+>   this is a **surface-flag advance, not an auto-complete** — parent and child WOs are **not**
+>   operation-coupled in the data model, so the system never mutates the parent's route; a human
+>   completes the parent. `find_parent_to_advance` returns the parent only when no laser child remains
+>   non-terminal, which becomes true exactly once (the last child flip), and completion handlers are
+>   idempotent + reconcile-on-read never re-flips a terminal child, so this records at most once. Fires
+>   from the live completion paths and the reconcile-on-read path (tagged `source =
+>   "reconcile_on_read"`); best-effort. **No API request/response shape change** — both halves ride the
+>   existing `quality_exceptions` field / event+audit machinery. No new endpoint, no migration.
+>
+> **G5-B — operator-qualification gate at clock-in & op start (warn-and-record)**
+> (`app/services/operator_qualification_service.py`, `app/api/endpoints/shop_floor.py`,
+> `app/models/work_center.py`, `app/schemas/time_entry.py`; migration `043`). `POST /shop-floor/clock-in`
+> and `POST /shop-floor/operations/{id}/start` evaluate the operator against the operation's work center
+> and **record** (never block) any gap. Both legs (locked decision):
+> - **Skill leg:** no active `SkillMatrix` entry at `skill_level >= MIN_SKILL_LEVEL` (= 2, "Basic", a
+>   module constant matching the legacy check endpoint's threshold) for the work center →
+>   `operator_not_skill_qualified` (severity `medium`).
+> - **Certification leg (optional):** where the **new** nullable
+>   `work_centers.required_certification_type` column is set, a missing/expired/revoked
+>   `OperatorCertification` of that type → `operator_certification_missing_or_expired` (severity
+>   `high`). When the column is NULL (the common case) this leg is skipped. The column reuses the
+>   existing `CertificationType` native enum.
+>
+> Each gap writes an `OPERATOR_QUALIFICATION_EXCEPTION` audit row + a warning OperationalEvent and is
+> surfaced on a new backward-compatible `qualification_exceptions` field (default `[]`) on the clock-in
+> `TimeEntryResponse` and the start-operation response body. Clock-in / start stay **operator-facing**
+> (any authenticated user); the gate only records, it does not gate the role. The gate is **tenant-scoped**
+> — every skill/cert/work-center lookup filters the active company. (The legacy
+> `GET /operator-certifications/skill-matrix/check/…` read endpoint is **not** company-scoped; the new
+> gate **is** — tracked as a compliance follow-up below.) Migration `043` adds the single nullable
+> column (metadata-only, no backfill).
+>
+> **G6-B — Certificate of Conformance generation**
+> (`app/models/shipping.py`, `app/services/coc_service.py`, `app/services/coc_pdf_service.py`,
+> `app/api/endpoints/shipping.py`; migration `044`). A real CoC artifact now exists (was a bare
+> boolean). Locked decisions: **per-shipment, DB frozen-snapshot** (the new `certificates_of_conformance`
+> table stores the immutable certified facts; the PDF is rendered deterministically on download — no
+> filesystem blob), **auto-issue-when-required**, and **Admin/Manager/Quality issue / read-broad**.
+> - **Three endpoints** on the shipping router (`/api/v1/shipping`): `POST /{shipment_id}/coc` (issue or
+>   return existing — idempotent, one CoC per shipment via `uq_coc_company_shipment`; RBAC
+>   **Admin/Manager/Quality**; tenant-scoped, 404 cross-tenant), `GET /{shipment_id}/coc` (metadata, 404
+>   if none; any authenticated company user), `GET /{shipment_id}/coc/pdf` (rendered `application/pdf`;
+>   any authenticated company user).
+> - **Auto-issue on ship.** `POST /{shipment_id}/ship` auto-issues when **required** = the shipment's
+>   `cert_of_conformance` flag is set OR a company-scoped `Customer` matched by `work_order.customer_name`
+>   has `requires_coc` (which **defaults `True`** — so auto-issue fires for essentially every
+>   customer-matched shipment; intended fail-safe). Auto-issue is **idempotent + best-effort**: a CoC
+>   failure never fails the ship (records a `coc_generation_failed` warning event). First issue writes a
+>   `log_create` audit row. CoC content = AS9100D conformance statement + part/revision + WO# /
+>   customer-PO + qty + lot/serial table + signature block. Migration `044` adds the tenant-scoped
+>   `certificates_of_conformance` table — **append-only** (intentionally no soft-delete, like an issued
+>   certificate). CUI note: CoC content lives only in the tenant-scoped DB and renders on demand (no
+>   off-platform egress).
+>
+> **In-batch concurrency defect found + fixed.** The CoC `begin_nested()` savepoint that guards the
+> `uq_coc_company_shipment` double-ship race originally had `db.add(coc)` **outside** the try block —
+> but `begin_nested()` autoflushes on open, so the INSERT (and its collision `IntegrityError`) would
+> have fired **outside** the savepoint, poisoning the outer ship transaction. Fixed by moving `db.add`
+> inside the savepoint try (now mirrors the FG-receipt `_insert_txn_with_savepoint` precedent from
+> Batch 6 / migration `041`).
+>
+> **Compliance note (PASS-WITH-NOTES).** All three *strengthen* the AS9100D traceability + CMMC
+> accountability posture already documented in `CMMC_LEVEL_2_COMPLIANCE.md`: G6-B adds an issued,
+> tamper-evident conformance artifact with frozen lot/serial provenance (AS9100D 8.5.2 / 8.6); G5-B
+> records operator competency gaps at the point of work (AS9100D 7.2 competence / CMMC AT
+> accountability); G1 records parent-completion-with-open-children and the all-children-complete signal
+> on the tamper-evident chain. **None changes a compliance *claim***, so — following the 11A/11B
+> precedent — `CMMC_LEVEL_2_COMPLIANCE.md` was **not** edited pre-merge. A reviewer/auditor may add a
+> light changelog line under AU-3.3.1 noting the new `OPERATOR_QUALIFICATION_EXCEPTION`,
+> `CHILD_WORK_ORDERS_COMPLETE`, and CoC `log_create` audit actions now on the hash chain (the audit
+> artifact should not be edited without sign-off).
+>
+> **Compliance-auditor follow-ups (tracked, not in 11C scope):**
+> - The legacy operator skill-matrix **read** endpoints (`GET /operator-certifications/skill-matrix/check/…`)
+>   are **not** tenant-scoped — the new G5-B gate is, but the legacy read endpoints should be scoped
+>   separately.
+> - `SkillMatrix`'s unique constraint omits `company_id` — it should be tenant-qualified.
+> - Optional DB-level CoC-immutability hardening (the row is treated as append-only in code; a
+>   DB-level guard would harden it further).
+>
+> **Docs updated for 11C:** `docs/API.md` (Shop Floor — `qualification_exceptions` warn-and-record gate
+> on clock-in/start; Work Orders — `child_work_orders_incomplete` quality exception + the
+> `CHILD_WORK_ORDERS_COMPLETE` parent-rollup signal; Shipping — three new CoC endpoints + auto-issue-on-
+> ship + RBAC), `docs/RBAC_PERMISSIONS.md` (new "Issue Certificate of Conformance" Shipping row —
+> Admin/Manager/Quality; CoC read = any authenticated user; record-only operator-qualification-gate
+> note under Work Orders), `docs/ENVIRONMENT_VARIABLES.md` (extended the "Not environment-configurable
+> (intentional)" note — confirms G5-B `MIN_SKILL_LEVEL` is a module constant and CoC requirement is
+> flag-driven, no new env var), and this doc. `CMMC_LEVEL_2_COMPLIANCE.md` deliberately **not** edited
+> (see compliance note above).
+>
+> **G4-Fix2** (ECO drives revision/hold on `affected_work_orders`) and **G1-general** (BOM-driven
+> child-WO spawn) remain **EXCLUDED** from Batch 11 as XL items for their own initiatives.

@@ -53,10 +53,12 @@ from app.services.completion_signal_service import (
     emit_operation_completed_event,
     emit_work_order_completed_event,
     enqueue_work_order_completion_signals,
+    record_parent_children_complete,
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import sync_laser_nest_from_operation
 from app.services.operational_event_service import OperationalEventService
+from app.services.operator_qualification_service import evaluate_and_record_operator_qualification
 from app.services.quality_gate_service import (
     QualityException,
     evaluate_and_record_completion_quality_exceptions,
@@ -70,6 +72,7 @@ from app.services.work_order_state_service import (
     WorkOrderStateError,
     begin_operation_progress,
     finalize_operation_completion,
+    find_parent_to_advance,
     floor_operation_quantity_at_evidence,
     has_incomplete_predecessors,
     operation_target_quantity,
@@ -159,7 +162,60 @@ def _emit_reconcile_events(
                 # emit() raises ValueError if the WO/op isn't in this company; a
                 # reconcile transition for another tenant must be skipped, not 500.
                 continue
+        # G1 ADVANCE on the reconcile path: for any WO this reconcile drove to COMPLETE
+        # that is a laser child, surface a signal on its parent iff every laser child is
+        # now terminal. Attributed to the requesting user, source="reconcile_on_read".
+        # FULLY best-effort: a parent-advance failure must never 500 a GET. Same
+        # no-double-fire reasoning as the live paths -- all-children-terminal becomes
+        # true exactly once, and a terminal child is never re-flipped on read.
+        _emit_reconcile_parent_advance(db, company_id, current_user, transitions)
     except Exception:  # pragma: no cover - reads must never 500 on event-emit failure
+        pass
+
+
+def _emit_reconcile_parent_advance(
+    db: Session,
+    company_id: int,
+    current_user: User,
+    transitions: list[StatusTransition],
+) -> None:
+    """Record the G1 parent-children-complete signal for reconcile-driven WO completions.
+
+    Mirrors the live-completion-path advance, on the read/reconcile path. For each
+    ``work_order`` -> COMPLETE transition, load the WO (company-scoped, not
+    soft-deleted) and, if it has a parent whose last laser child just completed, leave
+    the tamper-evident audit row + ``child_work_orders_complete`` event. Best-effort:
+    the whole block is wrapped so it can never 500 a GET, joined to this read's unit of
+    work (the caller commits) and tenant-scoped via ``company_id``.
+    """
+    completed_wo_ids = {tr.resource_id for tr in transitions if tr.resource_type == "work_order"}
+    if not completed_wo_ids:
+        return
+    try:
+        audit = AuditService(db, current_user)
+        completed_work_orders = (
+            db.query(WorkOrder)
+            .filter(
+                WorkOrder.id.in_(completed_wo_ids),
+                WorkOrder.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrder.parent_work_order_id.isnot(None),
+            )
+            .all()
+        )
+        for child in completed_work_orders:
+            parent = find_parent_to_advance(db, child, company_id)
+            if parent is not None:
+                record_parent_children_complete(
+                    db,
+                    parent_work_order=parent,
+                    child_work_order=child,
+                    company_id=company_id,
+                    user_id=current_user.id,
+                    audit=audit,
+                    source="reconcile_on_read",
+                )
+    except Exception:  # pragma: no cover - reads must never 500 on parent-advance failure
         pass
 
 
@@ -527,6 +583,7 @@ def clock_in(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Clock in to a work order operation"""
     # Prevent duplicate clock-ins for the same operation
@@ -608,6 +665,22 @@ def clock_in(
     )
 
     db.add(time_entry)
+
+    # G5-B: warn-and-record operator-qualification gate. The operation/WC/predecessor
+    # validation passed and the TimeEntry is in this unit of work; evaluate the
+    # (read-only, tenant-scoped) skill + certification gates and, for each unsatisfied
+    # one, leave a tamper-evident audit row + a warning OperationalEvent that commit
+    # ATOMICALLY with this clock-in below. NEVER blocks the clock-in.
+    qualification_exceptions = evaluate_and_record_operator_qualification(
+        db,
+        company_id=company_id,
+        user=current_user,
+        operation=operation,
+        work_center_id=operation.work_center_id,
+        audit=audit,
+        source="clock_in",
+    )
+
     OperationalEventService(db).emit(
         company_id=company_id,
         event_type="labor_clock_in",
@@ -681,6 +754,11 @@ def clock_in(
         },
         company_id=company_id,
     )
+
+    # G5-B: surface any unsatisfied qualification gate on the response (set AFTER the
+    # refresh so it survives -- it is a transient, non-column attribute the
+    # TimeEntryResponse schema reads; defaults to empty list otherwise). Warn-only.
+    time_entry.qualification_exceptions = [exc.as_dict() for exc in qualification_exceptions]
 
     return time_entry
 
@@ -1009,6 +1087,24 @@ def clock_out(
                 user=current_user,
                 source="clock_out",
             )
+        # G1 ADVANCE: when THIS WO (a laser child) just completed, surface a signal on
+        # its parent iff every laser child is now terminal. Signal-only -- we do NOT
+        # auto-complete the parent (parent/child WOs are not operation-coupled). The
+        # advance fires only when ALL children are terminal, which becomes true exactly
+        # once (when the last child flips); completion handlers are idempotent and
+        # reconcile won't re-flip a terminal child, so this records at most once.
+        if work_order_completed:
+            parent = find_parent_to_advance(db, work_order, company_id)
+            if parent is not None:
+                record_parent_children_complete(
+                    db,
+                    parent_work_order=parent,
+                    child_work_order=work_order,
+                    company_id=company_id,
+                    user_id=current_user.id,
+                    audit=audit,
+                    source="completion",
+                )
 
     try:
         db.commit()
@@ -1912,6 +2008,7 @@ def start_operation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Mark operation as in progress and create a time entry.
@@ -2004,11 +2101,26 @@ def start_operation(
         db.add(time_entry)
 
     # Create audit log
-    AuditService(db, current_user).log(
+    audit.log(
         action="START_OPERATION",
         resource_type="work_order_operation",
         resource_id=operation_id,
         description=f"Started operation {operation.operation_number} on WO {work_order.work_order_number}",
+    )
+
+    # G5-B: warn-and-record operator-qualification gate. Validation passed and the
+    # TimeEntry (if any) is in this unit of work; evaluate the (read-only,
+    # tenant-scoped) skill + certification gates and, for each unsatisfied one, leave a
+    # tamper-evident audit row + a warning OperationalEvent that commit ATOMICALLY with
+    # this start below. NEVER blocks the start.
+    qualification_exceptions = evaluate_and_record_operator_qualification(
+        db,
+        company_id=company_id,
+        user=current_user,
+        operation=operation,
+        work_center_id=operation.work_center_id,
+        audit=audit,
+        source="start_operation",
     )
 
     try:
@@ -2074,6 +2186,8 @@ def start_operation(
             "status": operation.status.value,
             "actual_start": operation.actual_start.isoformat() if operation.actual_start else None,
         },
+        # G5-B: surface any unsatisfied qualification gate (warn-only; defaults to []).
+        "qualification_exceptions": [exc.as_dict() for exc in qualification_exceptions],
     }
 
 
@@ -2540,6 +2654,23 @@ def complete_operation(
             user=current_user,
             source="complete_operation",
         )
+    # G1 ADVANCE: when THIS WO (a laser child) just completed, surface a signal on its
+    # parent iff every laser child is now terminal. Signal-only -- we do NOT
+    # auto-complete the parent (parent/child WOs are not operation-coupled). Fires only
+    # when ALL children are terminal, which becomes true exactly once (last child
+    # flips); idempotent completion + non-reopening reconcile => records at most once.
+    if work_order_completed:
+        parent = find_parent_to_advance(db, work_order, company_id)
+        if parent is not None:
+            record_parent_children_complete(
+                db,
+                parent_work_order=parent,
+                child_work_order=work_order,
+                company_id=company_id,
+                user_id=current_user.id,
+                audit=audit,
+                source="completion",
+            )
 
     try:
         db.commit()

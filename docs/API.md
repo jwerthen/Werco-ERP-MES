@@ -100,6 +100,16 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > [Webhooks](#webhooks). Both are dispatched asynchronously **after commit** and best-effort: a signal
 > failure never fails the completion, and nothing fires for a rolled-back completion.
 >
+> **Parent/child laser-nest completion rollup (G1).** When the **last** laser-cutting child work order
+> (`WorkOrderType.LASER_CUTTING`, linked by `parent_work_order_id`) of a parent reaches a terminal
+> status, the system records a `child_work_orders_complete` operational event **and** a tamper-evident
+> `audit_log` row (action **`CHILD_WORK_ORDERS_COMPLETE`**) attributed to the parent. This is a
+> **signal only** — it does **not** auto-complete the parent or mutate its route (parent and child WOs
+> are not operation-coupled); it surfaces "all children done, ready to advance" so a human completes
+> the parent. It fires from every completion path including reconcile-on-read (tagged
+> `source = "reconcile_on_read"` there) and is tenant-scoped and best-effort. **No API request/response
+> shape change.**
+>
 > **Idempotent completion.** `/work-orders/{id}/complete` (and shipment `/{id}/ship`) are idempotent:
 > re-invoking on an already-terminal work order/shipment returns the current state
 > (`{"already_completed": true}` / `{"already_shipped": true}`) and fires no second audit row, event,
@@ -351,9 +361,13 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > `fai_not_passed` (a First Article Inspection on the work order that is not `PASSED`), `open_blocker`
 > (an open/acknowledged work-order blocker), and `no_labor_recorded` (severity `medium`: a work order
 > completed with one or more operations that recorded **zero** labor — no time entry, or only
-> zero-duration entries — so its cost/hour actuals may be understated; helps surface missed clock-ins).
-> The `no_labor_recorded` signal fires **regardless of the `LABOR_COST_ROLLUP_ENABLED` flag** (it is a
-> process/operator-accuracy signal, not a cost figure). This applies to both
+> zero-duration entries — so its cost/hour actuals may be understated; helps surface missed clock-ins),
+> and `child_work_orders_incomplete` (severity `high`, **G1**: a parent work order completed while one
+> or more of its **laser-cutting** child work orders — linked by `parent_work_order_id`,
+> `WorkOrderType.LASER_CUTTING` — were still non-terminal; the parent **still completes**, it does not
+> block. A CANCELLED child counts as resolved, not a blocker. The exception lists the offending child
+> WO numbers). The `no_labor_recorded` signal fires **regardless of the `LABOR_COST_ROLLUP_ENABLED`
+> flag** (it is a process/operator-accuracy signal, not a cost figure). This applies to both
 > `/work-orders/operations/{id}/complete` and `/shop-floor/operations/{id}/complete`,
 > `/work-orders/{id}/complete`, and `/shop-floor/clock-out/{id}` when it completes an operation or work
 > order (the field rides on that endpoint's `TimeEntryResponse`). Each entry is
@@ -364,6 +378,27 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > NCR/FAI/blocker gates are evaluated on the next live completion). And `fai_not_passed` only fires
 > when an FAI **exists** and is not passed — a required-but-missing FAI is not detectable (no
 > "FAI required" flag in the data model).
+
+> **Operator-qualification gate is warn-and-record, not blocking (G5-B).** `POST /shop-floor/clock-in`
+> and `POST /shop-floor/operations/{id}/start` evaluate the operator against the operation's work
+> center and **record** (never block) any unsatisfied qualification gate — the clock-in / start still
+> **succeeds** and is open to **any authenticated user** (these are operator-facing; the gate only
+> records). Each unsatisfied gate writes a tamper-evident `audit_log` row (action
+> **`OPERATOR_QUALIFICATION_EXCEPTION`**) plus a warning operational event, and is surfaced on a
+> `qualification_exceptions` array on the response — on the clock-in `TimeEntryResponse` and on the
+> start-operation response body. The gates are:
+> - `operator_not_skill_qualified` (severity `medium`): no active `SkillMatrix` entry at
+>   `skill_level >= 2` ("Basic", a module constant `MIN_SKILL_LEVEL`) for the operation's work center.
+> - `operator_certification_missing_or_expired` (severity `high`): where the work center declares a
+>   `required_certification_type`, the operator holds no current (active / expiring-soon)
+>   `OperatorCertification` of that type. When the work center has no required cert type (the common
+>   case) this leg is skipped.
+>
+> Each entry is `{ "code", "message", "reference_type", "reference_id", "severity" }`; the field
+> defaults to `[]`, so an all-clear clock-in / start is shape-compatible with the pre-G5-B response.
+> The gate is **tenant-scoped** — every skill/cert/work-center lookup filters the active company.
+> (Note: the legacy `GET /operator-certifications/skill-matrix/check/…` read endpoint is **not**
+> company-scoped; this new gate is.)
 
 #### Inspection Schema
 
@@ -641,6 +676,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/shipping/orders/` | List shipping orders | Yes |
 | POST | `/shipping/orders/` | Create shipping order | Yes |
 | POST | `/shipping/orders/{id}/ship` | Mark as shipped | Yes |
+| POST | `/shipping/{shipment_id}/coc` | Issue / generate the Certificate of Conformance (idempotent) | Admin / Manager / Quality |
+| GET | `/shipping/{shipment_id}/coc` | Get CoC metadata (404 if none issued) | Yes |
+| GET | `/shipping/{shipment_id}/coc/pdf` | Download the rendered CoC PDF (`application/pdf`) | Yes |
 
 > **Shipment-close is audited.** Marking a shipment shipped closes its work order
 > (status → `CLOSED`); that terminal status change is recorded in the tamper-evident audit trail
@@ -669,6 +707,31 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >   lot changed, or the stock was already moved), on-hand is **not** decremented and a tamper-evident
 >   `audit_log` row (action `SHIP_FG_LOT_MISSING`) + a warning operational event record the
 >   discrepancy; the ship/close still proceeds.
+
+> **Certificate of Conformance (CoC) generation (G6-B).** A CoC is a real, per-shipment compliance
+> artifact (previously just a `cert_of_conformance` boolean). It is a **DB frozen snapshot** — the
+> `certificates_of_conformance` row stores the immutable certified facts at issue time and the PDF is
+> rendered **deterministically on download** (there is no filesystem blob). CoC content is an AS9100D
+> conformance statement + part/revision + WO# / customer-PO + quantity + lot/serial table +
+> signature/issuer block. All three endpoints are **tenant-scoped** (a cross-tenant `shipment_id`
+> returns **404**):
+> - `POST /shipping/{shipment_id}/coc` — issue or return the existing CoC. **Idempotent**: at most one
+>   CoC per shipment, DB-enforced (`uq_coc_company_shipment`); re-issuing returns the same CoC with no
+>   second audit row. RBAC: **Admin / Manager / Quality** (quality artifact). First issue writes a
+>   tamper-evident `log_create` audit row.
+> - `GET /shipping/{shipment_id}/coc` — CoC metadata; **404** if none issued. Any authenticated company
+>   user (read-broad / write-restricted, like the other shipping reads).
+> - `GET /shipping/{shipment_id}/coc/pdf` — streams the rendered PDF (`application/pdf`,
+>   `Content-Disposition: attachment`). Any authenticated company user.
+>
+> **Auto-issue on ship.** `POST /shipping/{shipment_id}/ship` auto-issues a CoC when one is
+> **required** — required = the shipment's `cert_of_conformance` flag is set **OR** a company-scoped
+> `Customer` matched by `work_order.customer_name` has `requires_coc` (which **defaults `True`**, so
+> auto-issue fires for essentially every customer-matched shipment — the intended fail-safe).
+> Auto-issue is **idempotent and best-effort**: a CoC failure never fails the ship — it records a
+> `coc_generation_failed` warning operational event (mirrors the warn-and-record posture of the FG /
+> over-ship guards). A successful auto-issue commits atomically with the ship and sets the shipment's
+> `cert_of_conformance` flag.
 
 ### Reports
 
