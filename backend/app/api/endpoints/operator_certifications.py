@@ -230,12 +230,16 @@ def serialize_skill(entry: SkillMatrix, db: Session) -> dict:
 
 
 @router.get("/certifications/dashboard")
-def certification_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def certification_dashboard(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Dashboard: expiring certs count, expired count, operators without certs, compliance rate"""
     today = date.today()
     soon = today + timedelta(days=30)
 
-    all_certs = db.query(OperatorCertification).all()
+    all_certs = db.query(OperatorCertification).filter(OperatorCertification.company_id == company_id).all()
 
     expired_count = 0
     expiring_soon_count = 0
@@ -257,15 +261,26 @@ def certification_dashboard(db: Session = Depends(get_db), current_user: User = 
     compliance_rate = round((active_count / total_certs * 100), 1) if total_certs > 0 else 100.0
 
     # Operators with at least one certification
-    operators_with_certs = db.query(func.count(func.distinct(OperatorCertification.user_id))).scalar() or 0
-    total_operators = db.query(func.count(User.id)).filter(User.is_active == True).scalar() or 0
+    operators_with_certs = (
+        db.query(func.count(func.distinct(OperatorCertification.user_id)))
+        .filter(OperatorCertification.company_id == company_id)
+        .scalar()
+        or 0
+    )
+    total_operators = (
+        db.query(func.count(User.id)).filter(User.company_id == company_id, User.is_active == True).scalar() or 0
+    )
     operators_without_certs = total_operators - operators_with_certs
 
     # Training hours this month
     first_of_month = today.replace(day=1)
     training_hours_month = (
         db.query(func.coalesce(func.sum(TrainingRecord.hours), 0.0))
-        .filter(TrainingRecord.training_date >= first_of_month, TrainingRecord.training_date <= today)
+        .filter(
+            TrainingRecord.company_id == company_id,
+            TrainingRecord.training_date >= first_of_month,
+            TrainingRecord.training_date <= today,
+        )
         .scalar()
     )
 
@@ -309,7 +324,10 @@ def certification_dashboard(db: Session = Depends(get_db), current_user: User = 
 
 @router.get("/certifications/expiring")
 def get_expiring_certifications(
-    days: int = 30, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    days: int = 30,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get certifications expiring within N days"""
     today = date.today()
@@ -318,6 +336,7 @@ def get_expiring_certifications(
     certs = (
         db.query(OperatorCertification)
         .filter(
+            OperatorCertification.company_id == company_id,
             OperatorCertification.expiration_date != None,
             OperatorCertification.expiration_date <= cutoff,
             OperatorCertification.expiration_date >= today,
@@ -332,12 +351,18 @@ def get_expiring_certifications(
 
 @router.get("/certifications/user/{user_id}")
 def get_user_certifications(
-    user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Get all certifications for a user"""
     certs = (
         db.query(OperatorCertification)
-        .filter(OperatorCertification.user_id == user_id)
+        .filter(
+            OperatorCertification.company_id == company_id,
+            OperatorCertification.user_id == user_id,
+        )
         .order_by(OperatorCertification.expiration_date)
         .all()
     )
@@ -381,9 +406,18 @@ def list_certifications(
 
 
 @router.get("/certifications/{cert_id}")
-def get_certification(cert_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_certification(
+    cert_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Get single certification"""
-    cert = db.query(OperatorCertification).filter(OperatorCertification.id == cert_id).first()
+    cert = (
+        db.query(OperatorCertification)
+        .filter(OperatorCertification.id == cert_id, OperatorCertification.company_id == company_id)
+        .first()
+    )
     if not cert:
         raise HTTPException(status_code=404, detail="Certification not found")
     return serialize_cert(cert, db)
@@ -465,11 +499,19 @@ def delete_certification(
 
 
 @router.get("/training/user/{user_id}")
-def get_user_training(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_user_training(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Get all training for a user"""
     records = (
         db.query(TrainingRecord)
-        .filter(TrainingRecord.user_id == user_id)
+        .filter(
+            TrainingRecord.company_id == company_id,
+            TrainingRecord.user_id == user_id,
+        )
         .order_by(TrainingRecord.training_date.desc())
         .all()
     )
@@ -526,9 +568,14 @@ def update_training(
     training_in: TrainingUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update training record"""
-    record = db.query(TrainingRecord).filter(TrainingRecord.id == training_id).first()
+    record = (
+        db.query(TrainingRecord)
+        .filter(TrainingRecord.id == training_id, TrainingRecord.company_id == company_id)
+        .first()
+    )
     if not record:
         raise HTTPException(status_code=404, detail="Training record not found")
 
@@ -682,9 +729,10 @@ def update_skill_entry(
     entry_in: SkillMatrixUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Update skill matrix entry"""
-    entry = db.query(SkillMatrix).filter(SkillMatrix.id == entry_id).first()
+    entry = db.query(SkillMatrix).filter(SkillMatrix.id == entry_id, SkillMatrix.company_id == company_id).first()
     if not entry:
         raise HTTPException(status_code=404, detail="Skill matrix entry not found")
 
