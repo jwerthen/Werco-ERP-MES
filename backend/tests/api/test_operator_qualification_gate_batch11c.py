@@ -572,11 +572,12 @@ def test_start_operation_qualified_no_exceptions(client: TestClient, db_session:
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_check_endpoint_not_company_scoped_but_new_evaluator_is(client: TestClient, db_session: Session):
-    """Contrast lock: a SkillMatrix row in company B satisfies the legacy
-    ``/skill-matrix/check`` endpoint (NOT tenant-scoped) yet the new
-    ``evaluate_operator_qualification`` (company-scoped) still raises the skill gate for
-    company A. This pins the compliance improvement G5-B introduced."""
+def test_legacy_check_endpoint_and_new_evaluator_are_both_company_scoped(client: TestClient, db_session: Session):
+    """Regression lock (fix/wo-remediation-followups): a SkillMatrix row tagged company B is
+    invisible to BOTH the legacy ``/skill-matrix/check`` endpoint (now company-scoped) and the
+    new ``evaluate_operator_qualification`` when the caller is in company A. Before the
+    tenant-scoping fix the legacy endpoint leaked the company-B row as ``qualified=True``; it is
+    now scoped, so it agrees with the evaluator and both deny qualification cross-tenant."""
     admin_a = make_user(db_session, role=UserRole.ADMIN, company_id=COMPANY_A)
     operator = make_user(db_session, role=UserRole.OPERATOR, company_id=COMPANY_A)
     wc = make_work_center(db_session, company_id=COMPANY_A)
@@ -584,13 +585,13 @@ def test_legacy_check_endpoint_not_company_scoped_but_new_evaluator_is(client: T
     make_skill(db_session, operator, wc, skill_level=4, company_id=COMPANY_B)
     db_session.commit()
 
-    # Legacy endpoint: NOT company-scoped -> sees the company-B row -> qualified True.
+    # Legacy endpoint: NOW company-scoped -> the company-B row is invisible -> not qualified.
     legacy = client.get(
         f"/api/v1/certifications/skill-matrix/check/{operator.id}/{wc.id}",
         headers=headers_for(admin_a),
     )
     assert legacy.status_code == status.HTTP_200_OK, legacy.text
-    assert legacy.json()["qualified"] is True
+    assert legacy.json()["qualified"] is False
 
     # New evaluator: company-scoped -> the company-B row is invisible -> not qualified.
     exc = evaluate_operator_qualification(db_session, user_id=operator.id, work_center_id=wc.id, company_id=COMPANY_A)

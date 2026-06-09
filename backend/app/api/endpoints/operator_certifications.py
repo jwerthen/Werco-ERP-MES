@@ -546,12 +546,17 @@ def update_training(
 
 @router.get("/skill-matrix/check/{user_id}/{work_center_id}")
 def check_operator_qualification(
-    user_id: int, work_center_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    user_id: int,
+    work_center_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Check if operator is qualified for a work center"""
     entry = (
         db.query(SkillMatrix)
         .filter(
+            SkillMatrix.company_id == company_id,
             SkillMatrix.user_id == user_id,
             SkillMatrix.work_center_id == work_center_id,
             SkillMatrix.is_active == True,
@@ -570,20 +575,29 @@ def check_operator_qualification(
 
 
 @router.get("/skill-matrix/user/{user_id}")
-def get_user_skills(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_user_skills(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Skill matrix for specific user"""
-    entries = db.query(SkillMatrix).filter(SkillMatrix.user_id == user_id).all()
+    entries = db.query(SkillMatrix).filter(SkillMatrix.company_id == company_id, SkillMatrix.user_id == user_id).all()
     return [serialize_skill(e, db) for e in entries]
 
 
 @router.get("/skill-matrix/work-center/{work_center_id}")
 def get_work_center_operators(
-    work_center_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    work_center_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Qualified operators for a work center"""
     entries = (
         db.query(SkillMatrix)
         .filter(
+            SkillMatrix.company_id == company_id,
             SkillMatrix.work_center_id == work_center_id,
             SkillMatrix.is_active == True,
         )
@@ -594,13 +608,22 @@ def get_work_center_operators(
 
 
 @router.get("/skill-matrix/")
-def list_skill_matrix(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_skill_matrix(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Full skill matrix (all users x work centers)"""
-    entries = db.query(SkillMatrix).filter(SkillMatrix.is_active == True).all()
+    entries = db.query(SkillMatrix).filter(SkillMatrix.company_id == company_id, SkillMatrix.is_active == True).all()
 
-    # Also return available users and work centers for the grid
-    users = db.query(User).filter(User.is_active == True).order_by(User.last_name).all()
-    work_centers = db.query(WorkCenter).filter(WorkCenter.is_active == True).order_by(WorkCenter.code).all()
+    # Also return available users and work centers for the grid (tenant-scoped)
+    users = db.query(User).filter(User.company_id == company_id, User.is_active == True).order_by(User.last_name).all()
+    work_centers = (
+        db.query(WorkCenter)
+        .filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True)
+        .order_by(WorkCenter.code)
+        .all()
+    )
 
     return {
         "entries": [serialize_skill(e, db) for e in entries],
@@ -611,7 +634,10 @@ def list_skill_matrix(db: Session = Depends(get_db), current_user: User = Depend
 
 @router.post("/skill-matrix/")
 def create_skill_entry(
-    entry_in: SkillMatrixCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    entry_in: SkillMatrixCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Add skill matrix entry"""
     if entry_in.skill_level < 1 or entry_in.skill_level > 5:
@@ -620,6 +646,7 @@ def create_skill_entry(
     existing = (
         db.query(SkillMatrix)
         .filter(
+            SkillMatrix.company_id == company_id,
             SkillMatrix.user_id == entry_in.user_id,
             SkillMatrix.work_center_id == entry_in.work_center_id,
         )
@@ -642,6 +669,7 @@ def create_skill_entry(
     data = entry_in.model_dump()
     data["approved_by"] = current_user.id
     entry = SkillMatrix(**data)
+    entry.company_id = company_id
     db.add(entry)
     db.commit()
     db.refresh(entry)

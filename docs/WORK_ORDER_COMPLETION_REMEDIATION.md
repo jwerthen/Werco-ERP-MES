@@ -67,10 +67,34 @@ Findings: DUP-1, RUP-5, AUD-1, AUD-2, ~~AUD-3~~ (deferred to Batch 3), AUD-4, EV
 > queries (now filter `company_id` + `is_deleted == False`), and the blocker-resume operation
 > lookup. **AUD-3** (audit on reconcile-on-read transitions) is explicitly deferred to Batch 3.
 >
-> **Open follow-ups (tracked, not yet fixed):**
-> 1. **Worker cron kwargs bug** — `app/worker.py` schedules `cron(run_mrp_job, …, kwargs={"mode": "AUTO_DRAFT"})`; ARQ's `cron()` does not accept a `kwargs=` argument, so the daily MRP cron entry is mis-wired. The per-company fan-out in `run_mrp_task`/`run_scheduling_task` (and the `company_id=None` defaults on the job wrappers) is correct; only the cron registration needs fixing.
-> 2. **`mrp_auto_service` field-name drift** — the `app.models.purchase_order`/`app.models.vendor` imports were corrected to `app.models.purchasing` (those modules don't exist), but remaining `PurchaseOrder`/`PurchaseOrderLine`/`Vendor` field references in `MRPAutoService` still need a pass against the `purchasing` model to confirm names line up.
-> 3. **Periodic `notification_jobs.py` cross-tenant scope** — `get_notification_recipients` now takes a `company_id`, and the MRP/scheduling jobs pass it, but the daily notification jobs in `app/jobs/notification_jobs.py` (quality / supervisor / manager / purchasing / inventory / sales digests) still call it **without** `company_id`, so those notifications fan out across all tenants.
+> **Open follow-ups — all three RESOLVED 2026-06-09 on branch `fix/wo-remediation-followups`**
+> (post-remediation HIGH-severity fixes, after a full code-vs-main verification sweep; tests added, gates green):
+> 1. **Worker cron kwargs bug — ✅ RESOLVED (2026-06-09).** `app/worker.py` scheduled
+>    `cron(run_mrp_job, …, kwargs={"mode": "AUTO_DRAFT"})`; ARQ's `cron()` accepts no `kwargs=` argument,
+>    so the daily MRP cron entry was mis-wired and crashed worker startup. Fixed by adding a thin
+>    `run_mrp_auto_draft_job(ctx)` wrapper that pins `mode="AUTO_DRAFT"` (delegating to `run_mrp_job`,
+>    which fans out per active company), registered in both `functions` and `cron_jobs`
+>    (`cron(run_mrp_auto_draft_job, hour=6, minute=0)`). The per-company fan-out in
+>    `run_mrp_task`/`run_scheduling_task` was already correct.
+> 2. **`mrp_auto_service` field-name drift — ✅ RESOLVED (2026-06-09).** `MRPAutoService._create_po`
+>    constructed `PurchaseOrderLine(po_id=…, quantity=…, unit_cost=…)` using columns that do not exist on
+>    the `app.models.purchasing` model, raising a `TypeError` at runtime. Corrected to the real columns —
+>    `purchase_order_id`, `quantity_ordered`, `unit_price` — and now also sets `line_total`
+>    (`quantity_ordered × unit_price`) and `company_id`.
+> 3. **Periodic `notification_jobs.py` cross-tenant scope — ✅ RESOLVED (2026-06-09).** The four daily
+>    digest jobs (calibrations, late work orders, low stock, quote expiry) queried their entities
+>    **globally** and called `get_notification_recipients` **without** `company_id`, so a single cron run
+>    notified every tenant's users about other tenants' overdue work, low stock, due calibrations and
+>    expiring quotes (invariant #1 violation). Each job now iterates the active companies (new
+>    `_active_company_ids` helper) and runs one isolated, tenant-scoped pass per company — every entity
+>    query filters `company_id` (work orders also `is_deleted == False`) and `get_notification_recipients`
+>    is passed `company_id`; one tenant's digest failure is caught and logged without aborting the rest.
+>    **Three latent runtime bugs were fixed in passing:** (a) the calibrations digest queried a
+>    non-existent `Calibration` class → now `Equipment` (with `CalibrationStatus.ACTIVE` and `.name`);
+>    (b) the low-stock digest filtered on `InventoryItem.reorder_point`, which doesn't exist → now joins
+>    `Part` and compares `quantity_on_hand <= Part.reorder_point` (soft-delete-filtered); (c) the
+>    quote-expiry digest called `.date()` on a `date` (`quote.valid_until`) → now
+>    `(quote.valid_until - now.date()).days`.
 
 ### Rank 5 — Serialize concurrent completion writes ☑ (Batch 2 · migration)
 Immediate: `.with_for_update()` re-fetch before the over-completion read-modify-write in `clock_out`/`/production`/`/complete`. Structural: map `__mapper_args__={'version_id_col': version}` **targeted on `WorkOrderOperation` and `TimeEntry` only** (NOT on the shared `OptimisticLockMixin`, which intentionally stays inert so enabling native version_id_col globally doesn't change commit behavior for every consumer of the mixin — see `app/db/mixins.py`); translate `StaleDataError`→409. Migration: partial unique index `uq_open_time_entry ON time_entries(user_id, operation_id) WHERE clock_out IS NULL` (pre-flight dedupe; idempotent/reversible).
@@ -1002,10 +1026,11 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 > surfaced on a new backward-compatible `qualification_exceptions` field (default `[]`) on the clock-in
 > `TimeEntryResponse` and the start-operation response body. Clock-in / start stay **operator-facing**
 > (any authenticated user); the gate only records, it does not gate the role. The gate is **tenant-scoped**
-> — every skill/cert/work-center lookup filters the active company. (The legacy
-> `GET /operator-certifications/skill-matrix/check/…` read endpoint is **not** company-scoped; the new
-> gate **is** — tracked as a compliance follow-up below.) Migration `043` adds the single nullable
-> column (metadata-only, no backfill).
+> — every skill/cert/work-center lookup filters the active company. (At 11C the legacy
+> `GET /operator-certifications/skill-matrix/check/…` read endpoint was **not** company-scoped, only this
+> new gate was — tracked as a compliance follow-up below; **the legacy skill-matrix read endpoints were
+> since tenant-scoped 2026-06-09 on branch `fix/wo-remediation-followups`** — see the compliance-auditor
+> follow-ups note.) Migration `043` adds the single nullable column (metadata-only, no backfill).
 >
 > **G6-B — Certificate of Conformance generation**
 > (`app/models/shipping.py`, `app/services/coc_service.py`, `app/services/coc_pdf_service.py`,
@@ -1047,13 +1072,21 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 > `CHILD_WORK_ORDERS_COMPLETE`, and CoC `log_create` audit actions now on the hash chain (the audit
 > artifact should not be edited without sign-off).
 >
-> **Compliance-auditor follow-ups (tracked, not in 11C scope):**
-> - The legacy operator skill-matrix **read** endpoints (`GET /operator-certifications/skill-matrix/check/…`)
->   are **not** tenant-scoped — the new G5-B gate is, but the legacy read endpoints should be scoped
->   separately.
-> - `SkillMatrix`'s unique constraint omits `company_id` — it should be tenant-qualified.
+> **Compliance-auditor follow-ups (tracked):**
+> - **Legacy operator skill-matrix read endpoints — ✅ RESOLVED (2026-06-09, branch
+>   `fix/wo-remediation-followups`).** The four skill-matrix READ endpoints in
+>   `app/api/endpoints/operator_certifications.py` — `GET /operator-certifications/skill-matrix/check/{user_id}/{work_center_id}`
+>   (`check_operator_qualification`), `GET …/skill-matrix/user/{user_id}` (`get_user_skills`),
+>   `GET …/skill-matrix/work-center/{work_center_id}` (`get_work_center_operators`),
+>   `GET …/skill-matrix/` (`list_skill_matrix`) — plus the `POST …/skill-matrix/` writer
+>   (`create_skill_entry`) are now **tenant-scoped**: each adds `company_id = Depends(get_current_company_id)`
+>   and filters `SkillMatrix.company_id == company_id` (and `list_skill_matrix` also scopes its
+>   `User`/`WorkCenter` grid lists; `create_skill_entry` scopes its duplicate-check and stamps
+>   `company_id` on the new row). Closes a cross-tenant skill-data read leak. **No RBAC change** — these
+>   remain open to any authenticated user, now company-scoped.
+> - `SkillMatrix`'s unique constraint omits `company_id` — it should be tenant-qualified. **(still open)**
 > - Optional DB-level CoC-immutability hardening (the row is treated as append-only in code; a
->   DB-level guard would harden it further).
+>   DB-level guard would harden it further). **(still open)**
 >
 > **Docs updated for 11C:** `docs/API.md` (Shop Floor — `qualification_exceptions` warn-and-record gate
 > on clock-in/start; Work Orders — `child_work_orders_incomplete` quality exception + the
