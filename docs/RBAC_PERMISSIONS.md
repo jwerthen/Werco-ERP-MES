@@ -139,6 +139,14 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Complete | ✓ | ✓ | ✓ | | | ✓ | |
 | Issue Certificate of Conformance | ✓ | ✓ | | | ✓ | | |
 
+> **Complete (mark shipped) — endpoint mapping (2026-06-09).** The Shipping **Complete** action
+> `POST /api/v1/shipping/{shipment_id}/ship` (`mark_shipped`) is now enforced **in code** to the
+> Complete row via `require_role([ADMIN, MANAGER, SUPERVISOR, SHIPPING])`
+> (`app/api/endpoints/shipping.py`). **This is a permission change:** the endpoint was previously open
+> to **any authenticated user**, who could close a work order by shipping it; a non-privileged user now
+> receives **403**. Marking shipped is the terminal shipping action that transitions the work order to
+> `CLOSED`, so it carries the **Complete** permission (not the broader View/Create reads).
+>
 > **Certificate of Conformance — endpoint mapping (Batch 11C / G6-B).** Issuing a CoC
 > `POST /api/v1/shipping/{shipment_id}/coc` (mint or return the existing frozen-snapshot CoC) is
 > enforced **in code** to `require_role([ADMIN, MANAGER, QUALITY])`
@@ -221,6 +229,10 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > `get_current_user` only — they are tenant-scoped but not role-restricted, so operators/viewers can
 > still load OEE dashboards. The **View** row therefore reflects intended UI visibility; the **Write**
 > row is a server-enforced control. Superuser / Platform Admin bypass role checks, as elsewhere.
+>
+> **Audit coverage (2026-06-09).** The OEE write endpoints now also write a tamper-evident `audit_log`
+> row on every record/target create/update/delete (and the auto-calc upsert), so OEE mutations are on
+> the hash chain alongside the role gate. No role change — audit-trail coverage only.
 
 ### Admin
 

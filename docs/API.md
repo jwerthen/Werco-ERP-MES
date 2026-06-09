@@ -397,11 +397,22 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > Each entry is `{ "code", "message", "reference_type", "reference_id", "severity" }`; the field
 > defaults to `[]`, so an all-clear clock-in / start is shape-compatible with the pre-G5-B response.
 > The gate is **tenant-scoped** — every skill/cert/work-center lookup filters the active company.
-> (The legacy skill-matrix read endpoints under `GET /operator-certifications/skill-matrix/…` —
-> `check/{user_id}/{work_center_id}`, `user/{user_id}`, `work-center/{work_center_id}`, and the list —
-> plus the `POST .../skill-matrix/` writer were **also tenant-scoped** as of 2026-06-09; all filter
-> `SkillMatrix.company_id` on the active company. They remain open to any authenticated user — the fix
-> added company scoping, not an RBAC change.)
+>
+> **Operator-certifications router is fully tenant-scoped (as of 2026-06-09).** Beyond the gate above,
+> the operator-certifications read/by-id endpoints now filter the active `company_id`:
+> - **Skill matrix:** the read endpoints under `GET /operator-certifications/skill-matrix/…` —
+>   `check/{user_id}/{work_center_id}`, `user/{user_id}`, `work-center/{work_center_id}`, and the list —
+>   the `POST .../skill-matrix/` writer, and `PUT .../skill-matrix/{entry_id}` (`update_skill_entry`)
+>   all filter `SkillMatrix.company_id`. The model's unique constraint is now tenant-qualified too —
+>   `(company_id, user_id, work_center_id)` via migration `045_skillmatrix_company_unique`.
+> - **Certifications / training:** `GET /operator-certifications/certifications/dashboard` (its cert
+>   counts, compliance rate, operators-with/without-certs — `User` now `company_id`-scoped — and
+>   training-hours-this-month aggregates), `GET .../certifications/expiring`,
+>   `GET .../certifications/user/{user_id}`, `GET .../certifications/{cert_id}`,
+>   `GET .../training/user/{user_id}`, and `PUT .../training/{training_id}` (`update_training`) all
+>   filter the active company; a cross-tenant id now returns **404** before any read/mutation.
+>
+> These remain open to **any authenticated user** — the fix added company scoping, not an RBAC change.
 
 #### Inspection Schema
 
@@ -678,7 +689,7 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 |--------|----------|-------------|---------------|
 | GET | `/shipping/` | List shipments | Yes |
 | POST | `/shipping/` | Create shipment | Yes |
-| POST | `/shipping/{shipment_id}/ship` | Mark as shipped (decrements FG, closes WO, auto-issues CoC when required) | Yes |
+| POST | `/shipping/{shipment_id}/ship` | Mark as shipped (decrements FG, closes WO, auto-issues CoC when required) | Admin / Manager / Supervisor / Shipping |
 | POST | `/shipping/{shipment_id}/coc` | Issue / generate the Certificate of Conformance (idempotent) | Admin / Manager / Quality |
 | GET | `/shipping/{shipment_id}/coc` | Get CoC metadata (404 if none issued) | Yes |
 | GET | `/shipping/{shipment_id}/coc/pdf` | Download the rendered CoC PDF (`application/pdf`) | Yes |
@@ -686,6 +697,14 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > **Shipment-close is audited.** Marking a shipment shipped closes its work order
 > (status → `CLOSED`); that terminal status change is recorded in the tamper-evident audit trail
 > (`GET /audit/`), flushed so the audit row commits atomically with the closure.
+>
+> **`POST /shipping/{shipment_id}/ship` is RBAC-gated to Admin / Manager / Supervisor / Shipping.**
+> Marking a shipment shipped is the terminal shipping action that **CLOSES the work order**, so it is
+> restricted to the documented Shipping **"Complete"** role set
+> (`require_role([ADMIN, MANAGER, SUPERVISOR, SHIPPING])`) rather than any authenticated user. A
+> non-privileged tenant user now gets **403**. See `docs/RBAC_PERMISSIONS.md` → Shipping. (The two
+> read CoC endpoints below stay open to any authenticated company user; issuing a CoC is
+> Admin / Manager / Quality.)
 >
 > **Marking shipped decrements finished-goods inventory (G2).** `POST /shipping/{shipment_id}/ship`
 > now writes the offsetting outbound stock movement for the goods leaving the building — the mirror of
@@ -836,6 +855,13 @@ records, targets) require **Admin / Manager / Supervisor**.
 > were previously open to any authenticated user. Read endpoints depend on `get_current_user` only, so
 > operators/viewers can still load dashboards. Superuser / Platform Admin bypass role checks, as
 > elsewhere. See `docs/RBAC_PERMISSIONS.md` → OEE.
+>
+> **OEE writes are audited.** All OEE record/target mutations — `POST /oee/calculate/{work_center_id}`,
+> `POST/PUT/DELETE /oee/records`, and `POST/PUT/DELETE /oee/targets` — now write a tamper-evident
+> `audit_log` row (`AuditService` `log_create` / `log_update` / `log_delete`, resource types
+> `oee_record` / `oee_target`). The audit row is flushed and logged **before** the terminal commit, so
+> it commits atomically with the record/target. The auto-calc upsert writes one representative row per
+> call. (These were RBAC-gated but unaudited prior to 2026-06-09.)
 
 > **`POST /oee/calculate/{work_center_id}` (auto-calculate).** Builds (or upserts, per work center +
 > date + shift) a real `OEERecord` for `record_date` (default today) from the day's **closed**
