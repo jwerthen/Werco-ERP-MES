@@ -10,11 +10,13 @@ CMMC Level 2 Control: AU-3.3.8 - Protect Audit Information
 
 import hashlib
 import json
+import zlib
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
-from sqlalchemy import desc, inspect
+from sqlalchemy import desc, inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_correlation_id, get_logger
@@ -22,6 +24,19 @@ from app.models.audit_log import AuditLog
 from app.models.user import User
 
 logger = get_logger(__name__)
+
+# Transaction-level advisory lock key for the GLOBAL audit-log hash chain.
+# ``sequence_number`` is globally unique across all tenants (one chain for the
+# whole table), so a single fixed key serializes every audited writer's
+# allocate+insert critical section. Derived deterministically from a stable
+# namespace string and clamped to a signed 64-bit range for
+# ``pg_advisory_xact_lock(bigint)``.
+_AUDIT_CHAIN_LOCK_KEY = (zlib.crc32(b"audit_log_chain") & 0x7FFFFFFF) - 0x40000000
+
+# Bounded retries for the residual sequence_number collision (the window where
+# the advisory lock is absent, e.g. SQLite in tests, or a genuinely concurrent
+# insert). Each retry re-reads the chain tail so the chain stays contiguous.
+_MAX_SEQUENCE_RETRIES = 5
 
 
 def compute_audit_hash(
@@ -256,10 +271,40 @@ class AuditService:
 
         return changes
 
+    def _acquire_chain_lock(self) -> None:
+        """
+        Serialize the global audit-chain allocate+insert critical section.
+
+        Acquires a transaction-level Postgres advisory lock keyed to the single
+        global chain (``sequence_number`` is globally unique across all tenants).
+        Held until the caller's transaction ends (commit/rollback), it guarantees
+        only one writer at a time reads the tail, allocates the next sequence, and
+        inserts — eliminating the read-the-same-max race under concurrency.
+
+        Guarded by dialect: only emitted on PostgreSQL. On SQLite (the test
+        backend) ``pg_advisory_xact_lock`` does not exist, and SQLite already
+        serializes writers, so this is a no-op there. The savepoint/retry path in
+        ``log()`` still covers any residual collision on either backend.
+        """
+        bind = self.db.get_bind()
+        dialect = bind.dialect.name if bind is not None else ""
+        if dialect != "postgresql":
+            return
+        self.db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _AUDIT_CHAIN_LOCK_KEY})
+
     def _get_next_sequence_and_previous_hash(self) -> Tuple[int, Optional[str]]:
         """
         Get the next sequence number and previous hash for chain integrity.
-        Uses database locking to ensure atomicity.
+
+        Reads the current chain tail (the row with the highest
+        ``sequence_number``) and returns ``(tail.sequence_number + 1,
+        tail.integrity_hash)`` so the new row is contiguous and links to the
+        latest hash. Returns ``(1, None)`` for the first row.
+
+        This is the read half of the allocate+insert critical section; it must
+        be called under the advisory lock acquired by ``_acquire_chain_lock``
+        (PostgreSQL) and re-called on each savepoint retry so the chain stays
+        correct after a residual collision.
         """
         # Get the last audit log entry
         last_entry = self.db.query(AuditLog).order_by(desc(AuditLog.sequence_number)).first()
@@ -295,6 +340,23 @@ class AuditService:
         ``company_id`` tenant-tags the row so audit data can be retrieved per
         tenant. It defaults to the company resolved at construction time and is
         deliberately excluded from the integrity hash (see ``compute_audit_hash``).
+
+        Serialization of the global hash chain (``sequence_number`` is globally
+        unique, one chain for the whole table):
+          1. A transaction-level Postgres advisory lock (``_acquire_chain_lock``)
+             is taken BEFORE reading the chain tail, so only one writer at a time
+             allocates+inserts. It auto-releases at txn end and is a no-op on
+             SQLite.
+          2. The tail-read → allocate → hash → INSERT is wrapped in a SAVEPOINT
+             (``begin_nested``) with a bounded retry. A unique-``sequence_number``
+             collision (the residual race, e.g. on SQLite where there is no
+             advisory lock) rolls back ONLY the savepoint — leaving the caller's
+             OUTER transaction usable — then re-reads the tail, re-allocates, and
+             retries. If every attempt collides, it degrades to the existing
+             best-effort contract (log + return ``None``) with the session left
+             un-poisoned.
+
+        This method never propagates an audit failure to the caller.
         """
         try:
             # Include correlation ID for request tracing
@@ -313,54 +375,84 @@ class AuditService:
             # company resolved at construction). Not part of the hash input.
             effective_company_id = company_id if company_id is not None else self.company_id
 
-            # Get next sequence number and previous hash (for chain integrity)
-            sequence_number, previous_hash = self._get_next_sequence_and_previous_hash()
+            # Serialize the global chain's allocate+insert against concurrent
+            # writers on PostgreSQL. Auto-releases at txn end; no-op on SQLite.
+            self._acquire_chain_lock()
 
-            # Compute integrity hash
-            integrity_hash = compute_audit_hash(
-                sequence_number=sequence_number,
-                timestamp=timestamp,
-                user_id=user_id,
-                user_email=user_email,
-                action=action,
-                resource_type=resource_type,
-                resource_id=resource_id,
-                resource_identifier=resource_identifier,
-                description=description,
-                old_values=old_values,
-                new_values=new_values,
-                ip_address=self._ip_address,
-                session_id=correlation_id,
-                success=success_str,
-                previous_hash=previous_hash,
-            )
+            # Allocate + insert under a savepoint, retrying a residual unique
+            # sequence_number collision. Re-read the tail on every attempt so the
+            # chain stays contiguous and ``previous_hash`` tracks the live tail.
+            for attempt in range(_MAX_SEQUENCE_RETRIES):
+                # Get next sequence number and previous hash (for chain integrity)
+                sequence_number, previous_hash = self._get_next_sequence_and_previous_hash()
 
-            log_entry = AuditLog(
-                sequence_number=sequence_number,
-                integrity_hash=integrity_hash,
-                previous_hash=previous_hash,
-                timestamp=timestamp,
-                user_id=user_id,
-                user_email=user_email,
-                user_name=user_name,
-                company_id=effective_company_id,
-                action=action,
-                resource_type=resource_type,
-                resource_id=resource_id,
-                resource_identifier=resource_identifier,
-                description=description,
-                old_values=old_values,
-                new_values=new_values,
-                ip_address=self._ip_address,
-                user_agent=self._user_agent,
-                session_id=correlation_id,
-                success=success_str,
-                error_message=error_message,
-                extra_data=extra_data,
+                # Compute integrity hash
+                integrity_hash = compute_audit_hash(
+                    sequence_number=sequence_number,
+                    timestamp=timestamp,
+                    user_id=user_id,
+                    user_email=user_email,
+                    action=action,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    resource_identifier=resource_identifier,
+                    description=description,
+                    old_values=old_values,
+                    new_values=new_values,
+                    ip_address=self._ip_address,
+                    session_id=correlation_id,
+                    success=success_str,
+                    previous_hash=previous_hash,
+                )
+
+                log_entry = AuditLog(
+                    sequence_number=sequence_number,
+                    integrity_hash=integrity_hash,
+                    previous_hash=previous_hash,
+                    timestamp=timestamp,
+                    user_id=user_id,
+                    user_email=user_email,
+                    user_name=user_name,
+                    company_id=effective_company_id,
+                    action=action,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    resource_identifier=resource_identifier,
+                    description=description,
+                    old_values=old_values,
+                    new_values=new_values,
+                    ip_address=self._ip_address,
+                    user_agent=self._user_agent,
+                    session_id=correlation_id,
+                    success=success_str,
+                    error_message=error_message,
+                    extra_data=extra_data,
+                )
+
+                # SAVEPOINT around the INSERT: a unique sequence_number collision
+                # rolls back ONLY this savepoint, so the caller's outer transaction
+                # stays usable (this is the fix for the old poisoning). The
+                # ``db.add`` MUST live inside the savepoint — ``begin_nested``
+                # autoflushes on open, so adding before it would emit the INSERT
+                # (and any collision) outside this try/except.
+                nested = self.db.begin_nested()
+                try:
+                    self.db.add(log_entry)
+                    self.db.flush()  # Don't commit - let the caller handle transaction
+                    return log_entry
+                except IntegrityError:
+                    # Residual sequence_number race: roll back ONLY the savepoint
+                    # so the caller's outer txn stays usable, then re-read the tail
+                    # and retry with a freshly built entry on the next iteration.
+                    nested.rollback()
+                    continue
+
+            # Exhausted retries without inserting; fall through to best-effort.
+            logger.error(
+                "Failed to create audit log: sequence_number collision persisted "
+                f"after {_MAX_SEQUENCE_RETRIES} attempts"
             )
-            self.db.add(log_entry)
-            self.db.flush()  # Don't commit - let the caller handle transaction
-            return log_entry
+            return None
         except Exception as e:
             logger.error(f"Failed to create audit log: {e}")
             # Don't raise - audit logging should not break the main operation

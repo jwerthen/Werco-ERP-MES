@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.downtime import DowntimeEvent, DowntimePlannedType
 from app.models.oee import OEERecord, OEETarget
@@ -14,6 +14,7 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrderOperation
+from app.services.audit_service import AuditService
 
 # Production-bearing time-entry types (OEE-5): pieces/scrap counted from these
 # uniformly across the auto-calc, matching ``analytics_service`` so a quantity logged
@@ -297,6 +298,7 @@ def create_oee_record(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Create a new OEE record with auto-calculated OEE metrics."""
     # Verify work center exists
@@ -326,6 +328,17 @@ def create_oee_record(
     )
     record.company_id = company_id
     db.add(record)
+
+    # Audit (tamper-evident). Flush so the PK is populated, log BEFORE the terminal commit
+    # so the audit row commits atomically with the OEE record (log() only flushes).
+    db.flush()
+    audit.log_create(
+        resource_type="oee_record",
+        resource_id=record.id,
+        resource_identifier=str(record.id),
+        new_values=record,
+        description=f"Created OEE record {record.id} for work center {wc.name}",
+    )
     db.commit()
     db.refresh(record)
 
@@ -342,6 +355,7 @@ def update_oee_record(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update an OEE record and recalculate OEE metrics."""
     record = (
@@ -353,6 +367,9 @@ def update_oee_record(
 
     if not record:
         raise HTTPException(status_code=404, detail="OEE record not found")
+
+    # Snapshot pre-mutation values for the audit diff (the live model is mutated in place).
+    old_values = {c.key: getattr(record, c.key) for c in record.__table__.columns}
 
     update_data = record_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -371,6 +388,16 @@ def update_oee_record(
     for field, value in oee_calcs.items():
         setattr(record, field, value)
 
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+    db.flush()
+    audit.log_update(
+        resource_type="oee_record",
+        resource_id=record.id,
+        resource_identifier=str(record.id),
+        old_values=old_values,
+        new_values=record,
+        description=f"Updated OEE record {record.id}",
+    )
     db.commit()
     db.refresh(record)
     return _record_to_response(record)
@@ -382,13 +409,26 @@ def delete_oee_record(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Delete an OEE record."""
     record = db.query(OEERecord).filter(OEERecord.id == record_id, OEERecord.company_id == company_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="OEE record not found")
 
+    # Snapshot for the audit row before the row is removed.
+    old_values = {c.key: getattr(record, c.key) for c in record.__table__.columns}
+    deleted_id = record.id
+
     db.delete(record)
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+    audit.log_delete(
+        resource_type="oee_record",
+        resource_id=deleted_id,
+        resource_identifier=str(deleted_id),
+        old_values=old_values,
+        description=f"Deleted OEE record {deleted_id}",
+    )
     db.commit()
     return {"message": "OEE record deleted"}
 
@@ -404,6 +444,7 @@ def auto_calculate_oee(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Auto-calculate OEE for a work center on a given date from existing data.
 
@@ -549,6 +590,8 @@ def auto_calculate_oee(
     )
 
     if existing:
+        # Snapshot pre-mutation values for the audit diff (the live model is mutated below).
+        old_values = {c.key: getattr(existing, c.key) for c in existing.__table__.columns}
         existing.planned_production_time_minutes = planned_time
         existing.actual_run_time_minutes = actual_run_minutes
         existing.downtime_minutes = downtime
@@ -565,6 +608,17 @@ def auto_calculate_oee(
         existing.production_reject_count = defect_parts
         for field, value in oee_calcs.items():
             setattr(existing, field, value)
+        # Audit (tamper-evident) the recomputed overwrite BEFORE the terminal commit so it
+        # commits atomically with the record. A single representative row per call.
+        db.flush()
+        audit.log_update(
+            resource_type="oee_record",
+            resource_id=existing.id,
+            resource_identifier=str(existing.id),
+            old_values=old_values,
+            new_values=existing,
+            description=f"Auto-calculated OEE record {existing.id} for work center {wc.name}",
+        )
         db.commit()
         db.refresh(existing)
         record = existing
@@ -590,6 +644,16 @@ def auto_calculate_oee(
         )
         record.company_id = company_id
         db.add(record)
+        # Audit (tamper-evident) the freshly created record BEFORE the terminal commit so it
+        # commits atomically. Flush so the PK is populated. A single representative row.
+        db.flush()
+        audit.log_create(
+            resource_type="oee_record",
+            resource_id=record.id,
+            resource_identifier=str(record.id),
+            new_values=record,
+            description=f"Auto-calculated OEE record {record.id} for work center {wc.name}",
+        )
         db.commit()
         db.refresh(record)
 
@@ -887,6 +951,7 @@ def create_oee_target(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Create or update an OEE target for a work center."""
     wc = (
@@ -906,9 +971,20 @@ def create_oee_target(
 
     if existing:
         # Update existing
+        old_values = {c.key: getattr(existing, c.key) for c in existing.__table__.columns}
         update_data = target_in.model_dump(exclude={"work_center_id"})
         for field, value in update_data.items():
             setattr(existing, field, value)
+        # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+        db.flush()
+        audit.log_update(
+            resource_type="oee_target",
+            resource_id=existing.id,
+            resource_identifier=str(existing.id),
+            old_values=old_values,
+            new_values=existing,
+            description=f"Updated OEE target for work center {wc.name}",
+        )
         db.commit()
         db.refresh(existing)
         target = existing
@@ -916,6 +992,15 @@ def create_oee_target(
         target = OEETarget(**target_in.model_dump())
         target.company_id = company_id
         db.add(target)
+        # Audit (tamper-evident) BEFORE the terminal commit; flush so the PK is populated.
+        db.flush()
+        audit.log_create(
+            resource_type="oee_target",
+            resource_id=target.id,
+            resource_identifier=str(target.id),
+            new_values=target,
+            description=f"Created OEE target for work center {wc.name}",
+        )
         db.commit()
         db.refresh(target)
 
@@ -942,16 +1027,28 @@ def update_oee_target(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update an OEE target."""
     target = db.query(OEETarget).filter(OEETarget.id == target_id, OEETarget.company_id == company_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="OEE target not found")
 
+    old_values = {c.key: getattr(target, c.key) for c in target.__table__.columns}
     update_data = target_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(target, field, value)
 
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+    db.flush()
+    audit.log_update(
+        resource_type="oee_target",
+        resource_id=target.id,
+        resource_identifier=str(target.id),
+        old_values=old_values,
+        new_values=target,
+        description=f"Updated OEE target {target.id}",
+    )
     db.commit()
     db.refresh(target)
 
@@ -982,12 +1079,25 @@ def delete_oee_target(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(OEE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Delete an OEE target."""
     target = db.query(OEETarget).filter(OEETarget.id == target_id, OEETarget.company_id == company_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="OEE target not found")
 
+    # Snapshot for the audit row before the row is removed.
+    old_values = {c.key: getattr(target, c.key) for c in target.__table__.columns}
+    deleted_id = target.id
+
     db.delete(target)
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+    audit.log_delete(
+        resource_type="oee_target",
+        resource_id=deleted_id,
+        resource_identifier=str(deleted_id),
+        old_values=old_values,
+        description=f"Deleted OEE target {deleted_id}",
+    )
     db.commit()
     return {"message": "OEE target deleted"}
