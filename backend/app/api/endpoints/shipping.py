@@ -320,7 +320,14 @@ def mark_shipped(
     shipment_id: int,
     tracking_number: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # RBAC (docs/RBAC_PERMISSIONS.md -> Shipping -> "Complete"): marking a shipment shipped
+    # is the terminal shipping action that CLOSES the work order, so it is gated to the
+    # documented Shipping-Complete role set (ADMIN / MANAGER / SUPERVISOR / SHIPPING). This
+    # is an intentional behavior change: non-privileged tenant users now get 403 (previously
+    # any authenticated user could close a WO by shipping).
+    current_user: User = Depends(
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING])
+    ),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
