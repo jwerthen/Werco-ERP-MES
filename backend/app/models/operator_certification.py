@@ -111,4 +111,6 @@ class SkillMatrix(Base, TenantMixin):
     work_center = relationship("WorkCenter")
     approver = relationship("User", foreign_keys=[approved_by])
 
-    __table_args__ = (UniqueConstraint('user_id', 'work_center_id', name='uq_user_work_center'),)
+    __table_args__ = (
+        UniqueConstraint('company_id', 'user_id', 'work_center_id', name='uq_skill_matrix_company_user_wc'),
+    )

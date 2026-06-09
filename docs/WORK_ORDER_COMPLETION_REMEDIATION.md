@@ -128,14 +128,25 @@ Findings: SFI-1, SFI-2, SFI-3, LOCK-1.
 > deploy/migration output for AS9100D labor traceability rather than to the tamper-evident
 > `audit_log`). See `docs/DEVELOPMENT.md` → Database Migrations for the bootstrap-path caveat.
 >
-> **Residual follow-up A1 (tracked, not fixed in Batch 2):** `audit_log.sequence_number` is
-> allocated by `max()+1` and is **not** serialized by the new `FOR UPDATE` row locks (those lock the
-> operation / time-entry / work-order rows, not the audit table). Two concurrent audit writes on a
-> hot completion path can therefore collide on the unique `sequence_number` and raise an uncaught
-> `IntegrityError`, surfacing as an occasional **500**. This is pre-existing but **worsened** by the
-> additional completion-path audit sites added in Batch 1. Track for a dedicated fix — e.g. serialize
-> sequence allocation (advisory lock / `SELECT … FOR UPDATE` on the chain tail) or catch-and-retry on
-> the sequence-collision `IntegrityError`.
+> **Residual follow-up A1 — ✅ RESOLVED (2026-06-09, branch `fix/wo-followups-round2`).**
+> `audit_log.sequence_number` was allocated by `max()+1` and was **not** serialized by the `FOR UPDATE`
+> row locks (those lock the operation / time-entry / work-order rows, not the audit table), so two
+> concurrent audit writes on a hot completion path could collide on the unique `sequence_number`, raise
+> an uncaught `IntegrityError`, **poison the caller's transaction**, and surface as an occasional **500**
+> — a pre-existing race **worsened** by the completion-path audit sites added in Batch 1 (and again by
+> the Batch 6 read-path inventory audits). `AuditService.log()` (`app/services/audit_service.py`) now
+> serializes the global chain's allocate+insert critical section: **(1)** a transaction-level Postgres
+> advisory lock (`pg_advisory_xact_lock`, dialect-guarded — no-op on SQLite, which already serializes
+> writers) is taken **before** reading the chain tail, so only one writer at a time reads the tail,
+> allocates the next `sequence_number`, and inserts; and **(2)** the tail-read → allocate → hash →
+> INSERT runs inside a **SAVEPOINT** (`begin_nested`) with a bounded retry (`_MAX_SEQUENCE_RETRIES = 5`)
+> — a residual unique-`sequence_number` collision rolls back **only** the savepoint (leaving the
+> caller's outer transaction usable), then re-reads the tail and retries with a freshly built entry.
+> `db.add` lives **inside** the savepoint because `begin_nested` autoflushes on open. The tamper-evident
+> hash-chain semantics (`sequence_number` / `previous_hash` / `integrity_hash`) are **unchanged**; this
+> only serializes allocation so concurrent audited writes can no longer collide/500 or poison the
+> transaction. If every retry collides, `log()` degrades to its existing best-effort contract
+> (log + return `None`) with the session left un-poisoned.
 
 ### Rank 6 — Consolidate op-complete → WO-rollup into one shared finalizer ☑ (Batch 3 · keystone)
 File: `work_order_state_service.py` (+ both endpoints). `finalize_operation_completion(db, wo, op, user, company_id)`: remaining-ops count (reuse loaded relationship), COMPLETE-vs-release branch, `max()`-guarded qty floored at TimeEntry evidence, always stamp `actual_start`, one absolute-vs-additive contract per verb, stop zeroing scrap from defaulted-0 param, self-healing READY release via `has_incomplete_predecessors`, populate/drop `current_operation_id`, return affected work_center_ids. `complete_work_order` delegates. Consistent ON_HOLD policy.
@@ -184,12 +195,12 @@ Findings: DUP-2, DUP-3, DUP-4, DUP-5, SFI-4, SFI-5, RUP-1, RUP-4, RUP-6, QG-5, B
 > `audit_log.sequence_number` collision) can never turn a GET into a 500.
 >
 > **Open follow-ups (tracked, not yet fixed):**
-> 1. **A1 — root `audit_log.sequence_number` race (carried over from Batch 2).** The `max()+1`
->    sequence allocation is still **not** serialized under concurrent writes; Batch 3 only guaranteed
->    that reconcile-on-read *reads* don't 500 when the collision happens (it swallows the failure and
->    drops the redundant write). The hot completion-path writers can still collide on the unique
->    `sequence_number` → occasional **500**. Needs a dedicated fix (serialize sequence allocation via
->    an advisory lock / `FOR UPDATE` on the chain tail, or catch-and-retry on the collision).
+> 1. **A1 — root `audit_log.sequence_number` race (carried over from Batch 2) — ✅ RESOLVED
+>    (2026-06-09, branch `fix/wo-followups-round2`).** Batch 3 only guaranteed that reconcile-on-read
+>    *reads* didn't 500 when the collision happened (it swallowed the failure and dropped the redundant
+>    write); the hot completion-path writers could still collide on the unique `sequence_number`. The
+>    `max()+1` allocation is now serialized in `AuditService.log()` (advisory lock + savepoint/retry) —
+>    see the resolved A1 note under Rank 5 (Batch 2) for the full description.
 > 2. **Rank-12 tension — AUD-3 keeps mutation + audit on the read path.** The planned rank-12
 >    "bound the dashboard reconcile / move it to a debounced ARQ job" (Batch 9) must **carry the
 >    audit emission with it**: once reconcile no longer runs under the requesting user it has to
@@ -342,10 +353,14 @@ Findings: EVT-1, EVT-2, EVT-3, EVT-4, EVT-5, MS-2.
 >    (seeded through the service), not through a tenant-facing REST endpoint — there is no
 >    `POST /api/v1/webhooks` route. Subscribers cannot yet self-register; track a CRUD endpoint
 >    (RBAC-gated) separately.
-> 4. **Pre-existing: `mark_shipped` has no `require_role`.** `POST /shipping/{shipment_id}/ship`
->    depends only on `get_current_user` + `get_current_company_id` — any authenticated user in the
->    tenant can close a WO by shipping it. This pre-dates Batch 5 (not introduced here) and is raised
->    separately for an RBAC gate.
+> 4. **`mark_shipped` now `require_role`-gated — ✅ RESOLVED (2026-06-09, branch
+>    `fix/wo-followups-round2`).** `POST /shipping/{shipment_id}/ship` (`mark_shipped`) previously
+>    depended only on `get_current_user` + `get_current_company_id`, so any authenticated tenant user
+>    could close a WO by shipping it. It now depends on
+>    `require_role([ADMIN, MANAGER, SUPERVISOR, SHIPPING])`, aligned to the documented Shipping
+>    **"Complete"** permission in `docs/RBAC_PERMISSIONS.md` (marking shipped is the terminal shipping
+>    action that CLOSES the work order). **Intentional behavior change:** a non-privileged user now gets
+>    **403** on this endpoint. See `docs/API.md` → Shipping and `docs/RBAC_PERMISSIONS.md` → Shipping.
 
 ### Rank 9 — FG receipt + backflush + as-built genealogy on completion ☑ (Batch 6 · data-sensitive)
 In finalizer on WO COMPLETE: assign FG lot/serial; create/increment FG `InventoryItem` + RECEIVE txn; backflush components (ISSUE txns carrying consumed lot, apply `scrap_factor`, per-part flag); route through `get_audit_service`. **Idempotent** (reconcile re-enters). Mirror trace into `trace_serial`; populate MRP `on_order`.
@@ -422,11 +437,12 @@ Findings: INV-1, INV-2, INV-3, TRACE-2, TRACE-3, TRACE-4, TRACE-5, MS-4.
 >    receipt + backflush currently run inline (best-effort) on reconcile-on-read; when reconcile moves
 >    to a debounced background job the inventory writes should move with it (and re-attribute to a
 >    system actor), mirroring the AUD-3 / EVT-4 reconcile-off-read follow-ups.
-> 4. **A1 (`audit_log.sequence_number` race) is amplified by read-path inventory audits.** Each FG
->    receipt / backflush now writes additional `audit_log` rows, and on the reconcile-on-read path
->    these are emitted under a GET — increasing the volume of concurrent audit writers that can collide
->    on the unserialized `max()+1` `sequence_number`. A1 remains the tracked dedicated fix (serialize
->    sequence allocation or catch-and-retry the collision).
+> 4. **A1 (`audit_log.sequence_number` race) was amplified by read-path inventory audits — ✅ RESOLVED
+>    (2026-06-09, branch `fix/wo-followups-round2`).** Each FG receipt / backflush writes additional
+>    `audit_log` rows (on the reconcile-on-read path, under a GET), which increased the volume of
+>    concurrent audit writers that could collide on the unserialized `max()+1` `sequence_number`. The
+>    allocation is now serialized in `AuditService.log()` (advisory lock + savepoint/retry) — see the
+>    resolved A1 note under Rank 5 (Batch 2).
 >
 > ⚠️ **Auditor sign-off — negative-stock-on-shortage posture.** A backflush that exceeds available
 > stock **drives the primary source lot negative and still completes the work order** (the demand is
@@ -568,11 +584,17 @@ Findings: OEE-1, OEE-4, OEE-5, OEE-6, OEE-7, COST-5, MS-5.
 > write-restricted, per `docs/RBAC_PERMISSIONS.md`). See `docs/API.md` → OEE Tracking and
 > `docs/RBAC_PERMISSIONS.md` → OEE.
 >
-> **Follow-ups (tracked, not fixed in Batch 8):**
-> 1. **`OEERecord` writes are not audited.** The auto-calc and manual `/oee/records` create/update/delete
->    do not write a tamper-evident `audit_log` row (OEE records are a derived daily snapshot, not a
->    primary production record). The OEE-write RBAC gate added here closes the access-control half of the
->    original concern; an audit-trail pass on `OEERecord` mutation remains a tracked standing item.
+> **Follow-ups (tracked):**
+> 1. **`OEERecord` / `OEETarget` writes are now audited — ✅ RESOLVED (2026-06-09, branch
+>    `fix/wo-followups-round2`).** The OEE write endpoints in `app/api/endpoints/oee.py` —
+>    `create_oee_record`, `update_oee_record`, `delete_oee_record`, the `auto_calculate_oee` create/update
+>    branches, and `create_oee_target` (create + update) / `update_oee_target` / `delete_oee_target` — now
+>    write a tamper-evident `audit_log` row via `AuditService` (`get_audit_service` dependency;
+>    `log_create` / `log_update` / `log_delete`). Each takes a pre-mutation column snapshot for the diff,
+>    `db.flush()`es so the PK is populated, and logs **before** the terminal `db.commit()` so the audit row
+>    commits atomically with the record/target. The auto-calc upsert writes one representative row per call.
+>    The Batch-8 RBAC gate closed the access-control half; this closes the audit-trail half (resource types
+>    `oee_record` / `oee_target`).
 > 2. **Manual `POST /oee/records` keeps the legacy planned-time availability formula.** The *manual*
 >    record-entry path (`calculate_oee` helper) still computes Availability = `actual_run_time ÷
 >    planned_production_time` from the operator-supplied fields, because those are hand-entered inputs,
@@ -703,10 +725,10 @@ Findings: PERF-1, PERF-2, PERF-3, PERF-4, PERF-5.
 > 1. **Reconcile-on-read → debounced ARQ job (with system-actor re-attribution).** As above — the full
 >    move off the read path is the remaining rank-12 initiative; the PERF-3 truncation WARNING is the
 >    operational trigger for when a shop has outgrown read-path reconcile.
-> 2. **A1 — root `audit_log.sequence_number` race (carried over from Batch 2/3/6).** Unchanged by Batch 9.
->    The unserialized `max()+1` sequence allocation can still collide under concurrent completion-path
->    audit writers; the fast-304 path reduces *how often* the dashboard read does any audited work, but
->    the dedicated fix (serialize sequence allocation or catch-and-retry the collision) is still open.
+> 2. **A1 — root `audit_log.sequence_number` race (carried over from Batch 2/3/6) — ✅ RESOLVED
+>    (2026-06-09, branch `fix/wo-followups-round2`).** Unchanged by Batch 9 itself; the dedicated fix
+>    landed in round-2 follow-ups — the `max()+1` allocation is now serialized in `AuditService.log()`
+>    (advisory lock + savepoint/retry). See the resolved A1 note under Rank 5 (Batch 2).
 
 ### Rank 13 — Frontend completion UX hardening ☑ (Batch 10)
 Invalidate `/shop-floor/dashboard` cache after completion mutations; in-flight guards on Complete buttons; memoize/window the WO list.
@@ -1084,7 +1106,29 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 >   `User`/`WorkCenter` grid lists; `create_skill_entry` scopes its duplicate-check and stamps
 >   `company_id` on the new row). Closes a cross-tenant skill-data read leak. **No RBAC change** — these
 >   remain open to any authenticated user, now company-scoped.
-> - `SkillMatrix`'s unique constraint omits `company_id` — it should be tenant-qualified. **(still open)**
+> - **Remaining `operator_certifications.py` cross-tenant read/write leak — ✅ RESOLVED (2026-06-09,
+>   branch `fix/wo-followups-round2`).** Seven more endpoints in
+>   `app/api/endpoints/operator_certifications.py` are now tenant-scoped (each adds
+>   `company_id = Depends(get_current_company_id)`): the `GET /certifications/dashboard`
+>   (`certification_dashboard`) aggregates — cert counts/compliance-rate, `operators_with_certs`,
+>   `total_operators` (now `User.company_id`-scoped), and training-hours-this-month — are now all
+>   company-scoped; `GET /certifications/expiring` filters `OperatorCertification.company_id`; and the
+>   by-id reads/updates `GET /certifications/user/{user_id}`, `GET /certifications/{cert_id}`,
+>   `GET /training/user/{user_id}`, `PUT /training/{training_id}` (`update_training`), and
+>   `PUT /skill-matrix/{entry_id}` (`update_skill_entry`) all add `company_id` to the lookup, so a
+>   cross-tenant id now returns **404** before any read/mutation. Closes the cross-tenant cert/training/
+>   skill read+write leak. **No RBAC change** — these stay open to any authenticated user, now
+>   company-scoped.
+> - **`SkillMatrix` unique constraint is now tenant-qualified — ✅ RESOLVED (2026-06-09, branch
+>   `fix/wo-followups-round2`).** The global `UniqueConstraint('user_id', 'work_center_id',
+>   name='uq_user_work_center')` is replaced by tenant-scoped
+>   `UniqueConstraint('company_id', 'user_id', 'work_center_id', name='uq_skill_matrix_company_user_wc')`
+>   on the model (`app/models/operator_certification.py`) and via migration
+>   **`045_skillmatrix_company_unique`**. The new key is strictly **looser** (it prepends `company_id` to
+>   the same tuple), so no pre-flight dedup is required and the migration is safe to apply before/after
+>   the model deploy; Postgres-guarded drop/recreate (SQLite `create_all` already builds the new
+>   constraint from `__table_args__`); idempotent + reversible. Two tenants can now record the same
+>   `(user_id, work_center_id)` skill row without a cross-tenant uniqueness collision (invariant #1).
 > - Optional DB-level CoC-immutability hardening (the row is treated as append-only in code; a
 >   DB-level guard would harden it further). **(still open)**
 >
