@@ -9,12 +9,14 @@ from app.models.operational_event import OperationalEvent
 from app.models.work_order import WorkOrder, WorkOrderOperation
 
 SENSITIVE_EVENT_KEYS = {
+    "api_key",
     "authorization",
     "bearer",
     "cookie",
     "cui",
     "document_text",
     "drawing_text",
+    "encrypted_api_key",
     "file_path",
     "password",
     "raw_text",

@@ -109,6 +109,20 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
         """Harden production settings."""
+        if self.ENVIRONMENT in ("production", "staging"):
+            # Carrier-integration secrets (API keys / webhook secrets) are Fernet-
+            # encrypted at rest with INTEGRATION_ENCRYPTION_KEY (fallback
+            # WEBHOOK_ENCRYPTION_KEY). It MUST be operator-provided in prod/staging
+            # (CMMC SC-28): an ephemeral key would make stored secrets undecryptable
+            # after a restart. Fail loud at startup rather than silently generating
+            # one (see app/services/carriers/crypto.py).
+            if not self.INTEGRATION_ENCRYPTION_KEY and not self.WEBHOOK_ENCRYPTION_KEY:
+                raise ValueError(
+                    "INTEGRATION_ENCRYPTION_KEY (or WEBHOOK_ENCRYPTION_KEY) must be set in "
+                    f"{self.ENVIRONMENT}. It encrypts carrier API keys / webhook secrets at rest "
+                    '(CMMC SC-28). Generate one with: python -c "from cryptography.fernet import '
+                    'Fernet; print(Fernet.generate_key().decode())"'
+                )
         if self.ENVIRONMENT == "production":
             if self.DEBUG:
                 raise ValueError("DEBUG must be false in production.")
@@ -352,6 +366,11 @@ class Settings(BaseSettings):
 
     # Webhook Configuration
     WEBHOOK_ENCRYPTION_KEY: str = ""
+
+    # Integration secret encryption (carrier-account API keys / webhook secrets).
+    # Fernet key; falls back to WEBHOOK_ENCRYPTION_KEY when unset (see
+    # app/services/carriers/crypto.py).
+    INTEGRATION_ENCRYPTION_KEY: str = ""
 
     # Labor-cost / hour rollup on work-order completion (Batch 7 / rank 10).
     #

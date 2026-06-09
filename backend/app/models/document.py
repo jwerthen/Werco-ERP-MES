@@ -22,6 +22,8 @@ class DocumentType(str, enum.Enum):
     NCR = "ncr"  # Non-Conformance Report
     CAR = "car"  # Corrective Action Report
     FAI = "fai"  # First Article Inspection
+    SHIPPING_LABEL = "shipping_label"  # Purchased carrier parcel label (PDF/PNG/ZPL)
+    BILL_OF_LADING = "bill_of_lading"  # Purchased LTL freight Bill of Lading
     OTHER = "other"
 
 

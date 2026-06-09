@@ -3,6 +3,7 @@ from .analytics import ReportTemplate
 from .audit_log import AuditLog
 from .bom import BOM, BOMItem, BOMItemType
 from .calibration import CalibrationRecord, CalibrationStatus, Equipment
+from .carrier_account import CarrierAccount, CompanyShippingProfile
 from .company import Company
 from .custom_field import CustomFieldDefinition, CustomFieldValue, EntityType, FieldType
 from .customer import Customer
@@ -114,7 +115,14 @@ from .routing_learning import (
     RoutingOperationPattern,
     RoutingWorkCenterPreference,
 )
-from .shipping import CertificateOfConformance, Shipment, ShipmentStatus
+from .shipping import (
+    CertificateOfConformance,
+    Shipment,
+    ShipmentPackage,
+    ShipmentRateQuote,
+    ShipmentStatus,
+    ShipmentTrackingEvent,
+)
 from .spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
 from .supplier_part import SupplierPartMapping
 from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
@@ -297,6 +305,11 @@ __all__ = [
     "RolePermission",
     "Shipment",
     "ShipmentStatus",
+    "ShipmentPackage",
+    "ShipmentRateQuote",
+    "ShipmentTrackingEvent",
     "CertificateOfConformance",
+    "CarrierAccount",
+    "CompanyShippingProfile",
     "SupplierPartMapping",
 ]

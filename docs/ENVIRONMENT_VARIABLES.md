@@ -260,13 +260,37 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 | `AWS_REGION` | No | `us-east-1` | AWS region |
 | `S3_BUCKET_NAME` | No | `werco-erp-documents` | S3 bucket for file storage |
 
+### Local Document Storage
+
+Document uploads — and **purchased shipping labels / Bills of Lading** from the
+carrier integration — are written to a local-disk directory (S3 is not used for
+these). The same resolver is used by `app/api/endpoints/documents.py` and the
+carrier `ShippingService`, so labels/BOLs land alongside every other `Document`.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `UPLOAD_DIR` | No | `/app/uploads` | Primary directory for document / label / BOL files. **In production point this at a mounted, backed-up volume** (or it lives only in the container's ephemeral filesystem). |
+| `UPLOAD_DIR_FALLBACK` | No | `./uploads` | Fallback directory used when `UPLOAD_DIR` is not writable (resolved to an absolute path). |
+
 ### External Services
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | No | - | Anthropic API key for AI-powered PO extraction |
 | `SENTRY_DSN` | No | - | Sentry DSN for error tracking |
-| `WEBHOOK_ENCRYPTION_KEY` | No | - | Key for encrypting webhook payloads |
+| `WEBHOOK_ENCRYPTION_KEY` | Conditional¹ | - | Fernet key for encrypting outbound-webhook secrets at rest. Also the **fallback** for `INTEGRATION_ENCRYPTION_KEY` when that is unset. |
+| `INTEGRATION_ENCRYPTION_KEY` | Conditional¹ | (falls back to `WEBHOOK_ENCRYPTION_KEY`) | Fernet key that encrypts **carrier-integration secrets at rest** (carrier-account API keys and inbound-webhook signing secrets — see [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md)). Resolution order: `INTEGRATION_ENCRYPTION_KEY` → `WEBHOOK_ENCRYPTION_KEY` → (dev/test only) an ephemeral generated key. |
+
+> ¹ **Mandatory in `production`/`staging`.** At least one of `INTEGRATION_ENCRYPTION_KEY` or `WEBHOOK_ENCRYPTION_KEY` must be set: when both are unset and `ENVIRONMENT` is `production` or `staging` the app **hard-fails at startup** (CMMC SC-28). The ephemeral-generated-key fallback exists **only** in dev/test — a generated key does not survive a restart and differs per worker/replica, which would leave stored carrier secrets permanently undecryptable, so it is refused outright in prod/staging rather than failing silently.
+
+> **Generating a Fernet key.** `WEBHOOK_ENCRYPTION_KEY` and `INTEGRATION_ENCRYPTION_KEY`
+> are **Fernet** keys (not `secrets.token_urlsafe` like `SECRET_KEY`). Generate one with:
+> ```bash
+> python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+> ```
+> A single-secret deployment can leave `INTEGRATION_ENCRYPTION_KEY` unset and rely on
+> `WEBHOOK_ENCRYPTION_KEY`; use a dedicated `INTEGRATION_ENCRYPTION_KEY` to rotate carrier
+> secrets independently of webhook secrets.
 
 ### Audit Log Retention / Archival (CMMC AU-3.3.8)
 

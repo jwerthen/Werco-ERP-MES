@@ -21,6 +21,7 @@ Shipped modules, grouped by domain:
 
 ### Warehouse
 - Unified, tabbed warehouse: **inventory** (on-hand, reorder, low-stock, transfers), **receiving** with accept/reject inspection and lot capture, and **shipping** (create shipment, mark shipped, print packing slip).
+- **Multi-carrier shipping** via a swappable aggregator (EasyPost-first): address validation, rate-shopping, label purchase, pickups, and inbound tracking — behind a per-company customer-data egress kill switch (default OFF) for CUI control. Parcel is fully implemented; LTL freight is scaffolded behind the same interface (see [docs/SHIPPING_CARRIER_INTEGRATION.md](docs/SHIPPING_CARRIER_INTEGRATION.md)).
 - **Lot/serial traceability** and genealogy.
 
 ### Purchasing & Supply Chain

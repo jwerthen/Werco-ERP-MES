@@ -54,6 +54,7 @@ const PrintTraveler = lazyWithRetry(() => import('./pages/PrintTraveler'));
 const PrintPurchaseOrder = lazyWithRetry(() => import('./pages/PrintPurchaseOrder'));
 const Traceability = lazyWithRetry(() => import('./pages/Traceability'));
 const PrintPackingSlip = lazyWithRetry(() => import('./pages/PrintPackingSlip'));
+const PrintShippingLabel = lazyWithRetry(() => import('./pages/PrintShippingLabel'));
 const AuditLog = lazyWithRetry(() => import('./pages/AuditLog'));
 const QuoteCalculator = lazyWithRetry(() => import('./pages/QuoteCalculator'));
 const AdminSettings = lazyWithRetry(() => import('./pages/AdminSettings'));
@@ -109,6 +110,7 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/print/traveler', permission: 'work_orders:view' },
   { prefix: '/print/purchase-order', permission: 'purchasing:view' },
   { prefix: '/print/packing-slip', permission: 'shipping:view' },
+  { prefix: '/print/shipping-label', permission: 'shipping:view' },
   { prefix: '/shop-floor', permission: 'work_orders:view' },
   { prefix: '/parts', permission: 'parts:view' },
   { prefix: '/bom', permission: 'boms:view' },
@@ -569,6 +571,11 @@ function AppRoutes() {
       <Route path="/print/packing-slip/:id" element={
         <PrivateRoute>
           <LazyRoute><PrintPackingSlip /></LazyRoute>
+        </PrivateRoute>
+      } />
+      <Route path="/print/shipping-label/:id" element={
+        <PrivateRoute>
+          <LazyRoute><PrintShippingLabel /></LazyRoute>
         </PrivateRoute>
       } />
       

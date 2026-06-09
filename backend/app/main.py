@@ -610,7 +610,12 @@ async def csrf_protection(request: Request, call_next):
             "/health",
             "/api/v1/errors/log",
         )
-        if request.url.path in exempt_paths:
+        # Inbound carrier tracking webhooks are server-to-server (no browser
+        # Origin / JWT); they authenticate via HMAC over the raw body, so the
+        # browser-oriented CSRF Origin/X-Requested-With checks must not apply.
+        # Prefix match because the path carries a {provider} segment.
+        exempt_prefixes = (f"{settings.API_V1_PREFIX}/webhooks/carriers/",)
+        if request.url.path in exempt_paths or request.url.path.startswith(exempt_prefixes):
             return await call_next(request)
 
         # Defense 1: Check for X-Requested-With header (cannot be set cross-origin without CORS)
@@ -651,6 +656,12 @@ async def csrf_protection(request: Request, call_next):
 # Input sanitization middleware - sanitize all incoming JSON data
 @app.middleware("http")
 async def sanitize_input(request: Request, call_next):
+    # Inbound carrier webhooks verify an HMAC over the EXACT raw body bytes;
+    # rewriting request._body with a sanitized copy would break that signature
+    # check. Skip sanitization for them (the handler treats the body as opaque
+    # and never echoes it). Prefix match because the path carries {provider}.
+    if request.url.path.startswith(f"{settings.API_V1_PREFIX}/webhooks/carriers/"):
+        return await call_next(request)
     # Only process JSON requests with body
     if request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-type", "").startswith(
         "application/json"

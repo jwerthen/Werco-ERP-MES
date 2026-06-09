@@ -160,6 +160,90 @@ class TestInsecureKeyPatterns:
                 Settings()
 
 
+class TestIntegrationEncryptionKeyValidation:
+    """Carrier-secret encryption key must be operator-provided in prod/staging (CMMC SC-28).
+
+    Guards the hard-fail added to ``validate_production_settings``: without an
+    explicit ``INTEGRATION_ENCRYPTION_KEY`` (or its ``WEBHOOK_ENCRYPTION_KEY``
+    fallback), the app would otherwise generate an ephemeral key that leaves
+    carrier API keys / webhook secrets undecryptable after a restart.
+    """
+
+    def test_production_without_encryption_key_rejected(self):
+        from pydantic import ValidationError
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "ENVIRONMENT": "production",
+            },
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc_info:
+                from app.core.config import Settings
+
+                Settings()
+
+            assert "INTEGRATION_ENCRYPTION_KEY" in str(exc_info.value)
+
+    def test_staging_without_encryption_key_rejected(self):
+        from pydantic import ValidationError
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "ENVIRONMENT": "staging",
+            },
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc_info:
+                from app.core.config import Settings
+
+                Settings()
+
+            assert "INTEGRATION_ENCRYPTION_KEY" in str(exc_info.value)
+
+    def test_webhook_encryption_key_satisfies_requirement(self):
+        """The WEBHOOK_ENCRYPTION_KEY fallback alone satisfies the prod requirement."""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://postgres:secret@db.example.supabase.co:5432/postgres",
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "WEBHOOK_ENCRYPTION_KEY": "fallback-webhook-encryption-key",
+                "ENVIRONMENT": "production",
+                "DEBUG": "false",
+                "CORS_ORIGINS": "https://erp.example.com",
+            },
+            clear=True,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+            assert settings.database_provider == "supabase"
+
+    def test_development_without_encryption_key_is_allowed(self):
+        """Dev/test may omit the key (an ephemeral key is acceptable locally)."""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SECRET_KEY": "a" * 64,
+                "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "ENVIRONMENT": "development",
+            },
+            clear=True,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+            assert settings.ENVIRONMENT == "development"
+
+
 class TestSupabaseDatabaseConfiguration:
     """Test Supabase database URL normalization and production enforcement."""
 
@@ -231,6 +315,7 @@ class TestSupabaseDatabaseConfiguration:
                 "SUPABASE_DB_PASSWORD": "db-password",
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "INTEGRATION_ENCRYPTION_KEY": "test-integration-encryption-key",
                 "ENVIRONMENT": "production",
                 "DEBUG": "false",
                 "CORS_ORIGINS": "https://erp.example.com",
@@ -252,6 +337,7 @@ class TestSupabaseDatabaseConfiguration:
                 "POSTGRES_URL": "postgresql://postgres.abc123:db-password@aws-1-us-west-2.pooler.supabase.com:5432/postgres",
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "INTEGRATION_ENCRYPTION_KEY": "test-integration-encryption-key",
                 "ENVIRONMENT": "production",
                 "DEBUG": "false",
                 "CORS_ORIGINS": "https://erp.example.com",
@@ -277,6 +363,7 @@ class TestSupabaseDatabaseConfiguration:
                 "POSTGRES_DATABASE": "postgres",
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "INTEGRATION_ENCRYPTION_KEY": "test-integration-encryption-key",
                 "ENVIRONMENT": "production",
                 "DEBUG": "false",
                 "CORS_ORIGINS": "https://erp.example.com",
@@ -325,6 +412,7 @@ class TestSupabaseDatabaseConfiguration:
                 "DB_PASSWORD": "",
                 "SECRET_KEY": "a" * 64,
                 "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+                "INTEGRATION_ENCRYPTION_KEY": "test-integration-encryption-key",
                 "ENVIRONMENT": "production",
                 "DEBUG": "false",
                 "CORS_ORIGINS": "https://erp.example.com",

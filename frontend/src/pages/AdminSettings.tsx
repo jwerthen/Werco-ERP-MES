@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import type { UserRole } from '../types';
 import { formatCentralDateTime } from '../utils/centralTime';
@@ -20,9 +21,11 @@ import {
   DocumentTextIcon,
   ShieldCheckIcon,
   UsersIcon,
+  GlobeAltIcon,
 } from '@heroicons/react/24/outline';
+import CarrierIntegrationsTab from '../components/admin/CarrierIntegrationsTab';
 
-type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'audit';
+type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'carriers' | 'audit';
 
 const MATERIAL_CATEGORIES = ['steel', 'stainless', 'aluminum', 'brass', 'copper', 'titanium', 'plastic', 'other'];
 const MACHINE_TYPES = ['cnc_mill_3axis', 'cnc_mill_4axis', 'cnc_mill_5axis', 'cnc_lathe', 'laser_fiber', 'laser_co2', 'plasma', 'waterjet', 'press_brake', 'punch_press'];
@@ -40,6 +43,7 @@ const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
   { key: 'overhead', label: 'Overhead/Markup', icon: Cog6ToothIcon },
   { key: 'employees', label: 'Employees', icon: UsersIcon },
   { key: 'roles', label: 'Roles & Permissions', icon: ShieldCheckIcon },
+  { key: 'carriers', label: 'Carriers / Integrations', icon: GlobeAltIcon },
   { key: 'audit', label: 'Audit Log', icon: ClockIcon },
 ];
 
@@ -79,7 +83,14 @@ const padEmployeeId = (value: string) => {
 const buildEmployeeEmail = (employeeId: string) => `employee-${employeeId}@werco.com`;
 
 export default function AdminSettings() {
-  const [activeTab, setActiveTab] = useState<TabKey>('materials');
+  const [searchParams] = useSearchParams();
+  // Honor a ?tab=<key> deep link (e.g. the "enable carrier egress" CTA in the
+  // Schedule-Shipment wizard links to /admin/settings?tab=carriers).
+  const initialTab = ((): TabKey => {
+    const requested = searchParams.get('tab');
+    return tabs.some((t) => t.key === requested) ? (requested as TabKey) : 'materials';
+  })();
+  const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
   const [loading, setLoading] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
 
@@ -353,7 +364,7 @@ export default function AdminSettings() {
       {/* Tab content */}
       <div className="card">
         {/* Show inactive toggle (not for configuration-only tabs) */}
-        {!['overhead', 'audit', 'workcentertypes', 'roles'].includes(activeTab) && (
+        {!['overhead', 'audit', 'workcentertypes', 'roles', 'carriers'].includes(activeTab) && (
           <div className="flex items-center justify-between mb-4 pb-4 border-b border-surface-200">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -417,6 +428,7 @@ export default function AdminSettings() {
               />
             )}
             {activeTab === 'roles' && rolePermissions && <RolePermissionsManager data={rolePermissions} onUpdate={() => loadTabData('roles')} />}
+            {activeTab === 'carriers' && <CarrierIntegrationsTab />}
             {activeTab === 'audit' && <AuditLogTable data={auditLog} />}
           </>
         )}

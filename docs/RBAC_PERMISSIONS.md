@@ -137,7 +137,29 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | | | ✓ | ✓ |
 | Create | ✓ | ✓ | ✓ | | | ✓ | |
 | Complete | ✓ | ✓ | ✓ | | | ✓ | |
+| Rate-shop / validate address (`shipping:rate`) | ✓ | ✓ | ✓ | | | ✓ | |
+| Buy label / BOL / schedule pickup (`shipping:label`) | ✓ | ✓ | ✓ | | | ✓ | |
+| Void / refund label (`shipping:void`) | ✓ | ✓ | ✓ | | | ✓ | |
 | Issue Certificate of Conformance | ✓ | ✓ | | | ✓ | | |
+
+> **Carrier-integration write actions — endpoint mapping (multi-carrier shipping integration).**
+> The carrier actions on `app/api/endpoints/shipping.py` —
+> `POST /shipping/validate-address`, `POST /shipping/{id}/rate-shop`,
+> `POST /shipping/{id}/buy-label`, `POST /shipping/{id}/buy-bol`,
+> `POST /shipping/{id}/schedule-pickup`, `POST /shipping/{id}/void-label`, and
+> `POST /shipping/{id}/refund` — are enforced **in code** to
+> `require_role([ADMIN, MANAGER, SUPERVISOR, SHIPPING])` (`CARRIER_WRITE_ROLES`). They transmit
+> customer data to a carrier (gated by the per-company `allow_carrier_egress` kill switch in the
+> service) and move money (label/BOL/void/refund are audited), so they carry the same role set that
+> may complete a shipment. The new permission strings `shipping:rate`, `shipping:label`, and
+> `shipping:void` (in `app/models/role_permission.py`, granted to Admin / Manager / Supervisor /
+> Shipping) drive the **frontend** `PermissionGate` / `usePermissions` visibility; the
+> `require_role` lists above are the authoritative server-side control. The read endpoints
+> (`GET /shipping/{id}/rates`, `GET /shipping/{id}/tracking`) stay open to any authenticated tenant
+> user (read-broad / write-restricted). See
+> [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md) and `docs/API.md` →
+> Shipping. The inbound carrier tracking webhook (`POST /webhooks/carriers/{provider}`) is
+> **unauthenticated by design** — see the Admin → Integrations note below.
 
 > **Complete (mark shipped) — endpoint mapping (2026-06-09).** The Shipping **Complete** action
 > `POST /api/v1/shipping/{shipment_id}/ship` (`mark_shipped`) is now enforced **in code** to the
@@ -282,8 +304,28 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | Settings | ✓ | | | | | | |
+| Integrations (`admin:integrations`) | ✓ | | | | | | |
 | Audit Logs | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
+
+> **Integrations (carrier-account credentials + shipping profile) — endpoint mapping.** The
+> carrier-integration admin console — `app/api/endpoints/integrations.py`, mounted under
+> `/api/v1/admin/settings` — is enforced **in code** to `require_role([ADMIN])` on every route:
+> the carrier-account CRUD (`GET`/`POST`/`PUT`/`DELETE …/carrier-accounts`), the credential-only
+> `POST …/carrier-accounts/{id}/test-connection`, and the company shipping-profile
+> `GET`/`PUT …/shipping-profile` (which holds the `allow_carrier_egress` kill switch). Carrier
+> secrets are write-only (Fernet-encrypted, never returned — only `api_key_last4` /
+> `has_webhook_secret`); deletes are soft deletes; create/update/delete and the egress toggle are
+> audited. The new `admin:integrations` permission string (granted to **Admin** in
+> `app/models/role_permission.py`) drives the frontend Carrier Integrations tab's visibility. See
+> [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md).
+>
+> **Inbound carrier webhook is unauthenticated (by design).** `POST /api/v1/webhooks/carriers/{provider}`
+> (`app/api/endpoints/carrier_webhooks.py`) has **no auth dependency** — a carrier cannot present a
+> JWT. Trust is established by **HMAC signature** verification against the stored per-tenant webhook
+> secret, and the owning tenant is resolved **only from stored shipment data**
+> (`Shipment.aggregator_shipment_id`), never from caller input. A request that matches no secret or no
+> shipment is dropped with **204** (no existence oracle). It is therefore not on this permission matrix.
 
 > **Audit-log access (tenant-scoped).** The **Audit Logs** row above covers audit *retrieval*:
 > `GET /api/v1/audit/`, `/audit/summary`, `/audit/actions`, `/audit/resource-types`
