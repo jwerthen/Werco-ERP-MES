@@ -898,7 +898,7 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 > were dead — nothing set them and nothing read them. Now:
 > - **Two new endpoints.** `POST /shop-floor/time-entries/{id}/approve` (sets `approved` now +
 >   `approved_by`) and `POST /shop-floor/time-entries/{id}/unapprove` (clears both). Both are
->   role-gated to **SUPERVISOR / QUALITY / ADMIN** (note: **not Manager**), tenant-scoped (cross-tenant
+>   role-gated to **ADMIN / MANAGER / SUPERVISOR / QUALITY**, tenant-scoped (cross-tenant
 >   id → **404** before any mutation), idempotent (re-approving / re-unapproving is a no-op with no
 >   second audit row), respect the `version` optimistic-lock column (concurrent stale write → **409**),
 >   and write **one** tamper-evident `audit_log` row (`time_entry_approve` / `time_entry_unapprove`).
@@ -947,7 +947,7 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 > custom-report labor-not-tracked headers + `estimated_hours` removed from the selectable catalog),
 > `docs/ENVIRONMENT_VARIABLES.md` (new `REQUIRE_APPROVED_LABOR_FOR_COST` flag + relationship to
 > `LABOR_COST_ROLLUP_ENABLED`), `docs/RBAC_PERMISSIONS.md` (new "Approve labor (TimeEntry)" row under
-> Work Orders — SUPERVISOR/QUALITY/ADMIN, no self-approval), and this doc.
+> Work Orders — ADMIN/MANAGER/SUPERVISOR/QUALITY, no self-approval), and this doc.
 >
 > **11C now landed** (G1 parent/child rollup, G5-B operator-cert gate, G6-B CoC generation — see the
 > Batch 11C status note below); **G4-Fix2** and **G1-general** remain **EXCLUDED**.
