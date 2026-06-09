@@ -1,202 +1,221 @@
-# Werco ERP & MES System
+# Werco ERP-MES
 
-A custom Enterprise Resource Planning (ERP) and Manufacturing Execution System (MES) built for Werco Manufacturing. Designed for AS9100D, ISO 9001, and CMMC Level 2 compliance.
+A custom **Enterprise Resource Planning (ERP) + Manufacturing Execution System (MES)** for precision manufacturing (sheet metal, CNC, fabrication, welding, paint/powder coat, assembly, inspection). Built from the ground up for **AS9100D, ISO 9001, and CMMC Level 2** — in this system, audit trails, lot/serial traceability, multi-tenant isolation, and role-based access control are correctness requirements, not optional features. A query that returns another tenant's rows, or a state change that isn't recorded in the tamper-evident audit log, is treated as a bug.
 
-## Features
+## What it does
 
-### Shop Floor / MES
-- **Work Center Management** - Track Fabrication, CNC, Welding, Paint, Powder Coating, Assembly, Inspection
-- **Job Tracking** - Real-time work order status and progress tracking
-- **Time Clock** - Operator clock-in/clock-out with production reporting
-- **Work Queue** - Visual job queue by work center with priority sorting
-- **Dashboard** - Real-time shop floor visibility
+Shipped modules, grouped by domain:
 
-### Work Order Management
-- Work order creation and routing
-- Operation sequencing with work instructions
-- Priority-based scheduling
-- Customer PO tracking
-- Lot/serial number traceability
+### Sales & Quoting
+- **AI RFQ quoting** — upload customer drawings (PDF/DXF/STEP); Anthropic Claude parses the package into parts and produces cost/lead-time estimates with confidence scores and stated assumptions, which a user reviews and converts to a quote.
+- **Routing learning** — the AI improves routing/estimate suggestions from accepted historical jobs.
+- Manual **quote calculator**, quote management, and customer records.
 
-### Parts & BOM
-- Part master with make vs. buy classification
-- Multi-level BOM support for assemblies
-- Revision control
-- Critical characteristic flagging
+### Production & Shop Floor
+- **Work orders** — release, dispatch, and full lifecycle tracking; priority P1–P10, customer-PO linkage, auto-loaded BOM and routing.
+- **Shop-floor kiosk** — operator start/hold/resume/complete with qty produced/scrapped and notes; badge/employee-ID login for kiosks.
+- **Scheduling & dispatch**, **OEE** tracking, **downtime** logging, and operator **time tracking / time clock**.
 
-### Compliance Features (AS9100D / ISO 9001 / CMMC)
-- Full audit logging of all actions
-- Document control with revision tracking
-- Lot traceability
-- User authentication with account lockout
-- Role-based access control
+### Engineering
+- **Part master** (make/buy classification, critical-characteristic flags), multi-level **BOM**, **routing**, and **engineering change orders (ECO)** with revision control.
 
-## Tech Stack
+### Warehouse
+- Unified, tabbed warehouse: **inventory** (on-hand, reorder, low-stock, transfers), **receiving** with accept/reject inspection and lot capture, and **shipping** (create shipment, mark shipped, print packing slip).
+- **Lot/serial traceability** and genealogy.
 
-- **Backend**: Python 3.11, FastAPI, SQLAlchemy, PostgreSQL
-- **Frontend**: React 18, TypeScript, Tailwind CSS
-- **Deployment**: Docker, Docker Compose
+### Purchasing & Supply Chain
+- Vendors, **purchase orders** (create/send), **MRP** (shortage detection and suggested-PO generation), receiving, **supplier scorecards**, and **PO upload** (AI parsing of PO/quote PDFs).
 
-## Quick Start
+### Quality & Compliance
+- **NCR / CAR / FAI**, **SPC**, **calibration** management, **customer complaints**, **QMS standards**, and **operator certifications / skill matrix**.
 
-### Prerequisites
-- Docker and Docker Compose
-- Git
+### Maintenance & Tooling
+- Preventive/corrective **maintenance** and **tool management**.
 
-### Installation
+### Analytics & Reporting
+- **Analytics** (production, quality, inventory, forecasting, costs), **reports**, and **job costing**.
 
-1. Clone the repository:
-```bash
-git clone https://github.com/jwerthen/werco-erp-mes.git
-cd werco-erp-mes
-```
+### Administration & Governance
+- **RBAC** (8 roles, server-side `require_role` gating), **multi-tenant** company scoping, **tamper-evident audit log** (SHA-256 hash chain), users/employee provisioning, work centers, custom fields, admin settings, setup wizard, import center, and a platform-admin overview for cross-company oversight.
 
-2. Create environment file:
-```bash
-copy backend\.env.example backend\.env
-# Edit .env with your settings (especially SECRET_KEY)
-```
+## Architecture
 
-3. Start with Docker:
-```bash
-docker-compose up -d
-```
+Monorepo with a layered FastAPI backend and a React SPA frontend.
 
-4. Seed the database (first time only):
-```bash
-docker-compose exec backend python -m scripts.seed_data
-```
+- **`backend/`** — FastAPI app under `app/`: thin routers in `api/endpoints/` (~53 routers under `/api/v1/`), business logic in `services/`, SQLAlchemy 2.0 `models/`, Pydantic 2 `schemas/`, and the auth/tenancy/RBAC dependency seam in `api/deps.py`.
+- **`frontend/`** — React 19 + TypeScript + Vite SPA; typed Axios client with ETag conditional caching and a refresh-token interceptor; React Context for auth and active-company switching.
+- **`landing/`** — separate marketing site (React + Vite), deployed independently.
+- **`docs/`** — operational runbooks and compliance documents.
+- **infra** — `docker-compose*.yml`, `nginx/`, `supabase/`, `load-tests/`.
 
-5. Access the application:
-- Frontend: http://localhost:3000
-- API Docs: http://localhost:8000/api/docs
+Cross-cutting platform properties:
+- **Multi-tenant** — domain tables carry `company_id` (`TenantMixin`); every query is scoped to the active company.
+- **Background work** — Redis 7 + **ARQ workers** (`app/worker.py`, `app/jobs/`) for email, MRP runs, and long tasks; enqueued from services, never blocking request handlers.
+- **Realtime** — WebSocket push for live shop-floor activity and dashboard updates.
+- **Tamper-evident audit** — the `audit_log` table is an append-only SHA-256 hash chain (`sequence_number`, `previous_hash`, `integrity_hash`); state changes flow through `AuditService`. (Known gap: the user-management and work-center routers do not yet emit audit entries — see Compliance below.)
+- **Auth** — JWT, ~15-min access token, ~7-day rotating refresh, 24h absolute session cap; account lockout after 5 failed password attempts (the email/password login path).
 
-### Default Credentials (Development Only)
-> **WARNING**: Change these immediately in production. Generate secure passwords with: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
-- **Admin**: admin@werco.com / admin123
-- **Users**: (email) / password123
+## Tech stack
 
-## Development Setup
+| Layer | Technology |
+|-------|-----------|
+| Backend | Python 3.11, FastAPI 0.136, Starlette 1.2, Uvicorn/Gunicorn |
+| ORM / DB | SQLAlchemy 2.0, Alembic 1.18, PostgreSQL (Supabase), psycopg2 |
+| Validation | Pydantic 2.12 + pydantic-settings |
+| Auth / security | python-jose (JWT), passlib + bcrypt, slowapi (rate limiting), bleach |
+| Background jobs | Redis 7, ARQ, croniter |
+| Realtime | websockets |
+| AI / LLM | Anthropic Claude (`anthropic` SDK) — Haiku / Sonnet / Opus tiers |
+| Document parsing | pypdf, pdf2image, pytesseract (OCR), python-docx, ezdxf (DXF), rapidfuzz |
+| Email / export | aiosmtplib, Jinja2, openpyxl, pandas, reportlab |
+| Monitoring | Sentry (optional) |
+| Frontend | React 19, TypeScript 5.9, Vite 7, React Router 7 |
+| UI / styling | Tailwind CSS 4, DaisyUI, Heroicons, Headless UI |
+| Forms / data | React Hook Form 7, Zod 4, Axios, Recharts, date-fns |
+| Frontend testing | Jest 30, Testing Library, Playwright |
 
-### Backend (without Docker)
+## Quick start (development)
 
 ```bash
-cd backend
-python -m venv venv
-venv\Scripts\activate  # Windows
-pip install -r requirements.txt
-
-# Set DATABASE_URL to your Supabase Postgres connection string in .env
-alembic upgrade head
-python -m scripts.seed_data
-uvicorn app.main:app --reload
+docker compose up
 ```
 
-### Frontend (without Docker)
+This brings up the backend (`:8000`), frontend (`:3000`), Redis, and the ARQ worker.
+
+**Required environment variables** (the compose file fails fast without them):
+
+- `DATABASE_URL` — a **Supabase Postgres** connection string. **There is no bundled Postgres container** — you must point at a Supabase (or other Postgres) instance.
+- `SECRET_KEY` — JWT signing secret.
+- `REFRESH_TOKEN_SECRET_KEY` — refresh-token signing secret.
+
+Set `ANTHROPIC_API_KEY` to enable the AI features (RFQ quoting, PO/BOM/QMS document parsing, routing learning). See **[docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md)** for the full list (Anthropic model tiers, SMTP, Sentry, Redis, webhook key, etc.).
+
+Once up:
+
+- Frontend: <http://localhost:3000>
+- Backend API: <http://localhost:8000>
+- API docs (OpenAPI/Swagger): <http://localhost:8000/api/docs> (ReDoc at `/api/redoc`)
+
+**Seed the database (first time):**
+
+```bash
+docker compose exec backend python -m scripts.seed_data
+```
+
+**Frontend without Docker** (Vite dev server):
 
 ```bash
 cd frontend
 npm install
-npm start
+npm run dev
 ```
 
-## Project Structure
+## Default accounts (development)
+
+The seed script (`backend/scripts/seed_data.py`) creates these accounts in the demo company. **Passwords are intentionally omitted here** — read them from the seed script if you need them.
+
+| Email | Role |
+|-------|------|
+| `admin@werco.com` | admin (superuser) |
+| `jsmith@werco.com` | manager |
+| `mjohnson@werco.com` | supervisor |
+| `bwilliams@werco.com` | operator |
+| `sjones@werco.com` | quality |
+| `dwilson@werco.com` | operator |
+
+> ⚠️ **These are development seed credentials only. Change them before any non-development use.** The first user ever created on a fresh system is automatically promoted to `platform_admin` during initial setup.
+
+## User roles
+
+Eight roles, gated server-side via `require_role()`. Writes/state-changes are role-gated; operational reads (work orders, parts, BOMs, routings, inventory, purchasing, receiving, shipping, quality) are tenant-scoped but readable by any authenticated user; administrative reads (users, admin settings, audit logs) are role-gated. All data is company-scoped (multi-tenant). See **[docs/RBAC_PERMISSIONS.md](docs/RBAC_PERMISSIONS.md)** for the full permission matrix.
+
+| Role | Scope |
+|------|-------|
+| `platform_admin` | Werco oversight — can switch company context; read-only cross-company access |
+| `admin` | Full access including Admin Settings, single company |
+| `manager` | Broad operational control and approvals; no admin-only settings |
+| `supervisor` | Shop execution and planning; limited user/admin controls |
+| `operator` | Execute work only (shop-floor kiosk) |
+| `quality` | Inspections and quality approvals |
+| `shipping` | Shipping operations |
+| `viewer` | Read-only (auditors, executives, guests) |
+
+## Deployment
+
+- **Backend + ARQ worker** → Railway
+- **Frontend + landing site** → Vercel
+- **Database** → Supabase (PostgreSQL)
+- **CI/CD** → GitHub Actions
+
+See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md](docs/DEPLOYMENT_RUNBOOK.md)**, **[docs/DOCKER_PRODUCTION.md](docs/DOCKER_PRODUCTION.md)**, and **[docs/CI_CD_SETUP.md](docs/CI_CD_SETUP.md)**.
+
+## Documentation
+
+| Document | What it covers |
+|----------|----------------|
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local dev setup, the `create_all` → `stamp` → `upgrade` bootstrap path |
+| [docs/API.md](docs/API.md) | REST endpoint reference (OpenAPI lives at `/api/docs`) |
+| [docs/RBAC_PERMISSIONS.md](docs/RBAC_PERMISSIONS.md) | The 8-role permission model |
+| [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) | All config and secrets |
+| [docs/AI_QUOTING_AGENT_RUNBOOK.md](docs/AI_QUOTING_AGENT_RUNBOOK.md) | Operating the Anthropic-powered RFQ/quoting feature |
+| [docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md](docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md) | AI quoting design/implementation notes |
+| [docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md) | CMMC L2 compliance posture |
+| [docs/AUDIT_LOG_RETENTION_RUNBOOK.md](docs/AUDIT_LOG_RETENTION_RUNBOOK.md) | Audit-log retention operations |
+| [docs/DATABASE_BACKUP.md](docs/DATABASE_BACKUP.md) | Backup and restore procedures |
+| [docs/onboarding/](docs/onboarding/README.md) | **Employee onboarding & training** — plain-language, role-by-role guides (Getting Started, Operator/Shop-Floor, Warehouse, Planner/Supervisor/Manager, Admin/IT) with screenshots and printable PDF handouts |
+| [docs/ONBOARDING.md](docs/ONBOARDING.md) | Developer onboarding & local setup |
+| [docs/BROWSER_HARNESS.md](docs/BROWSER_HARNESS.md) | Safe headless-Chromium CLI for screenshots/snapshots/logs/PDFs |
+| [docs/SMOKE_TESTS.md](docs/SMOKE_TESTS.md) · [docs/LAUNCH_CHECKLIST.md](docs/LAUNCH_CHECKLIST.md) · [docs/PRODUCTION_CHECKLIST.md](docs/PRODUCTION_CHECKLIST.md) | Pre-launch verification |
+
+## Compliance
+
+Built for **AS9100D**, **ISO 9001**, and **CMMC Level 2**. The mechanisms below are enforced in code as correctness invariants:
+
+- **Tenant isolation** — `company_id` scoping on all domain data; cross-tenant reads are defects.
+- **Tamper-evident audit log** — append-only SHA-256 hash chain over create/update/delete/status-change events; never backfilled or edited out of band. **Known coverage gap:** the user-management router (`app/api/endpoints/users.py` — create/update/activate/deactivate/role-change/password-reset) and the work-center router (`app/api/endpoints/work_centers.py`) currently emit **no** audit entries; do not represent those actions as audited to auditors until they route through `AuditService`.
+- **Soft delete** — `SoftDeleteMixin` (`is_deleted` / `deleted_at` / `deleted_by`); no physical deletes on traced data.
+- **Traceability** — part/BOM revision control, critical-characteristic flags, and lot/serial genealogy; shipped data is preserved via new revisions rather than mutation.
+- **RBAC + access control** — server-side role gating, account lockout (5 failed password attempts → 30-min lock, email/password login path), JWT session caps.
+
+See **[docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md)**.
+
+## Project structure
 
 ```
-Werco-ERP/
-├── backend/
+Werco-ERP-MES/
+├── backend/                  # Python 3.11 / FastAPI
 │   ├── app/
-│   │   ├── api/           # API routes
-│   │   ├── core/          # Config, security
-│   │   ├── db/            # Database setup
-│   │   ├── models/        # SQLAlchemy models
-│   │   ├── schemas/       # Pydantic schemas
-│   │   └── services/      # Business logic
-│   ├── alembic/           # Database migrations
-│   ├── scripts/           # Utility scripts
-│   └── tests/             # Unit tests
-├── frontend/
-│   ├── src/
-│   │   ├── components/    # React components
-│   │   ├── pages/         # Page components
-│   │   ├── services/      # API client
-│   │   ├── context/       # React context
-│   │   └── types/         # TypeScript types
-│   └── public/
-└── docs/                  # Documentation
+│   │   ├── api/
+│   │   │   ├── endpoints/     # ~53 REST routers under /api/v1/
+│   │   │   └── deps.py        # auth / tenancy / RBAC dependency seam
+│   │   ├── core/             # config, security, cache, pagination, realtime
+│   │   ├── db/               # database, mixins, tenant_filter helpers
+│   │   ├── models/           # SQLAlchemy 2.0 models
+│   │   ├── schemas/          # Pydantic 2 request/response contracts
+│   │   ├── services/         # business logic (incl. audit_service.py)
+│   │   ├── jobs/             # ARQ background jobs
+│   │   ├── worker.py         # ARQ worker entrypoint
+│   │   └── main.py           # app factory + middleware
+│   ├── alembic/              # migrations
+│   ├── scripts/             # seed_data.py and utilities
+│   └── tests/                # pytest suite
+├── frontend/                 # React 19 + TypeScript + Vite SPA
+│   └── src/
+│       ├── pages/            # route-level screens
+│       ├── components/       # reusable UI by domain
+│       ├── services/         # Axios API client (ETag + refresh interceptor)
+│       ├── context/          # auth, active-company, shortcuts, tours
+│       └── validation/       # Zod schemas
+├── landing/                  # marketing site (React + Vite → Vercel)
+├── load-tests/               # load testing suite
+├── docs/                     # runbooks + compliance docs
+├── nginx/ · supabase/        # infra
+└── docker-compose*.yml
 ```
-
-## API Endpoints
-
-### Authentication
-- `POST /api/v1/auth/login` - User login
-- `POST /api/v1/auth/register` - Register new user
-
-### Work Centers
-- `GET /api/v1/work-centers/` - List work centers
-- `POST /api/v1/work-centers/` - Create work center
-- `PUT /api/v1/work-centers/{id}` - Update work center
-
-### Parts
-- `GET /api/v1/parts/` - List parts
-- `POST /api/v1/parts/` - Create part
-- `GET /api/v1/parts/{id}` - Get part details
-
-### Work Orders
-- `GET /api/v1/work-orders/` - List work orders
-- `POST /api/v1/work-orders/` - Create work order
-- `POST /api/v1/work-orders/{id}/release` - Release to production
-- `POST /api/v1/work-orders/{id}/start` - Start work order
-
-### Shop Floor
-- `GET /api/v1/shop-floor/dashboard` - Dashboard data
-- `GET /api/v1/shop-floor/my-active-job` - Current user's active job
-- `POST /api/v1/shop-floor/clock-in` - Clock in to operation
-- `POST /api/v1/shop-floor/clock-out/{id}` - Clock out with production data
-- `GET /api/v1/shop-floor/work-center-queue/{id}` - Jobs queued at work center
-
-## User Roles
-
-| Role | Permissions |
-|------|-------------|
-| Admin | Full system access |
-| Manager | Create/edit work orders, parts, users |
-| Supervisor | Release work orders, manage operations |
-| Operator | Clock in/out, report production |
-| Quality | Inspection, NCR management |
-| Shipping | Shipping operations |
-| Viewer | Read-only access |
-
-## Compliance Notes
-
-### AS9100D / ISO 9001
-- Document control with revision tracking
-- Lot/serial traceability on all transactions
-- Audit trail for all changes
-- First Article Inspection (FAI) support
-- Non-conformance reporting (future)
-
-### CMMC Level 2
-- User authentication with session management
-- Account lockout after failed attempts
-- Role-based access control
-- Comprehensive audit logging
-- Encrypted data at rest (PostgreSQL) and in transit (HTTPS)
-
-## Future Modules
-
-- [ ] Estimating & Quoting
-- [ ] Quality Management (NCR, CAR, FAI)
-- [ ] Inventory Management
-- [ ] Purchasing & Receiving
-- [ ] Shipping & Invoicing
-- [ ] Scheduling & Capacity Planning
-- [ ] Document Management
-- [ ] Customer Portal
 
 ## Support
 
 For questions or issues, contact the Werco IT department.
 
 ---
-Built for Werco Manufacturing - AS9100D & ISO 9001 Compliant
+Built for Werco Manufacturing — AS9100D / ISO 9001 / CMMC Level 2.
