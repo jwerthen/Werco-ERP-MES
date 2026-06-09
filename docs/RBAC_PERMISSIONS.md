@@ -176,6 +176,49 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > `mark_operation_inspected`). The role set matches the matrix exactly — this repo has no separate
 > `INSPECTOR` role, so operation inspection is performed by Admin / Manager / Supervisor / Quality.
 
+### Operator Certifications & Training
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create | ✓ | ✓ | | | ✓ | | |
+| Edit | ✓ | ✓ | | | ✓ | | |
+| Delete | ✓ | ✓ | | | ✓ | | |
+
+### Skill Matrix
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create | ✓ | ✓ | ✓ | | | | |
+| Edit | ✓ | ✓ | ✓ | | | | |
+
+> **Write enforcement — these role sets are new (defaults chosen for this fix, 2026-06-09).** The
+> seven write endpoints on the operator-certifications router
+> (`app/api/endpoints/operator_certifications.py`, mounted at `/api/v1/operator-certifications`) are now
+> enforced **in code**; the RBAC matrix previously had **no rows** for these record types and the writes
+> were open to any authenticated user.
+> - **Certifications + training writes** —
+>   `POST/PUT/DELETE …/certifications/{…}` (`create_certification` / `update_certification` /
+>   `delete_certification`) and `POST/PUT …/training/{…}` (`create_training` / `update_training`) —
+>   require `require_role([ADMIN, MANAGER, QUALITY])` (`CERT_TRAINING_WRITE_ROLES`). These are
+>   operator-qualification / conformance records that Quality owns alongside Admin/Manager.
+> - **Skill-matrix writes** — `POST …/skill-matrix/` (`create_skill_entry`, which upserts) and
+>   `PUT …/skill-matrix/{entry_id}` (`update_skill_entry`) — require
+>   `require_role([ADMIN, MANAGER, SUPERVISOR])` (`SKILL_MATRIX_WRITE_ROLES`), because skill-matrix
+>   entries are competency assessments performed by Supervisors (and above).
+>
+> Any other authenticated role now receives **403**. **Read** endpoints (the certifications dashboard /
+> list / by-user / by-id, training list / by-user, and the skill-matrix check / by-user /
+> by-work-center / list) stay open to **any authenticated user**, tenant-scoped — the read-broad /
+> write-restricted model. Superuser / Platform Admin bypass role checks, as elsewhere.
+>
+> **Writes are audited + FK-validated.** Each write now records a tamper-evident `audit_log` row
+> (resource types `operator_certification` / `training_record` / `skill_matrix`; create / update /
+> delete). The create endpoints (and `update_training`'s re-pointed `work_center_id`) reject a
+> `user_id` / `work_center_id` that does not belong to the active company with **422** before insert
+> (cross-tenant FK-injection guard). See `docs/API.md` and `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`.
+
 ### Engineering Change Orders (ECO)
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
