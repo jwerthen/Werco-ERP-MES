@@ -132,13 +132,14 @@ class MRPAutoService:
         self.db.flush()
 
         # Create PO line
-        unit_cost = self._get_part_cost(action.part_id, vendor.id)
+        unit_price = self._get_part_cost(action.part_id, vendor.id)
         po_line = PurchaseOrderLine(
             company_id=self.company_id,
-            po_id=po.id,
+            purchase_order_id=po.id,
             part_id=action.part_id,
-            quantity=action.quantity,
-            unit_cost=unit_cost,
+            quantity_ordered=action.quantity,
+            unit_price=unit_price,
+            line_total=(action.quantity or 0) * (unit_price or 0),
             line_number=1,
         )
         self.db.add(po_line)

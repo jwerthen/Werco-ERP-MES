@@ -43,6 +43,16 @@ async def run_mrp_job(ctx, mode: str = "REVIEW", company_id: int = None):
     return await run_mrp_task(mode, company_id=company_id)
 
 
+async def run_mrp_auto_draft_job(ctx):
+    """Cron entrypoint for the daily MRP AUTO_DRAFT pass.
+
+    ARQ fires cron coroutines with only ``ctx``, so the schedule can't pass
+    ``mode`` through ``cron()``. This thin wrapper pins ``mode="AUTO_DRAFT"``
+    (the request default is "REVIEW") and fans out over every active company.
+    """
+    return await run_mrp_job(ctx, mode="AUTO_DRAFT")
+
+
 async def generate_report_job(ctx, report_type: str, filters: dict = None):
     """Generate report job"""
     from app.jobs.report_jobs import generate_report_task
@@ -169,6 +179,7 @@ class WorkerSettings:
         send_email_job,
         send_webhook_job,
         run_mrp_job,
+        run_mrp_auto_draft_job,
         generate_report_job,
         run_scheduling_job,
         send_daily_digest_job,
@@ -184,7 +195,7 @@ class WorkerSettings:
 
     # Cron jobs (scheduled tasks)
     cron_jobs = [
-        cron(run_mrp_job, hour=6, minute=0, kwargs={"mode": "AUTO_DRAFT"}),  # 6 AM daily
+        cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT)
         cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily
         cron(check_calibrations_job, hour=7, minute=0),  # 7 AM daily
         cron(check_late_work_orders_job, hour=8, minute=0),  # 8 AM daily
