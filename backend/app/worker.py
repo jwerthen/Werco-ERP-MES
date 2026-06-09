@@ -146,6 +146,34 @@ async def dispatch_work_order_completion_signals_job(ctx, work_order_id: int, co
     return await dispatch_work_order_completion_signals_task(work_order_id, company_id, status)
 
 
+async def process_tracking_webhook_job(
+    ctx, *, company_id: int, shipment_id: int, provider: str = None, events: list = None
+):
+    """Apply inbound carrier-webhook tracking events to a shipment.
+
+    Enqueued by the inbound carrier-webhook endpoint with the tenant ALREADY
+    resolved from stored shipment data (``aggregator_shipment_id``); this wrapper
+    forwards the kwargs to the task, which persists the events tenant-scoped.
+    """
+    from app.jobs.shipping_jobs import process_tracking_webhook_task
+
+    return await process_tracking_webhook_task(
+        company_id=company_id, shipment_id=shipment_id, provider=provider, events=events
+    )
+
+
+async def poll_tracking_job(ctx):
+    """Cron fallback: refresh tracking for in-flight shipments, fanned out per tenant.
+
+    Only polls tenants whose ``allow_carrier_egress`` kill switch is ON (the call
+    to ``provider.get_tracking`` is outbound carrier traffic). Best-effort -- never
+    raises out of the cron.
+    """
+    from app.jobs.shipping_jobs import poll_tracking_task
+
+    return await poll_tracking_task()
+
+
 # ============================================================================
 # STARTUP/SHUTDOWN
 # ============================================================================
@@ -191,6 +219,7 @@ class WorkerSettings:
         check_quote_expiring_job,
         aggregate_ai_learning_job,
         dispatch_work_order_completion_signals_job,
+        process_tracking_webhook_job,
     ]
 
     # Cron jobs (scheduled tasks)
@@ -204,6 +233,7 @@ class WorkerSettings:
         cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily
         cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM
         cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM
+        cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback)
     ]
 
     # Lifecycle

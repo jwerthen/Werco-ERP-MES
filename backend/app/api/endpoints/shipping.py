@@ -2,7 +2,7 @@ from datetime import date, datetime
 from io import BytesIO
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
@@ -11,10 +11,40 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.core.realtime import safe_broadcast
 from app.core.websocket import broadcast_dashboard_update, broadcast_work_order_update
 from app.db.database import get_db
-from app.models.shipping import CertificateOfConformance, Shipment, ShipmentStatus
+from app.models.shipping import (
+    CertificateOfConformance,
+    Shipment,
+    ShipmentRateQuote,
+    ShipmentStatus,
+    ShipmentTrackingEvent,
+)
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.schemas.shipping import (
+    AddressValidationRequest,
+    AddressValidationResponse,
+    BuyBolRequest,
+    BuyBolResponse,
+    BuyLabelRequest,
+    BuyLabelResponse,
+    RateQuoteResponse,
+    RateShopRequest,
+    SchedulePickupRequest,
+    SchedulePickupResponse,
+    ShipmentCreate,
+    ShipmentResponse,
+    ShipmentTrackingResponse,
+    ShipmentUpdate,
+    TrackingEventResponse,
+    VoidRefundResponse,
+)
 from app.services.audit_service import AuditService
+from app.services.carriers.exceptions import (
+    AddressInvalidError,
+    CarrierError,
+    EgressDisabledError,
+    NotSupportedError,
+)
 from app.services.coc_service import (
     coc_required_for_shipment,
     generate_coc_for_shipment,
@@ -26,53 +56,38 @@ from app.services.completion_inventory_service import (
 )
 from app.services.completion_signal_service import enqueue_work_order_completion_signals
 from app.services.operational_event_service import OperationalEventService
+from app.services.shipping_service import ShippingService
 
 router = APIRouter()
 
 
-class ShipmentCreate(BaseModel):
-    work_order_id: int
-    ship_to_name: Optional[str] = None
-    ship_to_address: Optional[str] = None
-    ship_to_city: Optional[str] = None
-    ship_to_state: Optional[str] = None
-    ship_to_zip: Optional[str] = None
-    carrier: Optional[str] = None
-    service_type: Optional[str] = None
-    quantity_shipped: float
-    weight_lbs: Optional[float] = None
-    num_packages: int = 1
-    packing_notes: Optional[str] = None
-    cert_of_conformance: bool = False
+# Carrier-action RBAC: rate-shop / label / void are documented under the Shipping
+# role set (docs/RBAC_PERMISSIONS.md). They transmit customer data to a carrier
+# (egress-gated in the service) and move money (audited), so they are restricted
+# to ADMIN / MANAGER / SUPERVISOR / SHIPPING -- the same set that may complete a
+# shipment. read-only views (rate quotes, tracking) stay open to any tenant user.
+CARRIER_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING]
 
 
-class ShipmentUpdate(BaseModel):
-    carrier: Optional[str] = None
-    service_type: Optional[str] = None
-    tracking_number: Optional[str] = None
-    ship_date: Optional[date] = None
-    estimated_delivery: Optional[date] = None
-    status: Optional[str] = None
+def _map_carrier_error(exc: CarrierError) -> HTTPException:
+    """Translate a service-layer carrier error onto a clean HTTP response.
 
-
-class ShipmentResponse(BaseModel):
-    id: int
-    shipment_number: str
-    work_order_id: int
-    work_order_number: Optional[str] = None
-    customer_name: Optional[str] = None
-    part_number: Optional[str] = None
-    status: str
-    ship_to_name: Optional[str] = None
-    carrier: Optional[str] = None
-    tracking_number: Optional[str] = None
-    quantity_shipped: float
-    ship_date: Optional[date] = None
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-        use_enum_values = True
+    No provider internals or secrets are surfaced -- only the typed error's
+    message (the adapters scrub api keys before raising).
+    """
+    if isinstance(exc, EgressDisabledError):
+        # Customer-data egress is OFF for this company (the kill switch). 409 is
+        # the precondition-not-met signal the UI uses to prompt enabling egress.
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    if isinstance(exc, AddressInvalidError):
+        return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    if isinstance(exc, NotSupportedError):
+        return HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
+    # CarrierError "not found" maps to 404; other provider failures are 502.
+    message = str(exc)
+    if "not found" in message.lower():
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message or "Carrier provider error")
 
 
 class CertificateOfConformanceResponse(BaseModel):
@@ -653,4 +668,281 @@ def download_certificate_of_conformance_pdf(
         BytesIO(pdf_bytes),
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ===========================================================================
+# Multi-carrier integration endpoints.
+#
+# Routers stay THIN: each delegates to ``ShippingService`` (the egress kill
+# switch, provider selection, audit, and idempotency all live there) and maps
+# the typed carrier errors onto HTTP via ``_map_carrier_error``. company_id is
+# always the ACTIVE company (get_current_company_id); the audit service is
+# request-scoped (get_audit_service). Provider-calling routes are ``async def``.
+# ===========================================================================
+
+
+@router.post("/validate-address", response_model=AddressValidationResponse)
+async def validate_address(
+    payload: AddressValidationRequest,
+    carrier_account_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(CARRIER_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Validate / normalize a postal address via the carrier (egress-gated)."""
+    service = ShippingService(db)
+    try:
+        result = await service.validate_address(company_id, payload.address, carrier_account_id=carrier_account_id)
+    except CarrierError as exc:
+        raise _map_carrier_error(exc)
+    return AddressValidationResponse.model_validate(result.model_dump())
+
+
+@router.post("/{shipment_id}/rate-shop", response_model=List[RateQuoteResponse])
+async def rate_shop(
+    shipment_id: int,
+    payload: RateShopRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(CARRIER_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Rate-shop a shipment and persist the quotes (egress-gated)."""
+    service = ShippingService(db)
+    try:
+        quotes = await service.rate_shop(
+            company_id,
+            shipment_id,
+            parcels=payload.parcels,
+            pallets=payload.pallets,
+            ship_from=payload.ship_from,
+            ship_to=payload.ship_to,
+            carrier_account_id=payload.carrier_account_id,
+            user_id=current_user.id,
+        )
+    except CarrierError as exc:
+        raise _map_carrier_error(exc)
+    return [RateQuoteResponse.model_validate(q) for q in quotes]
+
+
+@router.get("/{shipment_id}/rates", response_model=List[RateQuoteResponse])
+def list_rate_quotes(
+    shipment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Return the persisted rate quotes for a shipment (read-only, no egress)."""
+    shipment = (
+        db.query(Shipment)
+        .filter(
+            Shipment.id == shipment_id,
+            Shipment.company_id == company_id,
+            Shipment.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    quotes = (
+        db.query(ShipmentRateQuote)
+        .filter(ShipmentRateQuote.shipment_id == shipment_id, ShipmentRateQuote.company_id == company_id)
+        .order_by(ShipmentRateQuote.amount)
+        .all()
+    )
+    return [RateQuoteResponse.model_validate(q) for q in quotes]
+
+
+@router.post("/{shipment_id}/buy-label", response_model=BuyLabelResponse)
+async def buy_label(
+    shipment_id: int,
+    payload: BuyLabelRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(CARRIER_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Purchase a parcel label (egress-gated, idempotent, audited)."""
+    service = ShippingService(db, audit)
+    try:
+        shipment, already_purchased = await service.buy_label(
+            company_id,
+            shipment_id,
+            payload.rate_id,
+            current_user.id,
+            carrier_account_id=payload.carrier_account_id,
+        )
+    except CarrierError as exc:
+        raise _map_carrier_error(exc)
+    return BuyLabelResponse(
+        shipment_id=shipment.id,
+        shipment_number=shipment.shipment_number,
+        carrier=shipment.carrier,
+        service_code=shipment.service_code,
+        tracking_number=shipment.tracking_number,
+        actual_cost=shipment.actual_cost,
+        cost_currency=shipment.cost_currency,
+        label_document_id=shipment.label_document_id,
+        label_purchased_at=shipment.label_purchased_at,
+        already_purchased=already_purchased,
+    )
+
+
+@router.post("/{shipment_id}/buy-bol", response_model=BuyBolResponse)
+async def buy_bol(
+    shipment_id: int,
+    payload: BuyBolRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(CARRIER_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Purchase an LTL Bill of Lading (egress-gated, idempotent, audited).
+
+    EasyPost raises ``NotSupportedError`` (freight is the future Zenkraft
+    adapter's job) -> mapped to HTTP 501.
+    """
+    service = ShippingService(db, audit)
+    try:
+        shipment, already_purchased = await service.buy_freight_bol(
+            company_id,
+            shipment_id,
+            payload.rate_id,
+            current_user.id,
+            carrier_account_id=payload.carrier_account_id,
+        )
+    except CarrierError as exc:
+        raise _map_carrier_error(exc)
+    return BuyBolResponse(
+        shipment_id=shipment.id,
+        shipment_number=shipment.shipment_number,
+        carrier=shipment.carrier,
+        bol_number=shipment.bol_number,
+        pro_number=shipment.pro_number,
+        actual_cost=shipment.actual_cost,
+        cost_currency=shipment.cost_currency,
+        bol_document_id=shipment.bol_document_id,
+        label_purchased_at=shipment.label_purchased_at,
+        already_purchased=already_purchased,
+    )
+
+
+@router.post("/{shipment_id}/schedule-pickup", response_model=SchedulePickupResponse)
+async def schedule_pickup(
+    shipment_id: int,
+    payload: SchedulePickupRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(CARRIER_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Schedule a carrier pickup for an already-purchased shipment (egress-gated)."""
+    service = ShippingService(db)
+    try:
+        pickup = await service.schedule_pickup(
+            company_id,
+            shipment_id,
+            pickup_date=payload.pickup_date,
+            window_start=payload.window_start,
+            window_end=payload.window_end,
+            carrier_account_id=payload.carrier_account_id,
+            user_id=current_user.id,
+        )
+    except CarrierError as exc:
+        raise _map_carrier_error(exc)
+    return SchedulePickupResponse(
+        provider_pickup_id=pickup.provider_pickup_id,
+        confirmation_number=pickup.confirmation_number,
+        scheduled_date=pickup.scheduled_date,
+        window_start=pickup.window_start,
+        window_end=pickup.window_end,
+        status=pickup.status,
+    )
+
+
+@router.post("/{shipment_id}/void-label", response_model=VoidRefundResponse)
+async def void_label(
+    shipment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(CARRIER_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Void a purchased label (egress-gated, idempotent, audited as a CANCEL)."""
+    service = ShippingService(db, audit)
+    try:
+        shipment = await service.void_label(company_id, shipment_id, current_user.id)
+    except CarrierError as exc:
+        raise _map_carrier_error(exc)
+    return VoidRefundResponse(
+        shipment_id=shipment.id,
+        voided_at=shipment.voided_at,
+        refund_status=shipment.refund_status,
+        message="Label voided / refund requested",
+    )
+
+
+@router.post("/{shipment_id}/refund", response_model=VoidRefundResponse)
+async def refund_label(
+    shipment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(CARRIER_WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Request a refund for a purchased label (alias of void; same money-moving CANCEL)."""
+    service = ShippingService(db, audit)
+    try:
+        shipment = await service.refund_label(company_id, shipment_id, current_user.id)
+    except CarrierError as exc:
+        raise _map_carrier_error(exc)
+    return VoidRefundResponse(
+        shipment_id=shipment.id,
+        voided_at=shipment.voided_at,
+        refund_status=shipment.refund_status,
+        message="Refund requested",
+    )
+
+
+@router.get("/{shipment_id}/tracking", response_model=ShipmentTrackingResponse)
+def get_tracking(
+    shipment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Return the stored tracking status + event history for a shipment.
+
+    Read-only and NOT egress-gated: it serves data already flowed back from
+    inbound webhooks. Tenant-scoped.
+    """
+    shipment = (
+        db.query(Shipment)
+        .filter(
+            Shipment.id == shipment_id,
+            Shipment.company_id == company_id,
+            Shipment.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+
+    events = (
+        db.query(ShipmentTrackingEvent)
+        .filter(
+            ShipmentTrackingEvent.shipment_id == shipment_id,
+            ShipmentTrackingEvent.company_id == company_id,
+        )
+        .order_by(ShipmentTrackingEvent.occurred_at.desc().nullslast(), ShipmentTrackingEvent.id.desc())
+        .all()
+    )
+    return ShipmentTrackingResponse(
+        shipment_id=shipment.id,
+        shipment_number=shipment.shipment_number,
+        tracking_number=shipment.tracking_number,
+        tracking_status=shipment.tracking_status,
+        tracking_status_detail=shipment.tracking_status_detail,
+        last_tracking_sync_at=shipment.last_tracking_sync_at,
+        actual_delivery=shipment.actual_delivery,
+        events=[TrackingEventResponse.model_validate(e) for e in events],
     )

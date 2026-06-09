@@ -1,10 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
+import { useToast } from '../components/ui/Toast';
+import usePermissions from '../hooks/usePermissions';
+import ScheduleShipmentModal, { ScheduleShipmentTarget } from '../components/shipping/ScheduleShipmentModal';
+import ShipmentTrackingPanel from '../components/shipping/ShipmentTrackingPanel';
 import {
   TruckIcon,
   PaperAirplaneIcon,
   PrinterIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
 } from '@heroicons/react/24/outline';
 
 interface Shipment {
@@ -18,6 +24,7 @@ interface Shipment {
   ship_to_name?: string;
   carrier?: string;
   tracking_number?: string;
+  tracking_status?: string;
   quantity_shipped: number;
   ship_date?: string;
   created_at: string;
@@ -41,12 +48,32 @@ const statusColors: Record<string, string> = {
   cancelled: 'bg-red-500/20 text-red-300',
 };
 
+const trackingBadge: Record<string, string> = {
+  delivered: 'bg-emerald-500/20 text-emerald-300',
+  out_for_delivery: 'bg-blue-500/20 text-blue-300',
+  in_transit: 'bg-blue-500/20 text-blue-300',
+  pre_transit: 'bg-yellow-500/20 text-yellow-300',
+};
+
 export default function Shipping({ embedded }: { embedded?: boolean }) {
+  const { showToast } = useToast();
+  const { can } = usePermissions();
+  // Carrier writes (rate-shop / buy-label / void) are gated server-side to the
+  // ADMIN / MANAGER / SUPERVISOR / SHIPPING set -- the frontend equivalent is the
+  // shipping:complete permission, held by exactly that role set.
+  const canSchedule = can('shipping:complete');
+
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [readyToShip, setReadyToShip] = useState<ReadyToShip[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [selectedWO, setSelectedWO] = useState<ReadyToShip | null>(null);
+
+  // Carrier Schedule-Shipment wizard target (a shipment that exists).
+  const [scheduleTarget, setScheduleTarget] = useState<ScheduleShipmentTarget | null>(null);
+  const [schedulingWoId, setSchedulingWoId] = useState<number | null>(null);
+  // Expanded tracking rows.
+  const [expandedTracking, setExpandedTracking] = useState<Record<number, boolean>>({});
 
   const [shipForm, setShipForm] = useState({
     ship_to_name: '',
@@ -103,19 +130,62 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       setShowCreateModal(false);
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create shipment');
+      showToast('error', err.response?.data?.detail || 'Failed to create shipment');
     }
   };
 
   const handleShip = async (shipmentId: number) => {
-    const tracking = prompt('Enter tracking number (optional):');
     try {
-      await api.markShipped(shipmentId, tracking || undefined);
+      await api.markShipped(shipmentId);
+      showToast('success', 'Shipment marked as shipped');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to mark as shipped');
+      showToast('error', err.response?.data?.detail || 'Failed to mark as shipped');
     }
   };
+
+  // Schedule a carrier shipment for an existing shipment row.
+  const scheduleForShipment = (s: Shipment) => {
+    setScheduleTarget({
+      shipment_id: s.id,
+      shipment_number: s.shipment_number,
+      work_order_number: s.work_order_number,
+      ship_to_name: s.ship_to_name,
+      customer_name: s.customer_name,
+      part_number: s.part_number,
+    });
+  };
+
+  // From a ready-to-ship WO: create the shipment first (the carrier flow needs a
+  // shipment id), then open the wizard against it.
+  const scheduleForWorkOrder = async (wo: ReadyToShip) => {
+    setSchedulingWoId(wo.work_order_id);
+    try {
+      const created = await api.createShipment({
+        work_order_id: wo.work_order_id,
+        ship_to_name: wo.customer_name || '',
+        quantity_shipped: wo.quantity_complete,
+        num_packages: 1,
+        cert_of_conformance: true,
+      });
+      await loadData();
+      setScheduleTarget({
+        shipment_id: created.id,
+        shipment_number: created.shipment_number,
+        work_order_number: wo.work_order_number,
+        ship_to_name: wo.customer_name,
+        customer_name: wo.customer_name,
+        part_number: wo.part_number,
+      });
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to start shipment');
+    } finally {
+      setSchedulingWoId(null);
+    }
+  };
+
+  const toggleTracking = (id: number) =>
+    setExpandedTracking((prev) => ({ ...prev, [id]: !prev[id] }));
 
   if (loading) {
     return (
@@ -161,13 +231,23 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                   <td className="px-4 py-3">
                     {wo.due_date ? formatCentralDate(wo.due_date, { year: undefined }) : '-'}
                   </td>
-                  <td className="px-4 py-3 text-center">
+                  <td className="px-4 py-3 text-center space-x-2 whitespace-nowrap">
+                    {canSchedule && (
+                      <button
+                        onClick={() => scheduleForWorkOrder(wo)}
+                        disabled={schedulingWoId === wo.work_order_id}
+                        className="btn-primary text-sm px-3 py-1 disabled:opacity-60"
+                      >
+                        <PaperAirplaneIcon className="h-4 w-4 inline mr-1" />
+                        {schedulingWoId === wo.work_order_id ? 'Starting…' : 'Schedule Shipment'}
+                      </button>
+                    )}
                     <button
                       onClick={() => openCreateModal(wo)}
-                      className="btn-primary text-sm px-3 py-1"
+                      className="btn-secondary text-sm px-3 py-1"
                     >
                       <TruckIcon className="h-4 w-4 inline mr-1" />
-                      Create Shipment
+                      Manual
                     </button>
                   </td>
                 </tr>
@@ -187,6 +267,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
           <table className="min-w-full divide-y divide-slate-700">
             <thead className="bg-slate-800">
               <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase w-8"></th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Shipment #</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
@@ -198,38 +279,90 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700">
-              {shipments.map((s) => (
-                <tr key={s.id} className="hover:bg-slate-800">
-                  <td className="px-4 py-3 font-mono">{s.shipment_number}</td>
-                  <td className="px-4 py-3 font-medium">{s.work_order_number}</td>
-                  <td className="px-4 py-3">{s.customer_name || s.ship_to_name || '-'}</td>
-                  <td className="px-4 py-3">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[s.status]}`}>
-                      {s.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">{s.carrier || '-'}</td>
-                  <td className="px-4 py-3 font-mono text-sm">{s.tracking_number || '-'}</td>
-                  <td className="px-4 py-3 text-right">{s.quantity_shipped}</td>
-                  <td className="px-4 py-3 text-center space-x-2">
-                    {s.status === 'pending' && (
-                      <button
-                        onClick={() => handleShip(s.id)}
-                        className="text-green-600 hover:text-emerald-300 text-sm"
-                      >
-                        <PaperAirplaneIcon className="h-5 w-5 inline" /> Ship
-                      </button>
+              {shipments.map((s) => {
+                const expanded = !!expandedTracking[s.id];
+                return (
+                  <React.Fragment key={s.id}>
+                    <tr className="hover:bg-slate-800">
+                      <td className="px-4 py-3">
+                        <button
+                          onClick={() => toggleTracking(s.id)}
+                          className="text-slate-500 hover:text-werco-primary"
+                          title="Show tracking"
+                        >
+                          {expanded ? (
+                            <ChevronDownIcon className="h-4 w-4" />
+                          ) : (
+                            <ChevronRightIcon className="h-4 w-4" />
+                          )}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 font-mono">{s.shipment_number}</td>
+                      <td className="px-4 py-3 font-medium">{s.work_order_number}</td>
+                      <td className="px-4 py-3">{s.customer_name || s.ship_to_name || '-'}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[s.status]}`}>
+                          {s.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">{s.carrier || '-'}</td>
+                      <td className="px-4 py-3">
+                        {s.tracking_number ? (
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-sm">{s.tracking_number}</span>
+                            {s.tracking_status && (
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                  trackingBadge[s.tracking_status.toLowerCase()] || 'bg-slate-500/20 text-slate-300'
+                                }`}
+                              >
+                                {s.tracking_status.replace(/_/g, ' ')}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          '-'
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right">{s.quantity_shipped}</td>
+                      <td className="px-4 py-3 text-center space-x-2 whitespace-nowrap">
+                        {canSchedule && s.status !== 'cancelled' && (
+                          <button
+                            onClick={() => scheduleForShipment(s)}
+                            className="text-werco-primary hover:text-blue-300 text-sm"
+                            title="Schedule carrier shipment"
+                          >
+                            <PaperAirplaneIcon className="h-5 w-5 inline" /> Schedule
+                          </button>
+                        )}
+                        {s.status === 'pending' && canSchedule && (
+                          <button
+                            onClick={() => handleShip(s.id)}
+                            className="text-green-600 hover:text-emerald-300 text-sm"
+                            title="Mark shipped (manual)"
+                          >
+                            <TruckIcon className="h-5 w-5 inline" /> Ship
+                          </button>
+                        )}
+                        <button
+                          onClick={() => window.open(`/print/packing-slip/${s.id}`, '_blank')}
+                          className="text-blue-600 hover:text-blue-300 text-sm"
+                          title="Print Packing Slip"
+                        >
+                          <PrinterIcon className="h-5 w-5 inline" />
+                        </button>
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr>
+                        <td colSpan={9} className="p-0">
+                          <ShipmentTrackingPanel shipmentId={s.id} />
+                        </td>
+                      </tr>
                     )}
-                    <button
-                      onClick={() => window.open(`/print/packing-slip/${s.id}`, '_blank')}
-                      className="text-blue-600 hover:text-blue-300 text-sm"
-                      title="Print Packing Slip"
-                    >
-                      <PrinterIcon className="h-5 w-5 inline" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
           {shipments.length === 0 && (
@@ -238,11 +371,20 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
         </div>
       </div>
 
-      {/* Create Shipment Modal */}
+      {/* Carrier Schedule-Shipment wizard */}
+      {scheduleTarget && (
+        <ScheduleShipmentModal
+          target={scheduleTarget}
+          onClose={() => setScheduleTarget(null)}
+          onCompleted={loadData}
+        />
+      )}
+
+      {/* Create Shipment Modal (legacy / manual path -- still supported) */}
       {showCreateModal && selectedWO && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Create Shipment</h3>
+            <h3 className="text-lg font-semibold mb-4">Create Shipment (Manual)</h3>
             <div className="bg-slate-800 rounded p-3 mb-4">
               <p className="font-medium">{selectedWO.work_order_number}</p>
               <p className="text-sm text-slate-400">{selectedWO.part_number} - {selectedWO.part_name}</p>

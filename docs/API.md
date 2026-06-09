@@ -710,6 +710,53 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/shipping/{shipment_id}/coc` | Get CoC metadata (404 if none issued) | Yes |
 | GET | `/shipping/{shipment_id}/coc/pdf` | Download the rendered CoC PDF (`application/pdf`) | Yes |
 
+#### Carrier integration (rate / label / freight / pickup / tracking)
+
+Multi-carrier endpoints on the shipping router. All carrier round-trips that transmit customer data
+are gated by the per-company `allow_carrier_egress` kill switch (default **OFF**) — when disabled the
+service makes **no** external call and returns **409**. Write actions are RBAC-gated to
+`Admin / Manager / Supervisor / Shipping`; reads are open to any authenticated tenant user. Money is
+`Decimal`/`Numeric(12,2)` throughout. See
+[docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/shipping/validate-address` | Validate / normalize a postal address via the carrier (egress-gated). Optional `?carrier_account_id=` | Admin / Manager / Supervisor / Shipping |
+| POST | `/shipping/{shipment_id}/rate-shop` | Rate-shop the shipment and persist the quotes (egress-gated). Body: `parcels` / `pallets` / optional `ship_from` / `ship_to` / `carrier_account_id` | Admin / Manager / Supervisor / Shipping |
+| GET | `/shipping/{shipment_id}/rates` | List the persisted rate quotes (read-only, no egress) | Yes |
+| POST | `/shipping/{shipment_id}/buy-label` | Purchase a parcel label (egress-gated, **idempotent**, audited). Body: `rate_id` (+ optional `carrier_account_id`) | Admin / Manager / Supervisor / Shipping |
+| POST | `/shipping/{shipment_id}/buy-bol` | Purchase an LTL Bill of Lading (egress-gated, idempotent, audited). **Returns 501 on EasyPost** (freight is unimplemented — see note) | Admin / Manager / Supervisor / Shipping |
+| POST | `/shipping/{shipment_id}/schedule-pickup` | Schedule a carrier pickup for a purchased shipment (egress-gated). Body: `pickup_date` / `window_start` / `window_end` | Admin / Manager / Supervisor / Shipping |
+| POST | `/shipping/{shipment_id}/void-label` | Void a purchased label (egress-gated, idempotent, audited as CANCEL) | Admin / Manager / Supervisor / Shipping |
+| POST | `/shipping/{shipment_id}/refund` | Request a refund for a purchased label (alias of void; same money-moving CANCEL) | Admin / Manager / Supervisor / Shipping |
+| GET | `/shipping/{shipment_id}/tracking` | Stored tracking status + event history (read-only, not egress-gated) | Yes |
+
+> **Egress kill switch (409).** `validate-address`, `rate-shop`, `buy-label`, `buy-bol`,
+> `schedule-pickup`, and `void`/`refund` are blocked with **HTTP 409** (`EgressDisabledError`) until an
+> admin enables `allow_carrier_egress` on the company shipping profile
+> (`PUT /admin/settings/shipping-profile`). This is the CUI / data-egress gate — those calls transmit
+> the customer ship-to address to a third-party aggregator. `test-connection` is the only carrier
+> round-trip exempt (it sends no customer data).
+>
+> **Idempotency.** `buy-label` / `buy-bol` pre-check for an already-purchased label/BOL and return the
+> existing shipment with `already_purchased: true` (no provider call). A deterministic idempotency key
+> (`sha256(company_id:shipment_id:rate_id)`) is persisted (partial-unique index) and sent to the
+> provider as an `Idempotency-Key` header.
+>
+> **Freight is scaffolded, not functional on EasyPost.** `buy-bol` (and the underlying freight
+> rate-shop) raise `NotSupportedError` on the EasyPost adapter → **HTTP 501**. EasyPost LTL is an
+> Enterprise-gated feature with no public REST wire format; the freight path is real at the
+> service/model/schema layers and waits on a future Zenkraft adapter. Parcel rate/label/track is fully
+> implemented.
+>
+> **Carrier-error → HTTP mapping** (`_map_carrier_error`): `EgressDisabledError` → 409,
+> `AddressInvalidError` → 422, `NotSupportedError` → 501, a `CarrierError` containing "not found" → 404,
+> any other provider failure → 502. Provider internals and secrets are never surfaced.
+>
+> **Tracking is informational.** Webhook / poll tracking events update `tracking_status` and set
+> `actual_delivery` on a `DELIVERED` event, but **never** auto-close the work order — `mark_shipped`
+> remains the only WO-closing action.
+
 > **Shipment-close is audited.** Marking a shipment shipped closes its work order
 > (status → `CLOSED`); that terminal status change is recorded in the tamper-evident audit trail
 > (`GET /audit/`), flushed so the audit row commits atomically with the closure.
@@ -920,6 +967,35 @@ records, targets) require **Admin / Manager / Supervisor**.
 > `/audit/*` (`AuditLog`) attribution. This is a separate trail from `/audit/*` and is **not** part
 > of the tamper-evident hash chain.
 
+### Carrier Integrations (Admin)
+
+Per-company carrier-aggregator credentials + ship-from / egress profile for the multi-carrier
+shipping integration. All routes are mounted under `/admin/settings` and gated to **Admin**. See
+[docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/admin/settings/carrier-accounts` | List the company's carrier accounts (secrets masked) | Admin |
+| GET | `/admin/settings/carrier-accounts/{id}` | Get one carrier account (secrets masked) | Admin |
+| POST | `/admin/settings/carrier-accounts` | Create a carrier account (api key / webhook secret encrypted at rest) | Admin |
+| PUT | `/admin/settings/carrier-accounts/{id}` | Update a carrier account; sending `api_key` / `webhook_secret` rotates the stored secret | Admin |
+| DELETE | `/admin/settings/carrier-accounts/{id}` | **Soft-delete** a carrier account (never physical — purchased labels/BOLs reference it) | Admin |
+| POST | `/admin/settings/carrier-accounts/{id}/test-connection` | Validate the stored credential (the **only** carrier call exempt from the egress kill switch — sends no customer data) | Admin |
+| GET | `/admin/settings/shipping-profile` | Get the company shipping profile (ship-from origin + egress flag); **404** until created | Admin |
+| PUT | `/admin/settings/shipping-profile` | Create / update the shipping profile, including the `allow_carrier_egress` kill switch | Admin |
+
+> **Secrets are write-only.** `api_key` and `webhook_secret` are accepted on create/update,
+> **Fernet-encrypted** before storage, and **never returned** — read responses expose only
+> `api_key_last4` and `has_webhook_secret`, and secrets never appear in audit / event payloads.
+> Create / update / delete are audited; an update flags `api_key_rotated` / `webhook_secret_rotated`
+> rather than recording the value.
+>
+> **`allow_carrier_egress` is the CUI kill switch (default OFF).** A new profile is created with
+> egress **disabled**; it flips only when an admin sets it on `PUT /shipping-profile`, and that toggle
+> is recorded as a **status change** on the tamper-evident audit trail. While OFF, every
+> customer-data-bearing carrier call (`/shipping/validate-address`, `/rate-shop`, `/buy-label`,
+> `/buy-bol`, `/schedule-pickup`, `/void-label`, `/refund`) is blocked with **409**.
+
 ### Audit Log
 
 Tamper-evident audit trail (CMMC Level 2 AU-3.3.8). Audit rows are **tenant-tagged** with
@@ -1084,6 +1160,30 @@ Delivery is asynchronous (ARQ background worker), enqueued after the completion 
 best-effort — a webhook failure never affects the work-order completion. Note that the **internal**
 `WO_COMPLETED` notification (email to the tenant's own users) may carry richer context than the
 egressing webhook payload above.
+
+### Inbound carrier tracking webhooks
+
+The carrier integration also **receives** inbound tracking webhooks from the aggregator:
+
+| Method | Endpoint | Auth |
+|--------|----------|------|
+| POST | `/webhooks/carriers/{provider}` (e.g. `/webhooks/carriers/easypost`) | **None** — HMAC-verified |
+
+This is the **only unauthenticated route in the API** — a carrier cannot present a JWT. Trust and
+tenancy are established without any caller-supplied identity:
+
+- The signature is verified (constant-time) against the stored per-tenant `webhook_secret` (EasyPost:
+  HMAC-SHA256 over the raw body, hex, in the `X-Hmac-Signature` header). A request matching **no**
+  tenant's secret is dropped with **204** (no body — no existence oracle).
+- The owning tenant is resolved **only from stored shipment data** (`Shipment.aggregator_shipment_id`,
+  falling back to `tracking_number`), **never** from the path or body. No matching shipment → **204**.
+- A verified, resolvable event returns **200** quickly; the normalized events are enqueued to the ARQ
+  `process_tracking_webhook_job` with the *resolved* `company_id` + `shipment_id`, and the DB write
+  (de-dup + status flow-back) happens in the job. If enqueue fails (Redis hiccup) the handler still
+  acknowledges with **202** — the poll-cron fallback re-delivers state.
+
+See [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md) for setup and the poll
+fallback.
 
 ## Rate Limiting
 

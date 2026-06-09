@@ -26,6 +26,26 @@ import {
   WorkOrderBlockerInput,
   WorkOrderBlockerStatus,
 } from '../types/aiForward';
+import {
+  AddressValidationRequest,
+  AddressValidationResult,
+  BuyBolRequest,
+  BuyBolResult,
+  BuyLabelRequest,
+  BuyLabelResult,
+  CarrierAccount,
+  CarrierAccountCreate,
+  CarrierAccountUpdate,
+  CarrierConnectionTestResult,
+  CompanyShippingProfile,
+  CompanyShippingProfileUpdate,
+  RateQuote,
+  RateShopRequest,
+  SchedulePickupRequest,
+  SchedulePickupResult,
+  ShipmentTracking,
+  VoidRefundResult,
+} from '../types/shipping';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 
@@ -1460,6 +1480,100 @@ class ApiService {
     const response = await this.api.post(`/shipping/${shipmentId}/ship`, null, {
       params: { tracking_number: trackingNumber }
     });
+    return response.data;
+  }
+
+  // Multi-carrier shipping (rate-shop / labels / freight / pickups / tracking).
+  // These are egress-gated server-side: until allow_carrier_egress is enabled in
+  // the shipping profile, the provider-calling routes return HTTP 409 (the UI
+  // surfaces that as a prompt to enable carrier egress in Admin > Carriers).
+  async validateAddress(
+    payload: AddressValidationRequest,
+    carrierAccountId?: number,
+  ): Promise<AddressValidationResult> {
+    const response = await this.api.post('/shipping/validate-address', payload, {
+      params: carrierAccountId != null ? { carrier_account_id: carrierAccountId } : undefined,
+    });
+    return response.data;
+  }
+
+  async rateShop(shipmentId: number, payload: RateShopRequest): Promise<RateQuote[]> {
+    const response = await this.api.post(`/shipping/${shipmentId}/rate-shop`, payload);
+    return response.data;
+  }
+
+  async getRates(shipmentId: number): Promise<RateQuote[]> {
+    const response = await this.api.get(`/shipping/${shipmentId}/rates`);
+    return response.data;
+  }
+
+  async buyLabel(shipmentId: number, payload: BuyLabelRequest): Promise<BuyLabelResult> {
+    const response = await this.api.post(`/shipping/${shipmentId}/buy-label`, payload);
+    return response.data;
+  }
+
+  async buyBol(shipmentId: number, payload: BuyBolRequest): Promise<BuyBolResult> {
+    const response = await this.api.post(`/shipping/${shipmentId}/buy-bol`, payload);
+    return response.data;
+  }
+
+  async schedulePickup(shipmentId: number, payload: SchedulePickupRequest): Promise<SchedulePickupResult> {
+    const response = await this.api.post(`/shipping/${shipmentId}/schedule-pickup`, payload);
+    return response.data;
+  }
+
+  async voidLabel(shipmentId: number): Promise<VoidRefundResult> {
+    const response = await this.api.post(`/shipping/${shipmentId}/void-label`);
+    return response.data;
+  }
+
+  async refundLabel(shipmentId: number): Promise<VoidRefundResult> {
+    const response = await this.api.post(`/shipping/${shipmentId}/refund`);
+    return response.data;
+  }
+
+  async getTracking(shipmentId: number): Promise<ShipmentTracking> {
+    const response = await this.api.get(`/shipping/${shipmentId}/tracking`);
+    return response.data;
+  }
+
+  // Admin: carrier-account credentials + company shipping profile.
+  // Admin-only server-side; secrets are write-only (the read shape exposes only
+  // api_key_last4 + has_webhook_secret -- never a full key).
+  async getCarrierAccounts(includeInactive = true): Promise<CarrierAccount[]> {
+    const response = await this.api.get('/admin/settings/carrier-accounts', {
+      params: { include_inactive: includeInactive },
+    });
+    return response.data;
+  }
+
+  async createCarrierAccount(data: CarrierAccountCreate): Promise<CarrierAccount> {
+    const response = await this.api.post('/admin/settings/carrier-accounts', data);
+    return response.data;
+  }
+
+  async updateCarrierAccount(id: number, data: CarrierAccountUpdate): Promise<CarrierAccount> {
+    const response = await this.api.put(`/admin/settings/carrier-accounts/${id}`, data);
+    return response.data;
+  }
+
+  async deleteCarrierAccount(id: number) {
+    const response = await this.api.delete(`/admin/settings/carrier-accounts/${id}`);
+    return response.data;
+  }
+
+  async testCarrierConnection(id: number): Promise<CarrierConnectionTestResult> {
+    const response = await this.api.post(`/admin/settings/carrier-accounts/${id}/test-connection`);
+    return response.data;
+  }
+
+  async getShippingProfile(): Promise<CompanyShippingProfile> {
+    const response = await this.api.get('/admin/settings/shipping-profile');
+    return response.data;
+  }
+
+  async updateShippingProfile(data: CompanyShippingProfileUpdate): Promise<CompanyShippingProfile> {
+    const response = await this.api.put('/admin/settings/shipping-profile', data);
     return response.data;
   }
 

@@ -136,7 +136,7 @@ There are 37+ Alembic versions over live, multi-tenant data. When adding a migra
 
 ## Where to look for operational context
 
-`docs/` holds the runbooks that aren't obvious from code: `RBAC_PERMISSIONS.md` (the role model), `CMMC_LEVEL_2_COMPLIANCE.md`, `AI_QUOTING_AGENT_RUNBOOK.md` + `IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md` (the Anthropic-powered RFQ/quoting feature), `DEPLOYMENT.md` / `RAILWAY_DEPLOYMENT.md`, `ENVIRONMENT_VARIABLES.md`, `API.md`, `DEVELOPMENT.md`, and `BROWSER_HARNESS.md` (the safe headless-Chromium CLI for screenshots/snapshots/logs/PDFs of a running app).
+`docs/` holds the runbooks that aren't obvious from code: `RBAC_PERMISSIONS.md` (the role model), `CMMC_LEVEL_2_COMPLIANCE.md`, `AI_QUOTING_AGENT_RUNBOOK.md` + `IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md` (the Anthropic-powered RFQ/quoting feature), `SHIPPING_CARRIER_INTEGRATION.md` (the swappable multi-carrier aggregator — EasyPost adapter + registry, the `allow_carrier_egress` CUI kill switch, inbound HMAC-verified webhooks, the tracking poll cron, and label/BOL Document storage), `DEPLOYMENT.md` / `RAILWAY_DEPLOYMENT.md`, `ENVIRONMENT_VARIABLES.md`, `API.md`, `DEVELOPMENT.md`, and `BROWSER_HARNESS.md` (the safe headless-Chromium CLI for screenshots/snapshots/logs/PDFs of a running app).
 
 ## Conventions worth matching
 
