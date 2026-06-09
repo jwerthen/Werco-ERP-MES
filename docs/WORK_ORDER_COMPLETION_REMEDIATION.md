@@ -1119,6 +1119,30 @@ two **EXCLUDED** XL items (deferred to their own initiatives, not part of Batch 
 >   cross-tenant id now returns **404** before any read/mutation. Closes the cross-tenant cert/training/
 >   skill read+write leak. **No RBAC change** — these stay open to any authenticated user, now
 >   company-scoped.
+> - **`operator_certifications.py` WRITE endpoints (no `require_role` + no audit + FK-injection) — ✅
+>   RESOLVED (2026-06-09, branch `fix/operator-cert-write-rbac-audit`).** The seven write endpoints on
+>   `app/api/endpoints/operator_certifications.py` were open to **any authenticated user**, wrote **no**
+>   `audit_log` row, and accepted a cross-tenant `user_id` / `work_center_id` FK on create (the prior
+>   round-2 fix added company *scoping* to the by-id read/update paths, not RBAC, audit, or create-time
+>   FK validation). Now:
+>   - **RBAC.** `create_certification` / `update_certification` / `delete_certification` /
+>     `create_training` / `update_training` → `require_role([ADMIN, MANAGER, QUALITY])`
+>     (`CERT_TRAINING_WRITE_ROLES`); `create_skill_entry` / `update_skill_entry` →
+>     `require_role([ADMIN, MANAGER, SUPERVISOR])` (`SKILL_MATRIX_WRITE_ROLES`). Any other authenticated
+>     role → **403**. These role sets are **new defaults** chosen for this fix — the RBAC matrix had no
+>     rows for these record types (cert/training are Quality-owned conformance records; skill-matrix
+>     entries are Supervisor-and-above competency assessments). The READ endpoints are unchanged (any
+>     authenticated user, tenant-scoped).
+>   - **Audit.** Each write writes a tamper-evident `audit_log` row (resource types
+>     `operator_certification` / `training_record` / `skill_matrix`; `log_create` / `log_update` /
+>     `log_delete`), flushed before the terminal commit so it commits atomically (mirrors the Batch-1
+>     completion-path audit precedent). `create_skill_entry`'s upsert-as-update path logs an update row.
+>   - **Create-time FK validation.** New `_require_company_user` / `_require_company_work_center` helpers
+>     reject a `user_id` / `work_center_id` that does not resolve to a row in the active company with
+>     **422** before insert (and on `update_training`'s re-pointed `work_center_id`) — closing the
+>     cross-tenant FK-injection vector on create. No migration, no new env var.
+>   See `docs/RBAC_PERMISSIONS.md` → Operator Certifications & Training / Skill Matrix and `docs/API.md`
+>   → Shop Floor (operator-certifications callout).
 > - **`SkillMatrix` unique constraint is now tenant-qualified — ✅ RESOLVED (2026-06-09, branch
 >   `fix/wo-followups-round2`).** The global `UniqueConstraint('user_id', 'work_center_id',
 >   name='uq_user_work_center')` is replaced by tenant-scoped

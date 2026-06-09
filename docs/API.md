@@ -412,7 +412,23 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 >   `GET .../training/user/{user_id}`, and `PUT .../training/{training_id}` (`update_training`) all
 >   filter the active company; a cross-tenant id now returns **404** before any read/mutation.
 >
-> These remain open to **any authenticated user** — the fix added company scoping, not an RBAC change.
+> These remain open to **any authenticated user** — the tenant-scoping fix added company scoping, not an RBAC change.
+>
+> **Operator-certifications WRITE endpoints are now role-gated, audited, and FK-validated (2026-06-09).**
+> The seven write endpoints on this router are no longer open to any authenticated user (they had no
+> RBAC rows before):
+> - **Certifications + training:** `POST/PUT/DELETE /operator-certifications/certifications/{…}` and
+>   `POST/PUT /operator-certifications/training/{…}` → `require_role([ADMIN, MANAGER, QUALITY])`.
+> - **Skill matrix:** `POST /operator-certifications/skill-matrix/` and
+>   `PUT /operator-certifications/skill-matrix/{entry_id}` → `require_role([ADMIN, MANAGER, SUPERVISOR])`.
+>
+> Any other authenticated role gets **403**. Each write writes a tamper-evident `audit_log` row
+> (resource types `operator_certification` / `training_record` / `skill_matrix`; create/update/delete —
+> `GET /audit/`). On the create endpoints (and `update_training`'s re-pointed `work_center_id`), a
+> `user_id` / `work_center_id` that does not belong to the active company is rejected with **422**
+> (`"… does not reference a … in your company"`) before insert — a cross-tenant FK-injection guard. The
+> read endpoints listed above are unchanged (any authenticated user, tenant-scoped). See
+> `docs/RBAC_PERMISSIONS.md` → Operator Certifications & Training / Skill Matrix.
 
 #### Inspection Schema
 

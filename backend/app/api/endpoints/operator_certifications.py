@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.operator_certification import (
     CertificationStatus,
@@ -15,10 +15,45 @@ from app.models.operator_certification import (
     SkillMatrix,
     TrainingRecord,
 )
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.services.audit_service import AuditService
+
+# RBAC write-role sets (read-broad / write-restricted, per docs/RBAC_PERMISSIONS.md).
+# The RBAC matrix has no dedicated Certifications / Training / Skill-Matrix table, so these
+# default to the documented convention for these record classes:
+#   * Certification + Training writes are operator-qualification / conformance records that
+#     Quality owns alongside Admin/Manager.
+#   * Skill-matrix writes are competency assessments performed by Supervisors (and above).
+# READ endpoints stay on ``get_current_user`` (tenant-scoped, any authenticated user).
+CERT_TRAINING_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]
+SKILL_MATRIX_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
 
 router = APIRouter()
+
+
+# ==================== FK Validation Helpers ====================
+
+
+def _require_company_user(db: Session, user_id: int, company_id: int) -> None:
+    """Reject a user_id FK that does not resolve to a user in the active company.
+
+    Guards against cross-tenant FK injection on create: a caller must not be able to attach a
+    certification / training / skill-matrix row to another tenant's user. 422 (input validation)
+    matches FastAPI's convention for a bad request body before insert.
+    """
+    exists = db.query(User.id).filter(User.id == user_id, User.company_id == company_id).first()
+    if not exists:
+        raise HTTPException(status_code=422, detail="user_id does not reference a user in your company")
+
+
+def _require_company_work_center(db: Session, work_center_id: int, company_id: int) -> None:
+    """Reject a work_center_id FK that does not resolve to a work center in the active company."""
+    exists = (
+        db.query(WorkCenter.id).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
+    )
+    if not exists:
+        raise HTTPException(status_code=422, detail="work_center_id does not reference a work center in your company")
 
 
 # ==================== Pydantic Schemas ====================
@@ -427,10 +462,14 @@ def get_certification(
 def create_certification(
     cert_in: CertificationCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(CERT_TRAINING_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Create certification"""
+    # Reject a cross-tenant user_id FK before insert.
+    _require_company_user(db, cert_in.user_id, company_id)
+
     data = cert_in.model_dump()
     data["certification_type"] = CertificationType(data["certification_type"])
     data["status"] = CertificationStatus(data["status"])
@@ -438,6 +477,16 @@ def create_certification(
     cert = OperatorCertification(**data)
     cert.company_id = company_id
     db.add(cert)
+
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically; flush for the PK.
+    db.flush()
+    audit.log_create(
+        resource_type="operator_certification",
+        resource_id=cert.id,
+        resource_identifier=str(cert.id),
+        new_values=cert,
+        description=f"Created operator certification {cert.id}",
+    )
     db.commit()
     db.refresh(cert)
     return serialize_cert(cert, db)
@@ -448,8 +497,9 @@ def update_certification(
     cert_id: int,
     cert_in: CertificationUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(CERT_TRAINING_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update certification"""
     cert = (
@@ -460,6 +510,9 @@ def update_certification(
     if not cert:
         raise HTTPException(status_code=404, detail="Certification not found")
 
+    # Snapshot pre-mutation values for the audit diff (the live model is mutated in place).
+    old_values = {c.key: getattr(cert, c.key) for c in cert.__table__.columns}
+
     update_data = cert_in.model_dump(exclude_unset=True)
     if "certification_type" in update_data:
         update_data["certification_type"] = CertificationType(update_data["certification_type"])
@@ -469,6 +522,16 @@ def update_certification(
     for field, value in update_data.items():
         setattr(cert, field, value)
 
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+    db.flush()
+    audit.log_update(
+        resource_type="operator_certification",
+        resource_id=cert.id,
+        resource_identifier=str(cert.id),
+        old_values=old_values,
+        new_values=cert,
+        description=f"Updated operator certification {cert.id}",
+    )
     db.commit()
     db.refresh(cert)
     return serialize_cert(cert, db)
@@ -478,8 +541,9 @@ def update_certification(
 def delete_certification(
     cert_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(CERT_TRAINING_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Delete certification"""
     cert = (
@@ -490,7 +554,19 @@ def delete_certification(
     if not cert:
         raise HTTPException(status_code=404, detail="Certification not found")
 
+    # Snapshot for the audit row before the row is physically removed (no SoftDeleteMixin here).
+    old_values = {c.key: getattr(cert, c.key) for c in cert.__table__.columns}
+    deleted_id = cert.id
+
     db.delete(cert)
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+    audit.log_delete(
+        resource_type="operator_certification",
+        resource_id=deleted_id,
+        resource_identifier=str(deleted_id),
+        old_values=old_values,
+        description=f"Deleted operator certification {deleted_id}",
+    )
     db.commit()
     return {"message": "Certification deleted"}
 
@@ -548,15 +624,31 @@ def list_training(
 def create_training(
     training_in: TrainingCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(CERT_TRAINING_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Create training record"""
+    # Reject cross-tenant FKs before insert (user_id required; work_center_id optional).
+    _require_company_user(db, training_in.user_id, company_id)
+    if training_in.work_center_id is not None:
+        _require_company_work_center(db, training_in.work_center_id, company_id)
+
     data = training_in.model_dump()
     data["recorded_by"] = current_user.id
     record = TrainingRecord(**data)
     record.company_id = company_id
     db.add(record)
+
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically; flush for the PK.
+    db.flush()
+    audit.log_create(
+        resource_type="training_record",
+        resource_id=record.id,
+        resource_identifier=str(record.id),
+        new_values=record,
+        description=f"Created training record {record.id}",
+    )
     db.commit()
     db.refresh(record)
     return serialize_training(record, db)
@@ -567,8 +659,9 @@ def update_training(
     training_id: int,
     training_in: TrainingUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(CERT_TRAINING_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update training record"""
     record = (
@@ -579,10 +672,27 @@ def update_training(
     if not record:
         raise HTTPException(status_code=404, detail="Training record not found")
 
+    # A re-pointed work_center_id must stay in-company (cross-tenant FK guard on update).
     update_data = training_in.model_dump(exclude_unset=True)
+    if update_data.get("work_center_id") is not None:
+        _require_company_work_center(db, update_data["work_center_id"], company_id)
+
+    # Snapshot pre-mutation values for the audit diff (the live model is mutated in place).
+    old_values = {c.key: getattr(record, c.key) for c in record.__table__.columns}
+
     for field, value in update_data.items():
         setattr(record, field, value)
 
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+    db.flush()
+    audit.log_update(
+        resource_type="training_record",
+        resource_id=record.id,
+        resource_identifier=str(record.id),
+        old_values=old_values,
+        new_values=record,
+        description=f"Updated training record {record.id}",
+    )
     db.commit()
     db.refresh(record)
     return serialize_training(record, db)
@@ -683,12 +793,17 @@ def list_skill_matrix(
 def create_skill_entry(
     entry_in: SkillMatrixCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(SKILL_MATRIX_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Add skill matrix entry"""
     if entry_in.skill_level < 1 or entry_in.skill_level > 5:
         raise HTTPException(status_code=400, detail="Skill level must be between 1 and 5")
+
+    # Reject cross-tenant FKs before any lookup/insert (both required on this model).
+    _require_company_user(db, entry_in.user_id, company_id)
+    _require_company_work_center(db, entry_in.work_center_id, company_id)
 
     existing = (
         db.query(SkillMatrix)
@@ -702,6 +817,7 @@ def create_skill_entry(
 
     if existing:
         # Update existing entry instead of creating duplicate
+        old_values = {c.key: getattr(existing, c.key) for c in existing.__table__.columns}
         existing.skill_level = entry_in.skill_level
         existing.qualified_date = entry_in.qualified_date
         existing.last_assessment_date = entry_in.last_assessment_date
@@ -709,6 +825,16 @@ def create_skill_entry(
         existing.notes = entry_in.notes
         existing.approved_by = current_user.id
         existing.is_active = True
+        # Audit (tamper-evident) the upsert-as-update BEFORE the terminal commit so it commits atomically.
+        db.flush()
+        audit.log_update(
+            resource_type="skill_matrix",
+            resource_id=existing.id,
+            resource_identifier=str(existing.id),
+            old_values=old_values,
+            new_values=existing,
+            description=f"Updated skill matrix entry {existing.id}",
+        )
         db.commit()
         db.refresh(existing)
         return serialize_skill(existing, db)
@@ -718,6 +844,15 @@ def create_skill_entry(
     entry = SkillMatrix(**data)
     entry.company_id = company_id
     db.add(entry)
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically; flush for the PK.
+    db.flush()
+    audit.log_create(
+        resource_type="skill_matrix",
+        resource_id=entry.id,
+        resource_identifier=str(entry.id),
+        new_values=entry,
+        description=f"Created skill matrix entry {entry.id}",
+    )
     db.commit()
     db.refresh(entry)
     return serialize_skill(entry, db)
@@ -728,8 +863,9 @@ def update_skill_entry(
     entry_id: int,
     entry_in: SkillMatrixUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(SKILL_MATRIX_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update skill matrix entry"""
     entry = db.query(SkillMatrix).filter(SkillMatrix.id == entry_id, SkillMatrix.company_id == company_id).first()
@@ -740,10 +876,23 @@ def update_skill_entry(
     if "skill_level" in update_data and (update_data["skill_level"] < 1 or update_data["skill_level"] > 5):
         raise HTTPException(status_code=400, detail="Skill level must be between 1 and 5")
 
+    # Snapshot pre-mutation values for the audit diff (the live model is mutated in place).
+    old_values = {c.key: getattr(entry, c.key) for c in entry.__table__.columns}
+
     for field, value in update_data.items():
         setattr(entry, field, value)
 
     entry.approved_by = current_user.id
+    # Audit (tamper-evident) BEFORE the terminal commit so it commits atomically.
+    db.flush()
+    audit.log_update(
+        resource_type="skill_matrix",
+        resource_id=entry.id,
+        resource_identifier=str(entry.id),
+        old_values=old_values,
+        new_values=entry,
+        description=f"Updated skill matrix entry {entry.id}",
+    )
     db.commit()
     db.refresh(entry)
     return serialize_skill(entry, db)
