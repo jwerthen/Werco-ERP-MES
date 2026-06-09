@@ -397,8 +397,11 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > Each entry is `{ "code", "message", "reference_type", "reference_id", "severity" }`; the field
 > defaults to `[]`, so an all-clear clock-in / start is shape-compatible with the pre-G5-B response.
 > The gate is **tenant-scoped** — every skill/cert/work-center lookup filters the active company.
-> (Note: the legacy `GET /operator-certifications/skill-matrix/check/…` read endpoint is **not**
-> company-scoped; this new gate is.)
+> (The legacy skill-matrix read endpoints under `GET /operator-certifications/skill-matrix/…` —
+> `check/{user_id}/{work_center_id}`, `user/{user_id}`, `work-center/{work_center_id}`, and the list —
+> plus the `POST .../skill-matrix/` writer were **also tenant-scoped** as of 2026-06-09; all filter
+> `SkillMatrix.company_id` on the active company. They remain open to any authenticated user — the fix
+> added company scoping, not an RBAC change.)
 
 #### Inspection Schema
 
