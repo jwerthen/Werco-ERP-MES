@@ -86,7 +86,7 @@ def _find_existing_part_number_by_description(db: Session, description: str, par
 
 
 async def _upload_and_extract_document(
-    document_type: str, file: UploadFile, db: Session, current_user: User
+    document_type: str, file: UploadFile, db: Session, current_user: User, company_id: Optional[int] = None
 ) -> POExtractionResult:
     """
     Upload a PO/Quote PDF or Word document and extract data using AI.
@@ -137,7 +137,10 @@ async def _upload_and_extract_document(
 
         # Extract structured data using LLM
         llm_result = extract_po_data_with_llm(
-            extraction_result.text, is_ocr=extraction_result.is_ocr, document_type=document_type
+            extraction_result.text,
+            is_ocr=extraction_result.is_ocr,
+            document_type=document_type,
+            company_id=company_id,
         )
 
         # Check for LLM errors
@@ -278,35 +281,44 @@ async def _upload_and_extract_document(
 
 @router.post("/upload-po", response_model=POExtractionResult)
 async def upload_and_extract_po(
-    file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Upload a purchase order PDF or Word document and extract data using AI.
     Supports: .pdf, .doc, .docx
     Returns extracted data for user review before committing.
     """
-    return await _upload_and_extract_document("po", file, db, current_user)
+    return await _upload_and_extract_document("po", file, db, current_user, company_id)
 
 
 @router.post("/upload-quote", response_model=POExtractionResult)
 async def upload_and_extract_quote(
-    file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Upload a vendor quote PDF or Word document and extract data to create a PO.
     Supports: .pdf, .doc, .docx
     """
-    return await _upload_and_extract_document("quote", file, db, current_user)
+    return await _upload_and_extract_document("quote", file, db, current_user, company_id)
 
 
 @router.post("/upload-invoice", response_model=POExtractionResult)
 async def upload_and_extract_invoice(
-    file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """
     Legacy endpoint. Uploads vendor quotes for PO creation.
     """
-    return await _upload_and_extract_document("quote", file, db, current_user)
+    return await _upload_and_extract_document("quote", file, db, current_user, company_id)
 
 
 @router.post("/create-from-upload", response_model=POUploadResponse)

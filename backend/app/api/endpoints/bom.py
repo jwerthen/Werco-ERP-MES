@@ -655,7 +655,9 @@ async def import_bom_preview(
     if not extraction_result.text or len(extraction_result.text.strip()) < 50:
         raise HTTPException(status_code=400, detail="Could not extract text from document")
 
-    extracted = extract_bom_data_with_llm(extraction_result.text, is_ocr=extraction_result.is_ocr)
+    extracted = extract_bom_data_with_llm(
+        extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
+    )
     if extracted.get("_error"):
         raise HTTPException(status_code=400, detail=extracted.get("_error"))
 
@@ -709,7 +711,9 @@ async def import_bom_or_part(
     if not extraction_result.text or len(extraction_result.text.strip()) < 50:
         raise HTTPException(status_code=400, detail="Could not extract text from document")
 
-    extracted = extract_bom_data_with_llm(extraction_result.text, is_ocr=extraction_result.is_ocr)
+    extracted = extract_bom_data_with_llm(
+        extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
+    )
     if extracted.get("_error"):
         raise HTTPException(status_code=400, detail=extracted.get("_error"))
 

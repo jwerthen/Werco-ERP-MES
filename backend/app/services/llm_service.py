@@ -1,15 +1,25 @@
 """
 LLM Service for Purchase Order Data Extraction
 Uses Claude API to extract structured data from PDF text.
+
+All API plumbing (client, model routing, usage telemetry, cost estimation)
+lives in ``app.services.llm_client.run_llm_task``. Prompt text is versioned in
+``app.services.prompts``.
 """
 
 import json
 import logging
-import os
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from app.services.llm_model_router import LLMTaskContext, select_anthropic_model
+from app.services.llm_client import LLMNotConfiguredError, is_anthropic_api_error, run_llm_task
+from app.services.llm_model_router import LLMTaskContext
+from app.services.prompts import (
+    BOM_EXTRACTION_PROMPT,
+    BOM_EXTRACTION_SCHEMA,
+    PO_EXTRACTION_PROMPT,
+    PO_EXTRACTION_SCHEMA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,105 +27,19 @@ logger = logging.getLogger(__name__)
 # entire request thread if the upstream API is slow or unreachable.
 LLM_API_TIMEOUT_SECONDS = 60.0
 
-# Extraction schema for LLM
-EXTRACTION_SCHEMA = """
-{
-  "document_type": "string - 'po' or 'quote'",
-  "po_number": "string - the purchase order number",
-  "quote_number": "string - the quote number (if document is a quote)",
-  "vendor": {
-    "name": "string - vendor/supplier company name",
-    "address": "string - full address if available"
-  },
-  "order_date": "YYYY-MM-DD format or null",
-  "expected_delivery_date": "YYYY-MM-DD format or null",
-  "required_date": "YYYY-MM-DD format or null",
-  "payment_terms": "string or null",
-  "shipping_method": "string or null",
-  "ship_to": "string - shipping address or null",
-  "line_items": [
-    {
-      "line_number": "integer",
-      "part_number": "string - the part/item number",
-      "description": "string - item description",
-      "qty_ordered": "number",
-      "unit_of_measure": "string - EA, LB, FT, etc.",
-      "unit_price": "number",
-      "line_total": "number",
-      "confidence": "high, medium, or low"
-    }
-  ],
-  "subtotal": "number or null",
-  "tax": "number or null",
-  "shipping_cost": "number or null",
-  "total_amount": "number",
-  "notes": "string - any special instructions or notes",
-  "extraction_confidence": "high, medium, or low - overall confidence"
-}
-"""
-
-SYSTEM_PROMPT = """You are a purchasing document extraction assistant specialized in manufacturing and fabrication industry documents. Your task is to extract structured data from purchase orders and vendor quotes.
-
-Key guidelines:
-1. Extract all fields according to the schema provided
-2. For part numbers, preserve exact formatting (dashes, spaces, etc.)
-3. For dates, convert to YYYY-MM-DD format
-4. For monetary values, extract as numbers without currency symbols
-5. If a field is unclear or ambiguous, set confidence to "low"
-6. If a field is not found, set to null
-7. Pay attention to quantity, unit price, and line totals - verify they make sense
-8. Look for common PO/quote formats: header info, line items table, totals section
-9. Set document_type to "quote" when the document is a vendor quote, otherwise "po"
-
-Return ONLY valid JSON matching the schema. No explanations or markdown."""
+# Backwards-compatible aliases — canonical text now lives in app.services.prompts.
+EXTRACTION_SCHEMA = PO_EXTRACTION_SCHEMA
+SYSTEM_PROMPT = PO_EXTRACTION_PROMPT.text
 
 
-BOM_EXTRACTION_SCHEMA = """
-{
-  "document_type": "string - 'bom' or 'part'",
-  "assembly": {
-    "part_number": "string or null",
-    "name": "string or null",
-    "revision": "string or null",
-    "description": "string or null",
-    "drawing_number": "string or null",
-    "part_type": "string - manufactured, assembly, purchased, raw_material, hardware, consumable"
-  },
-  "items": [
-    {
-      "line_number": "integer",
-      "part_number": "string or null",
-      "description": "string",
-      "quantity": "number",
-      "unit_of_measure": "string - EA, LB, FT, IN, etc.",
-      "item_type": "string - make, buy, phantom",
-      "line_type": "string - component, hardware, consumable, reference",
-      "reference_designator": "string or null",
-      "find_number": "string or null",
-      "notes": "string or null",
-      "confidence": "high, medium, or low"
-    }
-  ],
-  "extraction_confidence": "high, medium, or low - overall confidence"
-}
-"""
+def _not_configured_message(exc: LLMNotConfiguredError) -> str:
+    return "LLM library not available" if exc.reason == "library" else "API key not configured"
 
 
-def extract_bom_data_with_llm(pdf_text: str, is_ocr: bool = False) -> Dict[str, Any]:
+def extract_bom_data_with_llm(pdf_text: str, is_ocr: bool = False, company_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Use Claude API to extract structured BOM/part data from text.
     """
-    try:
-        import anthropic
-    except ImportError:
-        logger.error("anthropic package not installed")
-        return _create_empty_bom_result("LLM library not available")
-
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.error("ANTHROPIC_API_KEY not set")
-        return _create_empty_bom_result("API key not configured")
-
     ocr_note = (
         "\n\nNote: This text was extracted via OCR and may contain errors. Be extra careful with quantities and part numbers."
         if is_ocr
@@ -142,19 +66,18 @@ Document Text:
 Return ONLY the JSON object, no other text."""
 
     try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=LLM_API_TIMEOUT_SECONDS)
-        model_decision = select_anthropic_model(
-            LLMTaskContext(task="bom_extraction", input_chars=len(pdf_text), is_ocr=is_ocr)
-        )
-
-        message = client.messages.create(
-            model=model_decision.model,
-            max_tokens=4096,
+        llm_result = run_llm_task(
+            LLMTaskContext(task="bom_extraction", input_chars=len(pdf_text), is_ocr=is_ocr),
             messages=[{"role": "user", "content": user_prompt}],
-            system=SYSTEM_PROMPT,
+            system=BOM_EXTRACTION_PROMPT.text,
+            max_tokens=4096,
+            company_id=company_id,
+            feature="bom_import",
+            prompt_version=BOM_EXTRACTION_PROMPT.version,
+            timeout=LLM_API_TIMEOUT_SECONDS,
         )
 
-        response_text = message.content[0].text.strip()
+        response_text = llm_result.text.strip()
 
         if response_text.startswith("```json"):
             response_text = response_text[7:]
@@ -167,24 +90,28 @@ Return ONLY the JSON object, no other text."""
         result["_extraction_metadata"] = {
             "extracted_at": datetime.utcnow().isoformat(),
             "source_was_ocr": is_ocr,
-            "model": model_decision.model,
-            "model_tier": model_decision.tier.value,
-            "model_selection_reason": model_decision.reason,
+            "model": llm_result.model,
+            "model_tier": llm_result.tier,
+            "model_selection_reason": llm_result.model_selection_reason,
+            "prompt_version": llm_result.prompt_version,
         }
 
         logger.info(
             "LLM BOM extraction successful: %s items using %s",
             len(result.get("items", [])),
-            model_decision.model,
+            llm_result.model,
         )
         return result
+    except LLMNotConfiguredError as e:
+        logger.error(str(e))
+        return _create_empty_bom_result(_not_configured_message(e))
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response as JSON: {e}")
         return _create_empty_bom_result(f"Invalid JSON response: {str(e)}")
-    except anthropic.APIError as e:
-        logger.error(f"Anthropic API error: {e}")
-        return _create_empty_bom_result(f"API error: {str(e)}")
     except Exception as e:
+        if is_anthropic_api_error(e):
+            logger.error(f"Anthropic API error: {e}")
+            return _create_empty_bom_result(f"API error: {str(e)}")
         logger.error(f"LLM extraction failed: {e}")
         return _create_empty_bom_result(f"Extraction failed: {str(e)}")
 
@@ -208,21 +135,15 @@ def _create_empty_bom_result(error_message: str) -> Dict[str, Any]:
     }
 
 
-def extract_po_data_with_llm(pdf_text: str, is_ocr: bool = False, document_type: str = "po") -> Dict[str, Any]:
+def extract_po_data_with_llm(
+    pdf_text: str,
+    is_ocr: bool = False,
+    document_type: str = "po",
+    company_id: Optional[int] = None,
+) -> Dict[str, Any]:
     """
     Use Claude API to extract structured PO/quote data from text.
     """
-    try:
-        import anthropic
-    except ImportError:
-        logger.error("anthropic package not installed")
-        return _create_empty_result("LLM library not available")
-
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.error("ANTHROPIC_API_KEY not set")
-        return _create_empty_result("API key not configured")
-
     # Prepare the extraction prompt
     ocr_note = (
         "\n\nNote: This text was extracted via OCR and may contain errors. Be extra careful with numbers and part numbers."
@@ -251,24 +172,23 @@ Purchase Order Text:
 Return ONLY the JSON object, no other text."""
 
     try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=LLM_API_TIMEOUT_SECONDS)
-        model_decision = select_anthropic_model(
+        llm_result = run_llm_task(
             LLMTaskContext(
                 task="po_extraction",
                 input_chars=len(pdf_text),
                 is_ocr=is_ocr,
                 document_type=document_type,
-            )
-        )
-
-        message = client.messages.create(
-            model=model_decision.model,
-            max_tokens=4096,
+            ),
             messages=[{"role": "user", "content": user_prompt}],
-            system=SYSTEM_PROMPT,
+            system=PO_EXTRACTION_PROMPT.text,
+            max_tokens=4096,
+            company_id=company_id,
+            feature="po_upload",
+            prompt_version=PO_EXTRACTION_PROMPT.version,
+            timeout=LLM_API_TIMEOUT_SECONDS,
         )
 
-        response_text = message.content[0].text.strip()
+        response_text = llm_result.text.strip()
 
         # Clean up response if needed
         if response_text.startswith("```json"):
@@ -284,25 +204,29 @@ Return ONLY the JSON object, no other text."""
         result["_extraction_metadata"] = {
             "extracted_at": datetime.utcnow().isoformat(),
             "source_was_ocr": is_ocr,
-            "model": model_decision.model,
-            "model_tier": model_decision.tier.value,
-            "model_selection_reason": model_decision.reason,
+            "model": llm_result.model,
+            "model_tier": llm_result.tier,
+            "model_selection_reason": llm_result.model_selection_reason,
+            "prompt_version": llm_result.prompt_version,
         }
 
         logger.info(
             "LLM extraction successful: %s line items using %s",
             len(result.get("line_items", [])),
-            model_decision.model,
+            llm_result.model,
         )
         return result
 
+    except LLMNotConfiguredError as e:
+        logger.error(str(e))
+        return _create_empty_result(_not_configured_message(e))
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response as JSON: {e}")
         return _create_empty_result(f"Invalid JSON response: {str(e)}")
-    except anthropic.APIError as e:
-        logger.error(f"Anthropic API error: {e}")
-        return _create_empty_result(f"API error: {str(e)}")
     except Exception as e:
+        if is_anthropic_api_error(e):
+            logger.error(f"Anthropic API error: {e}")
+            return _create_empty_result(f"API error: {str(e)}")
         logger.error(f"LLM extraction failed: {e}")
         return _create_empty_result(f"Extraction failed: {str(e)}")
 

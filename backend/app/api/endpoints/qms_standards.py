@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 from datetime import datetime
 from typing import List
 
@@ -32,7 +31,9 @@ from app.services.auto_evidence_service import (
     compute_overall_compliance,
     discover_evidence_for_clause,
 )
-from app.services.llm_model_router import LLMTaskContext, select_anthropic_model
+from app.services.llm_client import LLMNotConfiguredError, run_llm_task
+from app.services.llm_model_router import LLMTaskContext
+from app.services.prompts import QMS_CLAUSE_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -163,16 +164,8 @@ async def upload_pdf_and_extract_clauses(
             status_code=400, detail="Could not extract text from PDF. The file may be scanned/image-based or empty."
         )
 
-    # Use Claude AI to extract clauses
-    try:
-        import anthropic
-    except ImportError:
-        raise HTTPException(status_code=500, detail="AI extraction library not available")
-
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI extraction not configured (ANTHROPIC_API_KEY missing)")
-
+    # Use Claude AI to extract clauses (prompt version: see app/services/prompts/qms.py —
+    # bump QMS_CLAUSE_EXTRACTION_PROMPT when this inline text changes).
     clause_schema = """[
   {
     "clause_number": "string - e.g. '4.1', '8.5.2'",
@@ -204,21 +197,20 @@ Document text:
 Return ONLY a valid JSON array. No markdown, no explanations."""
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        model_decision = select_anthropic_model(
+        llm_result = run_llm_task(
             LLMTaskContext(
                 task="qms_clause_extraction",
                 input_chars=len(pdf_text),
                 max_output_tokens=16000,
-            )
-        )
-        message = client.messages.create(
-            model=model_decision.model,
-            max_tokens=16000,
+            ),
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=16000,
+            company_id=company_id,
+            feature="qms_standards",
+            prompt_version=QMS_CLAUSE_EXTRACTION_PROMPT.version,
         )
 
-        response_text = message.content[0].text.strip()
+        response_text = llm_result.text.strip()
 
         # Clean markdown fences
         if response_text.startswith("```json"):
@@ -233,6 +225,13 @@ Return ONLY a valid JSON array. No markdown, no explanations."""
         if not isinstance(extracted, list):
             raise ValueError("Expected a JSON array of clauses")
 
+    except LLMNotConfiguredError as e:
+        detail = (
+            "AI extraction library not available"
+            if e.reason == "library"
+            else "AI extraction not configured (ANTHROPIC_API_KEY missing)"
+        )
+        raise HTTPException(status_code=500, detail=detail)
     except json.JSONDecodeError as e:
         logger.error(f"AI returned invalid JSON: {e}")
         raise HTTPException(
@@ -280,8 +279,8 @@ Return ONLY a valid JSON array. No markdown, no explanations."""
         "Extracted %s clauses from PDF for standard %s using %s (%s)",
         len(clauses),
         standard.name,
-        model_decision.model,
-        model_decision.reason,
+        llm_result.model,
+        llm_result.model_selection_reason,
     )
     return clauses
 

@@ -1,4 +1,5 @@
 from .ai_learning import AICorrection, AIInteractionEvent, AIOutcome, AIRecommendation
+from .ai_usage import AIUsageEvent
 from .analytics import ReportTemplate
 from .audit_log import AuditLog
 from .bom import BOM, BOMItem, BOMItemType
@@ -145,6 +146,7 @@ __all__ = [
     "AICorrection",
     "AIRecommendation",
     "AIOutcome",
+    "AIUsageEvent",
     "User",
     "UserRole",
     "WorkCenter",

@@ -32,6 +32,7 @@ from app.schemas.routing_generation import (
     RoutingGenerationResult,
 )
 from app.services.ai_learning_service import AILearningService
+from app.services.prompts import ROUTING_GENERATION_PROMPT
 from app.services.routing_learning_service import (
     create_generation_session,
     get_learned_routing_context,
@@ -283,6 +284,7 @@ async def generate_routing_from_drawing(
         learned_patterns=learned_context.get("patterns"),
         preferred_work_center_ids=learned_context.get("preferred_work_center_ids"),
         learned_examples_context=learned_context.get("examples_prompt"),
+        company_id=company_id,
     )
 
     if gen_result.get("_error"):
@@ -487,6 +489,7 @@ def create_routing_from_generation(
                     "suggest_only": True,
                 },
                 confidence_score=0.75 if not ai_corrections else 0.55,
+                prompt_version=ROUTING_GENERATION_PROMPT.version,
                 model_version=(generation_session.learned_context or {}).get("model"),
                 corrections=ai_corrections,
             ),
