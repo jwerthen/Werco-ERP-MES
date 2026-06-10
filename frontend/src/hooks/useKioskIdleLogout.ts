@@ -25,6 +25,10 @@ export function useKioskIdleLogout({ enabled, timeoutSeconds, warningSeconds = 3
   countdownSeconds: number | null;
   reset: () => void;
 } {
+  // Clamp the warning window below the total timeout so a short timeout
+  // (e.g. ?idle_logout_s=30 with the 30s default warning) still gets a quiet
+  // period instead of a permanent countdown banner.
+  const effectiveWarningSeconds = Math.min(warningSeconds, timeoutSeconds - 1);
   const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null);
   const deadlineRef = useRef<number>(0);
   const firedRef = useRef(false);
@@ -55,7 +59,7 @@ export function useKioskIdleLogout({ enabled, timeoutSeconds, warningSeconds = 3
         return;
       }
       const remainingS = Math.ceil(remainingMs / 1000);
-      setCountdownSeconds(remainingS <= warningSeconds ? remainingS : null);
+      setCountdownSeconds(remainingS <= effectiveWarningSeconds ? remainingS : null);
     };
 
     const interval = window.setInterval(tick, 1000);
@@ -68,7 +72,7 @@ export function useKioskIdleLogout({ enabled, timeoutSeconds, warningSeconds = 3
       window.clearInterval(interval);
       ACTIVITY_EVENTS.forEach((event) => window.removeEventListener(event, handleActivity));
     };
-  }, [enabled, warningSeconds, reset]);
+  }, [enabled, effectiveWarningSeconds, reset]);
 
   return { countdownSeconds, reset };
 }

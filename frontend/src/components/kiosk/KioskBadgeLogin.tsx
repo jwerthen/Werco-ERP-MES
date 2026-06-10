@@ -51,6 +51,9 @@ export default function KioskBadgeLogin({ stationLabel, onLogin }: KioskBadgeLog
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (submitting) return;
+      // Keyboard shortcuts (Ctrl/Cmd/Alt chords) and in-progress IME composition
+      // are not badge input — don't let them pollute the buffer.
+      if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
       if (event.key === 'Enter') {
         event.preventDefault();
         void submit(value);

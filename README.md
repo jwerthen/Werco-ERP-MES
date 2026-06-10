@@ -14,6 +14,7 @@ Shipped modules, grouped by domain:
 ### Production & Shop Floor
 - **Work orders** — release, dispatch, and full lifecycle tracking; priority P1–P10, customer-PO linkage, auto-loaded BOM and routing.
 - **Shop-floor kiosk** — operator start/hold/resume/complete with qty produced/scrapped and notes; badge/employee-ID login for kiosks.
+- **Operator kiosk** (`/kiosk`) — touch-first screen for fixed station terminals: badge-scan login, two-tap clock-in from the station queue, report production / complete / hold with structured scrap and hold reasons, idle auto-logout, and all writes tagged with the `kiosk` telemetry channel (see [docs/KIOSK.md](docs/KIOSK.md)).
 - **Scheduling & dispatch**, **OEE** tracking, **downtime** logging, and operator **time tracking / time clock**.
 
 ### Engineering

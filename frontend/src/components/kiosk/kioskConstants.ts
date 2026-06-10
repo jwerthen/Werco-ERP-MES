@@ -6,12 +6,15 @@
  *   adoption-telemetry channel. Use KIOSK_SOURCE, never a string literal.
  * - Scrap ALWAYS requires an explicit reason chosen from SCRAP_REASONS
  *   (no default, no free text). The chosen label is stored verbatim in the
- *   TimeEntry.scrap_reason column (free string, 255 max) on clock-out, and is
- *   prefixed into `notes` for in-shift production reports (that endpoint has
- *   no structured scrap_reason field yet).
+ *   TimeEntry.scrap_reason column (free string, 255 max) — clock-out and
+ *   in-shift production reports both send it as the structured `scrap_reason`
+ *   field on their respective endpoints.
  * - Hold reasons mirror the backend WorkOrderBlockerCategory enum
  *   (backend/app/models/work_order_blocker.py) so a kiosk hold files the same
- *   structured blocker a supervisor would.
+ *   structured blocker a supervisor would. The backend only files a blocker
+ *   when the hold carries a note OR a non-OTHER category, so the kiosk sends a
+ *   stub note ("Other (reported at kiosk)") with the "Other" tile — every
+ *   kiosk hold files a blocker.
  */
 
 export const KIOSK_SOURCE = 'kiosk';

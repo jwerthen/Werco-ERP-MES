@@ -175,9 +175,9 @@ export default function OperatorKiosk() {
         await api.reportOperationProduction(job.operation_id, {
           quantity_complete_delta: good,
           quantity_scrapped_delta: scrap,
-          // No structured scrap_reason on this endpoint (backend gap) — record
-          // the chosen reason in notes so it is never lost.
-          notes: scrap > 0 && scrapReason ? `Scrap reason: ${scrapReason}` : undefined,
+          // Structured scrap reason (same TimeEntry.scrap_reason column clock-out
+          // writes). The kiosk has no free-text notes input, so `notes` is not sent.
+          scrap_reason: scrap > 0 && scrapReason ? scrapReason : undefined,
           source: KIOSK_SOURCE,
         });
         showToast('success', scrap > 0 ? `Saved ${good} good, ${scrap} scrap` : `Saved ${good} good`);
@@ -216,11 +216,14 @@ export default function OperatorKiosk() {
         showToast('success', `Completed ${job.work_order_number}`);
         setView({ name: 'queue' });
       } catch (err) {
-        const fallback = clockedOut
-          ? 'Clocked out, but the operation could not be completed.'
-          : 'Could not complete. Try again.';
-        showToast('error', kioskErrorMessage(err, fallback));
-        if (clockedOut) setView({ name: 'queue' });
+        // Two-step verb: if the clock-out landed but completion was refused, say so
+        // honestly AND keep the backend's gating detail verbatim.
+        if (clockedOut) {
+          showToast('error', `Clocked out, but completing failed: ${kioskErrorMessage(err, 'Could not complete. Try again.')}`);
+          setView({ name: 'queue' });
+        } else {
+          showToast('error', kioskErrorMessage(err, 'Could not complete. Try again.'));
+        }
       } finally {
         setBusy(false);
         await refresh();
@@ -234,7 +237,15 @@ export default function OperatorKiosk() {
       if (!job.operation_id) return;
       setBusy(true);
       try {
-        await api.holdOperation(job.operation_id, { category, severity: 'medium' });
+        await api.holdOperation(job.operation_id, {
+          category,
+          severity: 'medium',
+          // The backend only files a WorkOrderBlocker when the hold carries a note
+          // OR a non-OTHER category; the kiosk's "Other" tile is category-only, so
+          // send a stub note to make sure every kiosk hold files a blocker.
+          ...(category === 'other' ? { note: 'Other (reported at kiosk)' } : {}),
+          source: KIOSK_SOURCE,
+        });
         showToast('info', 'Operation placed on hold');
         setView({ name: 'queue' });
         setHoldReason(null);
@@ -306,7 +317,10 @@ export default function OperatorKiosk() {
             <button
               type="button"
               onClick={handleIdleLogout}
-              className="flex min-h-16 items-center gap-2 rounded border border-fd-line bg-fd-sunken px-4 text-lg font-bold uppercase tracking-wide text-fd-body transition-colors hover:border-fd-line-bright"
+              // Disabled mid-mutation: logging out while a clock-in/out is in flight
+              // 401s the retry path and bounces the tablet off /kiosk.
+              disabled={busy}
+              className="flex min-h-16 items-center gap-2 rounded border border-fd-line bg-fd-sunken px-4 text-lg font-bold uppercase tracking-wide text-fd-body transition-colors hover:border-fd-line-bright disabled:cursor-not-allowed disabled:opacity-40"
             >
               <ArrowRightOnRectangleIcon className="h-6 w-6" />
               Log out

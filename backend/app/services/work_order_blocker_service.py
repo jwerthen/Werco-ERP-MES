@@ -69,7 +69,12 @@ class WorkOrderBlockerService:
         work_order_id: int,
         data: WorkOrderBlockerCreate,
         audit: Optional[AuditService] = None,
+        source: Optional[str] = None,
     ) -> WorkOrderBlocker:
+        # ``source`` is the A0.1 adoption-telemetry client channel
+        # (kiosk/desktop/scanner/import/backfill) when the triggering request
+        # supplied one; None means unknown/not reported (e.g. office paths).
+        # Passed through to the work_order_blocker_created event payload only.
         work_order = (
             self.db.query(WorkOrder)
             .options(joinedload(WorkOrder.operations))
@@ -132,6 +137,8 @@ class WorkOrderBlockerService:
                 "title": blocker.title,
                 "work_order_number": work_order.work_order_number,
                 "operation_name": operation.name if operation else None,
+                # A0.1 adoption telemetry: client channel (None = not reported).
+                "source": source,
             },
         )
         self._create_notification_logs(company_id=company_id, blocker=blocker, work_order=work_order)

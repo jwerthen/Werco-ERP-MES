@@ -117,7 +117,7 @@ describe('OperatorKiosk', () => {
     expect(await screen.findByText('Previous operations must be completed first')).toBeInTheDocument();
   });
 
-  it('requires a scrap reason before production can be saved, then reports with source:"kiosk"', async () => {
+  it('requires a scrap reason before production can be saved, then reports it structurally with source:"kiosk"', async () => {
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
     mockedApi.reportOperationProduction.mockResolvedValue({});
     renderKiosk();
@@ -141,7 +141,8 @@ describe('OperatorKiosk', () => {
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
         quantity_complete_delta: 3,
         quantity_scrapped_delta: 2,
-        notes: 'Scrap reason: Material defect',
+        // Structured field, not the old `notes: 'Scrap reason: …'` workaround.
+        scrap_reason: 'Material defect',
         source: 'kiosk',
       })
     );
@@ -182,8 +183,74 @@ describe('OperatorKiosk', () => {
     fireEvent.click(screen.getByRole('button', { name: /^hold job$/i }));
 
     await waitFor(() =>
-      expect(mockedApi.holdOperation).toHaveBeenCalledWith(31, { category: 'machine_down', severity: 'medium' })
+      expect(mockedApi.holdOperation).toHaveBeenCalledWith(31, {
+        category: 'machine_down',
+        severity: 'medium',
+        source: 'kiosk',
+      })
     );
+    // A non-Other category already files a blocker on its own — no stub note.
+    expect(mockedApi.holdOperation.mock.calls[0][1]).not.toHaveProperty('note');
+  });
+
+  it('the catch-all "Other" hold sends a stub note so the backend still files a blocker', async () => {
+    // Backend only files a WorkOrderBlocker when the hold carries a note OR a
+    // non-OTHER category; a category-only "other" hold would silently skip it.
+    mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+    mockedApi.holdOperation.mockResolvedValue({});
+    renderKiosk();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^hold$/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    fireEvent.click(screen.getByRole('button', { name: /^hold job$/i }));
+
+    await waitFor(() =>
+      expect(mockedApi.holdOperation).toHaveBeenCalledWith(31, {
+        category: 'other',
+        severity: 'medium',
+        note: 'Other (reported at kiosk)',
+        source: 'kiosk',
+      })
+    );
+  });
+
+  it('says so honestly (with the backend detail verbatim) when clock-out lands but complete is refused', async () => {
+    mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+    mockedApi.clockOut.mockResolvedValue({});
+    mockedApi.completeOperation.mockRejectedValue({
+      response: { data: { detail: 'Final inspection has not been recorded' } },
+    });
+    renderKiosk();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^complete$/i }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    expect(
+      await screen.findByText('Clocked out, but completing failed: Final inspection has not been recorded')
+    ).toBeInTheDocument();
+  });
+
+  it('disables Log out while a mutation is in flight', async () => {
+    mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+    let resolveHold: (value: unknown) => void = () => undefined;
+    mockedApi.holdOperation.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveHold = resolve;
+        })
+    );
+    renderKiosk();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^hold$/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Machine down' }));
+    fireEvent.click(screen.getByRole('button', { name: /^hold job$/i }));
+
+    // Mid-mutation: logging out now would 401 the in-flight write and bounce
+    // the tablet off /kiosk.
+    expect(screen.getByRole('button', { name: /log out/i })).toBeDisabled();
+
+    resolveHold({});
+    await waitFor(() => expect(screen.getByRole('button', { name: /log out/i })).toBeEnabled());
   });
 
   it('shows the badge login screen when unauthenticated', async () => {

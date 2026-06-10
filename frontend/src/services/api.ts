@@ -941,7 +941,7 @@ class ApiService {
     return response.data;
   }
 
-  async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string; source?: string }) {
+  async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string; scrap_reason?: string; source?: string }) {
     const response = await this.api.post(`/shop-floor/operations/${operationId}/production`, data);
     this.invalidateDashboardCache();
     return response.data;
@@ -952,7 +952,7 @@ class ApiService {
     return response.data;
   }
 
-  async holdOperation(operationId: number, data?: { category?: string; severity?: string; note?: string }) {
+  async holdOperation(operationId: number, data?: { category?: string; severity?: string; note?: string; source?: string }) {
     // Body is optional and backward-compatible: when present the backend also
     // records a WorkOrderBlocker (category/severity/note) alongside the hold.
     const response = await this.api.put(`/shop-floor/operations/${operationId}/hold`, data);

@@ -38,7 +38,13 @@ class ClockOut(BaseModel):
 
     quantity_produced: float = 0.0
     quantity_scrapped: float = 0.0
-    scrap_reason: Optional[str] = None
+    # max_length matches the TimeEntry.scrap_reason String(255) column.
+    scrap_reason: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Reason for scrapped parts; omit when nothing was scrapped -- an omitted "
+        "reason never clears one recorded by an in-shift production report.",
+    )
     notes: Optional[str] = None
     # A0.1 adoption telemetry: channel of THIS clock-out write. Optional; when
     # omitted the entry keeps whatever channel clock-in recorded.

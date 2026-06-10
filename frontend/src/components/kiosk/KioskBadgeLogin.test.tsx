@@ -43,6 +43,25 @@ describe('KioskBadgeLogin', () => {
     expect(screen.getByTestId('kiosk-badge-display')).toHaveTextContent('Waiting for badge…');
   });
 
+  it('ignores keyboard-shortcut chords and IME composition keystrokes', () => {
+    const onLogin = jest.fn();
+    render(<KioskBadgeLogin stationLabel="LASER1" onLogin={onLogin} />);
+
+    // Ctrl/Cmd/Alt chords (browser/OS shortcuts) must not pollute the buffer.
+    fireEvent.keyDown(window, { key: 'r', ctrlKey: true });
+    fireEvent.keyDown(window, { key: 'l', metaKey: true });
+    fireEvent.keyDown(window, { key: '4', altKey: true });
+    // Nor must keystrokes replayed during IME composition.
+    fireEvent.keyDown(window, { key: 'a', isComposing: true });
+    expect(screen.getByTestId('kiosk-badge-display')).toHaveTextContent('Waiting for badge…');
+
+    // A modified Enter is a shortcut too — it must not submit the buffer.
+    fireEvent.keyDown(window, { key: '7' });
+    fireEvent.keyDown(window, { key: 'Enter', ctrlKey: true });
+    expect(onLogin).not.toHaveBeenCalled();
+    expect(screen.getByTestId('kiosk-badge-display')).toHaveTextContent('7');
+  });
+
   it('does not submit an empty badge', () => {
     const onLogin = jest.fn();
     render(<KioskBadgeLogin stationLabel="LASER1" onLogin={onLogin} />);
