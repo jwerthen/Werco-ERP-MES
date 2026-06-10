@@ -270,6 +270,41 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
 
+### Bulk Imports (Import Center / Excel Migration Kit)
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Download templates (`GET /import/templates*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Import users (`POST /users/import-csv`) | ✓ | | | | | | |
+| Import parts / materials | ✓ | ✓ | ✓ | | | | |
+| Import customers / vendors / work centers | ✓ | ✓ | | | | | |
+| Import open work orders (`POST /work-orders/import`) | ✓ | ✓ | ✓ | | | | |
+| Import open purchase orders (`POST /purchasing/purchase-orders/import`) | ✓ | ✓ | | | | | |
+
+> **Endpoint mapping (A0.2 Excel migration kit, enforced in code).** All rows above apply
+> identically to dry-run (`?dry_run=true`) and commit calls.
+> - **Templates are open to any authenticated user** (`get_current_user`): the XLSX templates are
+>   static workbooks containing **no tenant data**, so listing/downloading them carries no read risk.
+> - **Open-WO import mirrors Work Orders → Create**:
+>   `require_role([ADMIN, MANAGER, SUPERVISOR])` (`app/api/endpoints/work_orders.py`) — importing an
+>   open work order creates+releases a WO through the same generation path as `POST /work-orders/`,
+>   so it carries exactly the WO Create/Release role set.
+> - **Open-PO import is Admin / Manager only — deliberately narrower than WO import**:
+>   `require_role([ADMIN, MANAGER])` (`app/api/endpoints/purchasing.py`). Imported POs land directly
+>   in **`sent` (issued)** status, and the interactive PO `/send` transition is Admin/Manager-only —
+>   allowing Supervisor here would let a spreadsheet issue POs its holder cannot issue in the UI
+>   (privilege escalation via import).
+> - **User import is Admin-only and cannot mint `platform_admin`**: a row with
+>   `role = platform_admin` is rejected per-row (`"role 'platform_admin' cannot be assigned via
+>   import"`), and `platform_admin` is excluded from the advertised valid-roles list. The
+>   platform-admin role is the cross-company Werco oversight role and must never be assignable from
+>   a tenant spreadsheet, even by a company Admin.
+> - The entity-import role sets (parts/materials → A/M/S; customers/vendors/work centers → A/M) are
+>   unchanged from the pre-existing CSV imports and match each module's Create row above.
+> - **Audit:** every committed import row writes a tamper-evident `audit_log` entry tagged
+>   `source = "import"`; dry runs write nothing (savepoint rollback). See `docs/API.md` →
+>   Bulk Imports & Templates and `docs/EXCEL_MIGRATION_RUNBOOK.md`.
+
 ### Analytics
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

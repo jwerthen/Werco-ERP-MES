@@ -1,5 +1,3 @@
-import csv
-import io
 from datetime import datetime
 from typing import List, Optional
 
@@ -15,6 +13,7 @@ from app.models.part import Part, PartType
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService
+from app.services.import_service import ImportFileError, parse_import_file
 
 router = APIRouter()
 
@@ -101,19 +100,7 @@ class CustomerCsvImportResponse(BaseModel):
     total_rows: int
     created_ids: List[int]
     errors: List[CustomerCsvImportError]
-
-
-def _normalize_csv_header(value: str) -> str:
-    return value.strip().lower().replace(" ", "_").replace("-", "_")
-
-
-def _csv_row(raw_row: dict, header_map: dict) -> dict:
-    row = {}
-    for raw_key, raw_value in raw_row.items():
-        if not raw_key:
-            continue
-        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
-    return row
+    dry_run: bool = False
 
 
 def _parse_bool(value: str, default: bool = False) -> bool:
@@ -187,12 +174,14 @@ def list_customer_names(
 
 @router.post("/import-csv", response_model=CustomerCsvImportResponse)
 async def import_customers_csv(
+    request: Request,
     file: UploadFile = File(...),
+    dry_run: bool = Query(False, description="Validate only; no rows are written"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    return await _import_customers_csv_impl(file, db, current_user, company_id)
+    return await _import_customers_csv_impl(request, file, dry_run, db, current_user, company_id)
 
 
 @router.get("/{customer_id}", response_model=CustomerResponse)
@@ -210,31 +199,19 @@ def get_customer(
 
 
 async def _import_customers_csv_impl(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
-    company_id: int = Depends(get_current_company_id),
+    request: Request,
+    file: UploadFile,
+    dry_run: bool,
+    db: Session,
+    current_user: User,
+    company_id: int,
 ):
-    """Import customer master records from CSV with row-level errors."""
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file")
-
+    """Import customer master records from CSV or XLSX with row-level errors."""
     content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
-
     try:
-        decoded_content = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
-
-    reader = csv.DictReader(io.StringIO(decoded_content))
-    if not reader.fieldnames:
-        raise HTTPException(status_code=400, detail="CSV must include a header row")
-
-    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
-    if "name" not in set(header_map.values()):
-        raise HTTPException(status_code=400, detail="Missing required CSV columns: name")
+        table = parse_import_file(file.filename, content, required_columns={"name"})
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     existing_names = {
         (value or "").strip().lower()
@@ -246,15 +223,13 @@ async def _import_customers_csv_impl(
         if value
     }
 
+    audit = AuditService(db, current_user, request)
     errors: List[CustomerCsvImportError] = []
     created_ids: List[int] = []
     total_rows = 0
+    accepted_count = 0
 
-    for row_number, raw_row in enumerate(reader, start=2):
-        row = _csv_row(raw_row, header_map)
-        if not any(row.values()):
-            continue
-
+    for row_number, row in table.iter_rows():
         total_rows += 1
         name = row.get("name", "")
         code = row.get("code", "")
@@ -290,16 +265,28 @@ async def _import_customers_csv_impl(
                 special_requirements=row.get("special_requirements") or None,
                 notes=row.get("notes") or None,
             )
+            is_active = _parse_bool(row.get("is_active", ""), True)
         except (ValueError, ValidationError) as exc:
             errors.append(CustomerCsvImportError(row=row_number, name=name or None, code=code or None, reason=str(exc)))
+            continue
+
+        if dry_run:
+            existing_names.add(name.lower())
+            if code:
+                existing_codes.add(code.lower())
+            accepted_count += 1
             continue
 
         try:
             customer_code = customer_in.code or generate_customer_code(db, customer_in.name, company_id)
             customer = Customer(**customer_in.model_dump(exclude={"code"}), code=customer_code)
             customer.company_id = company_id
-            customer.is_active = _parse_bool(row.get("is_active", ""), True)
+            customer.is_active = is_active
             db.add(customer)
+            db.flush()
+            audit.log_create(
+                "customer", customer.id, customer.name, new_values=customer, extra_data={"source": "import"}
+            )
             db.commit()
             db.refresh(customer)
         except Exception as exc:
@@ -311,13 +298,15 @@ async def _import_customers_csv_impl(
         if customer.code:
             existing_codes.add(customer.code.lower())
         created_ids.append(customer.id)
+        accepted_count += 1
 
     return CustomerCsvImportResponse(
-        imported_count=len(created_ids),
+        imported_count=accepted_count,
         skipped_count=len(errors),
         total_rows=total_rows,
         created_ids=created_ids,
         errors=errors,
+        dry_run=dry_run,
     )
 
 

@@ -28,6 +28,13 @@ import {
 } from '../types/aiForward';
 import { AIUsageSummaryResponse } from '../types/aiUsage';
 import {
+  EntityImportResponse,
+  ImportTemplateIndexResponse,
+  PurchaseOrderImportResponse,
+  UserImportResponse,
+  WorkOrderImportResponse,
+} from '../types/importKit';
+import {
   AddressValidationRequest,
   AddressValidationResult,
   BuyBolRequest,
@@ -412,11 +419,12 @@ class ApiService {
     return response.data;
   }
 
-  async importWorkCentersCsv(file: File) {
+  async importWorkCentersCsv(file: File, dryRun = false): Promise<EntityImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
     const response = await this.api.post('/work-centers/import-csv', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { dry_run: dryRun }
     });
     return response.data;
   }
@@ -475,11 +483,12 @@ class ApiService {
     return response.data;
   }
 
-  async importPartsCsv(file: File) {
+  async importPartsCsv(file: File, dryRun = false): Promise<EntityImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
     const response = await this.api.post('/parts/import-csv', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { dry_run: dryRun }
     });
     return response.data;
   }
@@ -539,11 +548,12 @@ class ApiService {
     return response.data;
   }
 
-  async importMaterialsCsv(file: File) {
+  async importMaterialsCsv(file: File, dryRun = false): Promise<EntityImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
     const response = await this.api.post('/materials/import-csv', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { dry_run: dryRun }
     });
     return response.data;
   }
@@ -1244,11 +1254,12 @@ class ApiService {
     return response.data;
   }
 
-  async importVendorsCsv(file: File) {
+  async importVendorsCsv(file: File, dryRun = false): Promise<EntityImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
     const response = await this.api.post('/purchasing/vendors/import-csv', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { dry_run: dryRun }
     });
     return response.data;
   }
@@ -1670,7 +1681,7 @@ class ApiService {
     return response.data;
   }
 
-  async importUsersCsv(file: File, defaultPassword?: string) {
+  async importUsersCsv(file: File, defaultPassword?: string, dryRun = false): Promise<UserImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
     if (defaultPassword && defaultPassword.trim()) {
@@ -1678,7 +1689,8 @@ class ApiService {
     }
 
     const response = await this.api.post('/users/import-csv', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { dry_run: dryRun }
     });
     return response.data;
   }
@@ -1724,11 +1736,12 @@ class ApiService {
     return response.data;
   }
 
-  async importCustomersCsv(file: File) {
+  async importCustomersCsv(file: File, dryRun = false): Promise<EntityImportResponse> {
     const formData = new FormData();
     formData.append('file', file);
     const response = await this.api.post('/customers/import-csv', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { dry_run: dryRun }
     });
     return response.data;
   }
@@ -3213,6 +3226,39 @@ class ApiService {
 
   async getPlatformOverview(): Promise<any> {
     const response = await this.api.get('/platform/overview');
+    return response.data;
+  }
+
+  // Excel migration import kit (A0.2)
+  async getImportTemplates(): Promise<ImportTemplateIndexResponse> {
+    const response = await this.api.get<ImportTemplateIndexResponse>('/import/templates');
+    return response.data;
+  }
+
+  async downloadImportTemplate(entity: string): Promise<{ blob: Blob; filename: string }> {
+    const response = await this.api.get(`/import/templates/${entity}`, { responseType: 'blob' });
+    const disposition: string | undefined = response.headers?.['content-disposition'];
+    const match = disposition?.match(/filename="?([^";]+)"?/i);
+    return { blob: response.data, filename: match?.[1] || `${entity}_template.xlsx` };
+  }
+
+  async importWorkOrders(file: File, dryRun = false): Promise<WorkOrderImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post<WorkOrderImportResponse>('/work-orders/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { dry_run: dryRun }
+    });
+    return response.data;
+  }
+
+  async importPurchaseOrders(file: File, dryRun = false): Promise<PurchaseOrderImportResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.api.post<PurchaseOrderImportResponse>('/purchasing/purchase-orders/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { dry_run: dryRun }
+    });
     return response.data;
   }
 

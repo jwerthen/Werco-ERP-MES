@@ -1,11 +1,9 @@
-import csv
-import io
 import re
 import secrets
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
@@ -13,6 +11,8 @@ from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.core.security import get_password_hash, verify_password
 from app.db.database import get_db
 from app.models.user import User, UserRole
+from app.services.audit_service import AuditService
+from app.services.import_service import ImportFileError, parse_import_file
 
 router = APIRouter()
 
@@ -91,12 +91,7 @@ class UserCsvImportResponse(BaseModel):
     skipped_count: int
     created_ids: List[int]
     errors: List[UserCsvImportError]
-
-
-def _normalize_csv_header(header: str) -> str:
-    normalized = (header or "").strip().lower()
-    normalized = normalized.replace("-", "_").replace(" ", "_")
-    return re.sub(r"[^a-z0-9_]", "", normalized)
+    dry_run: bool = False
 
 
 def _generated_email(employee_id: str, existing_emails: set[str]) -> str:
@@ -216,34 +211,20 @@ def create_user(
 
 @router.post("/import-csv", response_model=UserCsvImportResponse)
 async def import_users_csv(
+    request: Request,
     file: UploadFile = File(...),
     default_password: Optional[str] = Form(None),
+    dry_run: bool = Query(False, description="Validate only; no rows are written"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Import users from CSV (Admin only)."""
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file")
-
+    """Import users from CSV or XLSX (Admin only)."""
     content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
-
     try:
-        decoded_content = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
-
-    reader = csv.DictReader(io.StringIO(decoded_content))
-    if not reader.fieldnames:
-        raise HTTPException(status_code=400, detail="CSV must include a header row")
-
-    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
-    required_headers = {"employee_id", "first_name", "last_name"}
-    missing_headers = sorted(required_headers - set(header_map.values()))
-    if missing_headers:
-        raise HTTPException(status_code=400, detail=f"Missing required CSV columns: {', '.join(missing_headers)}")
+        table = parse_import_file(file.filename, content, required_columns={"employee_id", "first_name", "last_name"})
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     existing_employee_ids = {
         (value or "").strip().lower()
@@ -253,22 +234,17 @@ async def import_users_csv(
         (value or "").strip().lower() for (value,) in db.query(User.email).filter(User.company_id == company_id).all()
     }
 
+    audit = AuditService(db, current_user, request)
     errors: List[UserCsvImportError] = []
     created_ids: List[int] = []
     total_rows = 0
+    accepted_count = 0
     default_password = (default_password or "").strip()
-    valid_roles = sorted([role.value for role in UserRole])
+    # platform_admin is the cross-company Werco oversight role; it must never be
+    # mintable from a tenant spreadsheet, so don't advertise it as valid either.
+    valid_roles = sorted(role.value for role in UserRole if role != UserRole.PLATFORM_ADMIN)
 
-    for row_number, raw_row in enumerate(reader, start=2):
-        row = {}
-        for raw_key, raw_value in raw_row.items():
-            if not raw_key:
-                continue
-            row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
-
-        if not any(row.values()):
-            continue
-
+    for row_number, row in table.iter_rows():
         total_rows += 1
         employee_id = row.get("employee_id", "")
         first_name = row.get("first_name", "")
@@ -318,6 +294,19 @@ async def import_users_csv(
             )
             continue
 
+        if role == UserRole.PLATFORM_ADMIN:
+            # A company admin must not be able to mint a cross-company platform
+            # admin from a spreadsheet row.
+            errors.append(
+                UserCsvImportError(
+                    row=row_number,
+                    employee_id=employee_id,
+                    email=email or None,
+                    reason="role 'platform_admin' cannot be assigned via import",
+                )
+            )
+            continue
+
         if not password:
             if role == UserRole.OPERATOR:
                 password = _generate_system_password()
@@ -358,6 +347,12 @@ async def import_users_csv(
             )
             continue
 
+        if dry_run:
+            accepted_count += 1
+            existing_employee_ids.add(employee_key)
+            existing_emails.add(email_key)
+            continue
+
         try:
             user = User(
                 email=email,
@@ -370,6 +365,16 @@ async def import_users_csv(
             )
             user.company_id = company_id
             db.add(user)
+            db.flush()
+            audit.log_create(
+                "user",
+                user.id,
+                user.employee_id,
+                # Deliberately not passing new_values: the model carries
+                # hashed_password and secrets must never land in the audit log.
+                description=f"Created user {user.employee_id} via import",
+                extra_data={"source": "import", "role": role.value, "email": user.email},
+            )
             db.commit()
             db.refresh(user)
         except Exception:
@@ -385,15 +390,17 @@ async def import_users_csv(
             continue
 
         created_ids.append(user.id)
+        accepted_count += 1
         existing_employee_ids.add(employee_key)
         existing_emails.add(email_key)
 
     return UserCsvImportResponse(
         total_rows=total_rows,
-        created_count=len(created_ids),
-        skipped_count=total_rows - len(created_ids),
+        created_count=accepted_count,
+        skipped_count=total_rows - accepted_count,
         created_ids=created_ids,
         errors=errors,
+        dry_run=dry_run,
     )
 
 

@@ -1042,6 +1042,98 @@ are **scoped to the caller's active company** (`get_current_company_id`).
 > (`require_role([ADMIN, MANAGER])`), but the only consuming UI today is the AdminRoute-gated
 > Admin Settings page, so Managers can currently exercise the allowance only via direct API calls.
 
+### Bulk Imports & Templates (Excel Migration Kit)
+
+One shared CSV/XLSX upload kit for go-live data migration — see
+[docs/EXCEL_MIGRATION_RUNBOOK.md](EXCEL_MIGRATION_RUNBOOK.md) for the operational sequence. All
+import endpoints below accept **`.csv`** (UTF-8) or **`.xlsx`** (first worksheet only) via the
+shared parser (`app/services/import_service.py`): headers are normalized to snake_case
+(`"Part Number"` → `part_number`), rows whose **first cell starts with `"# "`** (hash + space — the
+template guidance marker; a bare `#` is data) are skipped, blank rows are tolerated, and files are
+capped at **10 MB / 10,000 data rows**. File-level problems (type, encoding, missing required
+columns, duplicate-after-normalization headers, caps) return **400** with a plain-English `detail`;
+two distinct columns that collide after normalization are a **hard error** naming both offenders
+(refusing the file beats silently merging columns in a migration tool). Row-level validation stays
+per-endpoint with the partial-success contract: on commit each row (each PO, for the PO import) is
+saved independently, bad rows are skipped and reported in `errors[]`.
+
+**Templates** (static workbooks, no tenant data — any authenticated user):
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/import/templates` | List the 9 downloadable templates (entity, title, columns, download path) | Yes |
+| GET | `/import/templates/{entity}` | Download the styled XLSX template (`werco-import-template-{entity}.xlsx`); 404 lists valid entities | Yes |
+
+Template entities: `users`, `parts`, `materials`, `customers`, `vendors`, `work-centers`,
+`work-orders`, `purchase-orders`, `bom`. Each workbook has an **Import** sheet (styled header + one
+`# `-prefixed guidance row, skipped on import) and an **Examples** sheet (never read by the
+importer).
+
+**Entity imports** (all pre-existing; now accepting XLSX, a `dry_run` query param, and audit-logging
+every created row):
+
+| Method | Endpoint | Required columns | Auth Required |
+|--------|----------|------------------|---------------|
+| POST | `/users/import-csv` | `employee_id`, `first_name`, `last_name` | Admin |
+| POST | `/parts/import-csv` | `part_number`, `name`, `part_type` | Admin / Manager / Supervisor |
+| POST | `/materials/import-csv` | `part_number`, `name`, `part_type` | Admin / Manager / Supervisor |
+| POST | `/customers/import-csv` | `name` | Admin / Manager |
+| POST | `/purchasing/vendors/import-csv` | `name` | Admin / Manager |
+| POST | `/work-centers/import-csv` | `code`, `name`, `work_center_type` | Admin / Manager |
+
+**Open-document migration imports** (new):
+
+| Method | Endpoint | Required columns | Auth Required |
+|--------|----------|------------------|---------------|
+| POST | `/work-orders/import` | `part_number`, `quantity` | Admin / Manager / Supervisor |
+| POST | `/purchasing/purchase-orders/import` | `vendor_code`, `part_number`, `quantity`, `unit_price` | Admin / Manager |
+
+> **`dry_run=true` (all eight import endpoints).** Validates and previews with **zero writes** —
+> the migration imports run every row inside a SAVEPOINT that is rolled back (including audit rows
+> and operational events), and a terminal `db.rollback()` backstops the whole request. The response
+> carries everything the commit would: counts, per-row `errors[]`, and (WO/PO imports) per-row
+> `results[]`. Numbers the system would generate (`wo_number` / `po_number` / vendor & customer
+> codes) are **not** reserved by a dry run — they report as `null` / "generated at commit".
+>
+> **Response shapes.** The six entity imports keep their existing response models
+> (`total_rows`, `imported_count` — `created_count` on users — `skipped_count`, `created_ids`,
+> `errors[]`) plus an **additive** `dry_run: bool` field (default `false`), so commit responses stay
+> backward compatible. The WO/PO imports return `WorkOrderImportResponse` /
+> `PurchaseOrderImportResponse` (`app/schemas/import_kit.py`): `dry_run`, `total_rows`,
+> `created_count`, `skipped_count`, `created_ids`, `results[]`, `errors[]` (the PO response adds
+> `created_line_count`, and its `results[]` entries are per-PO, not per-row).
+>
+> **All import rows are audited.** Every committed row writes a tamper-evident `audit_log` entry via
+> `AuditService` tagged `extra_data.source = "import"` (previously the CSV imports skipped audit
+> logging). The **user import never logs `new_values`** — the model carries `hashed_password` and
+> secrets must not land in the audit log. The user import also **rejects `role = platform_admin`**
+> per row: a tenant spreadsheet must not mint the cross-company oversight role (see
+> `docs/RBAC_PERMISSIONS.md` → Bulk Imports).
+>
+> **`POST /work-orders/import` — open (in-flight) work orders.** Optional columns: `wo_number`
+> (generated when blank; uniqueness checked **case-insensitively**, in-file and against the DB),
+> `due_date` (**past dates allowed** — open WOs can be overdue; this intentionally differs from the
+> interactive `WorkOrderCreate` schema), `customer` (existing customer **code or name**),
+> `customer_po`, `priority` (1–10, default 5), `completed_through_seq`. The part must exist **with a
+> released routing** (operations are generated through the same path as `POST /work-orders/`, never
+> raw inserts); the WO is released on import (first pending op promoted to READY) so it lands in
+> floor queues. **Paper-complete seeding:** operations with `sequence <= completed_through_seq` are
+> set COMPLETE at target quantity with **no fabricated `actual_start`/`actual_end`, operators, or
+> TimeEntry labor** (that evidence doesn't exist; inventing it would corrupt cycle-time/labor
+> analytics and the AS9100D story). Each paper-completed op emits an `operation_completed`
+> OperationalEvent with `source = "import"`, and the WO's audit rows record the exact
+> `paper_completed_sequences`. A `completed_through_seq` covering **every** operation is rejected —
+> only open WOs may be imported.
+>
+> **`POST /purchasing/purchase-orders/import` — open (issued) purchase orders.** Rows sharing a
+> `po_number` become **lines of one PO** (blank `po_number` = single-line PO, number generated at
+> commit); a PO imports whole-or-not-at-all — one invalid line skips its whole group, and all lines
+> must share one `vendor_code`. Imported POs land in **`sent`** status (receivable on day 1) with
+> **`order_date` deliberately NULL** — the real order date predates the system and is unknown; NULL
+> means "pre-migration", mirroring the WO no-fabricated-provenance decision. `expected_date` is the
+> max `promised_date` across lines. **Admin / Manager only** — the interactive `/send` transition is
+> Admin/Manager, so allowing Supervisor here would let a spreadsheet issue POs the UI forbids.
+
 ### Audit Log
 
 Tamper-evident audit trail (CMMC Level 2 AU-3.3.8). Audit rows are **tenant-tagged** with

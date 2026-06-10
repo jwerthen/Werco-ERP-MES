@@ -151,17 +151,19 @@ Go to **Setup Wizard** (under **Administration**) to load the minimum data neede
 Click **Refresh** anytime to recheck progress.
 
 ### Import Center
-Go to **Import Center** (under **Administration**) to load master data from spreadsheets. Pick a data type from the left list:
-- **Employees / Users**, **Parts**, **Customers**, **Vendors**, and **Work Centers** import directly on this page.
+Go to **Import Center** (under **Administration**) to load data from spreadsheets — Excel (`.xlsx`) or CSV. Pick a data type from the left list:
+- **Employees / Users**, **Parts**, **Materials & Supplies**, **Customers**, **Vendors**, **Work Centers**, **Open Work Orders**, and **Open Purchase Orders** import directly on this page.
 - **BOMs** and **Inventory** use their own module pages (the Import Center links you there).
 
 For each type:
-1. Click **Template** to download a correctly formatted CSV with sample rows.
-2. Fill it in, matching the column headers.
-3. Choose your file under **CSV File** and click **Import**.
-4. Review the result line: how many rows were **Created**, **Skipped**, and any per-row errors to fix and re-import.
+1. Click **Download template (.xlsx)** for a correctly formatted Excel template. The grey row under the headers is guidance (it's skipped automatically on import), and an **Examples** sheet shows filled-in rows (that sheet is never imported).
+2. Fill in the **Import** sheet, keeping the column headers.
+3. Choose your file and click **Validate file (dry run)**. Nothing is written yet — you get a preview of how many rows **would** be created, plus a per-row error table.
+4. Fix any errors and validate again until clean, then click **Commit import**. Rows with errors are skipped and reported; good rows are created.
 
 > Tip: For employees, operators can be imported without an email or password (they'll use badge login). Non-operators need a password in the row, or set a **Default Password** for the whole import.
+
+> Moving the whole shop off Excel for go-live? Follow the step-by-step load order, rehearsal plan, and cutover checklist in the [Excel migration runbook](../EXCEL_MIGRATION_RUNBOOK.md).
 
 ---
 

@@ -1,6 +1,4 @@
-import csv
 import enum
-import io
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
@@ -15,6 +13,7 @@ from app.models.part import ENGINEERING_PART_TYPES, Part, PartType, UnitOfMeasur
 from app.models.user import User, UserRole
 from app.schemas.part import PartCreate, PartResponse, PartUpdate
 from app.services.audit_service import AuditService
+from app.services.import_service import ImportFileError, parse_import_file
 from app.services.part_number_service import generate_werco_part_number, normalize_description
 
 router = APIRouter()
@@ -38,19 +37,7 @@ class PartCsvImportResponse(BaseModel):
     total_rows: int
     created_ids: List[int]
     errors: List[PartCsvImportError]
-
-
-def _normalize_csv_header(value: str) -> str:
-    return value.strip().lower().replace(" ", "_").replace("-", "_")
-
-
-def _csv_row(raw_row: dict, header_map: dict) -> dict:
-    row = {}
-    for raw_key, raw_value in raw_row.items():
-        if not raw_key:
-            continue
-        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
-    return row
+    dry_run: bool = False
 
 
 def _parse_bool(value: str, default: bool = False) -> bool:
@@ -272,48 +259,32 @@ def create_part(
 
 @router.post("/import-csv", response_model=PartCsvImportResponse)
 async def import_parts_csv(
+    request: Request,
     file: UploadFile = File(...),
+    dry_run: bool = Query(False, description="Validate only; no rows are written"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Import part master records from CSV with row-level errors."""
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file")
-
+    """Import part master records from CSV or XLSX with row-level errors."""
     content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
-
     try:
-        decoded_content = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
-
-    reader = csv.DictReader(io.StringIO(decoded_content))
-    if not reader.fieldnames:
-        raise HTTPException(status_code=400, detail="CSV must include a header row")
-
-    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
-    required_headers = {"part_number", "name", "part_type"}
-    missing_headers = sorted(required_headers - set(header_map.values()))
-    if missing_headers:
-        raise HTTPException(status_code=400, detail=f"Missing required CSV columns: {', '.join(missing_headers)}")
+        table = parse_import_file(file.filename, content, required_columns={"part_number", "name", "part_type"})
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     existing_part_numbers = {
         (value or "").strip().upper()
         for (value,) in db.query(Part.part_number).filter(Part.company_id == company_id).all()
     }
 
+    audit = AuditService(db, current_user, request)
     errors: List[PartCsvImportError] = []
     created_ids: List[int] = []
     total_rows = 0
+    accepted_count = 0
 
-    for row_number, raw_row in enumerate(reader, start=2):
-        row = _csv_row(raw_row, header_map)
-        if not any(row.values()):
-            continue
-
+    for row_number, row in table.iter_rows():
         total_rows += 1
         part_number = row.get("part_number", "").upper()
 
@@ -347,16 +318,24 @@ async def import_parts_csv(
                 customer_part_number=row.get("customer_part_number") or None,
                 drawing_number=row.get("drawing_number") or None,
             )
+            is_active = _parse_bool(row.get("is_active", ""), True)
         except (ValueError, ValidationError) as exc:
             errors.append(PartCsvImportError(row=row_number, part_number=part_number or None, reason=str(exc)))
+            continue
+
+        if dry_run:
+            existing_part_numbers.add(part_number)
+            accepted_count += 1
             continue
 
         try:
             part = Part(**part_in.model_dump(), created_by=current_user.id)
             part.company_id = company_id
-            part.is_active = _parse_bool(row.get("is_active", ""), True)
+            part.is_active = is_active
             part.status = row.get("status") or "active"
             db.add(part)
+            db.flush()
+            audit.log_create("part", part.id, part.part_number, new_values=part, extra_data={"source": "import"})
             db.commit()
             db.refresh(part)
         except Exception as exc:
@@ -366,13 +345,15 @@ async def import_parts_csv(
 
         existing_part_numbers.add(part.part_number.upper())
         created_ids.append(part.id)
+        accepted_count += 1
 
     return PartCsvImportResponse(
-        imported_count=len(created_ids),
+        imported_count=accepted_count,
         skipped_count=len(errors),
         total_rows=total_rows,
         created_ids=created_ids,
         errors=errors,
+        dry_run=dry_run,
     )
 
 
