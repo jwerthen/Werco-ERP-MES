@@ -342,6 +342,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Integrations (`admin:integrations`) | ✓ | | | | | | |
 | Audit Logs | ✓ | ✓ | | | | | |
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
+| Wallboard display tokens (`/auth/display-token` issue/list/revoke) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
 
 > **Integrations (carrier-account credentials + shipping profile) — endpoint mapping.** The
@@ -395,6 +396,21 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > in the UI**: the only consuming surface is the Admin Settings → AI Usage & Cost tab, and
 > `/admin/settings` is AdminRoute-gated (admin role / superuser), so Managers can exercise this
 > permission only via direct API calls today.
+
+> **Wallboard display tokens (`/auth/display-token`, A0.5).** Issue / list / revoke are enforced
+> **in code** via `require_role([ADMIN, MANAGER])` and tenant-scoped to the active company;
+> issuance and revocation write tamper-evident `audit_log` rows. **A display token is not a role
+> and carries no user identity** — it is a single-endpoint credential for an unattended TV. What it
+> **can** do: authenticate the read-only `GET /shop-floor/wallboard` (via the dedicated
+> `get_display_or_user` dependency), scoped to the issuing company (taken from the `display_tokens`
+> DB row, never from the client). What it **cannot** do: reach any other endpoint (`verify_token`
+> accepts only `type == "access"` JWTs, so a display token gets **401** everywhere else), write
+> anything (the wallboard endpoint performs zero writes), or outlive revocation/expiry (the DB row
+> is re-checked on every request; a revoked token dies on the TV's next ~30s poll). As with AI
+> usage above, the **Manager allowance is currently UI-dormant**: the managing surface is Admin
+> Settings → Wallboard Displays and `/admin/settings` is AdminRoute-gated, so Managers can exercise
+> it only via direct API calls today. See [docs/API.md](API.md) → Authentication → Display tokens
+> and [docs/WALLBOARD.md](WALLBOARD.md).
 
 ## Backend Implementation
 

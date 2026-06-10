@@ -18,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.core.security import create_display_token
+from app.core.security import create_display_token, get_current_user_from_token, verify_token
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.display_token import DisplayToken
@@ -175,6 +175,25 @@ def test_display_token_rejected_everywhere_but_wallboard(
     else:
         response = client.post(path, json={}, headers=display_headers)
     assert response.status_code == 401, f"{method} {path} -> {response.status_code} (expected 401)"
+
+
+async def test_display_token_cannot_authenticate_websocket(client: TestClient, admin_headers: dict):
+    """WS fencing: a display JWT must never pass the WebSocket auth path.
+
+    WebSocket auth goes through ``get_current_user_from_token`` →
+    ``verify_token``, which only accepts ``type == "access"`` JWTs. A display
+    token (``type == "display"``) must be rejected at the JWT-type check,
+    before any DB lookup happens.
+    """
+    data = _issue_token(client, admin_headers, label="WS fence TV")
+
+    # The payload check the WS auth path relies on rejects the display JWT...
+    assert verify_token(data["token"]) is None
+
+    # ...so the async WS auth helper refuses it outright. Rejection happens
+    # before the session is touched, hence db=None is safe (and proves it).
+    with pytest.raises(Exception, match="Could not validate credentials"):
+        await get_current_user_from_token(data["token"], db=None)  # type: ignore[arg-type]
 
 
 def test_display_token_authenticates_wallboard(client: TestClient, admin_headers: dict):
@@ -365,6 +384,173 @@ def test_wallboard_payload_contents(
     blocked = next(b for b in payload["blocked_wos"] if b["wo_number"] == test_work_order.work_order_number)
     assert blocked["category"] == "material_missing"
     assert 1.5 <= blocked["age_hours"] <= 2.5
+
+
+def test_soft_deleted_wo_excluded_from_active_queued_counts(
+    client: TestClient,
+    admin_headers: dict,
+    db_session: Session,
+    test_work_center: WorkCenter,
+    test_part,
+    admin_user: User,
+):
+    """Soft-deleted WOs must not inflate active/queued counts on the wallboard
+    OR the dashboard (both go through operation_counts_by_work_center)."""
+    wo = WorkOrder(
+        work_order_number="WO-SOFT-DEL",
+        part_id=test_part.id,
+        quantity_ordered=5,
+        status=WorkOrderStatus.IN_PROGRESS,
+        priority=5,
+        company_id=1,
+    )
+    db_session.add(wo)
+    db_session.flush()
+    db_session.add_all(
+        [
+            WorkOrderOperation(
+                work_order_id=wo.id,
+                work_center_id=test_work_center.id,
+                sequence=10,
+                name="Ghost ready op",
+                status=OperationStatus.READY,
+                company_id=1,
+            ),
+            WorkOrderOperation(
+                work_order_id=wo.id,
+                work_center_id=test_work_center.id,
+                sequence=20,
+                name="Ghost active op",
+                status=OperationStatus.IN_PROGRESS,
+                company_id=1,
+            ),
+        ]
+    )
+    wo.soft_delete(admin_user.id)
+    db_session.commit()
+
+    payload = client.get(WALLBOARD_URL, headers=admin_headers).json()
+    wc = next(w for w in payload["work_centers"] if w["id"] == test_work_center.id)
+    assert wc["queued_count"] == 0
+
+    dashboard = client.get("/api/v1/shop-floor/dashboard", headers=admin_headers).json()
+    center = next(item for item in dashboard["work_centers"] if item["id"] == test_work_center.id)
+    assert center["queued_operations"] == 0
+    assert center["active_operations"] == 0
+
+
+def test_blocked_count_ignores_deleted_and_terminal_work_orders(
+    client: TestClient,
+    admin_headers: dict,
+    db_session: Session,
+    test_work_center: WorkCenter,
+    test_part,
+    admin_user: User,
+    operator_user: User,
+):
+    """Per-WC blocked_count and the blocked_wos ticker must agree: blockers on
+    soft-deleted or terminal (COMPLETE/CLOSED/CANCELLED) WOs are off the board."""
+
+    def make_blocked_wo(number: str, wo_status: WorkOrderStatus, soft_deleted: bool = False) -> WorkOrder:
+        wo = WorkOrder(
+            work_order_number=number,
+            part_id=test_part.id,
+            quantity_ordered=1,
+            status=wo_status,
+            priority=5,
+            company_id=1,
+        )
+        db_session.add(wo)
+        db_session.flush()
+        op = WorkOrderOperation(
+            work_order_id=wo.id,
+            work_center_id=test_work_center.id,
+            sequence=10,
+            name=f"Blocked op {number}",
+            company_id=1,
+        )
+        db_session.add(op)
+        db_session.flush()
+        db_session.add(
+            WorkOrderBlocker(
+                work_order_id=wo.id,
+                operation_id=op.id,
+                category=WorkOrderBlockerCategory.MATERIAL_MISSING.value,
+                status=WorkOrderBlockerStatus.OPEN.value,
+                title=f"Blocker on {number}",
+                reported_by=operator_user.id,
+                reported_at=datetime.utcnow(),
+                company_id=1,
+            )
+        )
+        if soft_deleted:
+            wo.soft_delete(admin_user.id)
+        return wo
+
+    make_blocked_wo("WO-BLK-LIVE", WorkOrderStatus.IN_PROGRESS)
+    make_blocked_wo("WO-BLK-DEL", WorkOrderStatus.IN_PROGRESS, soft_deleted=True)
+    make_blocked_wo("WO-BLK-DONE", WorkOrderStatus.COMPLETE)
+    make_blocked_wo("WO-BLK-CXL", WorkOrderStatus.CANCELLED)
+    db_session.commit()
+
+    payload = client.get(WALLBOARD_URL, headers=admin_headers).json()
+    wc = next(w for w in payload["work_centers"] if w["id"] == test_work_center.id)
+    assert wc["blocked_count"] == 1
+    # The ticker applies the same exclusions, so the two cannot disagree.
+    assert {b["wo_number"] for b in payload["blocked_wos"]} == {"WO-BLK-LIVE"}
+
+
+def test_open_break_and_downtime_entries_are_not_wallboard_jobs(
+    client: TestClient,
+    admin_headers: dict,
+    db_session: Session,
+    test_work_center: WorkCenter,
+    test_work_order: WorkOrder,
+    operator_user: User,
+):
+    """Open BREAK/DOWNTIME time entries are clocked time, not jobs — they must
+    not render ghost job rows on the TV. Only SETUP/RUN/REWORK/INSPECTION
+    entries with an operation count as active jobs."""
+    test_work_order.status = WorkOrderStatus.IN_PROGRESS
+    operation = test_work_order.operations[0]
+    db_session.add_all(
+        [
+            # Real labor — the only row that may appear on the TV.
+            TimeEntry(
+                user_id=operator_user.id,
+                work_order_id=test_work_order.id,
+                operation_id=operation.id,
+                work_center_id=test_work_center.id,
+                entry_type=TimeEntryType.RUN,
+                clock_in=datetime.utcnow() - timedelta(minutes=10),
+                company_id=1,
+            ),
+            # Open break — no operation, non-labor type.
+            TimeEntry(
+                user_id=operator_user.id,
+                work_center_id=test_work_center.id,
+                entry_type=TimeEntryType.BREAK,
+                clock_in=datetime.utcnow() - timedelta(minutes=5),
+                company_id=1,
+            ),
+            # Open downtime attached to the operation — still not labor.
+            TimeEntry(
+                user_id=operator_user.id,
+                work_order_id=test_work_order.id,
+                operation_id=operation.id,
+                work_center_id=test_work_center.id,
+                entry_type=TimeEntryType.DOWNTIME,
+                clock_in=datetime.utcnow() - timedelta(minutes=5),
+                company_id=1,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = client.get(WALLBOARD_URL, headers=admin_headers).json()
+    wc = next(w for w in payload["work_centers"] if w["id"] == test_work_center.id)
+    assert len(wc["active_jobs"]) == 1
+    assert wc["active_jobs"][0]["wo_number"] == test_work_order.work_order_number
 
 
 def test_wallboard_dept_filter(client: TestClient, admin_headers: dict, db_session: Session):

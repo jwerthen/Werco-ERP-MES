@@ -16,6 +16,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Wallboard from './Wallboard';
 import {
   captureWallboardTokenFromUrl,
+  clearWallboardToken,
   fetchWallboard,
   getWallboardToken,
 } from '../services/wallboardClient';
@@ -24,12 +25,14 @@ import type { WallboardResponse } from '../types/wallboard';
 jest.mock('../services/wallboardClient', () => ({
   __esModule: true,
   captureWallboardTokenFromUrl: jest.fn(),
+  clearWallboardToken: jest.fn(),
   getWallboardToken: jest.fn(() => 'display-jwt'),
   fetchWallboard: jest.fn(),
 }));
 
 const mockFetchWallboard = fetchWallboard as jest.MockedFunction<typeof fetchWallboard>;
 const mockGetToken = getWallboardToken as jest.MockedFunction<typeof getWallboardToken>;
+const mockClearToken = clearWallboardToken as jest.MockedFunction<typeof clearWallboardToken>;
 const mockCapture = captureWallboardTokenFromUrl as jest.MockedFunction<
   typeof captureWallboardTokenFromUrl
 >;
@@ -136,6 +139,41 @@ describe('Wallboard', () => {
       // Last good data still on screen
       expect(screen.getByText('Laser 1')).toBeInTheDocument();
       expect(screen.getByText(/WO-1001/)).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('shows the revoked screen, clears the token, and stops polling on UNAUTHORIZED', async () => {
+    jest.useFakeTimers();
+    try {
+      mockFetchWallboard.mockResolvedValueOnce(payload);
+      renderWallboard();
+
+      expect(await screen.findByTestId('wallboard-grid')).toBeInTheDocument();
+
+      // Next poll: the server rejects the (revoked/expired) display token.
+      mockFetchWallboard.mockRejectedValue(new Error('UNAUTHORIZED'));
+      await act(async () => {
+        jest.advanceTimersByTime(30_000);
+      });
+
+      // Distinct full-screen state — NOT the generic offline banner over stale data.
+      expect(await screen.findByTestId('revoked-screen')).toBeInTheDocument();
+      expect(screen.getByText(/Display access revoked or expired/i)).toBeInTheDocument();
+      expect(screen.getByText(/new display link in Admin Settings/i)).toBeInTheDocument();
+      expect(screen.queryByTestId('wallboard-grid')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('offline-banner')).not.toBeInTheDocument();
+
+      // The dead credential is dropped from storage.
+      expect(mockClearToken).toHaveBeenCalled();
+
+      // Polling stops — no further fetches against a known-dead token.
+      const callsAfterRevoke = mockFetchWallboard.mock.calls.length;
+      await act(async () => {
+        jest.advanceTimersByTime(120_000);
+      });
+      expect(mockFetchWallboard.mock.calls.length).toBe(callsAfterRevoke);
     } finally {
       jest.useRealTimers();
     }

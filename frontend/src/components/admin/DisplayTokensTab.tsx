@@ -23,7 +23,7 @@ import {
 } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import type { DisplayToken, DisplayTokenIssued } from '../../types/wallboard';
-import { formatCentralDateTime } from '../../utils/centralTime';
+import { formatCentralDateTime, toDate } from '../../utils/centralTime';
 
 export default function DisplayTokensTab() {
   const [tokens, setTokens] = useState<DisplayToken[]>([]);
@@ -78,7 +78,10 @@ export default function DisplayTokensTab() {
     }
   };
 
-  const wallboardUrl = issued ? `${window.location.origin}/wallboard?token=${issued.token}` : '';
+  // Token goes in the URL FRAGMENT, never the query string: fragments stay in
+  // the browser, so the long-lived display credential can't land in server
+  // access logs. wallboardClient still accepts legacy ?token= URLs.
+  const wallboardUrl = issued ? `${window.location.origin}/wallboard#token=${issued.token}` : '';
 
   const copy = async (text: string, which: 'token' | 'url') => {
     try {
@@ -180,8 +183,8 @@ export default function DisplayTokensTab() {
           </div>
           <p className="text-xs text-surface-500">
             Open the URL on the TV's browser — the token is stored on the device and stripped from the
-            address bar. Add <span className="font-mono">&amp;dept=&lt;work center type&gt;</span> to show one
-            department only.
+            address bar. Add <span className="font-mono">?dept=&lt;work center type&gt;</span> before the{' '}
+            <span className="font-mono">#token</span> part to show one department only.
           </p>
           <button type="button" className="btn-secondary btn-sm" onClick={() => setIssued(null)}>
             Done — I copied it
@@ -218,7 +221,11 @@ export default function DisplayTokensTab() {
             </thead>
             <tbody>
               {tokens.map((token) => {
-                const expired = new Date(token.expires_at) <= new Date();
+                // toDate treats the backend's zone-less naive-UTC string as
+                // UTC — native new Date(...) would parse it as LOCAL time and
+                // disagree with the server by the UTC offset.
+                const expiresAt = toDate(token.expires_at);
+                const expired = expiresAt !== null && expiresAt.getTime() <= Date.now();
                 return (
                   <tr key={token.id}>
                     <td className="font-medium">{token.label}</td>

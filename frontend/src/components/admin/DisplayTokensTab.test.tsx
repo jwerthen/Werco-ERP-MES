@@ -86,9 +86,30 @@ describe('DisplayTokensTab', () => {
     const panel = await screen.findByTestId('issued-panel');
     expect(panel).toHaveTextContent(/will not be shown again/i);
     expect((screen.getByTestId('issued-token') as HTMLInputElement).value).toBe('eyJ.display.jwt');
-    expect((screen.getByTestId('issued-url') as HTMLInputElement).value).toContain(
-      '/wallboard?token=eyJ.display.jwt',
-    );
+    // Token rides in the URL FRAGMENT — query strings land in server access
+    // logs, fragments never leave the browser.
+    const issuedUrl = (screen.getByTestId('issued-url') as HTMLInputElement).value;
+    expect(issuedUrl).toContain('/wallboard#token=eyJ.display.jwt');
+    expect(issuedUrl).not.toContain('?token=');
+  });
+
+  it('marks a token Expired using UTC parsing of the zone-less expires_at', async () => {
+    // The backend serializes naive-UTC datetimes with NO zone suffix. Parsing
+    // them as local time would disagree with the server by the UTC offset —
+    // a token that expired 1 hour ago must show Expired in every timezone.
+    const naiveUtc = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, '');
+    const oneHourAgo = naiveUtc(new Date(Date.now() - 60 * 60 * 1000));
+    const oneHourAhead = naiveUtc(new Date(Date.now() + 60 * 60 * 1000));
+    mockApi.listDisplayTokens.mockResolvedValue([
+      { ...activeToken, id: 10, label: 'Just expired TV', expires_at: oneHourAgo },
+      { ...activeToken, id: 11, label: 'Still active TV', expires_at: oneHourAhead },
+    ]);
+
+    render(<DisplayTokensTab />);
+
+    expect(await screen.findByText('Just expired TV')).toBeInTheDocument();
+    expect(screen.getByText('Expired')).toBeInTheDocument();
+    expect(screen.getByText('Active')).toBeInTheDocument();
   });
 
   it('revokes a token after confirmation', async () => {

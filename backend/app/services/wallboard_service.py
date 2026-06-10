@@ -26,7 +26,7 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.downtime import DowntimeEvent
-from app.models.time_entry import TimeEntry
+from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
@@ -42,6 +42,13 @@ from app.services.work_order_state_service import operation_target_quantity
 
 # Blocker states that still block (RESOLVED / DISMISSED do not).
 _UNRESOLVED_BLOCKER_STATUSES = [WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]
+
+# Work orders in these states are off the board everywhere (counts, blockers, tickers).
+_TERMINAL_WO_STATUSES = [WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]
+
+# Entry types that represent labor on an operation. Open BREAK/DOWNTIME entries
+# are clocked time but not jobs — they must not render as ghost rows on the TV.
+_LABOR_ENTRY_TYPES = [TimeEntryType.SETUP, TimeEntryType.RUN, TimeEntryType.REWORK, TimeEntryType.INSPECTION]
 
 # Cap the tickers — a TV ticker cycling 500 rows is unreadable anyway.
 _TICKER_LIMIT = 25
@@ -84,7 +91,8 @@ def operation_counts_by_work_center(db: Session, company_id: int) -> dict[int, d
         .join(WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id)
         .filter(
             WorkOrder.company_id == company_id,
-            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
+            WorkOrder.is_deleted == False,  # noqa: E712 — soft-deleted WOs must not inflate counts
+            WorkOrder.status.not_in(_TERMINAL_WO_STATUSES),
             WorkOrderOperation.work_center_id.isnot(None),
         )
         .group_by(WorkOrderOperation.work_center_id)
@@ -125,7 +133,15 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
             joinedload(TimeEntry.operation),
             joinedload(TimeEntry.work_order).joinedload(WorkOrder.part),
         )
-        .filter(TimeEntry.company_id == company_id, TimeEntry.clock_out.is_(None))
+        .filter(
+            TimeEntry.company_id == company_id,
+            TimeEntry.clock_out.is_(None),
+            # Only real labor on an operation is a "job" — an open BREAK or
+            # DOWNTIME entry (no operation, or non-labor type) must not render
+            # a ghost job row on the TV.
+            TimeEntry.operation_id.isnot(None),
+            TimeEntry.entry_type.in_(_LABOR_ENTRY_TYPES),
+        )
         .all()
     )
     jobs_by_wc: dict[int, list[WallboardActiveJob]] = defaultdict(list)
@@ -150,10 +166,15 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
     blocker_counts = dict(
         db.query(WorkOrderOperation.work_center_id, func.count(WorkOrderBlocker.id))
         .join(WorkOrderOperation, WorkOrderOperation.id == WorkOrderBlocker.operation_id)
+        .join(WorkOrder, WorkOrder.id == WorkOrderBlocker.work_order_id)
         .filter(
             WorkOrderBlocker.company_id == company_id,
             WorkOrderBlocker.status.in_(_UNRESOLVED_BLOCKER_STATUSES),
             WorkOrderOperation.work_center_id.isnot(None),
+            # Keep this in lockstep with the blocked_wos ticker below: a
+            # soft-deleted or terminal WO's blockers are off the board.
+            WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrder.status.not_in(_TERMINAL_WO_STATUSES),
         )
         .group_by(WorkOrderOperation.work_center_id)
         .all()
@@ -202,7 +223,7 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrder.due_date < today,
-            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
+            WorkOrder.status.not_in(_TERMINAL_WO_STATUSES),
         )
         .order_by(WorkOrder.due_date.asc())
         .limit(_TICKER_LIMIT)
@@ -227,6 +248,7 @@ def build_wallboard_payload(db: Session, company_id: int, dept: Optional[str] = 
             WorkOrderBlocker.company_id == company_id,
             WorkOrderBlocker.status.in_(_UNRESOLVED_BLOCKER_STATUSES),
             WorkOrder.is_deleted == False,  # noqa: E712
+            WorkOrder.status.not_in(_TERMINAL_WO_STATUSES),
         )
         .order_by(WorkOrderBlocker.reported_at.asc())
         .limit(_TICKER_LIMIT)

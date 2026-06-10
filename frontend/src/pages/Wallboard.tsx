@@ -19,6 +19,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom';
 import {
   captureWallboardTokenFromUrl,
+  clearWallboardToken,
   fetchWallboard,
   getWallboardToken,
 } from '../services/wallboardClient';
@@ -52,6 +53,7 @@ export default function Wallboard() {
   const [data, setData] = useState<WallboardResponse | null>(null);
   const [offline, setOffline] = useState(false);
   const [noToken, setNoToken] = useState(false);
+  const [revoked, setRevoked] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [now, setNow] = useState<Date>(new Date());
   const [tickerIndex, setTickerIndex] = useState(0);
@@ -75,6 +77,13 @@ export default function Wallboard() {
       if (!mountedRef.current) return;
       if (err?.message === 'NO_TOKEN') {
         setNoToken(true);
+      } else if (err?.message === 'UNAUTHORIZED') {
+        // Revoked or expired display token: stale data + an "offline" badge
+        // would lie forever on an unattended TV. Drop the dead credential,
+        // stop polling, and show the distinct full-screen state.
+        clearWallboardToken();
+        setRevoked(true);
+        setOffline(false);
       } else {
         // Keep the last good board on screen; just flag it.
         setOffline(true);
@@ -82,8 +91,10 @@ export default function Wallboard() {
     }
   }, [dept]);
 
-  // Poll every 30s.
+  // Poll every 30s (suspended once the token is known-dead — every further
+  // poll would just 401 again until someone provisions a new link).
   useEffect(() => {
+    if (revoked) return undefined;
     mountedRef.current = true;
     load();
     const id = setInterval(load, POLL_INTERVAL_MS);
@@ -91,7 +102,7 @@ export default function Wallboard() {
       mountedRef.current = false;
       clearInterval(id);
     };
-  }, [load]);
+  }, [load, revoked]);
 
   // Wall clock — 1s tick.
   useEffect(() => {
@@ -169,12 +180,22 @@ export default function Wallboard() {
 
       {/* Body */}
       <main className="flex-1 overflow-hidden p-6">
-        {noToken && !data ? (
+        {revoked ? (
+          <div
+            className="h-full flex flex-col items-center justify-center text-center gap-4"
+            data-testid="revoked-screen"
+          >
+            <p className="text-4xl font-bold text-[#f04438]">Display access revoked or expired</p>
+            <p className="text-2xl text-[#8b98a9] max-w-3xl">
+              Create a new display link in Admin Settings → Wallboard Displays and open it on this TV.
+            </p>
+          </div>
+        ) : noToken && !data ? (
           <div className="h-full flex flex-col items-center justify-center text-center gap-4">
             <p className="text-4xl font-bold">No display token</p>
             <p className="text-2xl text-[#8b98a9] max-w-3xl">
               Open this screen using the wallboard link from Admin Settings → Wallboard Displays
-              (it includes a one-time ?token=… parameter), or sign in first.
+              (it includes a one-time #token=… fragment), or sign in first.
             </p>
           </div>
         ) : !data ? (

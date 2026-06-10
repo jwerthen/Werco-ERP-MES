@@ -22,7 +22,12 @@ const getFormatter = (options: Intl.DateTimeFormatOptions) => {
   return formatter;
 };
 
-const toDate = (value: DateInput): Date | null => {
+/**
+ * Parse a backend timestamp into a Date, treating zone-less strings as UTC
+ * (the API serializes naive-UTC datetimes without a 'Z' suffix — native
+ * `new Date(...)` would mis-parse those as LOCAL time).
+ */
+export const toDate = (value: DateInput): Date | null => {
   if (value === null || value === undefined || value === '') {
     return null;
   }
