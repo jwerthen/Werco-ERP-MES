@@ -49,6 +49,8 @@ TASK_MODEL_ENV = {
     "po_extraction": "ANTHROPIC_PO_MODEL",
     "routing_generation": "ANTHROPIC_ROUTING_MODEL",
     "qms_clause_extraction": "ANTHROPIC_QMS_MODEL",
+    "copilot_chat": "ANTHROPIC_COPILOT_MODEL",
+    "nl_search": "ANTHROPIC_NL_SEARCH_MODEL",
 }
 
 
@@ -95,6 +97,14 @@ def select_anthropic_model(context: LLMTaskContext) -> LLMModelDecision:
         return LLMModelDecision(model=mode, tier=LLMModelTier.DEFAULT, reason="forced model id")
 
     complexity_score = _complexity_score(context)
+
+    if task == "nl_search":
+        return model_decision_for_tier(LLMModelTier.FAST, "NL search intent parse is a cheap classification")
+
+    if task == "copilot_chat":
+        if complexity_score >= 5:
+            return model_decision_for_tier(LLMModelTier.REASONING, "long multi-tool copilot conversation")
+        return model_decision_for_tier(LLMModelTier.DEFAULT, "copilot chat needs reliable multi-step tool use")
 
     if task == "qms_clause_extraction":
         if context.input_chars >= 85_000 or (context.input_chars >= 50_000 and context.max_output_tokens >= 16_000):

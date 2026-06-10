@@ -4,6 +4,19 @@ Bump a prompt's semver `version` and add an entry here whenever its text or
 request layout changes. The version string is recorded on `AIUsageEvent`
 (every API call) and on `AIInteractionEvent`/`AIRecommendation` learning rows.
 
+## 2026-06-10
+
+- `copilot_chat` 1.0.0 — new system prompt for Werco Copilot v1 (read-only
+  tool-use chat over tenant ERP data). Sent as a `system` block with
+  `cache_control: ephemeral`; the deterministic tool schemas render before it,
+  so tools + system are cached together and re-read on every iteration of the
+  tool-use loop. Confirm the cache engages via `cache_read_tokens` on
+  `copilot_chat` rows in `ai_usage_events` (Sonnet's minimum cacheable prefix
+  is 2048 tokens; below that the breakpoint is a harmless no-op).
+- `nl_search_intent` 1.0.0 — new fast-tier intent parser for `/search/nl`.
+  Emits the same filter structure as the rule parser; the rule parser always
+  runs first and the LLM is skipped when rules already score high confidence.
+
 ## 2026-06-09
 
 - `po_extraction` 1.0.0 — system prompt + schema moved verbatim from

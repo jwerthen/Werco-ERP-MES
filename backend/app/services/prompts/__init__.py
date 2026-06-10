@@ -14,6 +14,7 @@ cacheable prefix for prompt caching.
 from typing import Dict
 
 from app.services.prompts.base import Prompt
+from app.services.prompts.copilot import COPILOT_CHAT_PROMPT, NL_SEARCH_INTENT_PROMPT
 from app.services.prompts.extraction import (
     BOM_EXTRACTION_PROMPT,
     BOM_EXTRACTION_SCHEMA,
@@ -30,6 +31,8 @@ PROMPT_REGISTRY: Dict[str, Prompt] = {
         BOM_EXTRACTION_PROMPT,
         ROUTING_GENERATION_PROMPT,
         QMS_CLAUSE_EXTRACTION_PROMPT,
+        COPILOT_CHAT_PROMPT,
+        NL_SEARCH_INTENT_PROMPT,
     )
 }
 
@@ -42,4 +45,6 @@ __all__ = [
     "BOM_EXTRACTION_SCHEMA",
     "ROUTING_GENERATION_PROMPT",
     "QMS_CLAUSE_EXTRACTION_PROMPT",
+    "COPILOT_CHAT_PROMPT",
+    "NL_SEARCH_INTENT_PROMPT",
 ]

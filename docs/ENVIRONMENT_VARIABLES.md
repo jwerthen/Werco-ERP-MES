@@ -276,7 +276,9 @@ carrier `ShippingService`, so labels/BOLs land alongside every other `Document`.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | No | - | Anthropic API key for the AI features (PO/quote + BOM document extraction, AI routing generation, QMS clause extraction). Every call goes through the shared client `app/services/llm_client.py`, which records per-call usage telemetry to the tenant-scoped `ai_usage_events` table (read via `GET /api/v1/ai-usage/summary` / the Admin Settings → AI Usage & Cost tab) |
+| `ANTHROPIC_API_KEY` | No | - | Anthropic API key for the AI features (PO/quote + BOM document extraction, AI routing generation, QMS clause extraction, Werco Copilot chat, `/search/nl` intent parsing). Every call goes through the shared client `app/services/llm_client.py`, which records per-call usage telemetry to the tenant-scoped `ai_usage_events` table (read via `GET /api/v1/ai-usage/summary` / the Admin Settings → AI Usage & Cost tab) |
+| `ANTHROPIC_COPILOT_MODEL` | No | (router auto) | Per-task model override for Werco Copilot chat (task `copilot_chat`). Unset: the router uses the Default tier (Sonnet), escalating to the Reasoning tier for long multi-tool conversations |
+| `ANTHROPIC_NL_SEARCH_MODEL` | No | (router auto) | Per-task model override for the `/search/nl` natural-language intent parse (task `nl_search`). Unset: pinned to the Fast tier (Haiku) |
 | `SENTRY_DSN` | No | - | Sentry DSN for error tracking |
 | `WEBHOOK_ENCRYPTION_KEY` | Conditional¹ | - | Fernet key for encrypting outbound-webhook secrets at rest. Also the **fallback** for `INTEGRATION_ENCRYPTION_KEY` when that is unset. |
 | `INTEGRATION_ENCRYPTION_KEY` | Conditional¹ | (falls back to `WEBHOOK_ENCRYPTION_KEY`) | Fernet key that encrypts **carrier-integration secrets at rest** (carrier-account API keys and inbound-webhook signing secrets — see [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md)). Resolution order: `INTEGRATION_ENCRYPTION_KEY` → `WEBHOOK_ENCRYPTION_KEY` → (dev/test only) an ephemeral generated key. |
@@ -291,6 +293,18 @@ carrier `ShippingService`, so labels/BOLs land alongside every other `Document`.
 > A single-secret deployment can leave `INTEGRATION_ENCRYPTION_KEY` unset and rely on
 > `WEBHOOK_ENCRYPTION_KEY`; use a dedicated `INTEGRATION_ENCRYPTION_KEY` to rotate carrier
 > secrets independently of webhook secrets.
+
+### Werco Copilot (read-only AI chat)
+
+Tuning knobs for `POST /api/v1/copilot/chat` (see [docs/API.md](API.md) → Werco Copilot). All
+optional; the defaults are the shipped behavior.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `COPILOT_RATE_LIMIT_PER_MINUTE` | No | `20` | Per-user request budget per minute (in-process sliding window, on top of the app-wide per-IP limits). Excess returns 429 |
+| `COPILOT_MAX_TOOL_ROUNDS` | No | `8` | Tool-use rounds per chat turn before the model is forced to answer from gathered data (`truncated: true` in the response) |
+| `COPILOT_MAX_OUTPUT_TOKENS` | No | `1024` | Output-token cap per model call in the tool loop |
+| `COPILOT_LLM_TIMEOUT_SECONDS` | No | `45` | Upstream Anthropic timeout per model call (seconds) |
 
 ### Audit Log Retention / Archival (CMMC AU-3.3.8)
 
