@@ -13,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.cache import invalidate_work_centers_cache
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
@@ -29,6 +29,7 @@ from app.models.routing import Routing, RoutingOperation
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
+from app.schemas.import_kit import WorkOrderImportResponse
 from app.schemas.work_order import (
     WorkOrderCreate,
     WorkOrderOperationCreate,
@@ -55,6 +56,7 @@ from app.services.completion_signal_service import (
     enqueue_work_order_completion_signals,
     record_parent_children_complete,
 )
+from app.services.import_service import ImportFileError, parse_import_file
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import (
     build_laser_nest_child_work_order,
@@ -64,6 +66,7 @@ from app.services.laser_nest_service import (
     parse_laser_nest_zip,
     sync_laser_nest_from_operation,
 )
+from app.services.migration_import_service import import_open_work_orders
 from app.services.operational_event_service import OperationalEventService
 from app.services.quality_gate_service import (
     QualityException,
@@ -1032,7 +1035,6 @@ def create_work_order(
     part = db.query(Part).filter(Part.id == work_order_in.part_id, Part.company_id == company_id).first()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
-    has_bom = _get_active_bom(db, part.id, company_id) is not None
 
     # Generate work order number
     wo_number = generate_work_order_number(db, company_id)
@@ -1047,49 +1049,9 @@ def create_work_order(
     # Auto-generate operations from routing if enabled and no operations provided
 
     if auto_routing and not work_order_in.operations:
-        if part.part_type == PartType.ASSEMBLY or has_bom:
-            _create_assembly_routing_operations(
-                db,
-                work_order,
-                float(work_order_in.quantity_ordered),
-                company_id=company_id,
-            )
-        else:
-            routing = (
-                db.query(Routing)
-                .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
-                .filter(
-                    Routing.company_id == company_id,
-                    Routing.part_id == work_order_in.part_id,
-                    Routing.is_active == True,
-                    Routing.status == "released",
-                )
-                .first()
-            )
-
-            if routing:
-                for rop in sorted(routing.operations, key=lambda x: x.sequence):
-                    if not rop.is_active:
-                        continue
-                    work_center = rop.work_center
-                    wo_op = WorkOrderOperation(
-                        work_order_id=work_order.id,
-                        sequence=rop.sequence,
-                        operation_number=rop.operation_number or f"Op {rop.sequence}",
-                        name=rop.name,
-                        description=rop.description,
-                        work_center_id=rop.work_center_id,
-                        setup_time_hours=rop.setup_hours,
-                        run_time_hours=float(rop.run_hours_per_unit or 0) * float(work_order_in.quantity_ordered),
-                        setup_instructions=rop.setup_instructions,
-                        run_instructions=rop.work_instructions,
-                        requires_inspection=rop.is_inspection_point,
-                        inspection_type="final" if _is_inspection_operation(rop) else None,
-                        status=OperationStatus.PENDING,
-                        operation_group=get_work_center_group(work_center) if work_center else None,
-                        company_id=company_id,
-                    )
-                    db.add(wo_op)
+        create_routing_operations_for_work_order(
+            db, work_order, part, float(work_order_in.quantity_ordered), company_id
+        )
     else:
         # Create operations from input
         for op_data in work_order_in.operations:
@@ -1294,6 +1256,104 @@ def _create_assembly_routing_operations(
         )
         db.add(wo_op)
         sequence += 10
+
+
+def create_routing_operations_for_work_order(
+    db: Session,
+    work_order: WorkOrder,
+    part: Part,
+    quantity: float,
+    company_id: int,
+) -> None:
+    """Generate this work order's operations from the part's released routing.
+
+    Single source of truth shared by POST /work-orders (auto_routing=True) and
+    the A0.2 Excel-migration open-WO import (``migration_import_service``), so
+    imported work orders get exactly the same routed operations as hand-entered
+    ones. Assembly-aware: assemblies/BOM parts expand component routings first
+    (``_create_assembly_routing_operations``); simple parts copy their released
+    routing operations. No-op when no released routing exists (the caller
+    decides whether that is an error).
+    """
+    has_bom = _get_active_bom(db, part.id, company_id) is not None
+    if part.part_type == PartType.ASSEMBLY or has_bom:
+        _create_assembly_routing_operations(db, work_order, float(quantity), company_id=company_id)
+        return
+
+    routing = (
+        db.query(Routing)
+        .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
+        .filter(
+            Routing.company_id == company_id,
+            Routing.part_id == work_order.part_id,
+            Routing.is_active == True,
+            Routing.status == "released",
+        )
+        .first()
+    )
+    if not routing:
+        return
+
+    for rop in sorted(routing.operations, key=lambda x: x.sequence):
+        if not rop.is_active:
+            continue
+        work_center = rop.work_center
+        wo_op = WorkOrderOperation(
+            work_order_id=work_order.id,
+            sequence=rop.sequence,
+            operation_number=rop.operation_number or f"Op {rop.sequence}",
+            name=rop.name,
+            description=rop.description,
+            work_center_id=rop.work_center_id,
+            setup_time_hours=rop.setup_hours,
+            run_time_hours=float(rop.run_hours_per_unit or 0) * float(quantity),
+            setup_instructions=rop.setup_instructions,
+            run_instructions=rop.work_instructions,
+            requires_inspection=rop.is_inspection_point,
+            inspection_type="final" if _is_inspection_operation(rop) else None,
+            status=OperationStatus.PENDING,
+            operation_group=get_work_center_group(work_center) if work_center else None,
+            company_id=company_id,
+        )
+        db.add(wo_op)
+
+
+@router.post("/import", response_model=WorkOrderImportResponse, summary="Import open work orders (CSV/XLSX)")
+async def import_open_work_orders_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Query(False, description="Validate and preview only; guarantees no rows are written"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Import OPEN (in-flight) work orders for the Excel go-live migration.
+
+    Columns: ``wo_number`` (optional, generated when blank), ``part_number``
+    (must exist with a released routing), ``quantity``, ``due_date`` (optional,
+    past dates allowed — open WOs can be overdue), ``customer`` (optional code
+    or name), ``customer_po`` (optional), ``priority`` (optional 1-10),
+    ``completed_through_seq`` (optional — last routing sequence already
+    finished on paper; those operations are marked complete WITHOUT fabricated
+    labor evidence and the next operation becomes READY in floor queues).
+
+    Use ``dry_run=true`` to preview: every row is fully validated (including
+    routing expansion) inside a savepoint that is rolled back.
+    """
+    content = await file.read()
+    try:
+        table = parse_import_file(file.filename, content, required_columns={"part_number", "quantity"})
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return import_open_work_orders(
+        db,
+        table=table,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+        dry_run=dry_run,
+    )
 
 
 @router.post("/{work_order_id}/laser-nest-packages/preview", response_model=LaserNestPreviewResponse)

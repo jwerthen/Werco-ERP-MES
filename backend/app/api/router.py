@@ -20,6 +20,7 @@ from app.api.endpoints import (
     engineering_changes,
     errors,
     exports,
+    import_templates,
     integrations,
     inventory,
     job_costing,
@@ -99,6 +100,7 @@ api_router.include_router(po_upload.router, prefix="/po-upload", tags=["PO Uploa
 api_router.include_router(analytics.router, prefix="/analytics", tags=["Analytics & BI"])
 api_router.include_router(search.router, prefix="/search", tags=["Global Search"])
 api_router.include_router(exports.router, prefix="/exports", tags=["Data Export"])
+api_router.include_router(import_templates.router, prefix="/import", tags=["Import Kit"])
 api_router.include_router(print_reports.router, prefix="/print", tags=["Print Reports"])
 api_router.include_router(oee.router, prefix="/oee", tags=["OEE Tracking"])
 api_router.include_router(operational_events.router, prefix="/operational-events", tags=["Operational Events"])

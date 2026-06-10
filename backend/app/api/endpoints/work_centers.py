@@ -1,8 +1,6 @@
-import csv
-import io
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
@@ -18,6 +16,8 @@ from app.db.database import get_db
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.schemas.work_center import WorkCenterCreate, WorkCenterResponse, WorkCenterUpdate
+from app.services.audit_service import AuditService
+from app.services.import_service import ImportFileError, parse_import_file
 from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
 
 router = APIRouter()
@@ -35,19 +35,7 @@ class WorkCenterCsvImportResponse(BaseModel):
     total_rows: int
     created_ids: List[int]
     errors: List[WorkCenterCsvImportError]
-
-
-def _normalize_csv_header(value: str) -> str:
-    return value.strip().lower().replace(" ", "_").replace("-", "_")
-
-
-def _csv_row(raw_row: dict, header_map: dict) -> dict:
-    row = {}
-    for raw_key, raw_value in raw_row.items():
-        if not raw_key:
-            continue
-        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
-    return row
+    dry_run: bool = False
 
 
 def _parse_bool(value: str, default: bool = False) -> bool:
@@ -156,33 +144,19 @@ def create_work_center(
 
 @router.post("/import-csv", response_model=WorkCenterCsvImportResponse)
 async def import_work_centers_csv(
+    request: Request,
     file: UploadFile = File(...),
+    dry_run: bool = Query(False, description="Validate only; no rows are written"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Import work centers from CSV with row-level errors."""
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file")
-
+    """Import work centers from CSV or XLSX with row-level errors."""
     content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
-
     try:
-        decoded_content = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
-
-    reader = csv.DictReader(io.StringIO(decoded_content))
-    if not reader.fieldnames:
-        raise HTTPException(status_code=400, detail="CSV must include a header row")
-
-    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
-    required_headers = {"code", "name", "work_center_type"}
-    missing_headers = sorted(required_headers - set(header_map.values()))
-    if missing_headers:
-        raise HTTPException(status_code=400, detail=f"Missing required CSV columns: {', '.join(missing_headers)}")
+        table = parse_import_file(file.filename, content, required_columns={"code", "name", "work_center_type"})
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     existing_codes = {
         (value or "").strip().upper()
@@ -191,15 +165,13 @@ async def import_work_centers_csv(
     valid_types = set(get_work_center_types(db, company_id=company_id))
     valid_statuses = {"available", "in_use", "maintenance", "offline"}
 
+    audit = AuditService(db, current_user, request)
     errors: List[WorkCenterCsvImportError] = []
     created_ids: List[int] = []
     total_rows = 0
+    accepted_count = 0
 
-    for row_number, raw_row in enumerate(reader, start=2):
-        row = _csv_row(raw_row, header_map)
-        if not any(row.values()):
-            continue
-
+    for row_number, row in table.iter_rows():
         total_rows += 1
         code = row.get("code", "").upper()
         work_center_type = normalize_work_center_type(row.get("work_center_type", ""))
@@ -228,17 +200,28 @@ async def import_work_centers_csv(
                 building=row.get("building") or None,
                 area=row.get("area") or None,
             )
+            is_active = _parse_bool(row.get("is_active", ""), True)
+            availability_rate = _parse_float(row.get("availability_rate", ""), "availability_rate", 100.0)
         except (ValueError, ValidationError) as exc:
             errors.append(WorkCenterCsvImportError(row=row_number, code=code or None, reason=str(exc)))
+            continue
+
+        if dry_run:
+            existing_codes.add(code)
+            accepted_count += 1
             continue
 
         try:
             work_center = WorkCenter(**work_center_in.model_dump())
             work_center.company_id = company_id
             work_center.current_status = current_status
-            work_center.is_active = _parse_bool(row.get("is_active", ""), True)
-            work_center.availability_rate = _parse_float(row.get("availability_rate", ""), "availability_rate", 100.0)
+            work_center.is_active = is_active
+            work_center.availability_rate = availability_rate
             db.add(work_center)
+            db.flush()
+            audit.log_create(
+                "work_center", work_center.id, work_center.code, new_values=work_center, extra_data={"source": "import"}
+            )
             db.commit()
             db.refresh(work_center)
         except Exception as exc:
@@ -248,16 +231,18 @@ async def import_work_centers_csv(
 
         existing_codes.add(work_center.code.upper())
         created_ids.append(work_center.id)
+        accepted_count += 1
 
     if created_ids:
         invalidate_work_centers_cache()
 
     return WorkCenterCsvImportResponse(
-        imported_count=len(created_ids),
+        imported_count=accepted_count,
         skipped_count=len(errors),
         total_rows=total_rows,
         created_ids=created_ids,
         errors=errors,
+        dry_run=dry_run,
     )
 
 

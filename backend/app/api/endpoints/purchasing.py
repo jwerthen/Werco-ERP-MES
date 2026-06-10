@@ -1,14 +1,12 @@
-import csv
-import io
 from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
 from app.models.part import Part
@@ -19,6 +17,7 @@ from app.models.purchasing import (
     Vendor,
 )
 from app.models.user import User, UserRole
+from app.schemas.import_kit import PurchaseOrderImportResponse
 from app.schemas.purchasing import (
     POCreate,
     POLineCreate,
@@ -30,6 +29,9 @@ from app.schemas.purchasing import (
     VendorResponse,
     VendorUpdate,
 )
+from app.services.audit_service import AuditService
+from app.services.import_service import ImportFileError, parse_import_file
+from app.services.migration_import_service import import_open_purchase_orders
 from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
@@ -48,19 +50,7 @@ class VendorCsvImportResponse(BaseModel):
     total_rows: int
     created_ids: List[int]
     errors: List[VendorCsvImportError]
-
-
-def _normalize_csv_header(value: str) -> str:
-    return value.strip().lower().replace(" ", "_").replace("-", "_")
-
-
-def _csv_row(raw_row: dict, header_map: dict) -> dict:
-    row = {}
-    for raw_key, raw_value in raw_row.items():
-        if not raw_key:
-            continue
-        row[header_map.get(raw_key, _normalize_csv_header(raw_key))] = (raw_value or "").strip()
-    return row
+    dry_run: bool = False
 
 
 def _parse_bool(value: str, default: bool = False) -> bool:
@@ -133,49 +123,36 @@ def create_vendor(
 
 @router.post("/vendors/import-csv", response_model=VendorCsvImportResponse)
 async def import_vendors_csv(
+    request: Request,
     file: UploadFile = File(...),
+    dry_run: bool = Query(False, description="Validate only; no rows are written"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Import vendor master records from CSV with row-level errors."""
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file")
-
+    """Import vendor master records from CSV or XLSX with row-level errors."""
     content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty")
-
     try:
-        decoded_content = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
-
-    reader = csv.DictReader(io.StringIO(decoded_content))
-    if not reader.fieldnames:
-        raise HTTPException(status_code=400, detail="CSV must include a header row")
-
-    header_map = {raw: _normalize_csv_header(raw) for raw in reader.fieldnames if raw}
-    if "name" not in set(header_map.values()):
-        raise HTTPException(status_code=400, detail="Missing required CSV columns: name")
+        table = parse_import_file(file.filename, content, required_columns={"name"})
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     existing_codes = {
         (value or "").strip().upper()
         for (value,) in db.query(Vendor.code).filter(Vendor.company_id == company_id).all()
     }
 
+    audit = AuditService(db, current_user, request)
     errors: List[VendorCsvImportError] = []
     created_ids: List[int] = []
     total_rows = 0
+    accepted_count = 0
 
-    for row_number, raw_row in enumerate(reader, start=2):
-        row = _csv_row(raw_row, header_map)
-        if not any(row.values()):
-            continue
-
+    for row_number, row in table.iter_rows():
         total_rows += 1
         name = row.get("name", "")
         code = (row.get("code") or "").upper()
+        code_was_provided = bool(code)
 
         try:
             if not name:
@@ -204,6 +181,7 @@ async def import_vendors_csv(
                 is_iso9001_certified=_parse_bool(row.get("is_iso9001_certified", ""), False),
                 notes=row.get("notes") or None,
             )
+            is_active = _parse_bool(row.get("is_active", ""), True)
         except (ValueError, ValidationError) as exc:
             errors.append(
                 VendorCsvImportError(
@@ -215,13 +193,23 @@ async def import_vendors_csv(
             )
             continue
 
+        if dry_run:
+            # Generated codes are only reserved at commit; don't let a
+            # would-be-generated code trip the in-file duplicate check.
+            if code_was_provided:
+                existing_codes.add(code.upper())
+            accepted_count += 1
+            continue
+
         try:
             vendor = Vendor(**vendor_in.model_dump())
             vendor.company_id = company_id
-            vendor.is_active = _parse_bool(row.get("is_active", ""), True)
+            vendor.is_active = is_active
             if vendor.is_approved:
                 vendor.approval_date = date.today()
             db.add(vendor)
+            db.flush()
+            audit.log_create("vendor", vendor.id, vendor.code, new_values=vendor, extra_data={"source": "import"})
             db.commit()
             db.refresh(vendor)
         except Exception as exc:
@@ -231,13 +219,15 @@ async def import_vendors_csv(
 
         existing_codes.add(vendor.code.upper())
         created_ids.append(vendor.id)
+        accepted_count += 1
 
     return VendorCsvImportResponse(
-        imported_count=len(created_ids),
+        imported_count=accepted_count,
         skipped_count=len(errors),
         total_rows=total_rows,
         created_ids=created_ids,
         errors=errors,
+        dry_run=dry_run,
     )
 
 
@@ -425,6 +415,46 @@ def create_purchase_order(
     db.commit()
     db.refresh(po)
     return po
+
+
+@router.post(
+    "/purchase-orders/import",
+    response_model=PurchaseOrderImportResponse,
+    summary="Import open purchase orders (CSV/XLSX)",
+)
+async def import_open_purchase_orders_endpoint(
+    file: UploadFile = File(...),
+    dry_run: bool = Query(False, description="Validate and preview only; guarantees no rows are written"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Import OPEN (issued, not yet received) purchase orders for the Excel go-live migration.
+
+    Columns: ``po_number`` (optional — rows sharing one become lines of a
+    single PO; generated when blank), ``vendor_code`` (must exist),
+    ``part_number`` (must exist), ``quantity``, ``unit_price``,
+    ``promised_date`` (optional). POs are created in ``sent`` (issued) status
+    so receiving can act on them immediately. Use ``dry_run=true`` to preview
+    without writing.
+    """
+    content = await file.read()
+    try:
+        table = parse_import_file(
+            file.filename, content, required_columns={"vendor_code", "part_number", "quantity", "unit_price"}
+        )
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return import_open_purchase_orders(
+        db,
+        table=table,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+        dry_run=dry_run,
+    )
 
 
 @router.get("/purchase-orders/{po_id}", response_model=POResponse)
