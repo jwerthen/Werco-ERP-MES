@@ -276,7 +276,7 @@ carrier `ShippingService`, so labels/BOLs land alongside every other `Document`.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | No | - | Anthropic API key for AI-powered PO extraction |
+| `ANTHROPIC_API_KEY` | No | - | Anthropic API key for the AI features (PO/quote + BOM document extraction, AI routing generation, QMS clause extraction). Every call goes through the shared client `app/services/llm_client.py`, which records per-call usage telemetry to the tenant-scoped `ai_usage_events` table (read via `GET /api/v1/ai-usage/summary` / the Admin Settings → AI Usage & Cost tab) |
 | `SENTRY_DSN` | No | - | Sentry DSN for error tracking |
 | `WEBHOOK_ENCRYPTION_KEY` | Conditional¹ | - | Fernet key for encrypting outbound-webhook secrets at rest. Also the **fallback** for `INTEGRATION_ENCRYPTION_KEY` when that is unset. |
 | `INTEGRATION_ENCRYPTION_KEY` | Conditional¹ | (falls back to `WEBHOOK_ENCRYPTION_KEY`) | Fernet key that encrypts **carrier-integration secrets at rest** (carrier-account API keys and inbound-webhook signing secrets — see [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md)). Resolution order: `INTEGRATION_ENCRYPTION_KEY` → `WEBHOOK_ENCRYPTION_KEY` → (dev/test only) an ephemeral generated key. |
@@ -352,6 +352,16 @@ The `E2E_*_EMAIL` / `E2E_*_SECRET` pairs must match **actual seeded users** from
   limit (5/min) and gets `429`s.
 - `E2E_BASE_URL` defaults to `http://localhost:5173` (also wired into
   `frontend/playwright.config.ts` `baseURL` and `webServer.url`).
+
+## Backend AI Eval Harness
+
+Golden-fixture evals for the LLM extraction pipelines live in `backend/tests/evals/` and are
+excluded from the default pytest run via the `evals` marker (see `backend/tests/evals/README.md`).
+Offline mode (the default) scores stored golden outputs — **no API key, no network**.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `RUN_LIVE_EVALS` | No | - | Set to `1` to make `pytest -m evals tests/evals` re-run each eval case against the **real Anthropic API** (billable) instead of scoring stored outputs. Live mode also requires `ANTHROPIC_API_KEY`; if either is unset, the live-gated tests are skipped and only offline scoring runs. |
 
 ## Docker Compose Variables
 

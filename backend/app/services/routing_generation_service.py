@@ -6,12 +6,13 @@ by extracting operations from drawing callouts and mapping them to work centers.
 
 import json
 import logging
-import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from app.services.llm_model_router import LLMTaskContext, select_anthropic_model
+from app.services.llm_client import LLMNotConfiguredError, run_llm_task
+from app.services.llm_model_router import LLMTaskContext
+from app.services.prompts import ROUTING_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -104,24 +105,6 @@ def build_routing_extraction_schema(work_center_types: List[str]) -> str:
 """.replace("WORK_CENTER_TYPES", types_str)
 
 
-ROUTING_SYSTEM_PROMPT = """You are a manufacturing process engineer assistant specialized in sheet metal fabrication, CNC machining, welding, and general manufacturing. Your task is to analyze engineering drawing content and propose a manufacturing routing (sequence of operations).
-
-Key guidelines:
-1. Analyze the drawing text and any geometry data provided to determine the manufacturing operations needed
-2. Sequence operations in logical manufacturing order (cut -> form -> weld -> finish -> inspect -> ship)
-3. Map each operation to exactly one of the allowed work_center_type values
-4. Include inspection operations where quality checks are needed (after critical operations, before shipping)
-5. Mark outside operations appropriately (anodizing, plating, heat treating are typically outside)
-6. For sheet metal parts: typical flow is cutting -> forming -> welding (if needed) -> finish -> inspect
-7. For machined parts: typical flow is machining -> deburr -> finish -> inspect
-8. For assemblies: include Assembly and Final Inspection steps
-9. Always end with a Final Inspection operation and Shipping
-10. If the drawing mentions specific processes, include them; if not, infer from geometry and material
-11. Set confidence based on how clearly the drawing calls out each operation
-
-Return ONLY valid JSON matching the schema. No explanations or markdown."""
-
-
 # Default time estimates by work center type (in hours)
 DEFAULT_TIME_ESTIMATES = {
     "laser": {"setup_hours": 0.20, "run_hours_per_unit": 0.08},
@@ -162,23 +145,16 @@ def extract_routing_data_with_llm(
     part_context: Optional[str] = None,
     is_assembly: bool = False,
     learned_examples_context: Optional[str] = None,
+    company_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Send drawing text and optional geometry data to Claude to propose routing operations.
     Returns structured JSON with proposed operations mapped to work center types.
     """
-    try:
-        import anthropic
-    except ImportError:
-        logger.error("anthropic package not installed")
-        return _create_empty_routing_result("LLM library not available")
-
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.error("ANTHROPIC_API_KEY not set")
-        return _create_empty_routing_result("API key not configured")
-
-    types_list = dedupe_work_center_types(work_center_types) or DEFAULT_WORK_CENTER_TYPES
+    # Sorted so the cached system prefix below is byte-stable regardless of DB row
+    # order at the call site -- an unstable prefix is a guaranteed cache miss that
+    # still pays the cache-write premium on every call.
+    types_list = sorted(dedupe_work_center_types(work_center_types) or DEFAULT_WORK_CENTER_TYPES)
     types_str = ", ".join(types_list)
     schema = build_routing_extraction_schema(types_list)
 
@@ -203,27 +179,41 @@ def extract_routing_data_with_llm(
 
     ocr_note = "\n\nNote: This text was extracted via OCR and may contain errors." if is_ocr else ""
     context_note = f"\n\nERP part context:\n{part_context}" if part_context else ""
-    learned_examples_note = (
-        f"\n\nSimilar approved routings from this company:\n{learned_examples_context}"
-        if learned_examples_context
-        else ""
-    )
     assembly_note = (
         "\n\nThe selected ERP part is an assembly. Include assembly/build operations if an allowed assembly-type work center exists."
         if is_assembly
         else ""
     )
 
-    user_prompt = f"""Analyze the following engineering drawing content and propose a manufacturing routing (sequence of operations).
+    # Prompt-cached system blocks. Stable-first ordering: the system prompt +
+    # schema/allowed types repeat for every generation in a company, and the
+    # learned-examples context repeats across calls for the same part family —
+    # both get cache_control breakpoints so only the drawing content below is
+    # reprocessed at full price on repeat calls (5-minute ephemeral TTL).
+    stable_system_text = f"""{ROUTING_GENERATION_PROMPT.text}
 
 Return JSON matching this schema exactly:
 {schema}
 
-Allowed work_center_type values: {types_str}
+Allowed work_center_type values: {types_str}"""
+
+    system_blocks: List[Dict[str, Any]] = [
+        {"type": "text", "text": stable_system_text, "cache_control": {"type": "ephemeral"}}
+    ]
+    if learned_examples_context:
+        system_blocks.append(
+            {
+                "type": "text",
+                "text": f"Similar approved routings from this company:\n{learned_examples_context}",
+                "cache_control": {"type": "ephemeral"},
+            }
+        )
+
+    user_prompt = f"""Analyze the following engineering drawing content and propose a manufacturing routing (sequence of operations).
 
 Important:
 - Propose operations in logical manufacturing sequence
-- Each operation must use one of the allowed work_center_type values listed above
+- Each operation must use one of the allowed work_center_type values listed in the system instructions
 - Include inspection and shipping steps
 - If the drawing shows a sheet metal part with cut profiles, start with the best available cutting work center type
 - If bends are present, include the best available forming/press brake work center type
@@ -231,7 +221,6 @@ Important:
 - If a finish is specified (powder coat, paint, anodize, etc.), include the appropriate finish operation
 - Mark anodizing, plating, and heat treating as outside operations
 {context_note}
-{learned_examples_note}
 {geometry_context}
 {ocr_note}
 {assembly_note}
@@ -244,9 +233,7 @@ Drawing Content:
 Return ONLY the JSON object, no other text."""
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-
-        model_decision = select_anthropic_model(
+        llm_result = run_llm_task(
             LLMTaskContext(
                 task="routing_generation",
                 input_chars=len(drawing_text),
@@ -254,16 +241,16 @@ Return ONLY the JSON object, no other text."""
                 geometry=geometry,
                 learned_examples=bool(learned_examples_context),
                 is_assembly=is_assembly,
-            )
-        )
-        message = client.messages.create(
-            model=model_decision.model,
-            max_tokens=4096,
+            ),
             messages=[{"role": "user", "content": user_prompt}],
-            system=ROUTING_SYSTEM_PROMPT,
+            system=system_blocks,
+            max_tokens=4096,
+            company_id=company_id,
+            feature="routing_generation",
+            prompt_version=ROUTING_GENERATION_PROMPT.version,
         )
 
-        response_text = message.content[0].text.strip()
+        response_text = llm_result.text.strip()
 
         # Strip markdown fences if present
         if response_text.startswith("```json"):
@@ -277,18 +264,23 @@ Return ONLY the JSON object, no other text."""
         result["_extraction_metadata"] = {
             "extracted_at": datetime.utcnow().isoformat(),
             "source_was_ocr": is_ocr,
-            "model": model_decision.model,
-            "model_tier": model_decision.tier.value,
-            "model_selection_reason": model_decision.reason,
+            "model": llm_result.model,
+            "model_tier": llm_result.tier,
+            "model_selection_reason": llm_result.model_selection_reason,
+            "prompt_version": llm_result.prompt_version,
         }
 
         logger.info(
             "LLM routing extraction successful: %s operations proposed using %s",
             len(result.get("operations", [])),
-            model_decision.model,
+            llm_result.model,
         )
         return result
 
+    except LLMNotConfiguredError as e:
+        logger.error(str(e))
+        message = "LLM library not available" if e.reason == "library" else "API key not configured"
+        return _create_empty_routing_result(message)
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM routing response as JSON: {e}")
         return _create_empty_routing_result(f"Invalid JSON response: {str(e)}")
@@ -890,6 +882,7 @@ def generate_draft_routing(
     learned_patterns: Optional[List[Dict[str, Any]]] = None,
     preferred_work_center_ids: Optional[Dict[str, List[int]]] = None,
     learned_examples_context: Optional[str] = None,
+    company_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Orchestrator: extract operations via LLM, map to work centers, estimate times.
@@ -911,6 +904,7 @@ def generate_draft_routing(
         part_context=part_context,
         is_assembly=is_assembly,
         learned_examples_context=learned_examples_context,
+        company_id=company_id,
     )
 
     warnings: List[str] = []

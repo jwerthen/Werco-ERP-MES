@@ -37,7 +37,7 @@ Shipped modules, grouped by domain:
 - **Analytics** (production, quality, inventory, forecasting, costs), **reports**, and **job costing**.
 
 ### Administration & Governance
-- **RBAC** (8 roles, server-side `require_role` gating), **multi-tenant** company scoping, **tamper-evident audit log** (SHA-256 hash chain), users/employee provisioning, work centers, custom fields, admin settings, setup wizard, import center, and a platform-admin overview for cross-company oversight.
+- **RBAC** (8 roles, server-side `require_role` gating), **multi-tenant** company scoping, **tamper-evident audit log** (SHA-256 hash chain), users/employee provisioning, work centers, custom fields, admin settings (incl. an **AI usage & cost** dashboard — per-task/per-model token, spend, and latency telemetry for the LLM features), setup wizard, import center, and a platform-admin overview for cross-company oversight.
 
 ## Architecture
 

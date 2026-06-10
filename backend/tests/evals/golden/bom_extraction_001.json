@@ -1,0 +1,97 @@
+{
+  "id": "bom_extraction_001",
+  "task": "bom_extraction",
+  "description": "Assembly BOM with hardware classification",
+  "is_ocr": false,
+  "input_text": "BILL OF MATERIALS\nAssembly: 4400-BRKT-ASSY Rev C\nBracket Assembly, Sensor Mount\nDrawing: DWG-4400-C\n\nItem  Part Number     Description                    Qty  UOM\n1     4400-BRKT-001   Bracket, Formed, 5052 .090     1    EA\n2     4400-PLT-002    Plate, Backing, 304SS 16ga     1    EA\n3     HW-PEM-S-632    PEM Nut S-632-2                4    EA\n4     HW-SCR-632-050  Screw 6-32 x 0.50 SS           4    EA",
+  "expected": {
+    "document_type": "bom",
+    "assembly": { "part_number": "4400-BRKT-ASSY", "revision": "C" },
+    "items": [
+      { "part_number": "4400-BRKT-001", "quantity": 1, "item_type": "make" },
+      { "part_number": "4400-PLT-002", "quantity": 1, "item_type": "make" },
+      { "part_number": "HW-PEM-S-632", "quantity": 4, "item_type": "buy" },
+      { "part_number": "HW-SCR-632-050", "quantity": 4, "item_type": "buy" }
+    ]
+  },
+  "stored_output": {
+    "document_type": "bom",
+    "assembly": {
+      "part_number": "4400-BRKT-ASSY",
+      "name": "Bracket Assembly, Sensor Mount",
+      "revision": "C",
+      "description": "Bracket Assembly, Sensor Mount",
+      "drawing_number": "DWG-4400-C",
+      "part_type": "assembly"
+    },
+    "items": [
+      {
+        "line_number": 1,
+        "part_number": "4400-BRKT-001",
+        "description": "Bracket, Formed, 5052 .090",
+        "quantity": 1,
+        "unit_of_measure": "EA",
+        "item_type": "make",
+        "line_type": "component",
+        "reference_designator": null,
+        "find_number": "1",
+        "notes": null,
+        "confidence": "high"
+      },
+      {
+        "line_number": 2,
+        "part_number": "4400-PLT-002",
+        "description": "Plate, Backing, 304SS 16ga",
+        "quantity": 1,
+        "unit_of_measure": "EA",
+        "item_type": "make",
+        "line_type": "component",
+        "reference_designator": null,
+        "find_number": "2",
+        "notes": null,
+        "confidence": "high"
+      },
+      {
+        "line_number": 3,
+        "part_number": "HW-PEM-S-632",
+        "description": "PEM Nut S-632-2",
+        "quantity": 4,
+        "unit_of_measure": "EA",
+        "item_type": "buy",
+        "line_type": "hardware",
+        "reference_designator": null,
+        "find_number": "3",
+        "notes": null,
+        "confidence": "high"
+      },
+      {
+        "line_number": 4,
+        "part_number": "HW-SCR-632-050",
+        "description": "Screw 6-32 x 0.50 SS",
+        "quantity": 4,
+        "unit_of_measure": "EA",
+        "item_type": "buy",
+        "line_type": "hardware",
+        "reference_designator": null,
+        "find_number": "4",
+        "notes": null,
+        "confidence": "high"
+      }
+    ],
+    "extraction_confidence": "high"
+  },
+  "thresholds": {
+    "document_type_match": 1.0,
+    "assembly_accuracy": 1.0,
+    "item_recall": 1.0,
+    "item_precision": 1.0,
+    "item_field_accuracy": 1.0
+  },
+  "live_thresholds": {
+    "document_type_match": 1.0,
+    "assembly_accuracy": 0.5,
+    "item_recall": 1.0,
+    "item_precision": 0.5,
+    "item_field_accuracy": 0.6
+  }
+}

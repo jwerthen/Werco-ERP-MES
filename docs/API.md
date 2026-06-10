@@ -1012,6 +1012,36 @@ shipping integration. All routes are mounted under `/admin/settings` and gated t
 > customer-data-bearing carrier call (`/shipping/validate-address`, `/rate-shop`, `/buy-label`,
 > `/buy-bol`, `/schedule-pickup`, `/void-label`, `/refund`) is blocked with **409**.
 
+### AI Usage Telemetry
+
+Read-only cost/latency observability over the per-call LLM usage ledger (`ai_usage_events` — one
+row per Anthropic API call, written by the shared client `app/services/llm_client.py`). Aggregates
+are **scoped to the caller's active company** (`get_current_company_id`).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/ai-usage/summary` | Per-task and per-model AI usage aggregates over a trailing window | Admin / Manager |
+
+**Query parameters:** `days` — aggregation window in days, integer `1`–`365` (default `30`).
+
+**Response shape:** `{ window_days, since, totals, by_task[], by_model[] }`. `totals` and each
+`by_task` / `by_model` row carry the same aggregate fields: `calls`, `input_tokens`,
+`output_tokens`, `cache_creation_tokens`, `cache_read_tokens`, `estimated_cost_usd` (nullable —
+`null` when the bucket has no priced calls; models missing from the price table in
+`llm_client.MODEL_PRICING_USD_PER_MTOK` record cost as `NULL`), `avg_latency_ms` (nullable), and
+`error_rate` (failed calls / total calls, `0.0`–`1.0`). `by_task` rows add `task` (e.g.
+`po_extraction`, `routing_generation`); `by_model` rows add `model` (the exact model id used).
+
+> **Telemetry, not audit data.** `ai_usage_events` rows record task, model/tier, prompt version,
+> token counts, estimated USD cost, latency, and success/error per LLM call. They are operational
+> telemetry — not on the tamper-evident `audit_log` hash chain — and the endpoint is read-only
+> (no `AuditService` involvement).
+>
+> **UI surface / dormant Manager allowance.** The endpoint backs the **Admin Settings → AI Usage &
+> Cost** tab (`/admin/settings?tab=aiusage`). The server allows **Admin and Manager**
+> (`require_role([ADMIN, MANAGER])`), but the only consuming UI today is the AdminRoute-gated
+> Admin Settings page, so Managers can currently exercise the allowance only via direct API calls.
+
 ### Audit Log
 
 Tamper-evident audit trail (CMMC Level 2 AU-3.3.8). Audit rows are **tenant-tagged** with

@@ -1,0 +1,72 @@
+{
+  "id": "po_extraction_001",
+  "task": "po_extraction",
+  "description": "Clean digital PO with two line items",
+  "is_ocr": false,
+  "input_text": "PURCHASE ORDER\nPO Number: PO-2026-0145\nDate: 2026-05-12\n\nVendor: Acme Metals Inc.\n1200 Industrial Pkwy, Cleveland, OH 44135\n\nShip To: Werco Manufacturing, 88 Fabrication Way, Mesa, AZ 85201\nPayment Terms: Net 30\n\nLine  Part Number     Description                Qty   UOM  Unit Price  Total\n1     AL-5052-048     Aluminum 5052 Sheet .048   25    EA   42.50       1062.50\n2     SS-304-16GA     Stainless 304 Sheet 16ga   10    EA   78.00       780.00\n\nSubtotal: 1842.50\nTax: 0.00\nTotal: 1842.50",
+  "expected": {
+    "document_type": "po",
+    "po_number": "PO-2026-0145",
+    "quote_number": null,
+    "vendor": { "name": "Acme Metals Inc.", "address": "1200 Industrial Pkwy, Cleveland, OH 44135" },
+    "total_amount": 1842.5,
+    "line_items": [
+      { "part_number": "AL-5052-048", "qty_ordered": 25, "unit_price": 42.5 },
+      { "part_number": "SS-304-16GA", "qty_ordered": 10, "unit_price": 78.0 }
+    ]
+  },
+  "stored_output": {
+    "document_type": "po",
+    "po_number": "PO-2026-0145",
+    "quote_number": null,
+    "vendor": { "name": "Acme Metals Inc.", "address": "1200 Industrial Pkwy, Cleveland, OH 44135" },
+    "order_date": "2026-05-12",
+    "expected_delivery_date": null,
+    "required_date": null,
+    "payment_terms": "Net 30",
+    "shipping_method": null,
+    "ship_to": "Werco Manufacturing, 88 Fabrication Way, Mesa, AZ 85201",
+    "line_items": [
+      {
+        "line_number": 1,
+        "part_number": "AL-5052-048",
+        "description": "Aluminum 5052 Sheet .048",
+        "qty_ordered": 25,
+        "unit_of_measure": "EA",
+        "unit_price": 42.5,
+        "line_total": 1062.5,
+        "confidence": "high"
+      },
+      {
+        "line_number": 2,
+        "part_number": "SS-304-16GA",
+        "description": "Stainless 304 Sheet 16ga",
+        "qty_ordered": 10,
+        "unit_of_measure": "EA",
+        "unit_price": 78.0,
+        "line_total": 780.0,
+        "confidence": "high"
+      }
+    ],
+    "subtotal": 1842.5,
+    "tax": 0.0,
+    "shipping_cost": null,
+    "total_amount": 1842.5,
+    "notes": null,
+    "extraction_confidence": "high"
+  },
+  "thresholds": {
+    "header_accuracy": 1.0,
+    "vendor_match": 1.0,
+    "line_item_recall": 1.0,
+    "line_item_precision": 1.0,
+    "line_item_field_accuracy": 1.0
+  },
+  "live_thresholds": {
+    "header_accuracy": 0.75,
+    "vendor_match": 1.0,
+    "line_item_recall": 1.0,
+    "line_item_precision": 0.5,
+    "line_item_field_accuracy": 0.75
+  }
+}

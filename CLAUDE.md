@@ -44,8 +44,10 @@ Invoke these two after the implementing agent finishes, as a matter of course �
 pytest                                  # full suite
 pytest tests/test_work_orders.py        # single file
 pytest tests/test_work_orders.py::test_create_work_order   # single test
-pytest -m unit                          # by marker: unit | integration | api | slow | requires_db
+pytest -m unit                          # by marker: unit | integration | api | slow | requires_db | evals
 pytest -m "not slow and not requires_db"
+pytest -m evals tests/evals             # AI eval harness — excluded from the default run; offline by default,
+                                        # live API opt-in via RUN_LIVE_EVALS=1 + ANTHROPIC_API_KEY (see tests/evals/README.md)
 
 # Lint / format / typecheck (also enforced by .pre-commit-config.yaml)
 black . && isort . && flake8 app && mypy app
@@ -92,6 +94,8 @@ Layered FastAPI app under `backend/app/`:
   - `require_role([UserRole.X, ...])`, `require_platform_admin`, `get_admin_user`
   - `get_audit_service` — request-scoped `AuditService`
 - `services/` — business logic. Multi-step / state-changing operations belong here, not in routers.
+  - **All Anthropic LLM calls go through `services/llm_client.py`** (`run_llm_task`: model routing via `llm_model_router`, prompt caching, per-call usage telemetry into the tenant-scoped `ai_usage_events` table — telemetry, not audit data). Don't instantiate `anthropic.Anthropic` at call sites.
+  - **Prompt text is versioned in `services/prompts/`** — bump the prompt's semver `version` and add a `CHANGELOG.md` entry there whenever prompt text or request layout changes; the version is recorded on every usage row.
 - `models/` — SQLAlchemy 2.0 declarative models (~48). All extend `Base` from `app.db.database`.
 - `schemas/` — Pydantic 2 request/response contracts. Keep API I/O typed through these.
 - `db/mixins.py` — shared model behavior (see invariants below).
