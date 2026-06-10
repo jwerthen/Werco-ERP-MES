@@ -7,7 +7,13 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user, require_platform_admin, require_role
+from app.api.deps import (
+    get_audit_service,
+    get_current_company_id,
+    get_current_user,
+    require_platform_admin,
+    require_role,
+)
 from app.core.config import settings
 from app.core.security import (
     create_access_token,
@@ -19,6 +25,12 @@ from app.core.security import (
 from app.db.database import get_db
 from app.models.company import Company
 from app.models.user import User, UserRole
+from app.schemas.display_token import (
+    DisplayTokenCreate,
+    DisplayTokenIssueResponse,
+    DisplayTokenListResponse,
+    DisplayTokenResponse,
+)
 from app.schemas.user import (
     EmployeeLoginRequest,
     PublicRegister,
@@ -29,6 +41,7 @@ from app.schemas.user import (
     UserResponse,
 )
 from app.services.audit_service import AuditService
+from app.services.display_token_service import issue_display_token, list_display_tokens, revoke_display_token
 
 router = APIRouter()
 
@@ -582,6 +595,77 @@ def switch_company(
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=UserResponse.model_validate(current_user),
     )
+
+
+# ---------------------------------------------------------------------------
+# Scoped display tokens for unattended TV wallboards (A0.5).
+#
+# A display token is a long-lived JWT with type="display" that authenticates
+# ONLY GET /shop-floor/wallboard (via the get_display_or_user dependency).
+# verify_token rejects it everywhere else, so it can never act as a user
+# session. Issuance/revocation are ADMIN/MANAGER-gated and audit-logged; the
+# raw JWT is shown exactly once at creation and never stored.
+# ---------------------------------------------------------------------------
+
+_DISPLAY_TOKEN_MANAGER_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
+
+
+@router.post("/display-token", response_model=DisplayTokenIssueResponse, summary="Issue a wallboard display token")
+def create_display_token_endpoint(
+    payload: DisplayTokenCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPLAY_TOKEN_MANAGER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Mint a scoped, revocable display token for a shop TV (ADMIN/MANAGER).
+
+    The returned ``token`` is shown ONCE — it is not stored and cannot be
+    retrieved again. Default lifetime 90 days, capped at 365.
+    """
+    record, token = issue_display_token(
+        db,
+        company_id=company_id,
+        label=payload.label,
+        expires_days=payload.expires_days,
+        created_by=current_user.id,
+        audit=audit,
+    )
+    return DisplayTokenIssueResponse(**DisplayTokenResponse.model_validate(record).model_dump(), token=token)
+
+
+@router.get("/display-token", response_model=DisplayTokenListResponse, summary="List wallboard display tokens")
+def list_display_tokens_endpoint(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPLAY_TOKEN_MANAGER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """List this company's display tokens (no JWTs — metadata only)."""
+    records = list_display_tokens(db, company_id=company_id)
+    return DisplayTokenListResponse(display_tokens=[DisplayTokenResponse.model_validate(record) for record in records])
+
+
+@router.delete("/display-token/{token_id}", response_model=DisplayTokenResponse, summary="Revoke a display token")
+def revoke_display_token_endpoint(
+    token_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPLAY_TOKEN_MANAGER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Revoke a display token (ADMIN/MANAGER, tenant-scoped, audited, idempotent).
+
+    The wallboard dependency re-checks the DB row on every request, so the
+    TV loses access on its next poll (within ~30s).
+    """
+    record = revoke_display_token(
+        db,
+        company_id=company_id,
+        token_id=token_id,
+        revoked_by=current_user.id,
+        audit=audit,
+    )
+    return DisplayTokenResponse.model_validate(record)
 
 
 @router.post("/reset-database")

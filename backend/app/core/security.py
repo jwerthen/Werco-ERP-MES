@@ -74,8 +74,54 @@ def create_refresh_token(
     return encoded_jwt, session_id, expire
 
 
+def create_display_token(jti: str, company_id: int, label: str, expires_at: datetime) -> str:
+    """Create a long-lived, scope-limited token for an unattended TV wallboard (A0.5).
+
+    The ``type`` claim is ``"display"`` — NOT ``"access"`` — so ``verify_token``
+    (and therefore ``get_current_user`` and every dependency built on it)
+    rejects it. Display tokens only authenticate via the dedicated
+    ``get_display_or_user`` dependency on the read-only wallboard endpoint.
+    ``jti`` ties the JWT to a ``display_tokens`` row so admins can revoke it.
+    """
+    to_encode = {
+        "exp": expires_at,
+        "sub": f"display:{jti}",
+        "type": "display",
+        "jti": jti,
+        "cid": company_id,
+        "label": label,
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def verify_display_token(token: str) -> Optional[dict]:
+    """Verify a display token and return its claims, or None.
+
+    Only checks signature/expiry/type; the caller MUST additionally check the
+    ``display_tokens`` row (exists, not revoked, not past ``expires_at``) —
+    the DB row is the revocation authority.
+    """
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        if payload.get("type") != "display":
+            return None
+        return {
+            "jti": payload.get("jti"),
+            "company_id": payload.get("cid"),
+            "label": payload.get("label"),
+        }
+    except JWTError:
+        return None
+
+
 def verify_token(token: str) -> Optional[dict]:
-    """Verify an access token and return user context claims."""
+    """Verify an access token and return user context claims.
+
+    SECURITY: the ``type == "access"`` check below is what fences display
+    tokens (``type == "display"``, see ``create_display_token``) and refresh
+    tokens out of every user-auth dependency. Do not relax it.
+    """
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         if payload.get("type") != "access":

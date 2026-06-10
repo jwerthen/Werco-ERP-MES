@@ -27,6 +27,7 @@ import {
   WorkOrderBlockerStatus,
 } from '../types/aiForward';
 import { AIUsageSummaryResponse } from '../types/aiUsage';
+import { DisplayToken, DisplayTokenCreateInput, DisplayTokenIssued } from '../types/wallboard';
 import {
   EntityImportResponse,
   ImportTemplateIndexResponse,
@@ -1596,6 +1597,26 @@ class ApiService {
   // active company. Rendered on Admin Settings > AI Usage & Cost.
   async getAIUsageSummary(days = 30): Promise<AIUsageSummaryResponse> {
     const response = await this.api.get('/ai-usage/summary', { params: { days } });
+    return response.data;
+  }
+
+  // Wallboard display tokens (A0.5). ADMIN + MANAGER server-side. The
+  // create response carries the JWT exactly ONCE — it is never retrievable
+  // again, so the UI must surface it immediately. NOTE: the wallboard page
+  // itself does NOT use this client (see services/wallboardClient.ts) — a
+  // display token must never enter the global axios auth state.
+  async createDisplayToken(data: DisplayTokenCreateInput): Promise<DisplayTokenIssued> {
+    const response = await this.api.post('/auth/display-token', data);
+    return response.data;
+  }
+
+  async listDisplayTokens(): Promise<DisplayToken[]> {
+    const response = await this.api.get('/auth/display-token');
+    return response.data.display_tokens;
+  }
+
+  async revokeDisplayToken(id: number): Promise<DisplayToken> {
+    const response = await this.api.delete(`/auth/display-token/${id}`);
     return response.data;
   }
 
