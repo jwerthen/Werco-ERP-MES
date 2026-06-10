@@ -1,10 +1,13 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "backend/Dockerfile"
+dockerfilePath = "Dockerfile"
 watchPatterns = ["**/*"]
 
-# NOTE: Ensure the backend service's "Root Directory" setting in Railway dashboard
-# is set to "backend" (not the repo root) for this config to work correctly.
+# NOTE: dockerfilePath is resolved relative to the upload root. CI deploys with
+# `cd backend && railway up . --path-as-root`, so the archive root IS the backend
+# dir and the Dockerfile sits at its root — hence the bare "Dockerfile". Leave the
+# Railway service "Root Directory" at the repo root / empty so it does not prepend
+# a "backend/" prefix and double-up the path (which yields backend/backend/Dockerfile).
 
 [deploy]
 healthcheckPath = "/health"
