@@ -26,6 +26,7 @@ import {
   WorkOrderBlockerInput,
   WorkOrderBlockerStatus,
 } from '../types/aiForward';
+import { AIUsageSummaryResponse } from '../types/aiUsage';
 import {
   AddressValidationRequest,
   AddressValidationResult,
@@ -1574,6 +1575,14 @@ class ApiService {
 
   async updateShippingProfile(data: CompanyShippingProfileUpdate): Promise<CompanyShippingProfile> {
     const response = await this.api.put('/admin/settings/shipping-profile', data);
+    return response.data;
+  }
+
+  // AI usage / cost telemetry. ADMIN + MANAGER server-side; read-only
+  // aggregates (per-task / per-model) over the AI usage ledger for the
+  // active company. Rendered on Admin Settings > AI Usage & Cost.
+  async getAIUsageSummary(days = 30): Promise<AIUsageSummaryResponse> {
+    const response = await this.api.get('/ai-usage/summary', { params: { days } });
     return response.data;
   }
 

@@ -105,10 +105,6 @@ def build_routing_extraction_schema(work_center_types: List[str]) -> str:
 """.replace("WORK_CENTER_TYPES", types_str)
 
 
-# Canonical text lives in the versioned prompt registry (app.services.prompts).
-ROUTING_SYSTEM_PROMPT = ROUTING_GENERATION_PROMPT.text
-
-
 # Default time estimates by work center type (in hours)
 DEFAULT_TIME_ESTIMATES = {
     "laser": {"setup_hours": 0.20, "run_hours_per_unit": 0.08},
@@ -155,7 +151,10 @@ def extract_routing_data_with_llm(
     Send drawing text and optional geometry data to Claude to propose routing operations.
     Returns structured JSON with proposed operations mapped to work center types.
     """
-    types_list = dedupe_work_center_types(work_center_types) or DEFAULT_WORK_CENTER_TYPES
+    # Sorted so the cached system prefix below is byte-stable regardless of DB row
+    # order at the call site -- an unstable prefix is a guaranteed cache miss that
+    # still pays the cache-write premium on every call.
+    types_list = sorted(dedupe_work_center_types(work_center_types) or DEFAULT_WORK_CENTER_TYPES)
     types_str = ", ".join(types_list)
     schema = build_routing_extraction_schema(types_list)
 

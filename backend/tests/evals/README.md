@@ -27,7 +27,9 @@ RUN_LIVE_EVALS=1 ANTHROPIC_API_KEY=sk-ant-... pytest -m evals tests/evals
 
 1. Drop a new `golden/<task>_<nnn>.json` with the fields above. Capture
    `stored_output` from a real run (the `_extraction_metadata` key is stripped
-   before scoring).
+   before scoring). **Golden fixtures must be synthetic or fully sanitized** —
+   never commit real customer/vendor names, part numbers, prices, or any other
+   content from production documents.
 2. Set `thresholds` to what the stored output actually achieves — evals catch
    regressions, they are not aspirational targets.
 3. Bump thresholds deliberately when a prompt-version change improves scores

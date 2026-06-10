@@ -114,3 +114,50 @@ Customer PDF excludes:
 - Parsing is resilient per file. One bad file should not abort all parsing.
 - File parse state is tracked per RFQ package file (`pending`, `parsed`, `parsed_with_fallback`, `error`).
 - Logs include parsing failures and fallback conditions.
+
+## Platform LLM Operations (shared across AI features)
+
+These notes cover the shared LLM plumbing used by **every** Anthropic call in the platform —
+PO/quote document extraction (`po-upload`), BOM import, AI routing generation, and QMS clause
+extraction. (The RFQ package parsing documented above is deterministic and makes no LLM calls.)
+
+### Shared client and model routing
+- Every Anthropic call flows through `backend/app/services/llm_client.py` (`run_llm_task`).
+- Model selection stays in the existing router (`app/services/llm_model_router.py`):
+  `ANTHROPIC_MODEL_SELECTION` plus per-tier / per-task model override env vars.
+- Routing generation sends its stable prefix (system prompt + schema/allowed work-center types +
+  learned-examples context) as `cache_control: ephemeral` system blocks, so repeat generations
+  hit the prompt cache and only the drawing content is reprocessed at full input price.
+  Data-handling note (CMMC traceability): with caching enabled, that prefix — including the
+  company's learned-routing examples — is retained server-side in Anthropic's prompt cache for
+  the ephemeral TTL (~5 minutes) instead of being transient per-request. Same provider, same
+  trust boundary and ToS; recorded here as a data-flow change. Caching only engages above
+  Anthropic's minimum cacheable prefix length; verify via `cache_creation_tokens`/`cache_read_tokens`
+  on `routing_generation` rows in `ai_usage_events`.
+
+### AI usage telemetry (cost / latency ledger)
+Each call writes one tenant-scoped row to `ai_usage_events`: task, exact model id, tier, feature,
+prompt version, input/output/cache-write/cache-read token counts, estimated USD cost (from the
+price table `MODEL_PRICING_USD_PER_MTOK` in `llm_client.py`; `NULL` for unpriced models), latency,
+and success/error type.
+- This is **operational telemetry, not audit data** — rows are not on the tamper-evident
+  `audit_log` hash chain, and they are written fire-and-forget on a dedicated short-lived session
+  (a telemetry failure logs a warning and never breaks the AI call).
+- Read it via `GET /api/v1/ai-usage/summary?days=N` (Admin/Manager) or the
+  `Admin Settings -> AI Usage & Cost` tab.
+- When Anthropic pricing changes or a new model is pinned, edit `MODEL_PRICING_USD_PER_MTOK`.
+
+### Versioned prompt registry
+- Prompt text lives in `backend/app/services/prompts/` (PO/quote extraction, BOM extraction,
+  routing generation; QMS clause extraction is version-registered with its text still at the
+  call site).
+- Bump the prompt's semver `version` and add an entry to `CHANGELOG.md` in that package whenever
+  prompt text or request layout changes — the version is recorded on every usage row and on
+  AI-learning rows, so regressions can be attributed to a prompt revision.
+
+### Eval harness
+- `backend/tests/evals/` holds golden-fixture evals for the PO and BOM extraction pipelines,
+  excluded from the default pytest run via the `evals` marker.
+- Offline (default — no API key, no network): `pytest -m evals tests/evals`
+- Live (opt-in, billable): `RUN_LIVE_EVALS=1 ANTHROPIC_API_KEY=... pytest -m evals tests/evals`
+- See `backend/tests/evals/README.md` for the fixture layout and how to add cases.

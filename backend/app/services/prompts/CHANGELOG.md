@@ -15,6 +15,10 @@ request layout changes. The version string is recorded on `AIUsageEvent`
   prompt caching: system prompt, schema/allowed work-center types, and the
   learned-examples context now travel as cacheable `system` blocks
   (`cache_control: ephemeral`) instead of being inlined in the user prompt.
-  Model-visible content is equivalent.
+  Model-visible content is equivalent. Note: Anthropic only engages the cache
+  above a minimum prefix length (1024 tokens on Sonnet/Opus); confirm it is
+  actually engaging by checking `cache_creation_tokens`/`cache_read_tokens` on
+  `routing_generation` rows in `ai_usage_events` — below the minimum the
+  breakpoints are harmless no-ops.
 - `qms_clause_extraction` 1.0.0 — version registration only; prompt text
   remains inline in `app/api/endpoints/qms_standards.py` (baseline).

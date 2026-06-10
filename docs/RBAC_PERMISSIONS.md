@@ -306,6 +306,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Settings | ✓ | | | | | | |
 | Integrations (`admin:integrations`) | ✓ | | | | | | |
 | Audit Logs | ✓ | ✓ | | | | | |
+| AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
 
 > **Integrations (carrier-account credentials + shipping profile) — endpoint mapping.** The
@@ -350,6 +351,15 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > verify only a record belonging to their active company, and a cross-tenant record returns
 > **404** (not 403) so it can't be used to probe for another company's records. Platform Admins /
 > superusers may verify any record (superuser bypasses role checks, as elsewhere).
+
+> **AI usage & cost summary.** `GET /api/v1/ai-usage/summary` (`app/api/endpoints/ai_usage.py`)
+> is enforced **in code** via `require_role([ADMIN, MANAGER])` and is **tenant-scoped** to the
+> caller's active company. It returns read-only per-task / per-model aggregates over the
+> `ai_usage_events` LLM telemetry ledger (operational telemetry, not audit data — see
+> [docs/API.md](API.md) → AI Usage Telemetry). Note the **Manager allowance is currently dormant
+> in the UI**: the only consuming surface is the Admin Settings → AI Usage & Cost tab, and
+> `/admin/settings` is AdminRoute-gated (admin role / superuser), so Managers can exercise this
+> permission only via direct API calls today.
 
 ## Backend Implementation
 

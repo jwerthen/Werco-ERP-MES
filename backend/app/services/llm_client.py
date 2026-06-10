@@ -210,7 +210,9 @@ def _record_usage_event(
     """Persist one AIUsageEvent row. Never raises — telemetry must not break the caller."""
     try:
         if company_id is None:
-            logger.warning("AI usage telemetry skipped for task %s: no company context", task)
+            # error, not warning: a caller omitting company_id silently erodes the
+            # per-tenant cost ledger -- make it loud so the gap gets fixed.
+            logger.error("AI usage telemetry skipped for task %s: no company context", task)
             return
 
         from app.models.ai_usage import AIUsageEvent

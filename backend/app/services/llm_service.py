@@ -27,9 +27,8 @@ logger = logging.getLogger(__name__)
 # entire request thread if the upstream API is slow or unreachable.
 LLM_API_TIMEOUT_SECONDS = 60.0
 
-# Backwards-compatible aliases — canonical text now lives in app.services.prompts.
+# Backwards-compatible alias — canonical text now lives in app.services.prompts.
 EXTRACTION_SCHEMA = PO_EXTRACTION_SCHEMA
-SYSTEM_PROMPT = PO_EXTRACTION_PROMPT.text
 
 
 def _not_configured_message(exc: LLMNotConfiguredError) -> str:
