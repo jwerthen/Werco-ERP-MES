@@ -127,6 +127,7 @@ The handy ones:
 | Shortcut | What it does |
 | --- | --- |
 | **Ctrl + K** | Open search |
+| **Ctrl + .** | Open or close the Werco Copilot assistant (ask questions about your jobs, schedules, and inventory) |
 | **Ctrl + N** | Create a new item (on screens that support it) |
 | **Ctrl + S** | Save your changes |
 | **Ctrl + Shift + R** | Refresh the data on screen |

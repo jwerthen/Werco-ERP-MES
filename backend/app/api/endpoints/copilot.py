@@ -41,6 +41,7 @@ router = APIRouter()
 # Per-user rate limit (in-process sliding window).
 # The global slowapi middleware in app/main.py is keyed by client IP; copilot
 # turns are expensive (multi-call LLM loops), so we add a per-user budget here.
+# TODO(redis): move this per-user limiter to Redis so the budget is shared across processes/replicas.
 # ---------------------------------------------------------------------------
 COPILOT_RATE_LIMIT_PER_MINUTE = int(os.getenv("COPILOT_RATE_LIMIT_PER_MINUTE", "20"))
 _RATE_WINDOW_SECONDS = 60.0
@@ -86,10 +87,12 @@ def copilot_chat(
     - ``{"type": "final", ...}`` — full :class:`CopilotChatResponse` payload
     - ``{"type": "error", "message": ...}`` — terminal error frame
     """
-    _check_rate_limit(current_user.id)
-
     if request.messages[-1].role != "user":
         raise HTTPException(status_code=422, detail="The last message must be from the user.")
+
+    # Consume a rate-limit token only AFTER request validation, so malformed
+    # requests don't burn the caller's per-minute budget.
+    _check_rate_limit(current_user.id)
 
     service = CopilotService(db, company_id=company_id, user=current_user)
     plain_messages = [{"role": m.role, "content": m.content} for m in request.messages]

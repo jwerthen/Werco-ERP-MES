@@ -884,9 +884,12 @@ class ApiService {
    *
    * Axios cannot stream response bodies in the browser, so this uses fetch
    * against the same base URL with the same Authorization header the axios
-   * client carries. Frames are `data: <json>` SSE events; handlers fire per
-   * event and the final payload is also returned. Throws on transport/HTTP
-   * errors and when the stream ends with an in-band `error` frame.
+   * client carries. Because fetch bypasses the axios interceptors, this method
+   * mirrors their auth behavior itself: a proactive refresh when the access
+   * token is near expiry, and on a 401 response one refresh + one retry.
+   * Frames are `data: <json>` SSE events; handlers fire per event and the
+   * final payload is also returned. Throws on transport/HTTP errors and when
+   * the stream ends with an in-band `error` frame.
    */
   async copilotChatStream(
     request: CopilotChatRequest,
@@ -894,21 +897,40 @@ class ApiService {
     signal?: AbortSignal
   ): Promise<CopilotChatResponse> {
     const baseURL = this.api.defaults.baseURL || API_BASE_URL;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'X-Requested-With': 'XMLHttpRequest',
-      Accept: 'text/event-stream',
-    };
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+
+    // Mirror the axios request interceptor: refresh proactively when the token
+    // expires within 60 seconds, so long streams don't start with a dying token.
+    if (this.tokenExpiresAt && Date.now() >= this.tokenExpiresAt - 60000 && this.refreshToken) {
+      try {
+        await this.refreshAccessToken();
+      } catch {
+        // Refresh failed — fall through; the request below will 401 and surface the error.
+      }
     }
 
-    const response = await fetch(`${baseURL}/copilot/chat?stream=true`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(request),
-      signal,
-    });
+    const doFetch = () => {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        Accept: 'text/event-stream',
+      };
+      if (this.token) {
+        headers['Authorization'] = `Bearer ${this.token}`;
+      }
+      return fetch(`${baseURL}/copilot/chat?stream=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(request),
+        signal,
+      });
+    };
+
+    let response = await doFetch();
+    if (response.status === 401 && this.refreshToken) {
+      // Mirror the axios response interceptor: one refresh, one retry.
+      await this.refreshAccessToken();
+      response = await doFetch();
+    }
     if (!response.ok || !response.body) {
       throw new Error(`Copilot request failed (${response.status})`);
     }

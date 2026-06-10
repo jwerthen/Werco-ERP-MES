@@ -104,6 +104,27 @@ class TestAuthAndValidation:
         )
         assert second.status_code == 429
 
+    def test_validation_failure_does_not_consume_rate_limit(self, client, auth_headers, monkeypatch):
+        """A 422 (bad history) must not burn the caller's per-minute budget."""
+        monkeypatch.setattr(copilot_endpoint, "COPILOT_RATE_LIMIT_PER_MINUTE", 1)
+        scripted = ScriptedLLM([FakeLLMResult([_text_block("ok")])])
+        monkeypatch.setattr(copilot_service, "run_llm_task", scripted)
+
+        bad = client.post(
+            CHAT_URL,
+            headers=auth_headers,
+            params={"stream": "false"},
+            json={"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]},
+        )
+        assert bad.status_code == 422
+        good = client.post(
+            CHAT_URL,
+            headers=auth_headers,
+            params={"stream": "false"},
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert good.status_code == 200  # the single token was still available
+
 
 # ---------------------------------------------------------------------------
 # Non-streaming path (?stream=false)
@@ -272,6 +293,8 @@ class TestNaturalLanguageSearchLLM:
         assert data["used_fallback"] is False
         assert len(scripted.calls) == 1
         assert scripted.calls[0]["ctx"].task == "nl_search"
+        # The 3s NL budget is wall-clock honest: no SDK retries behind the timeout.
+        assert scripted.calls[0]["max_retries"] == 0
         for item in data["results"]:
             assert set(item.keys()) == NL_RESULT_KEYS
 

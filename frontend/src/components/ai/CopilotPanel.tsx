@@ -36,6 +36,7 @@ interface ChatEntry {
 }
 
 const MAX_HISTORY_SENT = 40; // matches the backend request schema cap
+const MAX_DISPLAYED_ENTRIES = 200; // render cap — very long sessions stay responsive
 const SUGGESTIONS = ["What's blocked right now?", 'How loaded is the laser this week?', 'Anything overdue?'];
 
 function toApiMessages(entries: ChatEntry[]): CopilotMessage[] {
@@ -253,7 +254,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
             </div>
           )}
 
-          {entries.map((entry, index) => (
+          {entries.slice(-MAX_DISPLAYED_ENTRIES).map((entry, index) => (
             <div key={index} data-testid={`copilot-message-${entry.role}`}>
               {entry.role === 'user' ? (
                 <div className="flex justify-end">

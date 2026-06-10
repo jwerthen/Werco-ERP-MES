@@ -334,6 +334,30 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > row on every record/target create/update/delete (and the auto-calc upsert), so OEE mutations are on
 > the hash chain alongside the role gate. No role change — audit-trail coverage only.
 
+### Werco Copilot (read-only AI chat)
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Chat (`POST /copilot/chat`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Endpoint vs. tool-level access.** The endpoint (`app/api/endpoints/copilot.py`) requires only
+> an authenticated user (`get_current_user`) — it is **strictly read-only** (every copilot tool
+> wraps an existing read path; nothing can be created, updated, or deleted), so the chat itself
+> carries no role gate. **Tool-level access mirrors each tool's source endpoint**: all eight v1
+> tools wrap any-authenticated reads. The `search_erp` tool **excludes employee (`user`-type)
+> results entirely** — data minimization, so employee names/emails never enter model prompts
+> regardless of the caller's role; the **Admin/Manager-only** gate on user results inside global
+> search now applies to `GET /search` only. The tool registry
+> (`CopilotToolSpec.allowed_roles` in `app/services/copilot_service.py`) supports fully
+> role-restricted tools for the future: such tools are omitted from other roles' tool lists and
+> refuse politely if invoked anyway.
+>
+> **Tenant scope is never model-controlled.** `company_id` is injected server-side from the
+> active company (`get_current_company_id`) into every tool call; tool input schemas carry no
+> tenant identifier, and undeclared input keys supplied by the model (including a `company_id`)
+> are dropped before dispatch. Per-user rate limit: 20 requests/minute default
+> (`COPILOT_RATE_LIMIT_PER_MINUTE`). See [docs/API.md](API.md) → Werco Copilot.
+
 ### Admin
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

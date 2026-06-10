@@ -10,8 +10,10 @@ Design rules (non-negotiable):
   model supplies (including ``company_id``) are dropped before dispatch.
 - **RBAC mirrors the source endpoints.** Each tool documents the endpoint it
   wraps and that endpoint's access rule. All v1 tools wrap any-authenticated
-  endpoints; the one role-restricted slice (user results inside global search)
-  is enforced *inside* ``run_global_search`` exactly as the endpoint does.
+  endpoints. Data minimization: the ``search_erp`` tool excludes the employee
+  directory entirely (``_SEARCH_ERP_TYPES`` carries no ``user`` type), so
+  employee names/emails never enter model prompts — the Admin/Manager-gated
+  user results remain available on ``GET /search`` only.
   ``CopilotToolSpec.allowed_roles`` exists for future role-restricted tools:
   restricted tools are not registered for (and politely refused to) other roles.
 - **All Anthropic calls go through ``run_llm_task``** — one usage-telemetry row
@@ -29,7 +31,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, FrozenSet, Generator, List, Optional
@@ -65,8 +66,12 @@ _MAX_TOOL_RESULT_CHARS = 6000
 
 
 def _escape_like(term: str) -> str:
-    """Neutralize SQL LIKE wildcards in model/user-supplied text."""
-    return re.sub(r"[%_]", " ", term).strip()
+    """Backslash-escape SQL LIKE wildcards in model/user-supplied text.
+
+    Pair every use with ``.like(pattern, escape="\\\\")`` so ``%``/``_`` in part
+    numbers and names match literally instead of acting as wildcards.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _enum_value(value: Any) -> Any:
@@ -129,7 +134,7 @@ def _tool_lookup_work_order(*, db: Session, company_id: int, user: User, number_
     if work_order is None:
         term = f"%{_escape_like(raw.lower())}%"
         candidates = (
-            base_query.filter(func.lower(WorkOrder.work_order_number).like(term))
+            base_query.filter(func.lower(WorkOrder.work_order_number).like(term, escape="\\"))
             .order_by(WorkOrder.due_date)
             .limit(5)
             .all()
@@ -174,18 +179,25 @@ def _tool_lookup_work_order(*, db: Session, company_id: int, user: User, number_
     }
 
 
+# Entity types the copilot's search tool is allowed to touch. "user" is
+# deliberately absent (data minimization): the employee directory never enters
+# model prompts via the copilot, regardless of the caller's role. GET /search
+# keeps its own Admin/Manager-gated user results — that gate is endpoint-only.
+_SEARCH_ERP_TYPES = ("part", "work_order", "customer", "bom", "routing", "vendor", "purchase_order", "quote")
+
+
 def _tool_search_erp(
     *, db: Session, company_id: int, user: User, query: str, types: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-    """Source: GET /search (any-authenticated; user-type results restricted to
-    ADMIN/MANAGER inside run_global_search). Decision: all roles; the embedded
-    user-results gate is preserved because the caller's User is passed through."""
+    """Source: GET /search (any-authenticated). Decision: all roles, but the
+    tool is restricted to ``_SEARCH_ERP_TYPES`` — employee ("user") results are
+    excluded server-side even if the model requests them."""
     q = str(query or "").strip()[:100]
     if not q:
         return {"data": {"results": []}, "summary": "empty search", "is_error": True}
-    types_str = None
-    if types:
-        types_str = ",".join(str(t) for t in types if isinstance(t, str))[:200] or None
+    requested = [str(t) for t in (types or []) if isinstance(t, str)]
+    selected = [t for t in requested if t in _SEARCH_ERP_TYPES] or list(_SEARCH_ERP_TYPES)
+    types_str = ",".join(selected)
     response = run_global_search(db=db, company_id=company_id, current_user=user, q=q, limit=20, types=types_str)
     return {
         "data": response.model_dump(),
@@ -253,9 +265,9 @@ def _tool_work_center_load(
     if work_center:
         term = f"%{_escape_like(str(work_center).lower())}%"
         wc_query = wc_query.filter(
-            func.lower(WorkCenter.name).like(term)
-            | func.lower(WorkCenter.code).like(term)
-            | func.lower(WorkCenter.work_center_type).like(term)
+            func.lower(WorkCenter.name).like(term, escape="\\")
+            | func.lower(WorkCenter.code).like(term, escape="\\")
+            | func.lower(WorkCenter.work_center_type).like(term, escape="\\")
         )
     work_centers = wc_query.order_by(WorkCenter.name).limit(20).all()
     if not work_centers:
@@ -324,7 +336,7 @@ def _tool_inventory_lookup(*, db: Session, company_id: int, user: User, part_num
         .filter(
             Part.company_id == company_id,
             Part.is_deleted == False,  # noqa: E712 — Part is soft-delete; mirror the /parts endpoints
-            func.lower(Part.part_number).like(term) | func.lower(Part.name).like(term),
+            func.lower(Part.part_number).like(term, escape="\\") | func.lower(Part.name).like(term, escape="\\"),
         )
         .limit(5)
         .all()
@@ -383,7 +395,7 @@ def _tool_customer_open_orders(*, db: Session, company_id: int, user: User, cust
         .filter(
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712 — WorkOrder is soft-delete
-            func.lower(WorkOrder.customer_name).like(term),
+            func.lower(WorkOrder.customer_name).like(term, escape="\\"),
             WorkOrder.status.in_(_OPEN_WO_STATUSES),
         )
         .order_by(WorkOrder.due_date)
@@ -394,7 +406,7 @@ def _tool_customer_open_orders(*, db: Session, company_id: int, user: User, cust
         db.query(Quote)
         .filter(
             Quote.company_id == company_id,
-            func.lower(Quote.customer_name).like(term),
+            func.lower(Quote.customer_name).like(term, escape="\\"),
             Quote.status.in_(_ACTIVE_QUOTE_STATUSES),
         )
         .order_by(Quote.created_at.desc())
@@ -480,17 +492,8 @@ TOOL_REGISTRY: List[CopilotToolSpec] = [
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": [
-                            "part",
-                            "work_order",
-                            "customer",
-                            "bom",
-                            "routing",
-                            "user",
-                            "vendor",
-                            "purchase_order",
-                            "quote",
-                        ],
+                        # No "user" here: the copilot's search excludes the employee directory.
+                        "enum": list(_SEARCH_ERP_TYPES),
                     },
                     "description": "Optional entity types to restrict the search to.",
                 },
@@ -742,6 +745,7 @@ class CopilotService:
                 feature="copilot_panel",
                 prompt_version=COPILOT_CHAT_PROMPT.version,
                 timeout=COPILOT_LLM_TIMEOUT_SECONDS,
+                max_retries=1,  # one retry for transient overload (529s), bounded so a turn can't stall
             )
             model_used = result.model
             response = result.raw_response
@@ -751,7 +755,9 @@ class CopilotService:
 
             if not tool_uses or force_final:
                 answer = "\n".join(part for part in text_parts if part).strip()
-                truncated = force_final
+                # Truncated when we forced the final call (round cap) OR the
+                # model ran out of output tokens mid-answer.
+                truncated = force_final or getattr(response, "stop_reason", None) == "max_tokens"
                 break
 
             rounds += 1

@@ -23,7 +23,11 @@ class AIContextService:
             .options(
                 joinedload(WorkOrder.part), joinedload(WorkOrder.operations).joinedload(WorkOrderOperation.work_center)
             )
-            .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+            .filter(
+                WorkOrder.id == work_order_id,
+                WorkOrder.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712 — WorkOrder is soft-delete
+            )
             .first()
         )
         if not work_order:
@@ -112,6 +116,7 @@ class AIContextService:
             "active_work_orders": self.db.query(WorkOrder)
             .filter(
                 WorkOrder.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712 — WorkOrder is soft-delete
                 WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]),
             )
             .count(),

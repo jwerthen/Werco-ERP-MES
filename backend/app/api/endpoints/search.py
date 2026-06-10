@@ -163,6 +163,7 @@ def _llm_interpret_nl_search(query: str, *, company_id: int) -> Optional[dict]:
             feature="nl_search",
             prompt_version=NL_SEARCH_INTENT_PROMPT.version,
             timeout=_NL_LLM_TIMEOUT_SECONDS,
+            max_retries=0,  # the 3s budget is wall-clock honest: no SDK retries hiding behind the timeout
         )
     except LLMNotConfiguredError:
         return None
@@ -230,6 +231,7 @@ def _literal_work_order_fallback(
         .outerjoin(Part, WorkOrder.part_id == Part.id)
         .filter(
             WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712 — WorkOrder is soft-delete
             or_(
                 func.lower(WorkOrder.work_order_number).like(search_term),
                 func.lower(WorkOrder.customer_po).like(search_term),
@@ -289,6 +291,7 @@ def natural_language_search(
         .options(joinedload(WorkOrder.part))
         .filter(
             WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712 — WorkOrder is soft-delete
             WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]),
         )
     )
@@ -382,7 +385,7 @@ def get_recent_items(
     # Recent work orders (last 5)
     recent_wos = (
         db.query(WorkOrder)
-        .filter(WorkOrder.company_id == company_id)
+        .filter(WorkOrder.company_id == company_id, WorkOrder.is_deleted == False)  # noqa: E712 — soft-delete
         .order_by(WorkOrder.updated_at.desc())
         .limit(5)
         .all()

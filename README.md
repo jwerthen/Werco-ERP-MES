@@ -6,6 +6,9 @@ A custom **Enterprise Resource Planning (ERP) + Manufacturing Execution System (
 
 Shipped modules, grouped by domain:
 
+### Werco Copilot (AI assistant)
+- **Ask-anything chat over your own ERP data** — a read-only copilot (header button or `Ctrl+.` from any screen) that answers shop questions ("where is WO-2024-0512?", "what's blocked?", "how loaded is the laser this week?") via Claude tool-use over live work orders, blockers, schedules, inventory, customers, and search, with deep links to the records it cites. Strictly read-only, tenant-scoped server-side, streamed answers, per-user rate-limited.
+
 ### Sales & Quoting
 - **AI RFQ quoting** — upload customer drawings (PDF/DXF/STEP); Anthropic Claude parses the package into parts and produces cost/lead-time estimates with confidence scores and stated assumptions, which a user reviews and converts to a quote.
 - **Routing learning** — the AI improves routing/estimate suggestions from accepted historical jobs.
@@ -92,7 +95,7 @@ This brings up the backend (`:8000`), frontend (`:3000`), Redis, and the ARQ wor
 - `SECRET_KEY` — JWT signing secret.
 - `REFRESH_TOKEN_SECRET_KEY` — refresh-token signing secret.
 
-Set `ANTHROPIC_API_KEY` to enable the AI features (RFQ quoting, PO/BOM/QMS document parsing, routing learning). See **[docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md)** for the full list (Anthropic model tiers, SMTP, Sentry, Redis, webhook key, etc.).
+Set `ANTHROPIC_API_KEY` to enable the AI features (Werco Copilot chat, RFQ quoting, PO/BOM/QMS document parsing, routing learning, natural-language search). See **[docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md)** for the full list (Anthropic model tiers, SMTP, Sentry, Redis, webhook key, etc.).
 
 Once up:
 

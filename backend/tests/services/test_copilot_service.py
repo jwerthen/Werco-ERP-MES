@@ -17,8 +17,10 @@ import app.services.llm_client as llm_client
 from app.models.ai_learning import AIInteractionEvent
 from app.models.audit_log import AuditLog
 from app.models.company import Company
+from app.models.part import Part
 from app.models.user import User, UserRole
-from app.models.work_order import WorkOrder
+from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.services.ai_context_service import AIContextService
 from app.services.copilot_service import (
     COPILOT_MAX_OUTPUT_TOKENS,
     COPILOT_MAX_TOOL_ROUNDS,
@@ -189,6 +191,87 @@ class TestTenantInjection:
 
 
 # ---------------------------------------------------------------------------
+# search_erp — employee directory excluded (data minimization, N3)
+# ---------------------------------------------------------------------------
+class TestSearchErpExcludesEmployeeDirectory:
+    def test_user_type_absent_from_schema_enum(self):
+        spec = next(s for s in TOOL_REGISTRY if s.name == "search_erp")
+        enum = spec.input_schema["properties"]["types"]["items"]["enum"]
+        assert "user" not in enum
+        assert set(enum) == set(copilot_service._SEARCH_ERP_TYPES)
+
+    def test_types_user_returns_no_user_results(self, service: CopilotService, test_user: User):
+        """Even a MANAGER (who passes the GET /search gate) gets no user results
+        through the copilot tool — types:["user"] is dropped by the allowlist."""
+        execution = service.execute_tool("search_erp", {"query": "testuser", "types": ["user"]})
+        assert execution.is_error is False
+        assert all(item["type"] != "user" for item in execution.payload["results"])
+        assert "user" not in execution.payload["categories"]
+
+    def test_default_search_never_includes_user_results(self, service: CopilotService, test_user: User):
+        execution = service.execute_tool("search_erp", {"query": "testuser"})
+        assert execution.is_error is False
+        assert all(item["type"] != "user" for item in execution.payload["results"])
+        assert "user" not in execution.payload["categories"]
+
+
+# ---------------------------------------------------------------------------
+# AIContextService — soft-deleted work orders invisible (defense in depth, N1/N2)
+# ---------------------------------------------------------------------------
+class TestAIContextServiceSoftDelete:
+    def test_work_order_context_refuses_soft_deleted(self, db_session: Session, test_work_order: WorkOrder):
+        test_work_order.is_deleted = True
+        db_session.commit()
+        with pytest.raises(ValueError):
+            AIContextService(db_session).work_order_context(company_id=1, work_order_id=test_work_order.id)
+
+    def test_active_work_order_count_excludes_soft_deleted(self, db_session: Session, test_work_order: WorkOrder):
+        test_work_order.status = WorkOrderStatus.RELEASED
+        db_session.commit()
+        before = AIContextService(db_session).compact_entity_context(company_id=1)["counts"]["active_work_orders"]
+
+        test_work_order.is_deleted = True
+        db_session.commit()
+        after = AIContextService(db_session).compact_entity_context(company_id=1)["counts"]["active_work_orders"]
+        assert after == before - 1
+
+
+# ---------------------------------------------------------------------------
+# LIKE escaping — wildcards in part numbers match literally
+# ---------------------------------------------------------------------------
+class TestLikeEscaping:
+    def test_underscore_part_number_found_literally(self, db_session: Session, service: CopilotService):
+        target = Part(
+            part_number="ABC_123",
+            name="Underscore part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        decoy = Part(
+            part_number="ABCX123",  # would match 'ABC_123' if _ stayed a wildcard
+            name="Decoy part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([target, decoy])
+        db_session.commit()
+
+        execution = service.execute_tool("inventory_lookup", {"part_number": "ABC_123"})
+        numbers = [p["part_number"] for p in execution.payload["parts"]]
+        assert "ABC_123" in numbers
+        assert "ABCX123" not in numbers
+
+    def test_percent_input_does_not_wildcard(self, db_session: Session, service: CopilotService, test_part: Part):
+        execution = service.execute_tool("inventory_lookup", {"part_number": "%"})
+        # '%' must match only parts containing a literal percent sign — none here.
+        assert execution.payload["parts"] == []
+
+
+# ---------------------------------------------------------------------------
 # Tool registry — RBAC and robustness
 # ---------------------------------------------------------------------------
 class TestToolRegistry:
@@ -281,6 +364,22 @@ class TestChatLoop:
         monkeypatch.setattr(copilot_service, "run_llm_task", scripted)
         service.run_chat(messages=[{"role": "user", "content": "hi"}])
         assert all(call["max_tokens"] == COPILOT_MAX_OUTPUT_TOKENS for call in scripted.calls)
+
+    def test_bounded_retries_on_every_call(self, monkeypatch, service: CopilotService):
+        """Each loop iteration allows exactly one SDK retry (transient overload)."""
+        scripted = ScriptedLLM([FakeLLMResult([_text_block("done")])])
+        monkeypatch.setattr(copilot_service, "run_llm_task", scripted)
+        service.run_chat(messages=[{"role": "user", "content": "hi"}])
+        assert all(call["max_retries"] == 1 for call in scripted.calls)
+
+    def test_truncated_flag_set_when_output_cap_hit(self, monkeypatch, service: CopilotService):
+        result = FakeLLMResult([_text_block("partial answer that got cut off mid-")])
+        result.raw_response.stop_reason = "max_tokens"
+        scripted = ScriptedLLM([result])
+        monkeypatch.setattr(copilot_service, "run_llm_task", scripted)
+        final = service.run_chat(messages=[{"role": "user", "content": "hi"}])
+        assert final["truncated"] is True
+        assert final["answer"].startswith("partial answer")
 
     def test_chat_turn_is_read_only(
         self, monkeypatch, db_session: Session, service: CopilotService, test_work_order: WorkOrder
@@ -392,9 +491,10 @@ class TestHelpers:
     def test_chunk_text_empty(self):
         assert copilot_service._chunk_text("") == []
 
-    def test_escape_like_neutralizes_wildcards(self):
-        assert "%" not in copilot_service._escape_like("100% laser_cut")
-        assert "_" not in copilot_service._escape_like("100% laser_cut")
+    def test_escape_like_backslash_escapes_wildcards(self):
+        assert copilot_service._escape_like("100% laser_cut") == "100\\% laser\\_cut"
+        assert copilot_service._escape_like("a\\b") == "a\\\\b"
+        assert copilot_service._escape_like("plain") == "plain"
 
     def test_context_hint_goes_into_last_user_message(self, service: CopilotService):
         messages = service._build_messages(

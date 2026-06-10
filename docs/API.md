@@ -1099,6 +1099,80 @@ are **scoped to the caller's active company** (`get_current_company_id`).
 > (`require_role([ADMIN, MANAGER])`), but the only consuming UI today is the AdminRoute-gated
 > Admin Settings page, so Managers can currently exercise the allowance only via direct API calls.
 
+### Werco Copilot (read-only AI chat)
+
+Ask-anything chat over the caller's **own company's** ERP data, answered via Claude tool-use
+against existing read paths (`app/api/endpoints/copilot.py` + `app/services/copilot_service.py`).
+Surfaced in the app as the Copilot drawer (header button / `Ctrl+.`); not available on the
+`/kiosk` or `/wallboard` screens.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/copilot/chat` | One chat turn — SSE stream by default; `?stream=false` for plain JSON | Yes (any authenticated user) |
+
+**Request body:** `{ "messages": [...], "context_hint": "..."? }`. `messages` is the
+**client-held** conversation history (the server is stateless between turns): 1–40 entries of
+`{ "role": "user" | "assistant", "content": string (1–8,000 chars) }`, oldest first, and the
+**last message must be from the user** (422 otherwise). Server-side shaping forwards only the
+trailing 30 messages at up to 4,000 chars each to the model. `context_hint` (optional,
+≤ 500 chars) tells the copilot what page/entity the user is viewing.
+
+**Streaming response (default).** `text/event-stream` of JSON frames (`data: {...}`):
+
+| Frame `type` | Payload fields | Meaning |
+|--------------|----------------|---------|
+| `tool_use` | `tool`, `summary` | A read-only lookup ran (one frame per tool call) |
+| `delta` | `text` | A chunk of the answer text |
+| `final` | full `CopilotChatResponse` payload | Terminal success frame — same shape as the `?stream=false` body |
+| `error` | `message` | Terminal error frame (failures after the stream starts arrive here, not as an HTTP status) |
+
+**Response (`?stream=false` body, and the `final` frame):**
+`{ answer, references[], tool_trace[], interaction_id, rounds, truncated }` —
+`references[]` are deep links `{ type, id, label, url }` to the entities used in the answer;
+`tool_trace[]` lists the tool calls `{ tool, summary }` in order; `truncated: true` means the
+tool-round cap was hit and the model was forced (`tool_choice: none`) to answer from what it had
+already gathered.
+
+**Limits / error codes:**
+
+- Per-user rate limit: **20 requests/minute** default (`COPILOT_RATE_LIMIT_PER_MINUTE`) → **429**.
+  This is in addition to the app-wide per-IP slowapi limits.
+- At most **8 tool rounds** per turn (`COPILOT_MAX_TOOL_ROUNDS`) plus one forced final answer
+  call; per-call output cap `COPILOT_MAX_OUTPUT_TOKENS` (default 1024); per-call upstream timeout
+  `COPILOT_LLM_TIMEOUT_SECONDS` (default 45s).
+- **503** — AI not configured (no `ANTHROPIC_API_KEY`); **502** — upstream AI-service failure;
+  **422** — invalid history (e.g. last message not from the user). With streaming (the default),
+  429 and the last-message 422 are still HTTP statuses (checked before the stream opens), but
+  configuration/upstream failures surface as a terminal `error` frame on an HTTP 200 stream.
+
+**Read-only + tenant-injection contract:**
+
+- Every tool is a thin wrapper over an existing read path — the copilot **cannot create, update,
+  or delete anything**.
+- The tenant is **never model-controlled**: `company_id` is injected server-side from the
+  authenticated session into every tool call; tool input schemas carry no tenant identifier, and
+  any undeclared input keys the model supplies (including a `company_id`) are dropped before
+  dispatch.
+- A failing tool returns an error tool-result to the model; it does not abort the turn.
+
+**Per-tool access** (mirrors each tool's source endpoint):
+
+| Tool | Wraps (source read path) | Access |
+|------|--------------------------|--------|
+| `lookup_work_order` | Work-order context (`GET /work-orders/{id}` + AI context service) | Any authenticated |
+| `search_erp` | `GET /search` (shared core `run_global_search`) | Any authenticated; **employee (`user`-type) results are excluded entirely** (data minimization — employee names/emails never enter model prompts). The Admin/Manager-gated user results remain available on `GET /search` only |
+| `list_blocked_work_orders` | `GET /work-order-blockers` (open + acknowledged) | Any authenticated |
+| `work_center_load` | `POST /scheduling/load-chart` | Any authenticated |
+| `schedule_conflicts` | `GET /scheduling/conflicts` | Any authenticated |
+| `inventory_lookup` | `GET /inventory` (on-hand/available by location and lot) | Any authenticated |
+| `customer_open_orders` | `GET /work-orders` + `GET /quotes` (open WOs, active quotes) | Any authenticated |
+| `company_snapshot` | AI context service aggregate counts | Any authenticated |
+
+> **Telemetry, not audit data.** Every model call in the loop writes one `ai_usage_events` row
+> (task `copilot_chat`), and every turn records an `AIInteractionEvent`
+> (`source_module = "copilot"`, content redacted by the learning service). The copilot performs
+> zero domain writes, so nothing lands on the `audit_log` hash chain.
+
 ### Bulk Imports & Templates (Excel Migration Kit)
 
 One shared CSV/XLSX upload kit for go-live data migration — see
@@ -1437,6 +1511,8 @@ Response:
 | 422 | Validation Error |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error |
+| 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |
+| 503 | Service Unavailable — an AI endpoint was called but the AI features are not configured (`ANTHROPIC_API_KEY` unset) |
 
 ## Interactive Documentation
 

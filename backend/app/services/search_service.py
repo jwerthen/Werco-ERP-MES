@@ -118,6 +118,7 @@ def run_global_search(
             db.query(WorkOrder)
             .filter(
                 WorkOrder.company_id == company_id,
+                WorkOrder.is_deleted == False,  # noqa: E712 — WorkOrder is soft-delete
                 or_(
                     func.lower(WorkOrder.work_order_number).like(search_term),
                     func.lower(WorkOrder.customer_po).like(search_term),

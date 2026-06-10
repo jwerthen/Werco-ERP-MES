@@ -193,6 +193,18 @@ class TestRunLLMTask:
         run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=1, timeout=60.0)
         assert fake_client.with_options_calls == [{"timeout": 60.0}]
 
+    def test_max_retries_applied_via_with_options(self, ctx, fake_client, recording_session):
+        run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=1, max_retries=0)
+        assert fake_client.with_options_calls == [{"max_retries": 0}]
+
+    def test_timeout_and_max_retries_combined(self, ctx, fake_client, recording_session):
+        run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=1, timeout=3.0, max_retries=1)
+        assert fake_client.with_options_calls == [{"timeout": 3.0, "max_retries": 1}]
+
+    def test_no_with_options_when_neither_given(self, ctx, fake_client, recording_session):
+        run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=1)
+        assert fake_client.with_options_calls == []
+
     def test_no_system_key_when_system_none(self, ctx, fake_client, recording_session):
         run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=1)
         assert "system" not in fake_client.messages.calls[0]

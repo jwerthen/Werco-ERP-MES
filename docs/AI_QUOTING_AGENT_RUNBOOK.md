@@ -118,13 +118,27 @@ Customer PDF excludes:
 ## Platform LLM Operations (shared across AI features)
 
 These notes cover the shared LLM plumbing used by **every** Anthropic call in the platform —
-PO/quote document extraction (`po-upload`), BOM import, AI routing generation, and QMS clause
-extraction. (The RFQ package parsing documented above is deterministic and makes no LLM calls.)
+PO/quote document extraction (`po-upload`), BOM import, AI routing generation, QMS clause
+extraction, Werco Copilot chat (`POST /copilot/chat`), and the natural-language search intent
+parse (`POST /search/nl`). (The RFQ package parsing documented above is deterministic and makes
+no LLM calls.)
 
 ### Shared client and model routing
 - Every Anthropic call flows through `backend/app/services/llm_client.py` (`run_llm_task`).
+  `run_llm_task` also carries the platform's tool-use support (`tools` / `tool_choice`,
+  forwarded verbatim) — the copilot's multi-round tool loop calls it once per iteration, and
+  each iteration records its own usage row.
 - Model selection stays in the existing router (`app/services/llm_model_router.py`):
   `ANTHROPIC_MODEL_SELECTION` plus per-tier / per-task model override env vars.
+
+| Task | Tier in `auto` mode | Per-task override env var |
+|------|---------------------|----------------------------|
+| `po_extraction` | Fast / Default / Reasoning by document complexity | `ANTHROPIC_PO_MODEL` |
+| `bom_extraction` | Fast / Default / Reasoning by document complexity | `ANTHROPIC_BOM_MODEL` |
+| `routing_generation` | Default; Reasoning for complex parts | `ANTHROPIC_ROUTING_MODEL` |
+| `qms_clause_extraction` | Default; Reasoning for large documents | `ANTHROPIC_QMS_MODEL` |
+| `copilot_chat` | Default (Sonnet); escalates to Reasoning for long multi-tool conversations | `ANTHROPIC_COPILOT_MODEL` |
+| `nl_search` | Pinned Fast (Haiku) — cheap intent classification | `ANTHROPIC_NL_SEARCH_MODEL` |
 - Routing generation sends its stable prefix (system prompt + schema/allowed work-center types +
   learned-examples context) as `cache_control: ephemeral` system blocks, so repeat generations
   hit the prompt cache and only the drawing content is reprocessed at full input price.
@@ -134,6 +148,20 @@ extraction. (The RFQ package parsing documented above is deterministic and makes
   trust boundary and ToS; recorded here as a data-flow change. Caching only engages above
   Anthropic's minimum cacheable prefix length; verify via `cache_creation_tokens`/`cache_read_tokens`
   on `routing_generation` rows in `ai_usage_events`.
+- **Werco Copilot also uses `cache_control: ephemeral`** on its stable prefix: the deterministic
+  tool schemas (which render before `system`) plus the versioned `copilot_chat` system prompt are
+  cached together by a single breakpoint on the system block, so every iteration of the per-turn
+  tool-use loop re-reads the cached prefix instead of re-paying full input price. The `nl_search`
+  intent parse likewise caches only its static system prompt.
+  Data-handling note (CMMC, extends the note above): for the copilot, the **cached-prefix
+  retention applies to the system prompt + tool schemas only** — static text containing no tenant
+  data. **Conversation content is never cached.** Tool RESULTS — which do contain tenant
+  operational data (work orders, blockers, schedules, inventory, customer orders) — flow to
+  Anthropic **per-request** as ordinary uncached message content, the same per-request trust
+  boundary as the other AI features. The copilot's `search_erp` tool excludes the employee
+  directory (`user`-type search results) entirely, so employee names/emails are never part of
+  that data flow. Verify the cache engages via `cache_read_tokens` on
+  `copilot_chat` rows in `ai_usage_events`.
 
 ### AI usage telemetry (cost / latency ledger)
 Each call writes one tenant-scoped row to `ai_usage_events`: task, exact model id, tier, feature,
@@ -149,8 +177,9 @@ and success/error type.
 
 ### Versioned prompt registry
 - Prompt text lives in `backend/app/services/prompts/` (PO/quote extraction, BOM extraction,
-  routing generation; QMS clause extraction is version-registered with its text still at the
-  call site).
+  routing generation, `copilot_chat` 1.0.0 — the Werco Copilot system prompt — and
+  `nl_search_intent` 1.0.0 — the `/search/nl` fast-tier intent parser; QMS clause extraction is
+  version-registered with its text still at the call site).
 - Bump the prompt's semver `version` and add an entry to `CHANGELOG.md` in that package whenever
   prompt text or request layout changes — the version is recorded on every usage row and on
   AI-learning rows, so regressions can be attributed to a prompt revision.

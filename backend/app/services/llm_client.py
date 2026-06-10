@@ -279,6 +279,7 @@ def run_llm_task(
     feature: Optional[str] = None,
     prompt_version: Optional[str] = None,
     timeout: Optional[float] = None,
+    max_retries: Optional[int] = None,
 ) -> LLMTaskResult:
     """Run one Anthropic Messages API call with model routing and telemetry.
 
@@ -305,6 +306,10 @@ def run_llm_task(
         feature: Product surface label recorded on the usage row.
         prompt_version: Version string from ``app.services.prompts``.
         timeout: Per-call SDK timeout in seconds (None = SDK default).
+        max_retries: Per-call SDK retry cap (None = SDK default, currently 2).
+            Pass 0 for latency-budgeted callers whose timeout must be
+            wall-clock honest; small values bound retry amplification in
+            multi-call loops.
 
     Raises:
         LLMNotConfiguredError: SDK missing or API key unset (no telemetry row).
@@ -312,8 +317,13 @@ def run_llm_task(
             recorded.
     """
     client = get_anthropic_client()
+    client_options: Dict[str, Any] = {}
     if timeout is not None:
-        client = client.with_options(timeout=timeout)
+        client_options["timeout"] = timeout
+    if max_retries is not None:
+        client_options["max_retries"] = max_retries
+    if client_options:
+        client = client.with_options(**client_options)
 
     decision: LLMModelDecision = select_anthropic_model(ctx)
 
