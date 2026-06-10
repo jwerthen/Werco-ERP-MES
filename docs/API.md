@@ -331,6 +331,22 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > **400 Bad Request** (`"You are already clocked in to this operation."`) instead of creating a
 > second open entry that would double-count production.
 >
+> **Adoption-telemetry `source` channel (A0.1).** `POST /shop-floor/clock-in`,
+> `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production`, and
+> `POST /shop-floor/operations/{id}/complete` accept an **optional** `source` field naming the client
+> channel that produced the write: `kiosk` | `desktop` | `scanner` | `import` | `backfill` (any other
+> value is a **422**). It is persisted on the time entry (`time_entries.source`, nullable; migration
+> `048_time_entry_source`; returned as `source` on `TimeEntryResponse`) for adoption analytics during
+> the paper-to-digital transition (clock-in coverage, digital completion %, backfill rate). Semantics:
+> **omitted → stored `NULL`** — the server never guesses a channel; `NULL` means unknown/legacy (all
+> pre-A0.1 rows, and entries opened by `/operations/{id}/start`, which takes no `source`, until a later
+> write reports one). A clock-out without `source` keeps the channel recorded at clock-in.
+> `/operations/{id}/complete` only **fills** `source` on the open entries it auto-closes when an entry
+> has none — it never overwrites another operator's recorded channel. The channel also rides on the
+> corresponding real-time events: the `labor_clock_in`, `labor_clock_out`, `operation_completed`, and
+> `work_order_completed` `OperationalEvent` payloads carry a `source` key (`null` when not reported —
+> e.g. office-endpoint or reconcile-on-read completions, which take no `source` input).
+>
 > **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
 > the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores
 > `clamp(max(existing, requested, recorded production evidence), 0, target)`; the additive verbs

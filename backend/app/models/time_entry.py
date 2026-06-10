@@ -19,6 +19,23 @@ class TimeEntryType(str, enum.Enum):
     BREAK = "break"
 
 
+class TimeEntrySource(str, enum.Enum):
+    """Adoption-telemetry channel that produced a labor/operation write (A0.1).
+
+    Stored as a plain nullable string on ``TimeEntry.source`` (NULL = unknown /
+    historical row; the server never guesses a channel the client didn't send).
+    Distinguishes live digital capture (kiosk/scanner/desktop) from paper
+    back-fill and bulk import so the adoption dashboard can compute clock-in
+    coverage, digital completion %, and backfill rate.
+    """
+
+    KIOSK = "kiosk"
+    DESKTOP = "desktop"
+    SCANNER = "scanner"
+    IMPORT = "import"
+    BACKFILL = "backfill"
+
+
 class TimeEntry(Base, TenantMixin):
     """Time tracking for shop floor labor"""
 
@@ -59,6 +76,16 @@ class TimeEntry(Base, TenantMixin):
     # Production tracking
     quantity_produced = Column(Float, default=0.0)
     quantity_scrapped = Column(Float, default=0.0)
+
+    # A0.1 adoption telemetry: last known write channel for this labor record (values
+    # from TimeEntrySource). Plain String (not SQLEnum) so adding a channel never needs
+    # an ALTER TYPE; nullable because historical/paper-era rows are unknown -- NULL means
+    # "not reported", never a guessed default. Note: /complete may fill a NULL on entries
+    # it auto-closes with the completer's channel, so this column reads as "last channel
+    # to touch the record"; the per-write capture channel is preserved losslessly on the
+    # labor_clock_in/labor_clock_out OperationalEvent payloads -- compute per-operator
+    # adoption metrics from events, not from this column.
+    source = Column(String(20), nullable=True)
 
     # Notes and reason codes
     notes = Column(Text)
