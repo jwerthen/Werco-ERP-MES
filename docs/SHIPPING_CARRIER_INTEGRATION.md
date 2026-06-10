@@ -123,10 +123,12 @@ those values to the Postgres `documenttype` enum, idempotently and Postgres-only
 Set `INTEGRATION_ENCRYPTION_KEY` to a Fernet key (it falls back to
 `WEBHOOK_ENCRYPTION_KEY` if unset). See
 [docs/ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md#external-services).
-In `production`/`staging` at least one of these keys is **mandatory** — the app
-**hard-fails at startup** if both are unset (CMMC SC-28), rather than generating
-an ephemeral key that would leave stored secrets undecryptable after a restart.
-The ephemeral generated-key fallback exists only in dev/test.
+The app and migrations boot without it, but in `production`/`staging`
+**creating or using a carrier account (or verifying an inbound webhook) fails
+loudly** until at least one of these keys is set (CMMC SC-28) — a loud startup
+warning is logged meanwhile. It is never silently replaced by an ephemeral key in
+prod/staging (that would leave stored secrets undecryptable after a restart); the
+ephemeral generated-key fallback exists only in dev/test.
 
 Generate one:
 
