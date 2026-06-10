@@ -3,6 +3,7 @@ import api from '../services/api';
 import { UserRole } from '../types';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { usePermissions } from '../hooks/usePermissions';
 import {
   PlusIcon,
   PencilIcon,
@@ -12,6 +13,7 @@ import {
   ArrowUpTrayIcon,
   CheckCircleIcon,
   ClockIcon,
+  IdentificationIcon,
 } from '@heroicons/react/24/outline';
 
 interface UserData {
@@ -92,6 +94,9 @@ const getApiErrorMessage = (err: any, fallback: string) => {
 export default function Users() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useAuth();
+  // Badge printing is admin/manager-only: /print/badges loads GET /users, which is
+  // server-enforced to ADMIN/MANAGER, so the button mirrors canManageUsers.
+  const { canManageUsers } = usePermissions();
   const approvalMode = searchParams.get('approvals') === 'pending';
   const canApproveUsers =
     currentUser?.role === 'admin' || currentUser?.role === 'platform_admin' || currentUser?.is_superuser === true;
@@ -110,6 +115,8 @@ export default function Users() {
   const [importResult, setImportResult] = useState<UserCsvImportResult | null>(null);
   const [approvalRoles, setApprovalRoles] = useState<Record<number, UserRole>>({});
   const [approvingUserIds, setApprovingUserIds] = useState<Record<number, boolean>>({});
+  // A0.4: selection for the badge print sheet.
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
 
   const [formData, setFormData] = useState({
     email: '',
@@ -132,6 +139,10 @@ export default function Users() {
       ]);
       setUsers(userList);
       setPendingUsers(pendingApprovals);
+      // Prune badge selections that no longer correspond to a visible user, so a
+      // refetch (filter change, approval, deactivation) cannot leave stale ids
+      // selected for printing.
+      setSelectedUserIds((current) => current.filter((id) => userList.some((u: UserData) => u.id === id)));
     } catch (err) {
       console.error('Failed to load users:', err);
     } finally {
@@ -256,6 +267,25 @@ export default function Users() {
     setShowPasswordModal(true);
   };
 
+  // A0.4 badge printing
+  const toggleBadgeSelection = (userId: number) => {
+    setSelectedUserIds((current) =>
+      current.includes(userId) ? current.filter((id) => id !== userId) : [...current, userId]
+    );
+  };
+
+  // Membership-based, not count-based: counts go stale when the users list refetches.
+  const allVisibleSelected = users.length > 0 && users.every((u) => selectedUserIds.includes(u.id));
+
+  const toggleSelectAllBadges = () => {
+    setSelectedUserIds(allVisibleSelected ? [] : users.map((u) => u.id));
+  };
+
+  const handlePrintBadges = () => {
+    if (selectedUserIds.length === 0) return;
+    window.open(`/print/badges?user_ids=${selectedUserIds.join(',')}`, '_blank');
+  };
+
   const handleImportCsv = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!importFile) {
@@ -329,6 +359,17 @@ export default function Users() {
             >
               <ClockIcon className="h-5 w-5 mr-2 text-amber-300" />
               Pending ({pendingUsers.length})
+            </button>
+          )}
+          {canManageUsers && (
+            <button
+              onClick={handlePrintBadges}
+              className="btn-secondary flex items-center"
+              disabled={selectedUserIds.length === 0}
+              title={selectedUserIds.length === 0 ? 'Select users below to print badges' : 'Print badges for selected users'}
+            >
+              <IdentificationIcon className="h-5 w-5 mr-2" />
+              Print Badges{selectedUserIds.length > 0 ? ` (${selectedUserIds.length})` : ''}
             </button>
           )}
           <button
@@ -449,6 +490,15 @@ export default function Users() {
           <table className="min-w-full divide-y divide-slate-700">
             <thead className="bg-slate-800">
               <tr>
+                <th className="px-4 py-3 text-left">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={toggleSelectAllBadges}
+                    className="rounded border-slate-600"
+                    aria-label="Select all users for badge printing"
+                  />
+                </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Employee</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Email</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Role</th>
@@ -460,6 +510,15 @@ export default function Users() {
             <tbody className="bg-[#151b28] divide-y divide-slate-700">
               {users.map((user) => (
                 <tr key={user.id} className={`hover:bg-slate-800 ${!user.is_active ? 'opacity-60' : ''}`}>
+                  <td className="px-4 py-4">
+                    <input
+                      type="checkbox"
+                      checked={selectedUserIds.includes(user.id)}
+                      onChange={() => toggleBadgeSelection(user.id)}
+                      className="rounded border-slate-600"
+                      aria-label={`Select ${user.first_name} ${user.last_name} for badge printing`}
+                    />
+                  </td>
                   <td className="px-4 py-4">
                     <div>
                       <div className="font-medium">{user.first_name} {user.last_name}</div>

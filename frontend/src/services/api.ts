@@ -12,6 +12,7 @@ import {
   CustomerStatsResponse,
 } from '../types/api';
 import { User, Part, WorkCenter } from '../types';
+import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
   AIInteractionEventInput,
   AIOutcomeInput,
@@ -1941,6 +1942,18 @@ class ApiService {
   // Scanner / Supplier Mappings
   async scannerLookup(code: string) {
     const response = await this.api.post('/scanner/lookup', null, { params: { code } });
+    return response.data;
+  }
+
+  // A0.4 QR traveler/badge scan plumbing. Resolves OP:{id} / WO:{number} /
+  // badge codes into a typed union; unknown codes come back as a structured
+  // miss (kind: 'unknown') with HTTP 200, so callers switch on `kind`.
+  async resolveScanAction(code: string, workCenterId?: number): Promise<ScanResolveResult> {
+    const payload: ScanResolveRequest = { code };
+    if (workCenterId !== undefined) {
+      payload.work_center_id = workCenterId;
+    }
+    const response = await this.api.post<ScanResolveResult>('/scanner/resolve-action', payload);
     return response.data;
   }
 

@@ -4,6 +4,7 @@ import api from '../services/api';
 import { Part, WorkOrder } from '../types';
 import QRCode from 'qrcode';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
+import { useAuth } from '../context/AuthContext';
 
 interface MaterialRequirement {
   bom_item_id: number;
@@ -36,10 +37,14 @@ interface MaterialRequirementsResponse {
 export default function PrintTraveler() {
   const { id } = useParams();
   const location = useLocation();
+  const { user } = useAuth();
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [part, setPart] = useState<Part | null>(null);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
+  // A0.4 scan plumbing: WO-level scan code (WO:{number}) + one OP:{id} code per routing step.
+  const [woCodeQrDataUrl, setWoCodeQrDataUrl] = useState<string>('');
+  const [opQrDataUrls, setOpQrDataUrls] = useState<Record<number, string>>({});
   const [autoPrintStarted, setAutoPrintStarted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -106,6 +111,26 @@ export default function PrintTraveler() {
       } catch (err) {
         console.error('Failed to generate QR code:', err);
       }
+      // A0.4: WO-level scan code for the resolve-action plumbing (plain text,
+      // wedge-scanner friendly) — separate from the phone URL QR above.
+      try {
+        const woCodeUrl = await QRCode.toDataURL(`WO:${workOrder.work_order_number}`, { width: 160, margin: 1 });
+        setWoCodeQrDataUrl(woCodeUrl);
+      } catch (err) {
+        console.error('Failed to generate WO scan QR code:', err);
+      }
+      // A0.4: one OP:{operation_id} code per routing step.
+      try {
+        const entries = await Promise.all(
+          (workOrder.operations ?? []).map(async (op) => {
+            const dataUrl = await QRCode.toDataURL(`OP:${op.id}`, { width: 160, margin: 1 });
+            return [op.id, dataUrl] as const;
+          })
+        );
+        setOpQrDataUrls(Object.fromEntries(entries));
+      } catch (err) {
+        console.error('Failed to generate operation QR codes:', err);
+      }
     };
     generateQr();
   }, [workOrder]);
@@ -139,6 +164,9 @@ export default function PrintTraveler() {
     day: '2-digit',
     year: 'numeric',
   });
+  // A0.4 print control: full timestamp + who printed, for the traveler footer.
+  const printedAt = new Date().toLocaleString();
+  const printedBy = user ? `${user.first_name} ${user.last_name}`.trim() : '-';
   const dueDate = workOrder.due_date
     ? formatCentralDate(workOrder.due_date, { month: '2-digit', day: '2-digit', year: 'numeric' })
     : '-';
@@ -151,6 +179,11 @@ export default function PrintTraveler() {
           .no-print { display: none; }
           .print-tight { margin-top: 0 !important; }
           .print-text-xs { font-size: 10px; }
+          /* A0.4: scan codes must stay >= 0.6in at print scale to scan reliably. */
+          .qr-scan-op { width: 0.65in !important; height: 0.65in !important; }
+          .qr-scan-header { width: 0.8in !important; height: 0.8in !important; }
+          /* A QR split across a page boundary does not scan: keep each routing row whole. */
+          tbody tr { break-inside: avoid; }
         }
       `}</style>
 
@@ -164,11 +197,24 @@ export default function PrintTraveler() {
         <div className="text-right">
           <img src="/Werco_Logo-PNG.png" alt="Werco" className="h-12 mb-2" />
           <p className="text-sm">AS9100D / ISO 9001 Certified</p>
-          {qrDataUrl && (
-            <div className="mt-2 flex justify-end">
-              <img src={qrDataUrl} alt="Work Order QR" className="h-20 w-20 print-qrcode" />
-            </div>
-          )}
+          <div className="mt-2 flex justify-end gap-3">
+            {qrDataUrl && (
+              <div className="text-center">
+                <img src={qrDataUrl} alt="Work Order QR" className="h-20 w-20 print-qrcode qr-scan-header" />
+                <div className="text-[9px] text-gray-600">Job page</div>
+              </div>
+            )}
+            {woCodeQrDataUrl && (
+              <div className="text-center">
+                <img
+                  src={woCodeQrDataUrl}
+                  alt={`Scan code WO:${workOrder.work_order_number}`}
+                  className="h-20 w-20 qr-scan-header"
+                />
+                <div className="text-[9px] text-gray-600 font-mono">WO:{workOrder.work_order_number}</div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -249,6 +295,7 @@ export default function PrintTraveler() {
       <table className="w-full border-collapse border text-xs mb-6 print-text-xs">
         <thead>
           <tr className="bg-gray-200">
+            <th className="border p-2 text-center">Scan</th>
             <th className="border p-2 text-left">Seq</th>
             <th className="border p-2 text-left">Operation / Instructions</th>
             <th className="border p-2 text-left">Work Center</th>
@@ -261,6 +308,18 @@ export default function PrintTraveler() {
         <tbody>
           {operations.map((op) => (
             <tr key={op.id}>
+              <td className="border p-1 text-center align-top">
+                {opQrDataUrls[op.id] && (
+                  <>
+                    <img
+                      src={opQrDataUrls[op.id]}
+                      alt={`Scan code OP:${op.id}`}
+                      className="h-16 w-16 mx-auto qr-scan-op"
+                    />
+                    <div className="text-[8px] text-gray-600 font-mono">OP:{op.id}</div>
+                  </>
+                )}
+              </td>
               <td className="border p-2 font-mono">{op.operation_number || op.sequence}</td>
               <td className="border p-2">
                 <div className="font-medium">{op.name}</div>
@@ -375,6 +434,20 @@ export default function PrintTraveler() {
         <div className="border-t-2 border-black pt-2 text-center">
           <p className="font-medium">Date</p>
         </div>
+      </div>
+
+      {/* A0.4 print control footer. Routing revision is not stored on work order
+          data (operations are copied from the routing without a revision snapshot),
+          so the part revision is the controlled reference shown here. The
+          "UNCONTROLLED WHEN PRINTED" stance is the standard AS9100D default,
+          pending the quality manager's controlled-copy decision (configurable copy). */}
+      <div className="border-t border-black mt-6 pt-2 text-[10px] text-gray-700 flex flex-wrap justify-between gap-x-6 gap-y-1">
+        <span className="font-bold">UNCONTROLLED WHEN PRINTED</span>
+        <span>Part Rev: {part?.revision || '-'}</span>
+        <span>Routing Rev: not recorded on work order (see released routing)</span>
+        <span>Printed: {printedAt}</span>
+        <span>Printed by: {printedBy}</span>
+        <span className="font-mono">{workOrder.work_order_number}</span>
       </div>
 
       {/* Print Button */}

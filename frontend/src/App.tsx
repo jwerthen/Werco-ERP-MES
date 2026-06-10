@@ -53,6 +53,7 @@ const Users = lazyWithRetry(() => import('./pages/Users'));
 const Customers = lazyWithRetry(() => import('./pages/Customers'));
 const Calibration = lazyWithRetry(() => import('./pages/Calibration'));
 const PrintTraveler = lazyWithRetry(() => import('./pages/PrintTraveler'));
+const PrintBadges = lazyWithRetry(() => import('./pages/PrintBadges'));
 const PrintPurchaseOrder = lazyWithRetry(() => import('./pages/PrintPurchaseOrder'));
 const Traceability = lazyWithRetry(() => import('./pages/Traceability'));
 const PrintPackingSlip = lazyWithRetry(() => import('./pages/PrintPackingSlip'));
@@ -110,6 +111,10 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/work-orders/new', permission: 'work_orders:create' },
   { prefix: '/work-orders', permission: 'work_orders:view' },
   { prefix: '/print/traveler', permission: 'work_orders:view' },
+  // Badge printing loads GET /users, which is server-enforced to ADMIN/MANAGER —
+  // gate to the matching admin/manager permissions (canManageUsers), not users:view,
+  // so a Supervisor is not routed into a guaranteed 403.
+  { prefix: '/print/badges', anyOf: ['users:create', 'users:edit'] },
   { prefix: '/print/purchase-order', permission: 'purchasing:view' },
   { prefix: '/print/packing-slip', permission: 'shipping:view' },
   { prefix: '/print/shipping-label', permission: 'shipping:view' },
@@ -589,6 +594,13 @@ function AppRoutes() {
       <Route path="/print/shipping-label/:id" element={
         <PrivateRoute>
           <LazyRoute><PrintShippingLabel /></LazyRoute>
+        </PrivateRoute>
+      } />
+      {/* A0.4 badge print sheet — admin/manager only (its GET /users fetch is
+          server-enforced to ADMIN/MANAGER; see routeAccessRequirements). */}
+      <Route path="/print/badges" element={
+        <PrivateRoute>
+          <LazyRoute><PrintBadges /></LazyRoute>
         </PrivateRoute>
       } />
       
