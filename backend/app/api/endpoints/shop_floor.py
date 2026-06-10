@@ -8,12 +8,19 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.api.deps import (
+    WallboardPrincipal,
+    get_audit_service,
+    get_current_company_id,
+    get_current_user,
+    get_display_or_user,
+    require_role,
+)
 from app.core.cache import invalidate_work_centers_cache
 from app.core.config import settings
 from app.core.realtime import safe_broadcast
@@ -37,6 +44,7 @@ from app.models.work_order_blocker import (
     WorkOrderBlockerStatus,
 )
 from app.schemas.time_entry import ClockIn, ClockOut, TimeEntryResponse
+from app.schemas.wallboard import WallboardResponse
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
@@ -65,6 +73,7 @@ from app.services.quality_gate_service import (
     record_reconcile_inspection_exception,
 )
 from app.services.scheduling_service import SchedulingService
+from app.services.wallboard_service import build_wallboard_payload, operation_counts_by_work_center
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
@@ -1615,30 +1624,9 @@ def shop_floor_dashboard(
     )
 
     # OPTIMIZATION: Single aggregation query for operation counts by work center
-    # Uses conditional aggregation (SUM with CASE) instead of N separate COUNT queries
-    operation_counts = (
-        db.query(
-            WorkOrderOperation.work_center_id,
-            func.sum(case((WorkOrderOperation.status == OperationStatus.IN_PROGRESS, 1), else_=0)).label(
-                'active_count'
-            ),
-            func.sum(case((WorkOrderOperation.status == OperationStatus.READY, 1), else_=0)).label('queued_count'),
-        )
-        .join(WorkOrder, WorkOrder.id == WorkOrderOperation.work_order_id)
-        .filter(
-            WorkOrder.company_id == company_id,
-            WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
-            WorkOrderOperation.work_center_id.isnot(None),
-        )
-        .group_by(WorkOrderOperation.work_center_id)
-        .all()
-    )
-
-    # Build lookup dict for O(1) access - avoids repeated dictionary lookups in loop
-    op_counts_by_wc = {
-        row.work_center_id: {'active': int(row.active_count or 0), 'queued': int(row.queued_count or 0)}
-        for row in operation_counts
-    }
+    # (conditional SUM/CASE, not N COUNT queries). Shared with the wallboard so
+    # the two surfaces can't drift on what "active/queued" means (A0.5).
+    op_counts_by_wc = operation_counts_by_work_center(db, company_id)
 
     # Get work centers (single query)
     work_centers = db.query(WorkCenter).filter(WorkCenter.company_id == company_id, WorkCenter.is_active == True).all()
@@ -1874,6 +1862,28 @@ def shop_floor_dashboard(
     response.headers["Cache-Control"] = "private, max-age=10"
 
     return data
+
+
+@router.get("/wallboard", response_model=WallboardResponse)
+def shop_floor_wallboard(
+    dept: Optional[str] = Query(None, max_length=50, description="Filter to one work-center type (case-insensitive)"),
+    db: Session = Depends(get_db),
+    principal: WallboardPrincipal = Depends(get_display_or_user),
+):
+    """Read-only TV wallboard snapshot (A0.5).
+
+    AUTH: accepts a normal user token OR a scoped display token — this is the
+    ONLY endpoint display tokens can authenticate (``get_display_or_user``);
+    everywhere else they 401 via ``verify_token``'s type check.
+
+    Tenant-scoped to the principal's company (user's active company, or the
+    display token's ``display_tokens.company_id`` — never client input).
+
+    DELIBERATELY side-effect free: no reconcile-on-read, no audit rows, no
+    events — an unattended TV polling every 30s must never mutate state, and
+    a display token has no user identity to attribute writes to.
+    """
+    return build_wallboard_payload(db, principal.company_id, dept=dept)
 
 
 @router.get("/active-users")

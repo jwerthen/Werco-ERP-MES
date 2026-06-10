@@ -38,6 +38,29 @@ Include the token in the Authorization header:
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
+### Display tokens (TV wallboards)
+
+Scoped, revocable credentials for unattended shop-floor TVs (A0.5). A display token is a
+long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floor/wallboard`
+(see Shop Floor below) — every other endpoint rejects it with **401**.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/auth/display-token` | Issue a display token. Body: `{"label", "expires_days"}` (label 1–100 chars; lifetime default **90** days, capped at **365**) | Admin / Manager |
+| GET | `/auth/display-token` | List this company's display tokens (metadata only — the JWTs are never returned) | Admin / Manager |
+| DELETE | `/auth/display-token/{id}` | Revoke a display token (status flip, idempotent; cross-tenant id → 404) | Admin / Manager |
+
+> **One-time reveal.** The raw JWT is returned exactly **once** — the `token` field on the POST
+> response. It is never stored server-side (only its `jti` lands in the `display_tokens` row) and
+> never appears in the list response, so a lost token cannot be recovered — revoke it and issue a
+> new one.
+>
+> **Revocation is DB-authoritative.** `DELETE` flips the row's `revoked` flag (the row is kept as
+> the issuance record, not deleted). Issuance and revocation both write tamper-evident `audit_log`
+> rows. The wallboard auth dependency re-checks the `display_tokens` row (exists / not revoked /
+> not past its DB `expires_at`) on **every** request, so a revoked or expired token stops working
+> on the TV's next poll (~30s) even though the JWT itself is still signature-valid.
+
 ## Core Endpoints
 
 ### Work Orders
@@ -308,6 +331,25 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue | Yes |
+| GET | `/shop-floor/wallboard` | Read-only TV wallboard snapshot (`?dept=` narrows to one work-center type, case-insensitive) | User **or** display token |
+
+> **Wallboard display-token threat model (A0.5).** `GET /shop-floor/wallboard` is the **only**
+> endpoint a display token can reach — it is guarded by `get_display_or_user`, the sole dependency
+> that honors `type="display"` JWTs; every other endpoint authenticates through `verify_token`,
+> whose `type == "access"` check rejects display (and refresh) tokens with **401**. On every
+> request the dependency re-checks the `display_tokens` DB row — existence, `revoked` flag, DB
+> `expires_at`, and that the JWT's `cid` claim matches the row's `company_id` — and tenant scope
+> comes from the **DB row, never client input**, so revocation/expiry hold for already-minted JWTs
+> and a forged claim cannot widen scope. The endpoint is a **zero-write read**: deliberately no
+> reconcile-on-read, no audit rows, no events — an unattended TV polling every 30s must never
+> mutate state, and a display token has no user identity to attribute writes to. Operator names in
+> the payload are truncated to "First L." (`operator_name`) because the board renders on a public
+> screen. Signed-in users can call it too (their active company scopes the data). Payload:
+> `work_centers[]` (`{code, name, status, active_jobs[], queued_count, blocked_count, down}`, each
+> active job `{wo_number, part_number, op_name, operator_name, elapsed_minutes, qty_done,
+> qty_target}`), `late_wos[]`, `blocked_wos[]` (tickers capped at 25), `generated_at`. Token
+> issuance/revocation: see Authentication → Display tokens. Operating a TV: see
+> [docs/WALLBOARD.md](WALLBOARD.md).
 
 > **Tenant isolation on clock/operation endpoints.** Clock-in, clock-out, and the shop-floor
 > operation start/complete endpoints scope every operation, work-order, and `TimeEntry` lookup to

@@ -15,6 +15,7 @@ from .customer_complaint import (
     ReturnMaterialAuthorization,
     RMAStatus,
 )
+from .display_token import DisplayToken
 from .document import Document, DocumentType
 from .downtime import DowntimeCategory, DowntimeEvent, DowntimePlannedType, DowntimeReasonCode
 from .engineering_change import (
@@ -177,6 +178,7 @@ __all__ = [
     "InventoryTransaction",
     "TransactionType",
     "AuditLog",
+    "DisplayToken",
     "Document",
     "DocumentType",
     "MRPRun",

@@ -31,6 +31,15 @@
 - [x] JWT token authentication
 - [x] Session management with absolute timeout (24 hours)
 - [x] Account lockout after failed attempts
+- [x] Scoped single-endpoint display tokens for shop-floor TV wallboards (AC-3.1.2
+  transaction/function limiting, A0.5): a `type="display"` JWT authenticates **only** the
+  read-only `GET /shop-floor/wallboard` — every other endpoint rejects it with 401 via
+  `verify_token`'s `type == "access"` check, so it can never act as a user session. Issuance and
+  revocation are least-privilege gated (ADMIN/MANAGER) and tamper-evidently audit-logged; the
+  `display_tokens` DB row — not the JWT — is the revocation/expiry and tenant-scope authority,
+  re-checked on every request (revocation takes effect within one ~30s poll). The endpoint
+  performs zero writes and truncates operator names to "First L." for public screens. The raw JWT
+  is shown once at issuance and never stored server-side.
 - [x] Multi-tenant data isolation enforced on shop-floor / work-order completion paths
   (AC-3.1.3 boundary control): the operation, clock, and completion endpoints
   (`/shop-floor/clock-in`, `/clock-out/{id}`, `/operations/{id}/start|complete`, and
@@ -259,6 +268,9 @@
 - [x] Token refresh mechanism
 - [x] Failed login tracking
 - [x] Account lockout
+- [x] Device-class credentials for unattended wallboard TVs: scoped display tokens — revocable,
+  expiring (≤365 days, default 90), audit-logged issuance/revocation, single read-only endpoint,
+  no user identity (cannot authenticate as a user; see ACCESS CONTROL above)
 
 **GAPS:**
 - [ ] **IA-3.5.3 - Multi-Factor Authentication** 🔴 CRITICAL
@@ -615,6 +627,7 @@ Backend:
 | 2026-06-07 | AC-3.1.5 / AS9100D 9.1.1 (OEE/OTD metric correctness, Batch 8 — rank 11): **reporting integrity** — `GET /analytics/kpis` now returns `null` ("n/a") for OEE when there is no staffed (clocked) time and for OTD when no due-dated WO completed in the window, replacing a fabricated **100% on-time on an empty set** (`KPIValue.value` is now nullable; frontend renders "n/a"). A COMPLETE WO with a null `actual_end` counts as **not on time**; the OTD set is soft-delete-filtered. OEE = Availability × Performance × Quality on the staffed-time basis is now identical on the KPI headline and the persisted `OEERecord` (derived from real clocked time / routing cycle / reported downtime+scrap). **Authorization** — the OEE write endpoints (`POST /oee/calculate/{wc}`, `POST/PUT/DELETE /oee/records`, `POST/PUT/DELETE /oee/targets`) now require ADMIN/MANAGER/SUPERVISOR (`OEE_WRITE_ROLES`); previously open to any authenticated user. Reads stay open so the shop floor can view dashboards. The dead `POST /oee/calculate/{wc}` (referenced non-existent `TimeEntry.start_time/end_time`, 500'd) is fixed. Tracked follow-up: `OEERecord` writes are not yet tamper-evidently audited. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` → Rank 11 | Droid |
 | 2026-06-09 | AC-3.1.3 / AC-3.1.5 / AU-3.3.1 (operator-certifications write hardening, branch `fix/operator-cert-write-rbac-audit`): the seven `operator_certifications.py` write endpoints — previously open to any authenticated user, unaudited, and accepting a cross-tenant FK on create — are now least-privilege role-gated (cert/training writes → ADMIN/MANAGER/QUALITY; skill-matrix writes → ADMIN/MANAGER/SUPERVISOR; other roles → 403), write a tamper-evident `audit_log` row per create/update/delete (`operator_certification` / `training_record` / `skill_matrix`), and reject a `user_id`/`work_center_id` outside the active company with 422 before insert. Role sets are new defaults (the RBAC matrix had no rows for these record types); reads unchanged (any authenticated user, tenant-scoped). No migration, no new env var; strengthens the existing posture, no compliance claim changed. See `docs/RBAC_PERMISSIONS.md` / `docs/API.md` / `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
 | 2026-06-09 | AU-3.3.1 / AU-3.3.8 / AC-3.1.3 (work-order completion round-2 follow-ups): closed five tracked items. **Audit integrity (AU-3.3.8):** the residual follow-up **A1** is resolved — `audit_log.sequence_number` allocation in `AuditService.log()` is now serialized (transaction-level Postgres advisory lock + savepoint/retry), so concurrent audited writes no longer collide on the unique sequence (occasional 500) or poison the caller's transaction; the tamper-evident hash-chain semantics are unchanged. **Audit coverage (AU-3.3.1):** OEE record/target create/update/delete + auto-calc now write tamper-evident `audit_log` rows (were RBAC-gated but unaudited). **Authorization:** `POST /shipping/{shipment_id}/ship` (`mark_shipped`, closes the WO) is now `require_role`-gated to ADMIN/MANAGER/SUPERVISOR/SHIPPING — previously any authenticated user (non-privileged → 403). **Tenant isolation (AC-3.1.3):** the remaining cross-tenant read/write leak in `operator_certifications.py` is closed (cert dashboard aggregates + by-id cert/training/skill reads/updates now company-scoped, 404 cross-tenant); the `SkillMatrix` unique constraint is now tenant-qualified (`company_id, user_id, work_center_id`; migration `045_skillmatrix_company_unique`). All strengthen the existing posture; no compliance claim changed. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
+| 2026-06-10 | AC-3.1.2 / IA / AU-3.3.1 (TV wallboard, A0.5, branch `feat/tv-wallboard`): added scoped display tokens for unattended shop TVs — `type="display"` JWTs that authenticate **only** the new zero-write `GET /shop-floor/wallboard` (401 everywhere else via `verify_token`'s type check, so they can never act as a user session); issuance/revocation ADMIN/MANAGER-gated, tenant-scoped, and tamper-evidently audit-logged; the `display_tokens` DB row is the revocation/expiry/tenant authority re-checked per request; raw JWT shown once at issuance, never stored; operator names truncated to "First L." for public screens. Additive mechanism — no existing compliance claim changed. See `docs/WALLBOARD.md` / `docs/API.md` / `docs/RBAC_PERMISSIONS.md` | Droid |
 
 ---
 

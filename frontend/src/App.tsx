@@ -28,6 +28,7 @@ const WorkOrderDetail = lazyWithRetry(() => import('./pages/WorkOrderDetail'));
 const ShopFloor = lazyWithRetry(() => import('./pages/ShopFloor'));
 const ShopFloorSimple = lazyWithRetry(() => import('./pages/ShopFloorSimple'));
 const OperatorKiosk = lazyWithRetry(() => import('./pages/OperatorKiosk'));
+const Wallboard = lazyWithRetry(() => import('./pages/Wallboard'));
 const WorkCenters = lazyWithRetry(() => import('./pages/WorkCenters'));
 const Parts = lazyWithRetry(() => import('./pages/PartsNew'));
 const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
@@ -266,6 +267,11 @@ function AppRoutes() {
       <Route path="/register" element={<Register />} />
       <Route path="/register-company" element={<CompanyRegister />} />
       <Route path="/unauthorized" element={<Unauthorized />} />
+
+      {/* TV wallboard (A0.5) — full-screen, NO Layout chrome, NO PrivateRoute.
+          Auth is a scoped display token via ?token= (or a signed-in session);
+          the backend endpoint rejects anything else. */}
+      <Route path="/wallboard" element={<LazyRoute><Wallboard /></LazyRoute>} />
 
       {/* Platform Administration (platform admin only) */}
       <Route path="/platform" element={
