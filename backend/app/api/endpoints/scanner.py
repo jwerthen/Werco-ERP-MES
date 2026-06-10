@@ -12,8 +12,39 @@ from app.models.purchasing import Vendor
 from app.models.supplier_part import SupplierPartMapping
 from app.models.user import User
 from app.models.work_order import WorkOrder
+from app.schemas.scanner import ScanResolveRequest, ScanResolveResult
+from app.services.scan_resolve_service import resolve_scan_code
 
 router = APIRouter()
+
+
+@router.post("/resolve-action", response_model=ScanResolveResult)
+def resolve_action(
+    payload: ScanResolveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Resolve a scanned traveler/badge code into a typed action context (A0.4).
+
+    Code formats: ``OP:{operation_id}`` (traveler routing-step QR),
+    ``WO:{work_order_number}`` (traveler header QR), or a bare employee badge id.
+    Unknown codes return ``kind="unknown"`` with HTTP 200 -- a structured miss,
+    not an error, because wedge scanners hit unknown codes constantly.
+
+    READ-ONLY: no audit rows, no OperationalEvents (GET semantics in a POST body;
+    POST keeps raw scanner text out of URLs/access logs). Tenant-scoped via the
+    active company; RBAC matches the underlying shop-floor reads (any
+    authenticated user). Badge resolution is a LOOKUP ONLY -- badge login stays
+    exclusively on POST /auth/employee-login.
+    """
+    return resolve_scan_code(
+        db,
+        company_id=company_id,
+        user=current_user,
+        code=payload.code,
+        work_center_id=payload.work_center_id,
+    )
 
 
 class SupplierMappingCreate(BaseModel):

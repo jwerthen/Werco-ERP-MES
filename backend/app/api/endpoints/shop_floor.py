@@ -65,6 +65,11 @@ from app.services.completion_signal_service import (
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import sync_laser_nest_from_operation
+from app.services.operation_action_gates import (
+    CLOCK_IN_ALLOWED_STATUSES,
+    get_open_time_entry,
+    operation_blocked_by_predecessors,
+)
 from app.services.operational_event_service import OperationalEventService
 from app.services.operator_qualification_service import evaluate_and_record_operator_qualification
 from app.services.quality_gate_service import (
@@ -501,14 +506,7 @@ def _is_open_time_entry_violation(exc: IntegrityError) -> bool:
 
 
 def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dict:
-    blocked = has_incomplete_predecessors(
-        db,
-        operation.work_order_id,
-        operation.sequence,
-        operation.id,
-        operation.work_center_id,
-        allow_same_work_center=True,
-    )
+    blocked = operation_blocked_by_predecessors(db, operation)
     can_check_in = (
         operation.status
         in [
@@ -624,18 +622,9 @@ def clock_in(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Clock in to a work order operation"""
-    # Prevent duplicate clock-ins for the same operation
-    existing = (
-        db.query(TimeEntry)
-        .filter(
-            and_(
-                TimeEntry.user_id == current_user.id,
-                TimeEntry.operation_id == clock_in_data.operation_id,
-                TimeEntry.clock_out.is_(None),
-            )
-        )
-        .first()
-    )
+    # Prevent duplicate clock-ins for the same operation (A0.4: shared gate helper --
+    # the scanner resolve-action endpoint consults the same predicate).
+    existing = get_open_time_entry(db, current_user.id, clock_in_data.operation_id)
 
     if existing:
         raise HTTPException(status_code=400, detail="You are already clocked in to this operation.")
@@ -661,21 +650,14 @@ def clock_in(
     if operation.work_center_id != clock_in_data.work_center_id:
         raise HTTPException(status_code=400, detail="Operation does not belong to this work center")
 
-    if operation.status not in [OperationStatus.PENDING, OperationStatus.READY, OperationStatus.IN_PROGRESS]:
+    if operation.status not in CLOCK_IN_ALLOWED_STATUSES:
         raise HTTPException(status_code=400, detail="Operation is not ready to start")
 
     # Prevent out-of-sequence starts
     work_order = operation.work_order
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
-    if has_incomplete_predecessors(
-        db,
-        operation.work_order_id,
-        operation.sequence,
-        operation.id,
-        operation.work_center_id,
-        allow_same_work_center=True,
-    ):
+    if operation_blocked_by_predecessors(db, operation):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
 
     # Update operation status
