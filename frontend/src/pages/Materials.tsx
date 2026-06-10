@@ -5,6 +5,7 @@ import { MATERIAL_SUPPLY_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
 import { partTypeColors } from '../types/engineering';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/Toast';
+import { Modal } from '../components/ui/Modal';
 import {
   ArrowDownTrayIcon,
   ArrowUpTrayIcon,
@@ -345,9 +346,7 @@ export default function MaterialsPage() {
         )}
       </div>
 
-      {showModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={closeModal}>
-          <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl" onClick={event => event.stopPropagation()}>
+      <Modal open={showModal} onClose={closeModal} size="lg">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold">{editingMaterial ? 'Edit Supply Item' : 'New Supply Item'}</h3>
               <button type="button" onClick={closeModal} className="text-slate-500 hover:text-slate-200">
@@ -448,9 +447,7 @@ export default function MaterialsPage() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import {
   PlusIcon,
   MagnifyingGlassIcon,
@@ -411,14 +412,12 @@ export default function Maintenance() {
       )}
 
       {/* Create Schedule Modal */}
-      {showCreateScheduleModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal open={showCreateScheduleModal} onClose={() => setShowCreateScheduleModal(false)} size="lg" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">New Maintenance Schedule</h3>
               <button onClick={() => setShowCreateScheduleModal(false)}><XMarkIcon className="w-5 h-5" /></button>
             </div>
-            <div className="p-4 space-y-3">
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-1">Work Center ID *</label>
                 <input type="number" value={scheduleForm.work_center_id} onChange={e => setScheduleForm(f => ({ ...f, work_center_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
@@ -466,19 +465,15 @@ export default function Maintenance() {
               <button onClick={handleCreateSchedule} disabled={!scheduleForm.work_center_id || !scheduleForm.description}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Create</button>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Create Work Order Modal */}
-      {showCreateWOModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-lg mx-4">
+      <Modal open={showCreateWOModal} onClose={() => setShowCreateWOModal(false)} size="lg" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">New Maintenance Work Order</h3>
               <button onClick={() => setShowCreateWOModal(false)}><XMarkIcon className="w-5 h-5" /></button>
             </div>
-            <div className="p-4 space-y-3">
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-1">Title *</label>
                 <input type="text" value={woForm.title} onChange={e => setWoForm(f => ({ ...f, title: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
@@ -522,19 +517,15 @@ export default function Maintenance() {
               <button onClick={handleCreateWO} disabled={!woForm.title || !woForm.work_center_id}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Create</button>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Complete Work Order Modal */}
-      {showCompleteModal && selectedWO && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-md mx-4">
+      <Modal open={showCompleteModal && !!selectedWO} onClose={() => setShowCompleteModal(false)} size="md" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex justify-between items-center p-4 border-b">
-              <h3 className="text-lg font-semibold">Complete: {selectedWO.title}</h3>
+              <h3 className="text-lg font-semibold">Complete: {selectedWO?.title}</h3>
               <button onClick={() => setShowCompleteModal(false)}><XMarkIcon className="w-5 h-5" /></button>
             </div>
-            <div className="p-4 space-y-3">
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-1">Completion Notes</label>
                 <textarea value={completeForm.notes} onChange={e => setCompleteForm(f => ({ ...f, notes: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
@@ -558,9 +549,7 @@ export default function Maintenance() {
               <button onClick={() => setShowCompleteModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
               <button onClick={handleComplete} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Complete</button>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

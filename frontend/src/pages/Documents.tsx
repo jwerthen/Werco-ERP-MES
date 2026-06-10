@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   ArrowUpTrayIcon,
@@ -279,9 +280,7 @@ export default function Documents() {
       </div>
 
       {/* Upload Modal */}
-      {showUploadModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
+      <Modal open={showUploadModal} onClose={() => setShowUploadModal(false)} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Upload Document</h3>
             <form onSubmit={handleUpload} className="space-y-4">
               <div>
@@ -356,9 +355,7 @@ export default function Documents() {
                 <button type="submit" className="btn-primary">Upload</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

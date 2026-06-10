@@ -8,6 +8,7 @@ import {
   ArrowRightIcon,
   SparklesIcon,
 } from '@heroicons/react/24/outline';
+import { Modal } from '../components/ui/Modal';
 
 interface QuoteLine {
   id: number;
@@ -307,9 +308,12 @@ export default function Quotes() {
       </div>
 
       {/* Create Quote Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        size="3xl"
+        closeOnBackdrop={false}
+      >
             <h3 className="text-lg font-semibold mb-4">Create Quote</h3>
             <form onSubmit={handleCreate} className="space-y-4">
               {/* Customer Info */}
@@ -463,9 +467,7 @@ export default function Quotes() {
                 <button type="submit" className="btn-primary">Create Quote</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

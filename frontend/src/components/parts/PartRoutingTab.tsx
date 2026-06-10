@@ -7,6 +7,7 @@ import {
 import { useToast } from '../ui/Toast';
 import { StatusBadge } from '../ui/StatusBadge';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { Modal } from '../ui/Modal';
 import {
   PlusIcon,
   PencilIcon,
@@ -328,9 +329,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
       </div>
 
       {/* Add/Edit Operation Modal */}
-      {showOpModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowOpModal(false)}>
-          <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
+      <Modal open={showOpModal} onClose={() => setShowOpModal(false)} size="lg">
             <h3 className="text-lg font-semibold mb-4">
               {editingOp ? 'Edit Operation' : 'Add Operation'}
             </h3>
@@ -452,9 +451,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Confirm Dialog */}
       <ConfirmDialog

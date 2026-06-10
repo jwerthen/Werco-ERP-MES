@@ -10,6 +10,7 @@ import {
   CalendarDaysIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
+import { Modal } from '../components/ui/Modal';
 
 // ── Types ────────────────────────────────────────────────────────
 type CertStatus = 'active' | 'expired' | 'suspended' | 'revoked' | 'pending';
@@ -618,9 +619,7 @@ export default function OperatorCertifications() {
       )}
 
       {/* ── Create Certification Modal ────────────────────────────── */}
-      {showCertModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-lg rounded-xl bg-[#151b28] p-6 shadow-xl">
+      <Modal open={showCertModal} onClose={() => setShowCertModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-white">New Certification</h2>
               <button onClick={() => setShowCertModal(false)} className="text-slate-400 hover:text-slate-400">
@@ -699,14 +698,10 @@ export default function OperatorCertifications() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* ── Create Training Record Modal ──────────────────────────── */}
-      {showTrainingModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-lg rounded-xl bg-[#151b28] p-6 shadow-xl">
+      <Modal open={showTrainingModal} onClose={() => setShowTrainingModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-white">New Training Record</h2>
               <button onClick={() => setShowTrainingModal(false)} className="text-slate-400 hover:text-slate-400">
@@ -790,9 +785,7 @@ export default function OperatorCertifications() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

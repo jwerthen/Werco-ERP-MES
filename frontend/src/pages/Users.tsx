@@ -15,6 +15,7 @@ import {
   ClockIcon,
   IdentificationIcon,
 } from '@heroicons/react/24/outline';
+import { Modal } from '../components/ui/Modal';
 
 interface UserData {
   id: number;
@@ -579,9 +580,12 @@ export default function Users() {
       </div>
 
       {/* Add/Edit User Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
+      <Modal
+        open={showModal}
+        onClose={() => { setShowModal(false); resetForm(); }}
+        size="lg"
+        closeOnBackdrop={false}
+      >
             <h3 className="text-lg font-semibold mb-4">
               {editingUser ? 'Edit User' : 'Add User'}
             </h3>
@@ -691,14 +695,15 @@ export default function Users() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Reset Password Modal */}
-      {showPasswordModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-sm w-full mx-4">
+      <Modal
+        open={showPasswordModal}
+        onClose={() => setShowPasswordModal(false)}
+        size="sm"
+        closeOnBackdrop={false}
+      >
             <h3 className="text-lg font-semibold mb-4">Reset Password</h3>
             <form onSubmit={handleResetPassword} className="space-y-4">
               <div>
@@ -725,14 +730,20 @@ export default function Users() {
                 <button type="submit" className="btn-primary">Reset Password</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* CSV Import Modal */}
-      {showImportModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
+      <Modal
+        open={showImportModal}
+        onClose={() => {
+          setShowImportModal(false);
+          setImportFile(null);
+          setImportDefaultPassword('');
+        }}
+        size="lg"
+        closeOnBackdrop={false}
+        closeOnEscape={!importing}
+      >
             <h3 className="text-lg font-semibold mb-4">Import Users From CSV</h3>
             <form onSubmit={handleImportCsv} className="space-y-4">
               <div>
@@ -782,9 +793,7 @@ export default function Users() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

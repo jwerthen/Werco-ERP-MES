@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import { useSearchParams } from 'react-router-dom';
 import {
   PlusIcon,
@@ -759,9 +760,19 @@ export default function RoutingPage() {
       </div>
 
       {/* Create Routing Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
+      <Modal
+        open={showCreateModal}
+        onClose={() => {
+          setShowCreateModal(false);
+          setForcedRoutingPart(null);
+          setNewRouting({ part_id: 0, revision: 'A', description: '' });
+          const nextParams = new URLSearchParams(searchParams);
+          nextParams.delete('part_id');
+          setSearchParams(nextParams);
+        }}
+        size="md"
+        closeOnBackdrop={false}
+      >
             <h3 className="text-lg font-semibold mb-4">Create New Routing</h3>
             <form onSubmit={handleCreateRouting} className="space-y-4">
               <div>
@@ -872,14 +883,16 @@ export default function RoutingPage() {
                 <button type="submit" className="btn-primary" disabled={!newRouting.part_id}>Create</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Generate from Drawing Modal */}
-      {showGenerateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => !generating && setShowGenerateModal(false)}>
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+      <Modal
+        open={showGenerateModal}
+        onClose={() => setShowGenerateModal(false)}
+        size="4xl"
+        closeOnBackdrop={!generating}
+        closeOnEscape={!generating}
+      >
             <div className="flex items-center gap-3 mb-4">
               <SparklesIcon className="h-6 w-6 text-werco-primary" />
               <h3 className="text-lg font-semibold">Generate Routing from Drawing</h3>
@@ -1248,14 +1261,14 @@ export default function RoutingPage() {
                 </div>
               </div>
             )}
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Add/Edit Operation Modal */}
-      {showAddOperationModal && selectedRouting && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowAddOperationModal(false)}>
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+      <Modal
+        open={showAddOperationModal && !!selectedRouting}
+        onClose={() => setShowAddOperationModal(false)}
+        size="lg"
+      >
             <h3 className="text-lg font-semibold mb-4">
               {editingOperation ? 'Edit Operation' : 'Add Operation'}
             </h3>
@@ -1445,9 +1458,7 @@ export default function RoutingPage() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

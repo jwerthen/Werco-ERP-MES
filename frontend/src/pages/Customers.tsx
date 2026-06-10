@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
+import { Modal } from '../components/ui/Modal';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
 interface Customer {
@@ -367,9 +368,12 @@ export default function Customers() {
       </div>
 
       {/* Add/Edit Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal
+        open={showModal}
+        onClose={() => { setShowModal(false); resetForm(); }}
+        size="2xl"
+        closeOnBackdrop={false}
+      >
             <h3 className="text-lg font-semibold mb-4">
               {editingCustomer ? 'Edit Customer' : 'Add Customer'}
             </h3>
@@ -529,14 +533,19 @@ export default function Customers() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Customer Detail Modal */}
-      {selectedCustomer && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg max-w-3xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+      <Modal
+        open={!!selectedCustomer}
+        onClose={closeDetails}
+        size="3xl"
+        closeOnBackdrop={false}
+        scroll={false}
+        padded={false}
+      >
+        {selectedCustomer && (
+          <>
             {/* Header */}
             <div className="px-6 py-4 border-b flex items-center justify-between bg-slate-800/50">
               <div className="flex items-center gap-3">
@@ -554,7 +563,7 @@ export default function Customers() {
             </div>
 
             {/* Content */}
-            <div className="p-6 overflow-y-auto flex-1">
+            <div className="p-6 overflow-y-auto flex-1 min-h-0">
               {loadingStats ? (
                 <div className="flex items-center justify-center h-32">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-werco-primary"></div>
@@ -740,16 +749,16 @@ export default function Customers() {
             {/* Footer */}
             <div className="px-6 py-4 border-t bg-slate-800/50 flex justify-end gap-3">
               <button onClick={closeDetails} className="btn-secondary">Close</button>
-              <button 
+              <button
                 onClick={() => { closeDetails(); handleEdit(selectedCustomer); }}
                 className="btn-primary"
               >
                 Edit Customer
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

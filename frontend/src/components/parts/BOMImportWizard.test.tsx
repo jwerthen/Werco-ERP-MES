@@ -95,6 +95,68 @@ describe('BOMImportWizard', () => {
     jest.clearAllMocks();
   });
 
+  describe('overlay portal', () => {
+    // Regression coverage: the modal must render into document.body via a portal
+    // (not inline in the page tree) and sit above the fixed sidebar at z-[60].
+    // Inline-at-z-50 rendering let the opaque sidebar paint over and clip the modal.
+    const renderUpload = () =>
+      renderWithRouter(<BOMImportWizard onComplete={jest.fn()} onClose={jest.fn()} />);
+
+    const getOverlay = () =>
+      document.body.querySelector('.fixed.inset-0') as HTMLElement | null;
+
+    it('renders the upload step when opened', () => {
+      renderUpload();
+      expect(screen.getByText('Import BOM / Drawing')).toBeInTheDocument();
+      expect(document.getElementById('upload-form')).toBeInTheDocument();
+      expect(document.querySelector('input[type="file"]')).toBeInTheDocument();
+    });
+
+    it('renders the overlay into document.body, outside the component container', () => {
+      const { container } = renderUpload();
+
+      const overlay = getOverlay();
+      expect(overlay).not.toBeNull();
+      // Portaled: the overlay is NOT nested inside the RTL render container.
+      expect(container).not.toContainElement(overlay);
+      // Portal target is document.body itself (overlay is a direct child).
+      expect(overlay!.parentElement).toBe(document.body);
+    });
+
+    it('layers the overlay above the sidebar via z-[60] and fixed inset-0', () => {
+      renderUpload();
+      const overlay = getOverlay();
+      expect(overlay).toHaveClass('fixed', 'inset-0', 'z-[60]');
+      expect(overlay).not.toHaveClass('z-50');
+    });
+
+    it('calls onClose when the backdrop is clicked', () => {
+      const onClose = jest.fn();
+      renderWithRouter(<BOMImportWizard onComplete={jest.fn()} onClose={onClose} />);
+
+      fireEvent.click(getOverlay() as HTMLElement);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not call onClose when the modal panel itself is clicked', () => {
+      const onClose = jest.fn();
+      renderWithRouter(<BOMImportWizard onComplete={jest.fn()} onClose={onClose} />);
+
+      // Clicking inside the panel (e.g. the heading) should not bubble to the backdrop.
+      fireEvent.click(screen.getByText('Import BOM / Drawing'));
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('calls onClose when the header close button is clicked', () => {
+      const onClose = jest.fn();
+      renderWithRouter(<BOMImportWizard onComplete={jest.fn()} onClose={onClose} />);
+
+      // The header X and the footer Cancel both close; click the first close affordance.
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('removes and restores import review line items', async () => {
     await renderPreview();
 

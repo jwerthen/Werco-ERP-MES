@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import { Part, PartType } from '../types';
 import { isMaterialSupplyPartType } from '../utils/catalogGroups';
 import { useNavigate } from 'react-router-dom';
@@ -793,9 +794,7 @@ export default function BOMPage() {
       </div>
 
       {/* Create BOM Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
+      <Modal open={showCreateModal} onClose={() => setShowCreateModal(false)} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create New BOM</h3>
             <form onSubmit={handleCreateBOM} className="space-y-4">
               <div>
@@ -861,14 +860,10 @@ export default function BOMPage() {
                 <button type="submit" className="btn-primary">Create</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Import BOM / Drawing Modal */}
-      {showImportModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
+      <Modal open={showImportModal} onClose={() => setShowImportModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold">Import BOM or Drawing</h3>
               <button onClick={() => setShowImportModal(false)}>
@@ -911,14 +906,12 @@ export default function BOMPage() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Import Preview Modal */}
-      {showPreviewModal && importPreview && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-6xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal open={showPreviewModal && !!importPreview} onClose={() => setShowPreviewModal(false)} size="6xl" closeOnBackdrop={false}>
+        {importPreview && (
+          <>
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-lg font-semibold">Review Import</h3>
@@ -1201,14 +1194,22 @@ export default function BOMPage() {
                 {importLoading ? 'Creating...' : 'Create'}
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
 
       {/* Add Item Modal */}
-      {showAddItemModal && selectedBOM && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-2xl p-6 max-w-5xl w-full mx-4">
+      <Modal
+        open={showAddItemModal && !!selectedBOM}
+        onClose={() => {
+          setShowAddItemModal(false);
+          setPartSearch('');
+          setPartTypeFilter('all');
+        }}
+        size="5xl"
+        closeOnBackdrop={false}
+        className="rounded-2xl"
+      >
             <div className="flex items-center justify-between mb-5">
               <div>
                 <h3 className="text-lg font-semibold">Add BOM Item</h3>
@@ -1461,14 +1462,10 @@ export default function BOMPage() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* New Part Modal (nested inside Add Item flow) */}
-      {showNewPartModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
+      <Modal open={showNewPartModal} onClose={() => setShowNewPartModal(false)} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create New Part</h3>
             <form onSubmit={handleCreateNewPart} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -1538,9 +1535,7 @@ export default function BOMPage() {
                 <button type="submit" className="btn-primary">Create & Select</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

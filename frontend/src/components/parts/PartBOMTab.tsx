@@ -9,6 +9,7 @@ import {
 import { useToast } from '../ui/Toast';
 import { StatusBadge } from '../ui/StatusBadge';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { Modal } from '../ui/Modal';
 import { BOMImportWizard } from './BOMImportWizard';
 import {
   PlusIcon,
@@ -533,9 +534,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
       </div>
 
       {/* Add Item Modal */}
-      {showAddItem && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAddItem(false)}>
-          <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
+      <Modal open={showAddItem} onClose={() => setShowAddItem(false)} size="lg">
             <div className="flex items-center justify-between gap-3 mb-4">
               <h3 className="text-lg font-semibold text-white">Add BOM Item</h3>
               <button
@@ -675,14 +674,10 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Batch Add Parts Modal */}
-      {showBatchAdd && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowBatchAdd(false)}>
-          <div className="bg-[#151b28] rounded-xl p-6 max-w-6xl w-full mx-4 shadow-xl animate-scale-in max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+      <Modal open={showBatchAdd} onClose={() => setShowBatchAdd(false)} size="6xl">
             <div className="flex items-start justify-between gap-4 mb-4">
               <div>
                 <h3 className="text-lg font-semibold text-white">Create Parts and Add to BOM</h3>
@@ -842,14 +837,10 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* New Part Modal */}
-      {showNewPart && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]" onClick={() => setShowNewPart(false)}>
-          <div className="bg-[#151b28] rounded-xl p-6 max-w-md w-full mx-4 shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
+      <Modal open={showNewPart} onClose={() => setShowNewPart(false)} size="md">
             <h3 className="text-lg font-semibold text-white mb-4">Create New Part</h3>
             <form onSubmit={handleCreateNewPart} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -923,9 +914,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Import Wizard */}
       {showImport && (

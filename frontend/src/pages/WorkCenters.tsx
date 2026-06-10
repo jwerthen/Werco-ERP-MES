@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import { WorkCenter, WorkCenterType } from '../types';
 import { PlusIcon, PencilIcon } from '@heroicons/react/24/outline';
 
@@ -275,9 +276,12 @@ export default function WorkCenters() {
       ))}
 
       {/* Add/Edit Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal
+        open={showModal}
+        onClose={() => { setShowModal(false); resetForm(); }}
+        size="lg"
+        closeOnBackdrop={false}
+      >
             <h3 className="text-lg font-semibold mb-4">
               {editingWc ? 'Edit Work Center' : 'Add Work Center'}
             </h3>
@@ -392,9 +396,7 @@ export default function WorkCenters() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

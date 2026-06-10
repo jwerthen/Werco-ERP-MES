@@ -25,6 +25,7 @@ import {
   ChevronDownIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
+import { Modal } from '../components/ui/Modal';
 
 interface WorkCenter {
   id: number;
@@ -1479,9 +1480,13 @@ export default function Scheduling() {
       </div>
 
       {/* Schedule Modal */}
-      {showScheduleModal && selectedJob && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowScheduleModal(false); setCapacityPreview(null); }}>
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4" onClick={(e) => e.stopPropagation()}>
+      <Modal
+        open={showScheduleModal && !!selectedJob}
+        onClose={() => { setShowScheduleModal(false); setCapacityPreview(null); }}
+        size="lg"
+      >
+        {selectedJob && (
+          <>
             <h3 className="text-lg font-semibold mb-4">Schedule Work Order</h3>
             <div className="bg-slate-800/50 rounded p-3 mb-4">
               <div className="flex justify-between items-start">
@@ -1641,9 +1646,9 @@ export default function Scheduling() {
                 </div>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

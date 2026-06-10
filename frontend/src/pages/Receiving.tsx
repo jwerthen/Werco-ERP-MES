@@ -13,6 +13,7 @@ import {
   DocumentCheckIcon,
   ClockIcon,
 } from '@heroicons/react/24/outline';
+import { Modal } from '../components/ui/Modal';
 
 interface POLine {
   line_id: number;
@@ -840,9 +841,14 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       </div>
 
       {/* RECEIVE MODAL */}
-      {showReceiveModal && selectedLine && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+      <Modal
+        open={showReceiveModal && !!selectedLine}
+        onClose={() => setShowReceiveModal(false)}
+        size="2xl"
+        closeOnBackdrop={false}
+      >
+        {selectedLine && (
+          <>
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-bold">Receive Material</h2>
               <button onClick={() => setShowReceiveModal(false)}>
@@ -1028,14 +1034,19 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 Receive Material
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
 
       {/* INSPECT MODAL */}
-      {showInspectModal && selectedReceipt && receiptDetail && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+      <Modal
+        open={showInspectModal && !!selectedReceipt && !!receiptDetail}
+        onClose={() => setShowInspectModal(false)}
+        size="2xl"
+        closeOnBackdrop={false}
+      >
+        {selectedReceipt && receiptDetail && (
+          <>
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-bold">Inspect Receipt</h2>
               <button onClick={() => setShowInspectModal(false)}>
@@ -1213,9 +1224,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 Complete Inspection
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

@@ -15,6 +15,7 @@ import {
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
+import { Modal } from '../components/ui/Modal';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -685,9 +686,7 @@ export default function EngineeringChanges() {
       )}
 
       {/* ── Create ECO Modal ──────────────────────────────────────── */}
-      {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-lg rounded-lg bg-[#151b28] shadow-xl">
+      <Modal open={showCreateModal} onClose={() => setShowCreateModal(false)} size="lg" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex items-center justify-between border-b px-6 py-4">
               <h2 className="text-lg font-semibold text-white">New Engineering Change Order</h2>
               <button onClick={() => setShowCreateModal(false)}>
@@ -811,14 +810,10 @@ export default function EngineeringChanges() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* ── Reject Modal ──────────────────────────────────────────── */}
-      {showRejectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-md rounded-lg bg-[#151b28] shadow-xl">
+      <Modal open={showRejectModal} onClose={() => setShowRejectModal(false)} size="md" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex items-center justify-between border-b px-6 py-4">
               <h2 className="text-lg font-semibold text-white">Reject ECO</h2>
               <button onClick={() => setShowRejectModal(false)}>
@@ -852,9 +847,7 @@ export default function EngineeringChanges() {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

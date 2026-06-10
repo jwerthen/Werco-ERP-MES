@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
 import { ImportPreview, ImportItem, ImportAssembly } from '../../types/engineering';
@@ -174,8 +175,13 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
 
   // ── Render ───────────────────────────────────────────────────────────
 
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+  // Portal to <body> so the overlay is a sibling of the app layout root rather
+  // than nested under <main>. Inline-rendered modals tie the sidebar's z-50
+  // (both fixed), letting the opaque sidebar paint over the backdrop and clip
+  // the modal's left edge. z-[60] matches the other BOM/parts modals that sit
+  // above the sidebar.
+  const overlay = (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]" onClick={onClose}>
       <div
         className="bg-[#151b28] rounded-xl shadow-xl mx-4 animate-scale-in flex flex-col"
         style={{ maxWidth: step === 'preview' ? '72rem' : '32rem', maxHeight: '90vh', width: '100%' }}
@@ -431,4 +437,6 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
       </div>
     </div>
   );
+
+  return typeof document !== 'undefined' && document.body ? createPortal(overlay, document.body) : overlay;
 }

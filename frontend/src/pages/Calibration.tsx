@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 import {
   PlusIcon,
@@ -378,9 +379,7 @@ export default function Calibration() {
       </div>
 
       {/* Add/Edit Equipment Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal open={showModal} onClose={() => { setShowModal(false); resetForm(); }} size="2xl" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">
               {editingEquipment ? 'Edit Equipment' : 'Add Equipment'}
             </h3>
@@ -499,14 +498,10 @@ export default function Calibration() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Record Calibration Modal */}
-      {showCalibrationModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
+      <Modal open={showCalibrationModal} onClose={() => setShowCalibrationModal(false)} size="lg" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Record Calibration</h3>
             <form onSubmit={handleCalibration} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -618,9 +613,7 @@ export default function Calibration() {
                 <button type="submit" className="btn-primary">Record Calibration</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

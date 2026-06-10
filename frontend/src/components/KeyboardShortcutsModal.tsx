@@ -7,6 +7,7 @@
 
 import React from 'react';
 import { formatShortcut, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
+import { Modal } from './ui/Modal';
 
 interface KeyboardShortcutsModalProps {
   isOpen: boolean;
@@ -34,10 +35,8 @@ interface ShortcutCategory {
 export function KeyboardShortcutsModal({ 
   isOpen, 
   onClose, 
-  contextShortcuts = [] 
+  contextShortcuts = []
 }: KeyboardShortcutsModalProps) {
-  if (!isOpen) return null;
-
   const categories: ShortcutCategory[] = [
     {
       title: 'Global Shortcuts',
@@ -71,17 +70,7 @@ export function KeyboardShortcutsModal({
   }
 
   return (
-    <div 
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="keyboard-shortcuts-title"
-    >
-      <div 
-        className="bg-[#151b28] rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[80vh] overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal open={isOpen} onClose={onClose} size="lg" scroll={false} padded={false} ariaLabelledBy="keyboard-shortcuts-title">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
           <h2 
@@ -133,8 +122,7 @@ export function KeyboardShortcutsModal({
             Press <kbd className="px-1 py-0.5 text-xs bg-slate-700 rounded text-slate-300">Esc</kbd> to close
           </p>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

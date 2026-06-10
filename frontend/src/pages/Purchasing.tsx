@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { useSearchParams } from 'react-router-dom';
 import { formatCentralDate } from '../utils/centralTime';
+import { Modal } from '../components/ui/Modal';
 import {
   PlusIcon,
   CheckCircleIcon,
@@ -655,9 +656,7 @@ export default function Purchasing() {
       )}
 
       {/* Create PO Modal */}
-      {showPOModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal open={showPOModal} onClose={() => setShowPOModal(false)} size="2xl" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create Purchase Order</h3>
             <form onSubmit={handleCreatePO} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -769,14 +768,10 @@ export default function Purchasing() {
                 <button type="submit" className="btn-primary">Create PO</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Create Vendor Modal */}
-      {showVendorModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
+      <Modal open={showVendorModal} onClose={() => setShowVendorModal(false)} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create Vendor</h3>
             <form onSubmit={handleCreateVendor} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -857,14 +852,17 @@ export default function Purchasing() {
                 <button type="submit" className="btn-primary">Create Vendor</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Edit Vendor Modal */}
-      {showEditVendorModal && selectedVendor && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-5xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal
+        open={showEditVendorModal && !!selectedVendor}
+        onClose={() => setShowEditVendorModal(false)}
+        size="5xl"
+        closeOnBackdrop={false}
+      >
+        {selectedVendor && (
+          <>
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-lg font-semibold">Edit Vendor</h3>
@@ -1154,14 +1152,12 @@ export default function Purchasing() {
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
 
       {/* Add New Part Modal */}
-      {showAddPartModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
+      <Modal open={showAddPartModal} onClose={() => setShowAddPartModal(false)} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Add New Part</h3>
             <form onSubmit={handleCreatePart} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -1245,9 +1241,7 @@ export default function Purchasing() {
                 <button type="submit" className="btn-primary">Create Part</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

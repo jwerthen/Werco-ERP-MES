@@ -20,6 +20,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from 'recharts';
+import { Modal } from '../components/ui/Modal';
 
 interface DashboardStats {
   characteristics_monitored: number;
@@ -459,9 +460,12 @@ const SPC = () => {
       )}
 
       {/* Add Measurement Modal */}
-      {showAddMeasurement && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-md p-6">
+      <Modal
+        open={showAddMeasurement}
+        onClose={() => setShowAddMeasurement(false)}
+        size="md"
+        closeOnBackdrop={false}
+      >
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-white">Add Measurement</h3>
               <button onClick={() => setShowAddMeasurement(false)}>
@@ -515,14 +519,15 @@ const SPC = () => {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Create Characteristic Modal */}
-      {showCreateChar && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-md p-6">
+      <Modal
+        open={showCreateChar}
+        onClose={() => setShowCreateChar(false)}
+        size="md"
+        closeOnBackdrop={false}
+      >
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-white">New Characteristic</h3>
               <button onClick={() => setShowCreateChar(false)}>
@@ -612,9 +617,7 @@ const SPC = () => {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 };

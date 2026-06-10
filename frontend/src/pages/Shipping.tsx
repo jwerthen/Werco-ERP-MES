@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
+import { Modal } from '../components/ui/Modal';
 import usePermissions from '../hooks/usePermissions';
 import ScheduleShipmentModal, { ScheduleShipmentTarget } from '../components/shipping/ScheduleShipmentModal';
 import ShipmentTrackingPanel from '../components/shipping/ShipmentTrackingPanel';
@@ -381,9 +382,14 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       )}
 
       {/* Create Shipment Modal (legacy / manual path -- still supported) */}
-      {showCreateModal && selectedWO && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-md w-full mx-4">
+      <Modal
+        open={showCreateModal && !!selectedWO}
+        onClose={() => setShowCreateModal(false)}
+        size="md"
+        closeOnBackdrop={false}
+      >
+        {selectedWO && (
+          <>
             <h3 className="text-lg font-semibold mb-4">Create Shipment (Manual)</h3>
             <div className="bg-slate-800 rounded p-3 mb-4">
               <p className="font-medium">{selectedWO.work_order_number}</p>
@@ -476,9 +482,9 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                 <button type="submit" className="btn-primary">Create Shipment</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

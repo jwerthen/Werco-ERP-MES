@@ -37,6 +37,7 @@ import {
 } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { useToast } from '../ui/Toast';
+import { Modal } from '../ui/Modal';
 import { LoadingButton } from '../ui/LoadingButton';
 import { formatCentralDate } from '../../utils/centralTime';
 import type {
@@ -347,8 +348,7 @@ export default function ScheduleShipmentModal({
   const currentStepIndex = STEPS.findIndex((s) => s.key === step);
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
-      <div className="bg-[#151b28] border border-slate-700 w-full max-w-3xl max-h-[90vh] flex flex-col">
+    <Modal open onClose={onClose} size="3xl" scroll={false} padded={false} closeOnBackdrop={false} className="border border-slate-700">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-700 px-5 py-4">
           <div>
@@ -480,8 +480,7 @@ export default function ScheduleShipmentModal({
             )}
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

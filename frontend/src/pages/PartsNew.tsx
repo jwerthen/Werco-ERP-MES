@@ -6,6 +6,7 @@ import { CustomerNameOption } from '../types/api';
 import { partTypeColors } from '../types/engineering';
 import { ENGINEERING_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
 import { StatusBadge } from '../components/ui/StatusBadge';
+import { Modal } from '../components/ui/Modal';
 import { useToast } from '../components/ui/Toast';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
 import { SkeletonTable } from '../components/ui/Skeleton';
@@ -913,11 +914,9 @@ export default function PartsPage() {
       )}
 
       {/* Create Part Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={closeCreateModal}>
-          <div className="bg-[#151b28] rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto shadow-xl animate-scale-in" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold mb-4">New Part</h3>
-            <form onSubmit={handleCreate} className="space-y-4">
+      <Modal open={showCreateModal} onClose={closeCreateModal} size="lg">
+        <h3 className="text-lg font-semibold mb-4">New Part</h3>
+        <form onSubmit={handleCreate} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="label">Part Number</label>
@@ -1113,9 +1112,7 @@ export default function PartsPage() {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Import Wizard */}
       {showImport && (

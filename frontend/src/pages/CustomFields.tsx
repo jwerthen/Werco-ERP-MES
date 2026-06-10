@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import {
   PlusIcon,
   PencilIcon,
@@ -302,9 +303,13 @@ export default function CustomFieldsPage() {
       )}
 
       {/* Create/Edit Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+      <Modal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        size="2xl"
+        closeOnBackdrop={false}
+        padded={false}
+      >
             <div className="p-6">
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-xl font-semibold">
@@ -480,9 +485,7 @@ export default function CustomFieldsPage() {
                 </div>
               </form>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

@@ -9,6 +9,7 @@ import {
   ArrowRightOnRectangleIcon,
   ArrowLeftOnRectangleIcon,
 } from '@heroicons/react/24/outline';
+import { Modal } from '../components/ui/Modal';
 
 interface Tool {
   id: number;
@@ -374,9 +375,13 @@ export default function ToolManagement() {
       </div>
 
       {/* Create Tool Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        size="lg"
+        closeOnBackdrop={false}
+        padded={false}
+      >
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">New Tool</h3>
               <button onClick={() => setShowCreateModal(false)}><XMarkIcon className="w-5 h-5" /></button>
@@ -440,14 +445,18 @@ export default function ToolManagement() {
               <button onClick={handleCreate} disabled={!createForm.tool_number || !createForm.name}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Create</button>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Checkout Modal */}
-      {showCheckoutModal && selectedTool && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-md mx-4">
+      <Modal
+        open={showCheckoutModal && !!selectedTool}
+        onClose={() => setShowCheckoutModal(false)}
+        size="md"
+        closeOnBackdrop={false}
+        padded={false}
+      >
+        {selectedTool && (
+          <>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">Checkout: {selectedTool.tool_number}</h3>
               <button onClick={() => setShowCheckoutModal(false)}><XMarkIcon className="w-5 h-5" /></button>
@@ -470,14 +479,20 @@ export default function ToolManagement() {
               <button onClick={() => setShowCheckoutModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
               <button onClick={handleCheckout} disabled={!checkoutForm.checked_out_to} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Checkout</button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
 
       {/* Checkin Modal */}
-      {showCheckinModal && selectedTool && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg shadow-xl w-full max-w-md mx-4">
+      <Modal
+        open={showCheckinModal && !!selectedTool}
+        onClose={() => setShowCheckinModal(false)}
+        size="md"
+        closeOnBackdrop={false}
+        padded={false}
+      >
+        {selectedTool && (
+          <>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">Check In: {selectedTool.tool_number}</h3>
               <button onClick={() => setShowCheckinModal(false)}><XMarkIcon className="w-5 h-5" /></button>
@@ -505,9 +520,9 @@ export default function ToolManagement() {
               <button onClick={() => setShowCheckinModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
               <button onClick={handleCheckin} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Check In</button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

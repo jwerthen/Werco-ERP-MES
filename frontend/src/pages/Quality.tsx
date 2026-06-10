@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
@@ -436,9 +437,7 @@ export default function QualityPage() {
       </div>
 
       {/* NCR Modal */}
-      {showNCRModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <Modal open={showNCRModal} onClose={() => setShowNCRModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New Non-Conformance Report</h3>
               <button onClick={() => setShowNCRModal(false)}><XMarkIcon className="h-6 w-6" /></button>
@@ -493,14 +492,10 @@ export default function QualityPage() {
                 <button type="submit" className="btn-primary">Create NCR</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* CAR Modal */}
-      {showCARModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
+      <Modal open={showCARModal} onClose={() => setShowCARModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New Corrective Action Request</h3>
               <button onClick={() => setShowCARModal(false)}><XMarkIcon className="h-6 w-6" /></button>
@@ -537,14 +532,10 @@ export default function QualityPage() {
                 <button type="submit" className="btn-primary">Create CAR</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* FAI Modal */}
-      {showFAIModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-lg w-full mx-4">
+      <Modal open={showFAIModal} onClose={() => setShowFAIModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New First Article Inspection</h3>
               <button onClick={() => setShowFAIModal(false)}><XMarkIcon className="h-6 w-6" /></button>
@@ -585,9 +576,7 @@ export default function QualityPage() {
                 <button type="submit" className="btn-primary">Create FAI</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import { formatCentralDateTime } from '../utils/centralTime';
 import {
   MagnifyingGlassIcon,
@@ -270,9 +271,14 @@ export default function AuditLog() {
       </div>
 
       {/* Detail Modal */}
-      {selectedLog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-[#151b28] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+      <Modal
+        open={!!selectedLog}
+        onClose={() => setSelectedLog(null)}
+        size="2xl"
+        closeOnBackdrop={false}
+      >
+        {selectedLog && (
+          <>
             <div className="flex justify-between items-start mb-4">
               <h3 className="text-lg font-semibold">Audit Log Detail</h3>
               <button onClick={() => setSelectedLog(null)} className="text-slate-400 hover:text-slate-300">
@@ -362,9 +368,9 @@ export default function AuditLog() {
                 Close
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

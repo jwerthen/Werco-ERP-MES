@@ -15,6 +15,7 @@ import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
+import { Modal } from '../components/ui/Modal';
 
 interface DashboardStats {
   total_rated: number;
@@ -424,9 +425,13 @@ const SupplierScorecards = () => {
       )}
 
       {/* Create Scorecard Modal */}
-      {showScorecardModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="bg-[#151b28] rounded-xl shadow-xl w-full max-w-lg mx-4">
+      <Modal
+        open={showScorecardModal}
+        onClose={() => setShowScorecardModal(false)}
+        size="lg"
+        closeOnBackdrop={false}
+        padded={false}
+      >
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
               <h3 className="text-lg font-semibold text-white">New Supplier Scorecard</h3>
               <button onClick={() => setShowScorecardModal(false)} className="text-slate-400 hover:text-slate-400">
@@ -476,14 +481,16 @@ const SupplierScorecards = () => {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Create Audit Modal */}
-      {showAuditModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="bg-[#151b28] rounded-xl shadow-xl w-full max-w-lg mx-4">
+      <Modal
+        open={showAuditModal}
+        onClose={() => setShowAuditModal(false)}
+        size="lg"
+        closeOnBackdrop={false}
+        padded={false}
+      >
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
               <h3 className="text-lg font-semibold text-white">New Supplier Audit</h3>
               <button onClick={() => setShowAuditModal(false)} className="text-slate-400 hover:text-slate-400">
@@ -560,9 +567,7 @@ const SupplierScorecards = () => {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 };
