@@ -1,9 +1,11 @@
 """Unit tests for the shared Excel/CSV import kit (A0.2).
 
 Covers the parsing edge cases the migration depends on: header normalization,
-blank-row tolerance, ``#`` guidance-row skipping, defensive cell coercion
-(Excel floats/dates/bools, numbers-as-text), size/row caps, and the invariant
-that every server-generated template round-trips through the parser.
+duplicate-header rejection, blank-row tolerance, ``"# "`` guidance-row skipping
+(while ``#``-prefixed part numbers like ``#10-32X1/2`` stay importable),
+defensive cell coercion (Excel floats/dates/bools, numbers-as-text), size/row
+caps, and the invariant that every server-generated template round-trips
+through the parser.
 """
 
 import io
@@ -137,6 +139,61 @@ class TestParseImportFileXlsx:
     def test_corrupt_xlsx_rejected(self):
         with pytest.raises(ImportFileError, match="xlsx"):
             parse_import_file("upload.xlsx", b"this is not a zip archive")
+
+
+@pytest.mark.unit
+class TestGuidanceRowMarker:
+    """Only the exact ``"# "`` template marker skips a row — ``#``-prefixed
+    part numbers (e.g. ``#10-32X1/2``) are real data and must import."""
+
+    def test_hash_prefixed_part_number_is_imported_not_skipped(self):
+        content = _xlsx_bytes(
+            [
+                ["part_number", "quantity"],
+                ["# REQUIRED. Part must exist.", "# REQUIRED."],  # template guidance row
+                ["#10-32X1/2", 500.0],  # real hardware part number
+                ["#8-32X3/8", 250.0],
+            ]
+        )
+        table = parse_import_file("upload.xlsx", content)
+        assert [row["part_number"] for _, row in table.iter_rows()] == ["#10-32X1/2", "#8-32X3/8"]
+
+    def test_hash_prefixed_part_number_in_csv(self):
+        content = b"part_number,quantity\n# guidance row,skipped\n#10-32X1/2,500\n"
+        table = parse_import_file("upload.csv", content)
+        rows = list(table.iter_rows())
+        assert len(rows) == 1
+        assert rows[0][1] == {"part_number": "#10-32X1/2", "quantity": "500"}
+
+    def test_bare_hash_without_space_is_data(self):
+        content = b"part_number,name\n#SPECIAL,Hash part\n"
+        table = parse_import_file("upload.csv", content)
+        assert [row["part_number"] for _, row in table.iter_rows()] == ["#SPECIAL"]
+
+
+@pytest.mark.unit
+class TestDuplicateHeaders:
+    """Two columns that collide after normalization must fail loudly at parse
+    time — silently merging them is data loss in a migration tool."""
+
+    def test_distinct_headers_colliding_after_normalization_rejected(self):
+        content = b"Part Number,part-number,name\nP-1,P-2,Bracket\n"
+        with pytest.raises(ImportFileError) as excinfo:
+            parse_import_file("upload.csv", content)
+        message = str(excinfo.value)
+        assert "Part Number" in message and "part-number" in message and "part_number" in message
+
+    def test_exact_duplicate_header_rejected(self):
+        content = _xlsx_bytes([["name", "name"], ["One", "Two"]])
+        with pytest.raises(ImportFileError, match="Duplicate column"):
+            parse_import_file("upload.xlsx", content)
+
+    def test_multiple_unnamed_trailing_columns_still_tolerated(self):
+        # Empty header cells are ignored, not treated as colliding duplicates.
+        content = _xlsx_bytes([["part_number", None, None], ["P-1", "x", "y"]])
+        table = parse_import_file("upload.xlsx", content)
+        _, row = next(table.iter_rows())
+        assert row == {"part_number": "P-1"}
 
 
 @pytest.mark.unit

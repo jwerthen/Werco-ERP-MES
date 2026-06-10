@@ -30,12 +30,13 @@ seeded as paper-complete.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Dict, List, Optional
 
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, SessionTransaction
 
 from app.db.tenant_filter import tenant_query
 from app.models.customer import Customer
@@ -82,6 +83,10 @@ def _parse_positive_float(value: str, field_name: str) -> float:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field_name} must be a number") from exc
+    # float("nan")/float("inf") parse fine and "nan <= 0" is False, so without
+    # this check NaN/inf would sail through and poison quantities/totals.
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must be a finite number")
     if parsed <= 0:
         raise ValueError(f"{field_name} must be greater than 0")
     return parsed
@@ -92,6 +97,8 @@ def _parse_non_negative_float(value: str, field_name: str) -> float:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field_name} must be a number") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must be a finite number")
     if parsed < 0:
         raise ValueError(f"{field_name} must be zero or greater")
     return parsed
@@ -102,8 +109,11 @@ def _parse_optional_int(value: str, field_name: str) -> Optional[int]:
     if not text:
         return None
     try:
-        return int(float(text))
-    except (TypeError, ValueError) as exc:
+        parsed = float(text)
+        if not math.isfinite(parsed):  # int(float("inf")) raises OverflowError -> 500
+            raise ValueError(f"{field_name} must be a whole number")
+        return int(parsed)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{field_name} must be a whole number") from exc
 
 
@@ -118,6 +128,31 @@ def _expunge_rolled_back(db: Session, instances: List[object]) -> None:
     for instance in instances:
         if instance in db:
             db.expunge(instance)
+
+
+def _rollback_failed_row(db: Session, nested: SessionTransaction, row_instances: List[object]) -> None:
+    """Roll back one failed import row without poisoning the rest of the import.
+
+    Normally the row's SAVEPOINT is still active and ``nested.rollback()`` is
+    the right (and only needed) recovery. But if ``db.commit()`` raised AFTER
+    ``nested.commit()`` already released the savepoint (constraint enforced at
+    COMMIT time, connection drop, ...), ``nested`` is closed — calling
+    ``rollback()`` on it raises ``ResourceClosedError``, which previously
+    escaped the handler as a 500 and lost the partial response (including the
+    ``created_ids`` of rows that HAD durably committed).
+
+    In that state ``Session.rollback()`` is the correct recovery: it discards
+    the session's current transaction — which holds only this row's work,
+    because every successful row is hard-committed immediately (commit mode)
+    or already savepoint-rolled-back (dry run) — and resets the session so the
+    loop can keep processing subsequent rows. Earlier committed rows are
+    already durable and unaffected.
+    """
+    if nested.is_active:
+        nested.rollback()
+    else:
+        db.rollback()
+    _expunge_rolled_back(db, row_instances)
 
 
 def _find_part(db: Session, company_id: int, part_number: str) -> Optional[Part]:
@@ -243,9 +278,11 @@ def import_open_work_orders(
                 number_key = parsed.wo_number.upper()
                 if number_key in seen_numbers:
                     raise ValueError(f"wo_number '{parsed.wo_number}' appears more than once in this file")
+                # Case-insensitive to match the in-file dedupe: 'wo-1001' must
+                # collide with an existing 'WO-1001', not slip past it.
                 exists = (
                     tenant_query(db, WorkOrder, company_id)
-                    .filter(WorkOrder.work_order_number == parsed.wo_number)
+                    .filter(func.upper(WorkOrder.work_order_number) == number_key)
                     .first()
                 )
                 if exists:
@@ -387,8 +424,7 @@ def import_open_work_orders(
                 seen_numbers.add(parsed.wo_number.upper())
             results.append(result)
         except ValueError as exc:
-            nested.rollback()
-            _expunge_rolled_back(db, row_instances)
+            _rollback_failed_row(db, nested, row_instances)
             errors.append(
                 WorkOrderImportError(
                     row=row_number,
@@ -398,8 +434,7 @@ def import_open_work_orders(
                 )
             )
         except Exception:
-            nested.rollback()
-            _expunge_rolled_back(db, row_instances)
+            _rollback_failed_row(db, nested, row_instances)
             logger.exception("open work order import failed on row %s", row_number)
             errors.append(
                 WorkOrderImportError(
@@ -536,8 +571,11 @@ def import_open_purchase_orders(
             if po_number:
                 if po_number.upper() in seen_po_numbers:
                     raise ValueError(f"po_number '{po_number}' was already imported earlier in this file")
+                # Case-insensitive to match the in-file dedupe (see wo_number).
                 exists = (
-                    tenant_query(db, PurchaseOrder, company_id).filter(PurchaseOrder.po_number == po_number).first()
+                    tenant_query(db, PurchaseOrder, company_id)
+                    .filter(func.upper(PurchaseOrder.po_number) == po_number.upper())
+                    .first()
                 )
                 if exists:
                     raise ValueError(f"po_number '{po_number}' already exists")
@@ -638,8 +676,7 @@ def import_open_purchase_orders(
             created_line_count += len(lines)
             results.append(result)
         except ValueError as exc:
-            nested.rollback()
-            _expunge_rolled_back(db, row_instances)
+            _rollback_failed_row(db, nested, row_instances)
             for line in lines:
                 errors.append(
                     PurchaseOrderImportError(
@@ -650,8 +687,7 @@ def import_open_purchase_orders(
                     )
                 )
         except Exception:
-            nested.rollback()
-            _expunge_rolled_back(db, row_instances)
+            _rollback_failed_row(db, nested, row_instances)
             logger.exception("open purchase order import failed for group %s", key)
             for line in lines:
                 errors.append(

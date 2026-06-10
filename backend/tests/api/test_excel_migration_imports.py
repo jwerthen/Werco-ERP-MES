@@ -18,8 +18,10 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.customer import Customer
@@ -28,8 +30,18 @@ from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.routing import Routing, RoutingOperation
 from app.models.time_entry import TimeEntry
+from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderStatus
+from app.services.audit_service import AuditService
+from app.services.import_service import ParsedTable
+from app.services.migration_import_service import (
+    _parse_non_negative_float,
+    _parse_optional_int,
+    _parse_positive_float,
+    import_open_purchase_orders,
+    import_open_work_orders,
+)
 
 
 def _csv_file(text: str):
@@ -45,6 +57,25 @@ def _xlsx_file(rows, filename="import.xlsx"):
     workbook.save(out)
     out.seek(0)
     return {"file": (filename, out, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+
+
+def _supervisor_headers(db_session: Session) -> dict:
+    """Mint a SUPERVISOR user + token (no shared fixture exists for this role)."""
+    user = User(
+        email="supervisor-import@werco.com",
+        employee_id="EMP-SUP-IMPORT",
+        first_name="Sup",
+        last_name="Visor",
+        hashed_password="$2b$12$abcdefghijklmnopqrstuv",
+        role=UserRole.SUPERVISOR,
+        is_active=True,
+        company_id=1,
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    token = create_access_token(subject=user.id, company_id=user.company_id)
+    return {"Authorization": f"Bearer {token}", "X-Requested-With": "XMLHttpRequest"}
 
 
 def _make_routed_part(db: Session, part_number: str, sequences=(10, 20, 30)) -> Part:
@@ -194,7 +225,7 @@ class TestXlsxAcceptanceOnExistingImports:
 @pytest.mark.requires_db
 class TestOpenWorkOrderImport:
     def test_happy_path_released_with_ready_first_op(self, client: TestClient, auth_headers: dict, db_session: Session):
-        part = _make_routed_part(db_session, "WOIMP-100")
+        _make_routed_part(db_session, "WOIMP-100")
         customer = Customer(name="Borealis Defense", code="BOR001", is_active=True, company_id=1)
         db_session.add(customer)
         db_session.commit()
@@ -304,6 +335,66 @@ class TestOpenWorkOrderImport:
         assert "OPEN work orders" in reasons[4]
         assert "more than once" in reasons[6]
         assert db_session.query(WorkOrder).count() == before + 1
+
+    def test_existing_wo_number_rejected_case_insensitively(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """A lowercase wo_number in the file must collide with an existing
+        uppercase DB row (in-file dedupe is case-insensitive; DB must match)."""
+        part = _make_routed_part(db_session, "WOIMP-CASE")
+        existing = WorkOrder(
+            work_order_number="WO-CASE-1",
+            part_id=part.id,
+            quantity_ordered=1,
+            status=WorkOrderStatus.RELEASED,
+            company_id=1,
+        )
+        db_session.add(existing)
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/work-orders/import",
+            headers=auth_headers,
+            files=_csv_file("wo_number,part_number,quantity\nwo-case-1,WOIMP-CASE,5\n"),
+        )
+        body = response.json()
+        assert body["created_count"] == 0
+        assert "already exists" in body["errors"][0]["reason"]
+        assert (
+            db_session.query(WorkOrder)
+            .filter_by(company_id=1)
+            .filter(WorkOrder.work_order_number.ilike("WO-CASE-1"))
+            .count()
+            == 1
+        )
+
+    def test_nan_and_inf_quantities_rejected(self, client: TestClient, auth_headers: dict, db_session: Session):
+        """float('nan')/float('inf') parse but must not pass the > 0 gate."""
+        _make_routed_part(db_session, "WOIMP-NAN")
+        response = client.post(
+            "/api/v1/work-orders/import",
+            headers=auth_headers,
+            files=_csv_file("part_number,quantity\n" "WOIMP-NAN,nan\n" "WOIMP-NAN,inf\n" "WOIMP-NAN,-inf\n"),
+        )
+        body = response.json()
+        assert body["created_count"] == 0
+        assert len(body["errors"]) == 3
+        assert all("finite" in error["reason"] for error in body["errors"])
+
+    def test_hash_prefixed_part_number_imports_as_data(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """Regression: '#10-32X1/2' is a real part number, not a guidance row."""
+        part = _make_routed_part(db_session, "#10-32X1/2")
+        response = client.post(
+            "/api/v1/work-orders/import",
+            headers=auth_headers,
+            files=_csv_file("wo_number,part_number,quantity\nWO-HASH-1,#10-32X1/2,500\n"),
+        )
+        body = response.json()
+        assert body["created_count"] == 1 and body["errors"] == []
+        wo = db_session.query(WorkOrder).filter_by(work_order_number="WO-HASH-1", company_id=1).one()
+        assert wo.part_id == part.id
 
     def test_part_without_released_routing_is_rejected(
         self, client: TestClient, auth_headers: dict, db_session: Session
@@ -540,3 +631,214 @@ class TestOpenPurchaseOrderImport:
             files=_csv_file("po_number,vendor_code,part_number,quantity,unit_price\nPO-DUPE,APX001,RM-1,10,1.00\n"),
         )
         assert "already exists" in response.json()["errors"][0]["reason"]
+
+    def test_existing_po_number_rejected_case_insensitively(
+        self, client: TestClient, auth_headers: dict, db_session: Session, vendor_and_parts
+    ):
+        """A lowercase po_number must collide with an existing uppercase DB row."""
+        po = PurchaseOrder(po_number="PO-CASE-1", vendor_id=vendor_and_parts.id, company_id=1)
+        db_session.add(po)
+        db_session.commit()
+        response = client.post(
+            "/api/v1/purchasing/purchase-orders/import",
+            headers=auth_headers,
+            files=_csv_file("po_number,vendor_code,part_number,quantity,unit_price\npo-case-1,APX001,RM-1,10,1.00\n"),
+        )
+        body = response.json()
+        assert body["created_count"] == 0
+        assert "already exists" in body["errors"][0]["reason"]
+
+    def test_nan_and_inf_prices_rejected(
+        self, client: TestClient, auth_headers: dict, db_session: Session, vendor_and_parts
+    ):
+        response = client.post(
+            "/api/v1/purchasing/purchase-orders/import",
+            headers=auth_headers,
+            files=_csv_file(
+                "po_number,vendor_code,part_number,quantity,unit_price\n"
+                "PO-NAN-1,APX001,RM-1,10,nan\n"
+                "PO-NAN-2,APX001,RM-1,inf,1.00\n"
+            ),
+        )
+        body = response.json()
+        assert body["created_count"] == 0
+        assert len(body["errors"]) == 2
+        assert all("finite" in error["reason"] for error in body["errors"])
+        assert db_session.query(PurchaseOrder).filter(PurchaseOrder.po_number.like("PO-NAN-%")).count() == 0
+
+    def test_supervisor_forbidden(self, client: TestClient, db_session: Session):
+        """Import lands POs in SENT; /send is ADMIN/MANAGER-only, so SUPERVISOR
+        importing would be a privilege escalation -> 403."""
+        headers = _supervisor_headers(db_session)
+        response = client.post(
+            "/api/v1/purchasing/purchase-orders/import",
+            headers=headers,
+            files=_csv_file("po_number,vendor_code,part_number,quantity,unit_price\nPO-X,APX001,RM-1,10,1.00\n"),
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.unit
+class TestMigrationNumericGuards:
+    """NaN/inf must never pass the numeric gates (they poison totals/quantities)."""
+
+    @pytest.mark.parametrize("bad", ["nan", "NaN", "inf", "-inf", "Infinity"])
+    def test_positive_float_rejects_non_finite(self, bad):
+        with pytest.raises(ValueError, match="finite"):
+            _parse_positive_float(bad, "quantity")
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+    def test_non_negative_float_rejects_non_finite(self, bad):
+        with pytest.raises(ValueError, match="finite"):
+            _parse_non_negative_float(bad, "unit_price")
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+    def test_optional_int_rejects_non_finite(self, bad):
+        with pytest.raises(ValueError, match="whole number"):
+            _parse_optional_int(bad, "priority")
+
+    def test_valid_values_still_parse(self):
+        assert _parse_positive_float("25", "quantity") == 25.0
+        assert _parse_non_negative_float("0", "unit_price") == 0.0
+        assert _parse_optional_int("5", "priority") == 5
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestCommitFailureRecovery:
+    """If db.commit() fails AFTER the row's savepoint was released, the import
+    must record a row error and keep going — not 500 with ResourceClosedError
+    and lose the partial response (rows already committed stay committed).
+
+    NOTE: these tests do NOT assert the failed row's absence from the DB. On
+    the pysqlite test engine a released savepoint's data survives the
+    recovery ROLLBACK (the well-known pysqlite implicit-transaction quirk);
+    on Postgres the failed COMMIT discards it. Either way the row's true
+    outcome after a failed commit is indeterminate from the client side
+    (e.g. connection drop after the server committed) — the contract under
+    test is: no escaped exception, partial response preserved, the row
+    reported as an error, and processing continuing."""
+
+    @staticmethod
+    def _flaky_commit(db_session: Session, fail_on_call: int):
+        real_commit = db_session.commit
+        calls = {"n": 0}
+
+        def commit():
+            calls["n"] += 1
+            if calls["n"] == fail_on_call:
+                raise OperationalError("COMMIT", {}, Exception("simulated connection loss at COMMIT"))
+            return real_commit()
+
+        return commit, real_commit
+
+    def test_work_order_import_survives_failed_commit_and_continues(self, db_session: Session, test_user):
+        _make_routed_part(db_session, "WOIMP-CF")
+        table = ParsedTable(
+            headers=["wo_number", "part_number", "quantity"],
+            rows=[
+                (2, {"wo_number": "WO-CF-1", "part_number": "WOIMP-CF", "quantity": "5"}),
+                (3, {"wo_number": "WO-CF-2", "part_number": "WOIMP-CF", "quantity": "5"}),
+                (4, {"wo_number": "WO-CF-3", "part_number": "WOIMP-CF", "quantity": "5"}),
+            ],
+        )
+        audit = AuditService(db_session, test_user)
+        flaky, real_commit = self._flaky_commit(db_session, fail_on_call=2)  # fail the SECOND row's commit
+        db_session.commit = flaky  # type: ignore[method-assign]
+        try:
+            response = import_open_work_orders(
+                db_session, table=table, current_user=test_user, company_id=1, audit=audit, dry_run=False
+            )
+        finally:
+            db_session.commit = real_commit  # type: ignore[method-assign]
+
+        assert response.created_count == 2
+        assert [result.wo_number for result in response.results] == ["WO-CF-1", "WO-CF-3"]
+        assert len(response.errors) == 1
+        assert response.errors[0].row == 3
+        assert "database error" in response.errors[0].reason
+        # The rows that committed successfully are durable and reported.
+        numbers = {
+            wo.work_order_number
+            for wo in db_session.query(WorkOrder).filter(WorkOrder.work_order_number.like("WO-CF-%"))
+        }
+        assert {"WO-CF-1", "WO-CF-3"} <= numbers
+        assert len(response.created_ids) == 2
+        # The failed row's id is NOT claimed as created.
+        committed = {
+            wo.id for wo in db_session.query(WorkOrder).filter(WorkOrder.work_order_number.in_(["WO-CF-1", "WO-CF-3"]))
+        }
+        assert set(response.created_ids) == committed
+
+    def test_purchase_order_import_survives_failed_commit_and_continues(self, db_session: Session, test_user):
+        vendor = Vendor(code="APXCF", name="Apex CF", is_active=True, company_id=1)
+        part = Part(
+            part_number="RM-CF",
+            name="Material CF",
+            part_type="raw_material",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add_all([vendor, part])
+        db_session.commit()
+
+        table = ParsedTable(
+            headers=["po_number", "vendor_code", "part_number", "quantity", "unit_price"],
+            rows=[
+                (
+                    2,
+                    {
+                        "po_number": "PO-CF-1",
+                        "vendor_code": "APXCF",
+                        "part_number": "RM-CF",
+                        "quantity": "10",
+                        "unit_price": "1.00",
+                    },
+                ),
+                (
+                    3,
+                    {
+                        "po_number": "PO-CF-2",
+                        "vendor_code": "APXCF",
+                        "part_number": "RM-CF",
+                        "quantity": "10",
+                        "unit_price": "1.00",
+                    },
+                ),
+                (
+                    4,
+                    {
+                        "po_number": "PO-CF-3",
+                        "vendor_code": "APXCF",
+                        "part_number": "RM-CF",
+                        "quantity": "10",
+                        "unit_price": "1.00",
+                    },
+                ),
+            ],
+        )
+        audit = AuditService(db_session, test_user)
+        flaky, real_commit = self._flaky_commit(db_session, fail_on_call=2)
+        db_session.commit = flaky  # type: ignore[method-assign]
+        try:
+            response = import_open_purchase_orders(
+                db_session, table=table, current_user=test_user, company_id=1, audit=audit, dry_run=False
+            )
+        finally:
+            db_session.commit = real_commit  # type: ignore[method-assign]
+
+        assert response.created_count == 2
+        assert [result.po_number for result in response.results] == ["PO-CF-1", "PO-CF-3"]
+        assert len(response.errors) == 1
+        assert response.errors[0].row == 3
+        assert "database error" in response.errors[0].reason
+        # The groups that committed successfully are durable and reported.
+        numbers = {
+            po.po_number for po in db_session.query(PurchaseOrder).filter(PurchaseOrder.po_number.like("PO-CF-%"))
+        }
+        assert {"PO-CF-1", "PO-CF-3"} <= numbers
+        committed = {
+            po.id for po in db_session.query(PurchaseOrder).filter(PurchaseOrder.po_number.in_(["PO-CF-1", "PO-CF-3"]))
+        }
+        assert set(response.created_ids) == committed

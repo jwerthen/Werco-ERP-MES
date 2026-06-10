@@ -426,7 +426,11 @@ async def import_open_purchase_orders_endpoint(
     file: UploadFile = File(...),
     dry_run: bool = Query(False, description="Validate and preview only; guarantees no rows are written"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    # ADMIN/MANAGER only: imported POs land directly in SENT (issued), and the
+    # interactive /send transition is ADMIN/MANAGER-only — allowing SUPERVISOR
+    # here would let them issue POs via spreadsheet that they cannot issue in
+    # the UI (privilege escalation).
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):

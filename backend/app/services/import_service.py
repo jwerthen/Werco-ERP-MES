@@ -13,9 +13,10 @@ One parsing front door for every tabular import endpoint:
   ``"5"`` not ``"5.0"``, booleans -> ``"true"``/``"false"``, everything else ->
   stripped text, so numbers-typed-as-text and text-typed-as-numbers both land
   in the shape the row validators expect.
-* Blank rows are dropped; rows whose first cell starts with ``#`` are treated
-  as guidance/example rows (the server-generated templates mark their guidance
-  row this way) and skipped.
+* Blank rows are dropped; rows whose first cell starts with ``"# "`` (hash +
+  space — the exact marker the server-generated templates write) are treated
+  as guidance rows and skipped. A bare ``#`` prefix without the space is REAL
+  DATA: part numbers like ``#10-32X1/2`` are common and must import.
 * Sane caps on file size and row count so a stray 300 MB workbook can't take
   the API down.
 
@@ -39,9 +40,11 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_IMPORT_ROWS = 10_000
 
-# Rows whose FIRST cell starts with this marker are guidance/example rows
-# (written by the server-generated templates) and are skipped on import.
-SKIP_ROW_MARKER = "#"
+# Rows whose FIRST cell starts with this marker are guidance rows and are
+# skipped on import. This must match EXACTLY what build_import_template_workbook
+# writes (``f"# {note}"`` — hash + space): a bare ``#`` would also swallow real
+# part numbers like ``#10-32X1/2``.
+SKIP_ROW_MARKER = "# "
 
 CSV_EXTENSIONS = {".csv"}
 XLSX_EXTENSIONS = {".xlsx"}
@@ -203,17 +206,28 @@ def parse_import_file(
             continue  # tolerate blank rows anywhere
         if not headers:
             headers = [normalize_import_header(cell) for cell in cells]
+            # Two distinct columns that collide after normalization would
+            # silently merge (silent data loss in a migration tool) — refuse the
+            # file and name the offenders instead.
+            first_seen: Dict[str, str] = {}
+            for raw_cell, header in zip(cells, headers):
+                if not header:
+                    continue  # trailing/unnamed columns are ignored
+                if header in first_seen:
+                    raise ImportFileError(
+                        f"Duplicate column: '{first_seen[header]}' and '{raw_cell}' both map to "
+                        f"'{header}' after normalization. Rename or remove one of them."
+                    )
+                first_seen[header] = raw_cell
             continue
         if cells[0].startswith(SKIP_ROW_MARKER):
-            continue  # template guidance/example row
+            continue  # template guidance row (exact "# " marker; "#10-32..." is data)
         if len(table_rows) >= max_rows:
             raise ImportFileError(f"Too many rows (max {max_rows}). Split the file and import in batches.")
         row: Dict[str, str] = {}
         for idx, header in enumerate(headers):
             if not header:
                 continue  # trailing/unnamed columns are ignored
-            if header in row and not (idx < len(cells) and cells[idx]):
-                continue  # first occurrence of a duplicated header wins
             row[header] = cells[idx] if idx < len(cells) else ""
         table_rows.append((row_number, row))
 
@@ -482,7 +496,8 @@ def build_import_template_workbook(entity: str) -> bytes:
     Layout contract (must stay in sync with :func:`parse_import_file`):
 
     * Sheet 1 ("Import"): styled header row, then ONE guidance row whose cells
-      all start with ``#`` — the importer skips ``#``-prefixed rows.
+      all start with ``"# "`` (:data:`SKIP_ROW_MARKER`) — the importer skips
+      exactly that prefix and nothing else.
     * Sheet 2 ("Examples"): the same header plus 2-3 realistic example rows.
       The importer only reads the first sheet, so examples can never be
       imported by accident.

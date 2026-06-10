@@ -233,6 +233,43 @@ class TestUsersAPI:
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
+    def test_import_users_csv_rejects_platform_admin_role(self, client: TestClient, admin_headers, db_session):
+        """A company admin must not be able to mint a cross-company platform
+        admin from a spreadsheet row — rejected as a row-level error."""
+        csv_content = (
+            "employee_id,first_name,last_name,password,role\n"
+            "EMP-CSV-PA1,Eve,Escalator,SecureP@ss123!,platform_admin\n"
+            "EMP-CSV-PA2,Norm,Operator,SecureP@ss123!,operator\n"
+        )
+        response = client.post(
+            "/api/v1/users/import-csv",
+            headers=admin_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["created_count"] == 1  # the operator row still imports
+        assert len(data["errors"]) == 1
+        assert data["errors"][0]["reason"] == "role 'platform_admin' cannot be assigned via import"
+        assert db_session.query(User).filter_by(employee_id="EMP-CSV-PA1").count() == 0
+        assert db_session.query(User).filter_by(employee_id="EMP-CSV-PA2").count() == 1
+
+    def test_import_users_csv_invalid_role_error_does_not_advertise_platform_admin(
+        self, client: TestClient, admin_headers
+    ):
+        """The 'valid roles' hint must not list platform_admin."""
+        csv_content = "employee_id,first_name,last_name,password,role\n" "EMP-CSV-BR1,Bad,Role,SecureP@ss123!,wizard\n"
+        response = client.post(
+            "/api/v1/users/import-csv",
+            headers=admin_headers,
+            files={"file": ("users.csv", csv_content, "text/csv")},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        reason = response.json()["errors"][0]["reason"]
+        assert "Invalid role" in reason
+        assert "platform_admin" not in reason
+
 
 @pytest.mark.api
 class TestUserRoles:

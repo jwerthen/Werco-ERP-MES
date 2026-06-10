@@ -240,7 +240,9 @@ async def import_users_csv(
     total_rows = 0
     accepted_count = 0
     default_password = (default_password or "").strip()
-    valid_roles = sorted([role.value for role in UserRole])
+    # platform_admin is the cross-company Werco oversight role; it must never be
+    # mintable from a tenant spreadsheet, so don't advertise it as valid either.
+    valid_roles = sorted(role.value for role in UserRole if role != UserRole.PLATFORM_ADMIN)
 
     for row_number, row in table.iter_rows():
         total_rows += 1
@@ -288,6 +290,19 @@ async def import_users_csv(
                     employee_id=employee_id,
                     email=email or None,
                     reason=f"Invalid role '{role_raw}'. Valid roles: {', '.join(valid_roles)}",
+                )
+            )
+            continue
+
+        if role == UserRole.PLATFORM_ADMIN:
+            # A company admin must not be able to mint a cross-company platform
+            # admin from a spreadsheet row.
+            errors.append(
+                UserCsvImportError(
+                    row=row_number,
+                    employee_id=employee_id,
+                    email=email or None,
+                    reason="role 'platform_admin' cannot be assigned via import",
                 )
             )
             continue

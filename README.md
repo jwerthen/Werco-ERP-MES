@@ -37,7 +37,8 @@ Shipped modules, grouped by domain:
 - **Analytics** (production, quality, inventory, forecasting, costs), **reports**, and **job costing**.
 
 ### Administration & Governance
-- **RBAC** (8 roles, server-side `require_role` gating), **multi-tenant** company scoping, **tamper-evident audit log** (SHA-256 hash chain), users/employee provisioning, work centers, custom fields, admin settings (incl. an **AI usage & cost** dashboard — per-task/per-model token, spend, and latency telemetry for the LLM features), setup wizard, import center, and a platform-admin overview for cross-company oversight.
+- **RBAC** (8 roles, server-side `require_role` gating), **multi-tenant** company scoping, **tamper-evident audit log** (SHA-256 hash chain), users/employee provisioning, work centers, custom fields, admin settings (incl. an **AI usage & cost** dashboard — per-task/per-model token, spend, and latency telemetry for the LLM features), setup wizard, and a platform-admin overview for cross-company oversight.
+- **Import Center / Excel migration kit** — XLSX + CSV bulk imports (users, parts, materials, customers, vendors, work centers) plus open-work-order and open-purchase-order loaders for go-live, with server-generated Excel templates and a dry-run-preview-then-commit flow (see [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md)).
 
 ## Architecture
 
@@ -53,7 +54,7 @@ Cross-cutting platform properties:
 - **Multi-tenant** — domain tables carry `company_id` (`TenantMixin`); every query is scoped to the active company.
 - **Background work** — Redis 7 + **ARQ workers** (`app/worker.py`, `app/jobs/`) for email, MRP runs, and long tasks; enqueued from services, never blocking request handlers.
 - **Realtime** — WebSocket push for live shop-floor activity and dashboard updates.
-- **Tamper-evident audit** — the `audit_log` table is an append-only SHA-256 hash chain (`sequence_number`, `previous_hash`, `integrity_hash`); state changes flow through `AuditService`. (Known gap: the user-management and work-center routers do not yet emit audit entries — see Compliance below.)
+- **Tamper-evident audit** — the `audit_log` table is an append-only SHA-256 hash chain (`sequence_number`, `previous_hash`, `integrity_hash`); state changes flow through `AuditService`. (Known gap: the interactive user-management and work-center endpoints do not yet emit audit entries — their bulk-import endpoints do — see Compliance below.)
 - **Auth** — JWT, ~15-min access token, ~7-day rotating refresh, 24h absolute session cap; account lockout after 5 failed password attempts (the email/password login path).
 
 ## Tech stack
@@ -158,6 +159,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 | [docs/API.md](docs/API.md) | REST endpoint reference (OpenAPI lives at `/api/docs`) |
 | [docs/RBAC_PERMISSIONS.md](docs/RBAC_PERMISSIONS.md) | The 8-role permission model |
 | [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) | All config and secrets |
+| [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md) | Go-live migration off Excel: load order, dry-run discipline, rehearsals, cutover checklist |
 | [docs/AI_QUOTING_AGENT_RUNBOOK.md](docs/AI_QUOTING_AGENT_RUNBOOK.md) | Operating the Anthropic-powered RFQ/quoting feature |
 | [docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md](docs/IMPLEMENTATION_NOTES_AI_QUOTING_AGENT.md) | AI quoting design/implementation notes |
 | [docs/CMMC_LEVEL_2_COMPLIANCE.md](docs/CMMC_LEVEL_2_COMPLIANCE.md) | CMMC L2 compliance posture |
@@ -173,7 +175,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 Built for **AS9100D**, **ISO 9001**, and **CMMC Level 2**. The mechanisms below are enforced in code as correctness invariants:
 
 - **Tenant isolation** — `company_id` scoping on all domain data; cross-tenant reads are defects.
-- **Tamper-evident audit log** — append-only SHA-256 hash chain over create/update/delete/status-change events; never backfilled or edited out of band. **Known coverage gap:** the user-management router (`app/api/endpoints/users.py` — create/update/activate/deactivate/role-change/password-reset) and the work-center router (`app/api/endpoints/work_centers.py`) currently emit **no** audit entries; do not represent those actions as audited to auditors until they route through `AuditService`.
+- **Tamper-evident audit log** — append-only SHA-256 hash chain over create/update/delete/status-change events; never backfilled or edited out of band. **Known coverage gap:** the **interactive** user-management endpoints (`app/api/endpoints/users.py` — create/update/activate/deactivate/role-change/password-reset) and work-center endpoints (`app/api/endpoints/work_centers.py`) currently emit **no** audit entries; do not represent those actions as audited to auditors until they route through `AuditService`. (The bulk-import endpoints in both routers — `/users/import-csv`, `/work-centers/import-csv` — **do** audit every created row, tagged `source = "import"`.)
 - **Soft delete** — `SoftDeleteMixin` (`is_deleted` / `deleted_at` / `deleted_by`); no physical deletes on traced data.
 - **Traceability** — part/BOM revision control, critical-characteristic flags, and lot/serial genealogy; shipped data is preserved via new revisions rather than mutation.
 - **RBAC + access control** — server-side role gating, account lockout (5 failed password attempts → 30-min lock, email/password login path), JWT session caps.
