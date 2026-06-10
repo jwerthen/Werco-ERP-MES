@@ -47,14 +47,19 @@ jobs:
 
       - name: Validate Railway token authentication
         run: |
-          # Account/workspace tokens pass `whoami`; project tokens may not.
+          # Informational pre-check only. Account/workspace tokens pass `whoami`;
+          # project-scoped tokens (what this workflow uses) do NOT, and the current
+          # Railway CLI's `railway status` accepts no `--project` flag, so there is
+          # no offline way to validate a project token here. The real gate is the
+          # `railway up --project ... --service ...` step below, which is what
+          # actually authenticates and authorizes against the project — so this
+          # step must never hard-fail and abort the deploy.
           if railway whoami > /dev/null 2>&1; then
             echo "Railway account authentication validated via whoami."
-            exit 0
+          else
+            echo "whoami did not validate (expected for a project-scoped RAILWAY_TOKEN)."
+            echo "Skipping offline validation; 'railway up --project' below is the real auth check."
           fi
-
-          echo "whoami failed; validating project-scoped token access instead..."
-          railway status --project "${RAILWAY_PROJECT_ID}" > /dev/null
 
       - name: Deploy frontend service from frontend root
         run: |
