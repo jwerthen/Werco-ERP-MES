@@ -300,6 +300,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [security-scan]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # contents: write is needed by the Create GitHub Release step; the repo's
+    # default workflow token permission is read-only.
+    permissions:
+      contents: write
     environment:
       name: production
       url: ${{ vars.PRODUCTION_URL }}
@@ -339,8 +343,15 @@ jobs:
       - name: Verify Production Config
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        # verify_launch imports app.core.config, so it needs the backend deps
+        # and backend/ as the working directory. `railway run` executes the
+        # command LOCALLY with the service's variables injected; --no-local
+        # stops it from rewriting internal hostnames (e.g. DATABASE_URL) for
+        # local development, which would trip the script's sanity checks.
         run: |
-          railway run --service werco-api --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" python -m scripts.verify_launch
+          cd backend
+          python3 -m pip install -q -r requirements.txt
+          railway run --no-local --service werco-api --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" python3 -m scripts.verify_launch
 
       - name: Create GitHub Release
         if: success()
