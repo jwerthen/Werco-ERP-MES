@@ -22,6 +22,16 @@ kiosk from a clerk back-filling from paper at 4pm. Contracts locked here:
    clock-in channel) and tags ``operation_completed`` / ``work_order_completed``.
    With ``source`` omitted it fills NOTHING: NULL stays NULL and the events carry
    ``source: None``.
+7. (A0.3) ``PUT /shop-floor/operations/{id}/hold`` accepts the same optional
+   ``source``: fill-only-if-NULL on the open entries it auto-closes, the channel
+   tags whichever event the hold emits (``operation_hold`` or
+   ``work_order_blocker_created`` via the blocker branch), and an unknown value
+   is a 422 that mutates nothing.
+8. (A0.3) ``POST /shop-floor/operations/{id}/production`` carries a structured
+   ``scrap_reason`` that persists onto the active TimeEntry like clock-out's --
+   only when the report carries scrap, and never clobbered back to None. A
+   reason-less clock-out (the kiosk COMPLETE flow) preserves it too, and the
+   field is capped at the column width (255) with a 422 beyond it.
 """
 
 from datetime import date, datetime, timedelta
@@ -380,6 +390,178 @@ def test_production_report_records_source(client: TestClient, db_session: Sessio
 
     db_session.expire_all()
     assert db_session.get(TimeEntry, entry_id).source == "scanner"
+
+
+def test_production_report_persists_scrap_reason(client: TestClient, db_session: Session):
+    """A0.3: /production carries a structured scrap reason that lands on the active
+    TimeEntry exactly like clock-out's, and a later reason-less report never
+    clobbers the recorded reason back to None."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+    entry = make_open_entry(db_session, operator, wo, op)
+    entry_id = entry.id
+
+    resp = client.post(
+        f"/api/v1/shop-floor/operations/{op.id}/production",
+        json={"quantity_complete_delta": 1.0, "quantity_scrapped_delta": 2.0, "scrap_reason": "Material defect"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    db_session.expire_all()
+    assert db_session.get(TimeEntry, entry_id).scrap_reason == "Material defect"
+
+    resp = client.post(
+        f"/api/v1/shop-floor/operations/{op.id}/production",
+        json={"quantity_complete_delta": 1.0, "quantity_scrapped_delta": 0.0},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    db_session.expire_all()
+    assert (
+        db_session.get(TimeEntry, entry_id).scrap_reason == "Material defect"
+    ), "a report without scrap must not clobber the recorded reason"
+
+
+def test_clock_out_without_reason_preserves_mid_shift_scrap_reason(client: TestClient, db_session: Session):
+    """Kiosk COMPLETE regression: a clock-out with zero scrap and NO reason must not
+    null a scrap reason recorded mid-shift via /production. Clock-out only writes
+    ``scrap_reason`` when it actually carries one."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+    entry = make_open_entry(db_session, operator, wo, op)
+    entry_id = entry.id
+
+    resp = client.post(
+        f"/api/v1/shop-floor/operations/{op.id}/production",
+        json={"quantity_complete_delta": 1.0, "quantity_scrapped_delta": 2.0, "scrap_reason": "Material defect"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    db_session.expire_all()
+    assert db_session.get(TimeEntry, entry_id).scrap_reason == "Material defect"
+
+    resp = client.post(
+        f"/api/v1/shop-floor/clock-out/{entry_id}",
+        json={"quantity_produced": 0, "quantity_scrapped": 0, "source": "kiosk"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    db_session.expire_all()
+    entry = db_session.get(TimeEntry, entry_id)
+    assert entry.clock_out is not None, "the clock-out itself must still land"
+    assert entry.scrap_reason == "Material defect", "a reason-less clock-out must not null the mid-shift scrap reason"
+
+
+def test_production_report_rejects_overlong_scrap_reason(client: TestClient, db_session: Session):
+    """``scrap_reason`` is capped at the TimeEntry column width (String(255)):
+    a 300-char reason is a 422 via Pydantic max_length, and nothing is written."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+    entry = make_open_entry(db_session, operator, wo, op)
+    entry_id = entry.id
+
+    resp = client.post(
+        f"/api/v1/shop-floor/operations/{op.id}/production",
+        json={"quantity_complete_delta": 0.0, "quantity_scrapped_delta": 1.0, "scrap_reason": "x" * 300},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+    db_session.expire_all()
+    entry = db_session.get(TimeEntry, entry_id)
+    assert entry.scrap_reason is None and entry.clock_out is None, "a 422 report must not touch the entry"
+
+
+# ===========================================================================
+# Operation hold
+# ===========================================================================
+
+
+def test_hold_fills_missing_source_without_overwriting(client: TestClient, db_session: Session):
+    """A0.3: a hold auto-closes every open entry on the operation; like /complete it
+    only FILLS a missing channel from the hold's own ``source`` -- another
+    operator's recorded clock-in channel is the adoption signal and must never
+    be clobbered."""
+    operator_kiosk = make_user(db_session)
+    operator_unknown = make_user(db_session)
+    holder = make_user(db_session, role=UserRole.SUPERVISOR)
+    wo, op, wc = make_wo_op(db_session)
+    kiosk_entry = make_open_entry(db_session, operator_kiosk, wo, op, source="kiosk")
+    unknown_entry = make_open_entry(db_session, operator_unknown, wo, op)
+    kiosk_entry_id, unknown_entry_id = kiosk_entry.id, unknown_entry.id
+
+    resp = client.put(
+        f"/api/v1/shop-floor/operations/{op.id}/hold",
+        json={"source": "desktop"},
+        headers=headers_for(holder),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    db_session.expire_all()
+    kiosk_entry = db_session.get(TimeEntry, kiosk_entry_id)
+    unknown_entry = db_session.get(TimeEntry, unknown_entry_id)
+    assert kiosk_entry.clock_out is not None and unknown_entry.clock_out is not None, "hold closes open entries"
+    assert kiosk_entry.source == "kiosk", "a recorded clock-in channel must never be overwritten"
+    assert unknown_entry.source == "desktop", "a missing channel is filled from the holding write"
+    assert db_session.get(WorkOrderOperation, op.id).status == OperationStatus.ON_HOLD
+
+
+def test_hold_event_payload_carries_source(client: TestClient, db_session: Session):
+    """Both hold event branches pass the channel through: a bare hold emits
+    ``operation_hold``; a hold WITH blocker details (the kiosk always sends a
+    category) routes through WorkOrderBlockerService and must tag
+    ``work_order_blocker_created`` instead."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+
+    resp = client.put(
+        f"/api/v1/shop-floor/operations/{op.id}/hold",
+        json={"source": "kiosk"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    event = latest_event(db_session, "operation_hold", operation_id=op.id)
+    assert event is not None, "a hold without blocker details must emit operation_hold"
+    assert event.event_payload.get("source") == "kiosk"
+
+    wo2, op2, wc2 = make_wo_op(db_session)
+    resp = client.put(
+        f"/api/v1/shop-floor/operations/{op2.id}/hold",
+        json={"category": "machine_down", "severity": "medium", "source": "kiosk"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    event = latest_event(db_session, "work_order_blocker_created", operation_id=op2.id)
+    assert event is not None, "a hold with blocker details must emit work_order_blocker_created"
+    assert event.event_payload.get("source") == "kiosk"
+
+
+def test_hold_rejects_unknown_source(client: TestClient, db_session: Session):
+    """OperationHoldRequest declares its own enum-typed ``source`` field, so an
+    unknown channel is a 422 via Pydantic validation and the rejected hold
+    mutates nothing: no status change, no entry closed, no channel written."""
+    operator = make_user(db_session)
+    wo, op, wc = make_wo_op(db_session)
+    entry = make_open_entry(db_session, operator, wo, op)
+    entry_id, op_id = entry.id, op.id
+
+    resp = client.put(
+        f"/api/v1/shop-floor/operations/{op_id}/hold",
+        json={"source": "fax"},
+        headers=headers_for(operator),
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op_id).status == OperationStatus.IN_PROGRESS
+    entry = db_session.get(TimeEntry, entry_id)
+    assert entry.clock_out is None and entry.source is None, "a 422 hold must not touch the entry"
 
 
 # ===========================================================================

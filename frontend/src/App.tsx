@@ -27,6 +27,7 @@ const WorkOrderNew = lazyWithRetry(() => import('./pages/WorkOrderNew'));
 const WorkOrderDetail = lazyWithRetry(() => import('./pages/WorkOrderDetail'));
 const ShopFloor = lazyWithRetry(() => import('./pages/ShopFloor'));
 const ShopFloorSimple = lazyWithRetry(() => import('./pages/ShopFloorSimple'));
+const OperatorKiosk = lazyWithRetry(() => import('./pages/OperatorKiosk'));
 const WorkCenters = lazyWithRetry(() => import('./pages/WorkCenters'));
 const Parts = lazyWithRetry(() => import('./pages/PartsNew'));
 const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
@@ -311,6 +312,12 @@ function AppRoutes() {
         </PrivateRoute>
       } />
       
+      {/* Operator kiosk (A0.3) — full-screen, no Layout. Handles its own auth:
+          unauthenticated visitors get the badge-login screen, not a redirect. */}
+      <Route path="/kiosk" element={
+        <LazyRoute><OperatorKiosk /></LazyRoute>
+      } />
+
       {/* Shop Floor */}
       <Route path="/shop-floor" element={
         <PrivateRoute>

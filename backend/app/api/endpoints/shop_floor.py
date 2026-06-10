@@ -100,6 +100,14 @@ class ProductionReportRequest(BaseModel):
     quantity_complete_delta: float = 0.0
     quantity_scrapped_delta: float = 0.0
     notes: Optional[str] = None
+    # A0.3: structured scrap reason, same shape as ClockOut.scrap_reason (the
+    # TimeEntry.scrap_reason column is String(255), hence the max_length).
+    scrap_reason: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Reason for scrapped parts; stored only when quantity_scrapped_delta > 0 "
+        "and never cleared by a later reason-less report.",
+    )
     # A0.1 adoption telemetry: client channel (kiosk/desktop/scanner/import/backfill).
     source: Optional[TimeEntrySource] = Field(
         None,
@@ -112,6 +120,13 @@ class OperationHoldRequest(BaseModel):
     category: WorkOrderBlockerCategory = WorkOrderBlockerCategory.OTHER
     severity: WorkOrderBlockerSeverity = WorkOrderBlockerSeverity.MEDIUM
     note: Optional[str] = None
+    # A0.1 adoption telemetry: client channel (kiosk/desktop/scanner/import/backfill).
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this hold (kiosk | desktop | scanner | import | backfill). "
+        "Also fills the channel on the open entries the hold auto-closes when they have none; never "
+        "overwrites a recorded channel. Omit when unknown.",
+    )
 
 
 class OperationInspectionRequest(BaseModel):
@@ -887,7 +902,11 @@ def clock_out(
     time_entry.quantity_scrapped = float(time_entry.quantity_scrapped or 0) + float(
         clock_out_data.quantity_scrapped or 0
     )
-    time_entry.scrap_reason = clock_out_data.scrap_reason
+    # A0.3: only overwrite when the clock-out actually carries a reason -- the kiosk
+    # COMPLETE flow clocks out with zero scrap and no reason, which must not null a
+    # reason recorded by an in-shift /production report.
+    if clock_out_data.scrap_reason:
+        time_entry.scrap_reason = clock_out_data.scrap_reason
     time_entry.notes = clock_out_data.notes or time_entry.notes
     # A0.1 adoption telemetry: record the clock-out channel when the client sent one;
     # omitted -> keep whatever channel clock-in recorded (NULL stays NULL, never guessed).
@@ -2333,6 +2352,12 @@ def report_operation_production(
         active_entry.notes = (
             f"{active_entry.notes}\n{production_data.notes}" if active_entry.notes else production_data.notes
         )
+    # A0.3: structured scrap reason -- persisted onto the active entry like clock-out's,
+    # but only when this report actually carries scrap; an omitted/None reason never
+    # clobbers a reason recorded by an earlier in-shift report.
+    scrap_reason = production_data.scrap_reason if (production_data.scrap_reason and scrap_delta > 0) else None
+    if scrap_reason:
+        active_entry.scrap_reason = scrap_reason
     # A0.1 adoption telemetry: record the reporting channel when the client sent one;
     # omitted -> keep whatever channel the entry already carries (never guessed).
     if production_data.source:
@@ -2350,6 +2375,7 @@ def report_operation_production(
             f"Reported production on operation {operation.operation_number} for WO {work_order.work_order_number}. "
             f"Added good: {good_delta}, scrap: {scrap_delta}. "
             f"Qty: {operation.quantity_complete}/{target_qty}"
+            + (f". Scrap reason: {scrap_reason}" if scrap_reason else "")
             + (f". Notes: {production_data.notes}" if production_data.notes else "")
         ),
     )
@@ -2936,7 +2962,15 @@ def put_operation_on_hold(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Put an operation on hold"""
+    """Put an operation on hold.
+
+    The body is optional and backward-compatible. When present it carries the
+    structured hold details -- ``category`` / ``severity`` / ``note`` (a note or a
+    non-OTHER category also files a WorkOrderBlocker) -- plus the optional
+    ``source`` adoption-telemetry channel (kiosk | desktop | scanner | import |
+    backfill) that tags the emitted event and fills the channel on any open time
+    entries the hold auto-closes (never overwriting a recorded one).
+    """
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order))
@@ -2966,10 +3000,17 @@ def put_operation_on_hold(
         .all()
     )
     now = datetime.utcnow()
+    # A0.1 adoption telemetry: channel of THIS hold write (None = not reported).
+    hold_source = hold_data.source.value if hold_data and hold_data.source else None
     for entry in open_entries:
         entry.clock_out = now
         if entry.clock_in:
             entry.duration_hours = (now - entry.clock_in).total_seconds() / 3600.0
+        # A0.1 adoption telemetry: a hold auto-closes OTHER operators' open entries
+        # too, so only FILL a missing channel -- never overwrite an entry's own
+        # recorded clock-in channel with the holder's channel (same as /complete).
+        if hold_source and entry.source is None:
+            entry.source = hold_source
 
     # Create audit log
     AuditService(db, current_user).log(
@@ -2991,6 +3032,7 @@ def put_operation_on_hold(
                     note=hold_data.note,
                     put_operation_on_hold=False,
                 ),
+                source=hold_source,
             )
         else:
             OperationalEventService(db).emit(
@@ -3006,6 +3048,8 @@ def put_operation_on_hold(
                 event_payload={
                     "work_order_number": work_order.work_order_number,
                     "operation_name": operation.name,
+                    # A0.1 adoption telemetry: client channel (None = not reported).
+                    "source": hold_source,
                 },
             )
 

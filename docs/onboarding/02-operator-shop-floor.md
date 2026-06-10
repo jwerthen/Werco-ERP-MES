@@ -25,6 +25,19 @@ Run through this every time you start, before you touch a part:
 
 ---
 
+## The fixed station kiosk (big-button touchscreens)
+
+Some cells have a dedicated wall or machine-side touchscreen that runs a simpler, big-button version of the kiosk, set up by IT for that one station. If your cell has one, it works like this:
+
+1. **Scan your badge** (or type your employee number on the on-screen pad and press the arrow). You don't need to tap anything first — just scan.
+2. The screen shows **your station's queue**. Tap a job, then tap **CLOCK IN**. That's it — two taps.
+3. While you're on a job, a banner stays pinned at the top with three big buttons: **REPORT PRODUCTION** (enter good and scrap on the keypad — any scrap makes you pick a reason from the grid, no skipping it), **COMPLETE** (closes your time and finishes the step), and **HOLD** (pick why the job is stopping — material missing, machine down, and so on).
+4. **It logs you out by itself** after about 4 minutes of no touching, with a countdown warning first — tap anywhere to stay on. Always scan in as yourself; never work under someone else's badge.
+
+If the screen shows a red **OFFLINE** banner, the kiosk lost its connection — what you've typed stays on screen, but nothing saves until it reconnects. If a button refuses with a message (an earlier step isn't done, the job is on hold), that's the same sequence protection described below — run the next job and tell your lead.
+
+---
+
 ## Your work queue: Most Important Next
 
 The **Most Important Next** panel is your focus list. It shows the top jobs to work, in order. The system ranks them automatically using:

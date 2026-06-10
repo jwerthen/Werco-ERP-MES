@@ -1,7 +1,7 @@
 const KIOSK_STORAGE_KEY = 'kiosk_mode';
 
 const isKioskEligiblePath = (pathname: string): boolean => {
-  return pathname.startsWith('/shop-floor') || pathname === '/login';
+  return pathname.startsWith('/shop-floor') || pathname.startsWith('/kiosk') || pathname === '/login';
 };
 
 export function syncKioskMode(pathname: string, search: string): boolean {
@@ -54,4 +54,23 @@ export function getKioskWorkCenterId(search: string): number | null {
 export function getKioskWorkCenterCode(search: string): string | null {
   const params = new URLSearchParams(search);
   return params.get('work_center_code');
+}
+
+/** Default idle auto-logout for the operator kiosk (seconds). */
+export const KIOSK_IDLE_LOGOUT_DEFAULT_S = 240;
+/** Floor so a typo can't make the kiosk log out mid-scan. */
+export const KIOSK_IDLE_LOGOUT_MIN_S = 30;
+/**
+ * Ceiling kept safely below the global AuthContext idle redirect (15 min),
+ * so the kiosk's badge screen — not a hard /login redirect — always wins.
+ */
+export const KIOSK_IDLE_LOGOUT_MAX_S = 600;
+
+/** Read the ?idle_logout_s=N override; clamped to [30, 600], default 240. */
+export function getKioskIdleLogoutSeconds(search: string): number {
+  const raw = new URLSearchParams(search).get('idle_logout_s');
+  if (!raw) return KIOSK_IDLE_LOGOUT_DEFAULT_S;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return KIOSK_IDLE_LOGOUT_DEFAULT_S;
+  return Math.min(KIOSK_IDLE_LOGOUT_MAX_S, Math.max(KIOSK_IDLE_LOGOUT_MIN_S, Math.round(value)));
 }

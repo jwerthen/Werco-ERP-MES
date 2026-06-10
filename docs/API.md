@@ -303,6 +303,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 | POST | `/shop-floor/operations/{id}/start` | Start an operation | Yes |
 | POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
+| PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold (closes open time entries; body optional — category/severity/note file a structured blocker) | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
@@ -332,8 +333,9 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > second open entry that would double-count production.
 >
 > **Adoption-telemetry `source` channel (A0.1).** `POST /shop-floor/clock-in`,
-> `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production`, and
-> `POST /shop-floor/operations/{id}/complete` accept an **optional** `source` field naming the client
+> `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production`,
+> `POST /shop-floor/operations/{id}/complete`, and `PUT /shop-floor/operations/{id}/hold` (as of
+> A0.3) accept an **optional** `source` field naming the client
 > channel that produced the write: `kiosk` | `desktop` | `scanner` | `import` | `backfill` (any other
 > value is a **422**). It is persisted on the time entry (`time_entries.source`, nullable; migration
 > `048_time_entry_source`; returned as `source` on `TimeEntryResponse`) for adoption analytics during
@@ -342,10 +344,23 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 > pre-A0.1 rows, and entries opened by `/operations/{id}/start`, which takes no `source`, until a later
 > write reports one). A clock-out without `source` keeps the channel recorded at clock-in.
 > `/operations/{id}/complete` only **fills** `source` on the open entries it auto-closes when an entry
-> has none — it never overwrites another operator's recorded channel. The channel also rides on the
-> corresponding real-time events: the `labor_clock_in`, `labor_clock_out`, `operation_completed`, and
-> `work_order_completed` `OperationalEvent` payloads carry a `source` key (`null` when not reported —
-> e.g. office-endpoint or reconcile-on-read completions, which take no `source` input).
+> has none — it never overwrites another operator's recorded channel. `/operations/{id}/hold` follows
+> the **same fill-only-if-NULL contract** as `/complete`: a hold auto-closes every open time entry on
+> the operation (which may belong to other operators), and the hold's `source` only fills a missing
+> channel on those entries — it is never used to overwrite a channel recorded at clock-in. The channel
+> also rides on the corresponding real-time events: the `labor_clock_in`, `labor_clock_out`,
+> `operation_completed`, and `work_order_completed` `OperationalEvent` payloads carry a `source` key
+> (`null` when not reported — e.g. office-endpoint or reconcile-on-read completions, which take no
+> `source` input), and so do the hold-path events: `operation_hold` (emitted when the hold carries no
+> blocker data) and `work_order_blocker_created` (emitted when the hold files a structured blocker).
+>
+> **Structured scrap reason on in-shift production reports (A0.3).**
+> `POST /shop-floor/operations/{id}/production` accepts an **optional** `scrap_reason` string — the
+> same shape and destination as the existing clock-out field (the `TimeEntry.scrap_reason` column,
+> 255 max), persisted onto the caller's **active** time entry. It is stored only when the report
+> actually carries scrap (`quantity_scrapped_delta > 0`); an omitted/`null` reason never clobbers a
+> reason recorded by an earlier in-shift report. When stored, the reason is also appended to the
+> tamper-evident `REPORT_OPERATION_PRODUCTION` audit description.
 >
 > **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
 > the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores

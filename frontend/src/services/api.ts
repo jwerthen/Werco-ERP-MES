@@ -827,13 +827,13 @@ class ApiService {
     return response.data;
   }
 
-  async clockIn(data: { work_order_id: number; operation_id: number; work_center_id: number; entry_type?: string; notes?: string }) {
+  async clockIn(data: { work_order_id: number; operation_id: number; work_center_id: number; entry_type?: string; notes?: string; source?: string }) {
     const response = await this.api.post('/shop-floor/clock-in', data);
     this.invalidateDashboardCache();
     return response.data;
   }
 
-  async clockOut(timeEntryId: number, data: { quantity_produced: number; quantity_scrapped?: number; scrap_reason?: string; notes?: string }) {
+  async clockOut(timeEntryId: number, data: { quantity_produced: number; quantity_scrapped?: number; scrap_reason?: string; notes?: string; source?: string }) {
     const response = await this.api.post(`/shop-floor/clock-out/${timeEntryId}`, data);
     this.invalidateDashboardCache();
     return response.data;
@@ -935,13 +935,13 @@ class ApiService {
     return response.data;
   }
 
-  async completeOperation(operationId: number, data: { quantity_complete: number; notes?: string }) {
+  async completeOperation(operationId: number, data: { quantity_complete: number; notes?: string; source?: string }) {
     const response = await this.api.post(`/shop-floor/operations/${operationId}/complete`, data);
     this.invalidateDashboardCache();
     return response.data;
   }
 
-  async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string }) {
+  async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string; scrap_reason?: string; source?: string }) {
     const response = await this.api.post(`/shop-floor/operations/${operationId}/production`, data);
     this.invalidateDashboardCache();
     return response.data;
@@ -952,8 +952,10 @@ class ApiService {
     return response.data;
   }
 
-  async holdOperation(operationId: number) {
-    const response = await this.api.put(`/shop-floor/operations/${operationId}/hold`);
+  async holdOperation(operationId: number, data?: { category?: string; severity?: string; note?: string; source?: string }) {
+    // Body is optional and backward-compatible: when present the backend also
+    // records a WorkOrderBlocker (category/severity/note) alongside the hold.
+    const response = await this.api.put(`/shop-floor/operations/${operationId}/hold`, data);
     this.invalidateDashboardCache();
     return response.data;
   }
