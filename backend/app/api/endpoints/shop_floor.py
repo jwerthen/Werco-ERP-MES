@@ -67,6 +67,7 @@ from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import sync_laser_nest_from_operation
 from app.services.operation_action_gates import (
     CLOCK_IN_ALLOWED_STATUSES,
+    MSG_WRONG_WORK_CENTER,
     get_open_time_entry,
     operation_blocked_by_predecessors,
 )
@@ -648,7 +649,8 @@ def clock_in(
         raise HTTPException(status_code=400, detail="Operation does not belong to this work order")
 
     if operation.work_center_id != clock_in_data.work_center_id:
-        raise HTTPException(status_code=400, detail="Operation does not belong to this work center")
+        # Shared constant so the scanner resolver's blocker text can never drift.
+        raise HTTPException(status_code=400, detail=MSG_WRONG_WORK_CENTER)
 
     if operation.status not in CLOCK_IN_ALLOWED_STATUSES:
         raise HTTPException(status_code=400, detail="Operation is not ready to start")

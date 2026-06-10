@@ -59,6 +59,18 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > array on the response; it does **not** gate the operator's role or block the clock-in / start. The
 > gate's lookups are tenant-scoped (every skill/cert/work-center query filters the active company).
 
+> **Scanner resolve-action is read-only and open to any authenticated user (A0.4).**
+> `POST /api/v1/scanner/resolve-action` (the QR traveler / badge scan resolver,
+> `app/api/endpoints/scanner.py`) carries no role gate (`get_current_user` only) — it mirrors the
+> read-broad shop-floor reads it sits in front of. It is **read-only** (no audit rows, no
+> operational events, no auth side effects; a badge scan is a lookup only — badge **login** stays
+> exclusively on `POST /auth/employee-login`) and **tenant-scoped** (a cross-tenant code, or a
+> soft-deleted work order, resolves to `kind: "unknown"`). The per-action gating it reports
+> (`legal_actions` / `blockers`) reflects operation / time-entry **state**, not role — the
+> shop-floor write verbs it mirrors (clock-in, production, complete, hold, resume) are themselves
+> operator-facing (any authenticated user), so the resolver bypasses no role check. See
+> `docs/API.md` → Scanner.
+
 ### Parts
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -269,6 +281,17 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Edit | ✓ | ✓ | | | | | |
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
+
+> **Badge printing (A0.4).** The badge print sheet `/print/badges` (opened from the Users page via
+> multi-select → "Print Badges") is **frontend-gated to Admin / Manager** — the route requires
+> `users:create`/`users:edit` (route map in `frontend/src/App.tsx`) and the Users-page button is
+> gated by `canManageUsers` (`frontend/src/utils/permissions.ts`), so a Supervisor (who holds only
+> `users:view`) never sees the button or reaches the route. No new endpoint or permission string
+> was added: badges are client-rendered QR codes of `users.employee_id`, and the page loads its
+> data from the existing `GET /api/v1/users/`, which is server-enforced to
+> `require_role([ADMIN, MANAGER])` (see the access-enforcement note above) — the frontend gate
+> matches that server-side split (plus Platform Admin / superuser), the same one the Users page
+> itself has.
 
 ### Bulk Imports (Import Center / Excel Migration Kit)
 

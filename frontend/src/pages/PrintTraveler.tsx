@@ -182,6 +182,8 @@ export default function PrintTraveler() {
           /* A0.4: scan codes must stay >= 0.6in at print scale to scan reliably. */
           .qr-scan-op { width: 0.65in !important; height: 0.65in !important; }
           .qr-scan-header { width: 0.8in !important; height: 0.8in !important; }
+          /* A QR split across a page boundary does not scan: keep each routing row whole. */
+          tbody tr { break-inside: avoid; }
         }
       `}</style>
 

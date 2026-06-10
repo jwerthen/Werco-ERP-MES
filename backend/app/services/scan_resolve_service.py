@@ -15,6 +15,7 @@ endpoints call -- so the resolver can never disagree with what
 from datetime import datetime
 from typing import List, Optional, Tuple, Union
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.db.tenant_filter import tenant_query
@@ -39,7 +40,11 @@ from app.services.operation_action_gates import (
     report_production_blockers,
     resume_blockers,
 )
-from app.services.work_order_state_service import operation_target_quantity
+
+# _active_operation_id is module-private by convention but is the canonical
+# "which operation is the WO on" rule (first IN_PROGRESS, else first READY,
+# else first non-COMPLETE, by sequence); reuse it rather than fork the logic.
+from app.services.work_order_state_service import _active_operation_id, operation_target_quantity
 
 OP_PREFIX = "OP:"
 WO_PREFIX = "WO:"
@@ -84,7 +89,10 @@ def _resolve_operation(
     work_center_id: Optional[int],
 ) -> ScanResult:
     id_text = raw[len(OP_PREFIX) :].strip()
-    if not id_text.isdigit():
+    # str.isdigit() alone is NOT a safe int() guard: it accepts non-ASCII digit forms
+    # like "OP:²" that int() rejects (500), and an unbounded digit string overflows
+    # the DB integer range. 18 digits stays inside a signed 64-bit integer.
+    if not (id_text.isascii() and id_text.isdigit()) or len(id_text) > 18:
         return UnknownScanResult(code=raw, reason="Malformed operation code (expected OP:<id>)")
     operation_id = int(id_text)
 
@@ -105,7 +113,7 @@ def _resolve_operation(
     if work_order is None or work_order.is_deleted:
         return UnknownScanResult(code=raw, reason="No operation matches this code")
 
-    legal_actions, blockers = _evaluate_actions(db, operation, work_order, user, company_id)
+    legal_actions, blockers = _evaluate_actions(db, operation, work_order, user, company_id, work_center_id)
     revision_check, warning = _routing_revision_check(db, company_id, work_order)
 
     part = work_order.part
@@ -142,10 +150,17 @@ def _evaluate_actions(
     work_order: WorkOrder,
     user: User,
     company_id: int,
+    work_center_id: Optional[int] = None,
 ) -> Tuple[List[ScanAction], dict]:
-    """Run every shop-floor gate for the calling user; split legal vs blocked."""
+    """Run every shop-floor gate for the calling user; split legal vs blocked.
+
+    ``work_center_id`` is the scanning station, when the request carried one --
+    clock-in is then gated to that station exactly like the real endpoint
+    (``POST /shop-floor/clock-in`` 400s on a work-center mismatch). With no
+    station id the evaluation is unchanged.
+    """
     gate_results: List[Tuple[ScanAction, List[str]]] = [
-        ("clock_in", clock_in_blockers(db, operation, user.id)),
+        ("clock_in", clock_in_blockers(db, operation, user.id, work_center_id=work_center_id)),
         ("report_production", report_production_blockers(db, operation, user.id, company_id)),
         ("complete", complete_blockers(db, operation, work_order)),
         ("hold", hold_blockers(operation)),
@@ -174,7 +189,9 @@ def _routing_revision_check(
             Routing.status == "released",
             Routing.is_deleted == False,  # noqa: E712
         )
-        .order_by(Routing.id.desc())
+        # Latest RELEASE wins, not latest row: approved_at is stamped at release
+        # time, so order by it (id only as a tiebreak / for legacy NULLs).
+        .order_by(Routing.approved_at.desc().nullslast(), Routing.id.desc())
         .first()
     )
     if routing is None:
@@ -209,8 +226,10 @@ def _resolve_work_order(db: Session, *, company_id: int, raw: str) -> ScanResult
     )
     work_order = query.filter(WorkOrder.work_order_number == number).first()
     if work_order is None:
-        # Case-insensitive exact fallback (scanners/keyboards can mangle case).
-        work_order = query.filter(WorkOrder.work_order_number.ilike(number)).first()
+        # Case-insensitive EXACT fallback (scanners/keyboards can mangle case).
+        # NOT ilike(): % and _ in scanned text act as SQL wildcards there, so a
+        # stray "WO:%" scan would resolve to an arbitrary work order.
+        work_order = query.filter(func.lower(WorkOrder.work_order_number) == number.lower()).first()
     if work_order is None:
         return UnknownScanResult(code=raw, reason="No work order matches this code")
 
@@ -225,10 +244,11 @@ def _resolve_work_order(db: Session, *, company_id: int, raw: str) -> ScanResult
         )
         for op in operations
     ]
-    current_operation_id = next(
-        (op.id for op in operations if (op.status.value if hasattr(op.status, "value") else op.status) != "complete"),
-        None,
-    )
+    # Canonical "operation the WO is currently on" -- the same helper that
+    # maintains work_order.current_operation_id (first IN_PROGRESS by sequence,
+    # else first READY, else first non-COMPLETE), so a WO scan can never
+    # disagree with the rest of the system about where the job is.
+    current_operation_id = _active_operation_id(work_order)
     summary = WorkOrderScanSummary(
         id=work_order.id,
         work_order_number=work_order.work_order_number,

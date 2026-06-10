@@ -719,12 +719,18 @@ if settings.RATE_LIMIT_ENABLED:
             "/api/v1/auth/refresh": "30/minute",  # Allow reasonable token refreshes
             "/api/v1/auth/employee-login": "3/minute",  # Employee ID kiosk login
         }
+        # Per-route limits for non-auth hot paths, same path -> limit shape as the
+        # auth map above. A0.4: wedge scanners hammer the scan resolver; ~1 scan/sec
+        # per client is generous headroom for a human with a scanner.
+        ENDPOINT_RATE_LIMITS = {
+            "/api/v1/scanner/resolve-action": "60/minute",
+        }
 
         def get_rate_limit_for_path(request):
             """Get rate limit based on request path"""
             path = request.url.path
-            for auth_path, limit in AUTH_RATE_LIMITS.items():
-                if path.startswith(auth_path):
+            for rated_path, limit in {**AUTH_RATE_LIMITS, **ENDPOINT_RATE_LIMITS}.items():
+                if path.startswith(rated_path):
                     return limit
             return f"{settings.RATE_LIMIT_TIMES}/{settings.RATE_LIMIT_SECONDS} second"
 
@@ -765,6 +771,7 @@ if settings.RATE_LIMIT_ENABLED:
             f"Rate limiting enabled: {settings.RATE_LIMIT_TIMES} requests/{settings.RATE_LIMIT_SECONDS}s (default)"
         )
         logger.info("Auth rate limits: login=5/min, register=3/min, refresh=30/min")
+        logger.info("Per-route rate limits: scanner resolve-action=60/min")
     except ImportError:
         logger.warning("Rate limiting requested but slowapi not installed")
 

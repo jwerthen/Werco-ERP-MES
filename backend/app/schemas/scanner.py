@@ -109,7 +109,10 @@ class WorkOrderScanSummary(BaseModel):
     part_number: Optional[str] = None
     part_name: Optional[str] = None
     current_operation_id: Optional[int] = Field(
-        None, description="First non-complete operation by sequence (computed, not the stale column)."
+        None,
+        description="The operation the WO is currently on, by the canonical rule "
+        "(first IN_PROGRESS by sequence, else first READY, else first non-COMPLETE; "
+        "computed, not the stale column).",
     )
 
 

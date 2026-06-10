@@ -553,6 +553,68 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 }
 ```
 
+### Scanner (QR / barcode)
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/scanner/resolve-action` | Resolve a scanned traveler/badge code into a typed action context (A0.4) | Yes |
+| POST | `/scanner/lookup` | Look up a scanned barcode: supplier part number → internal part number → work order number | Yes |
+| GET | `/scanner/mappings` | List supplier part-number mappings | Yes |
+| POST | `/scanner/mappings` | Create a supplier part-number mapping | Yes |
+| DELETE | `/scanner/mappings/{mapping_id}` | Deactivate a supplier part-number mapping | Yes |
+
+> **`POST /scanner/resolve-action` (A0.4 QR traveler / badge scan plumbing).** Every scan surface
+> (kiosk, wedge scanner, phone) posts the raw scanned text and gets back a **discriminated union**
+> keyed on `kind` — `operation` | `work_order` | `employee` | `unknown`. Request body:
+> `{ "code": "<raw scanned text>", "work_center_id": <optional station work center id> }` (`code`
+> 1–255 chars, whitespace stripped; `work_center_id` only drives the `work_center_match` flag on
+> operation scans — it never widens access). Open to **any authenticated user** — it mirrors the
+> read-broad shop-floor reads. Code formats (prefix matching is case-insensitive):
+> - `OP:{operation_id}` — a routing-step QR printed on the traveler → `kind: "operation"`.
+> - `WO:{work_order_number}` — the traveler header QR → `kind: "work_order"` (exact match, with a
+>   case-insensitive exact fallback).
+> - anything else — probed as an employee badge id (exact match on an **active** user's
+>   `employee_id`) → `kind: "employee"`.
+> - no match / malformed → `kind: "unknown"` with `{ code, reason }`, returned with **HTTP 200** —
+>   a structured miss, not an error, because wedge scanners hit unknown codes constantly.
+>
+> **`kind: "operation"`** carries an operation summary (sequence, status, WO number/status, part,
+> work center, quantities, plus `work_center_match` — true/false when the request named a station,
+> `null` otherwise), `legal_actions` — the subset of
+> `clock_in | report_production | complete | hold | resume` the **calling user** could perform
+> right now — and `blockers`, a map of action → human-readable reasons, present only for actions
+> **not** in `legal_actions`. The gating is derived from the same predicates the live shop-floor
+> write endpoints enforce (`app/services/operation_action_gates.py`, extracted from those
+> handlers, which now call the same helpers), and it **mirrors the live endpoints' gating
+> verbatim — clients should treat blocker text as display-ready** (a kiosk showing a resolver
+> blocker and a kiosk showing the endpoint's 400 show the same message).
+>
+> **Routing-staleness warning is a documented proxy.** `warning: "routing_revision_changed"` (with
+> the accompanying `routing_revision_check` object) flags that the part's current **released**
+> routing was released after the work order's release/creation baseline — i.e. any traveler
+> printed from this WO predates the routing now in force. This is **timestamp inference, not an
+> exact check**: work orders do not snapshot the routing revision their operations were generated
+> from, and traveler prints are not recorded server-side. `routing_revision_check` carries the
+> current released routing's `current_released_revision`, the boolean
+> `released_routing_changed_after_wo_creation` (`null` when either side lacks a usable timestamp),
+> the `checked_against` baseline (WO `released_at`, else `created_at`), and a `note` restating the
+> proxy semantics. An exact check requires a WO-level routing snapshot (pending; not in the data
+> model today).
+>
+> **`kind: "work_order"`** returns the WO summary plus its operation list (id / sequence /
+> operation number / name / status) and `current_operation_id` — the first non-complete operation
+> by sequence (computed, not the stale column).
+>
+> **`kind: "employee"` is a lookup ONLY** — `{ employee_id, first_name, last_initial }`, no
+> tokens, no session, **no auth side effects**. Badge **login** stays exclusively on
+> `POST /auth/employee-login`.
+>
+> **Read-only / zero-write.** Resolving a scan writes **no audit rows** and emits **no operational
+> events** — it has GET semantics in a POST body (POST keeps raw scanner text out of URLs and
+> access logs). **Tenant-scoped:** every lookup filters the active company; a code that exists in
+> another tenant — and a soft-deleted work order (or an operation whose WO is soft-deleted) —
+> resolves to `kind: "unknown"` exactly like a code that exists nowhere.
+
 ### Quality
 
 | Method | Endpoint | Description | Auth Required |

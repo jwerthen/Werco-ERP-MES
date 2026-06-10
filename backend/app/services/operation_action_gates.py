@@ -34,6 +34,7 @@ COMPLETE_ALLOWED_STATUSES = [OperationStatus.IN_PROGRESS, OperationStatus.READY]
 
 # Blocker messages, verbatim from the shop-floor handlers.
 MSG_ALREADY_CLOCKED_IN = "You are already clocked in to this operation."
+MSG_WRONG_WORK_CENTER = "Operation does not belong to this work center"
 MSG_NOT_READY_TO_START = "Operation is not ready to start"
 MSG_PREDECESSORS_INCOMPLETE = "Previous operations must be completed first"
 MSG_MUST_BE_IN_PROGRESS = "Operation must be in progress to add completed quantity"
@@ -93,15 +94,25 @@ def operation_blocked_by_predecessors(db: Session, operation: WorkOrderOperation
     )
 
 
-def clock_in_blockers(db: Session, operation: WorkOrderOperation, user_id: int) -> List[str]:
+def clock_in_blockers(
+    db: Session, operation: WorkOrderOperation, user_id: int, work_center_id: Optional[int] = None
+) -> List[str]:
     """Reasons POST /shop-floor/clock-in would refuse this user on this operation.
 
-    Mirrors the handler's gate order: duplicate open entry -> status -> predecessors.
-    Empty list == the clock-in gates pass.
+    Mirrors the handler's gate order: duplicate open entry -> work center ->
+    status -> predecessors. Empty list == the clock-in gates pass.
+
+    ``work_center_id`` is the station the caller would clock in FROM (the
+    handler's ``clock_in_data.work_center_id``); when provided and it differs
+    from the operation's work center, clock-in is blocked with the handler's
+    exact 400 text. ``None`` (no station known) skips the gate -- the resolver
+    must not invent a station the request never carried.
     """
     reasons: List[str] = []
     if get_open_time_entry(db, user_id, operation.id) is not None:
         reasons.append(MSG_ALREADY_CLOCKED_IN)
+    if work_center_id is not None and operation.work_center_id != work_center_id:
+        reasons.append(MSG_WRONG_WORK_CENTER)
     if operation.status not in CLOCK_IN_ALLOWED_STATUSES:
         reasons.append(MSG_NOT_READY_TO_START)
     if operation_blocked_by_predecessors(db, operation):

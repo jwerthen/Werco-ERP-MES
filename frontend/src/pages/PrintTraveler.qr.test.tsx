@@ -128,6 +128,17 @@ describe('PrintTraveler scan QRs', () => {
     expect(screen.getByAltText('Work Order QR')).toBeInTheDocument();
   });
 
+  it('keeps each routing row whole across print page breaks (a split QR does not scan)', async () => {
+    const { container } = renderTraveler();
+
+    await waitFor(() => expect(screen.getByText('WORK ORDER TRAVELER')).toBeInTheDocument());
+    const styleText = Array.from(container.querySelectorAll('style'))
+      .map((style) => style.textContent || '')
+      .join('\n');
+    expect(styleText).toContain('@media print');
+    expect(styleText).toContain('tbody tr { break-inside: avoid; }');
+  });
+
   it('renders the print-control footer with printed-by, part revision, and the uncontrolled stance', async () => {
     renderTraveler();
 

@@ -3,6 +3,7 @@ import api from '../services/api';
 import { UserRole } from '../types';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { usePermissions } from '../hooks/usePermissions';
 import {
   PlusIcon,
   PencilIcon,
@@ -93,6 +94,9 @@ const getApiErrorMessage = (err: any, fallback: string) => {
 export default function Users() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user: currentUser } = useAuth();
+  // Badge printing is admin/manager-only: /print/badges loads GET /users, which is
+  // server-enforced to ADMIN/MANAGER, so the button mirrors canManageUsers.
+  const { canManageUsers } = usePermissions();
   const approvalMode = searchParams.get('approvals') === 'pending';
   const canApproveUsers =
     currentUser?.role === 'admin' || currentUser?.role === 'platform_admin' || currentUser?.is_superuser === true;
@@ -135,6 +139,10 @@ export default function Users() {
       ]);
       setUsers(userList);
       setPendingUsers(pendingApprovals);
+      // Prune badge selections that no longer correspond to a visible user, so a
+      // refetch (filter change, approval, deactivation) cannot leave stale ids
+      // selected for printing.
+      setSelectedUserIds((current) => current.filter((id) => userList.some((u: UserData) => u.id === id)));
     } catch (err) {
       console.error('Failed to load users:', err);
     } finally {
@@ -266,8 +274,11 @@ export default function Users() {
     );
   };
 
+  // Membership-based, not count-based: counts go stale when the users list refetches.
+  const allVisibleSelected = users.length > 0 && users.every((u) => selectedUserIds.includes(u.id));
+
   const toggleSelectAllBadges = () => {
-    setSelectedUserIds((current) => (current.length === users.length ? [] : users.map((u) => u.id)));
+    setSelectedUserIds(allVisibleSelected ? [] : users.map((u) => u.id));
   };
 
   const handlePrintBadges = () => {
@@ -350,15 +361,17 @@ export default function Users() {
               Pending ({pendingUsers.length})
             </button>
           )}
-          <button
-            onClick={handlePrintBadges}
-            className="btn-secondary flex items-center"
-            disabled={selectedUserIds.length === 0}
-            title={selectedUserIds.length === 0 ? 'Select users below to print badges' : 'Print badges for selected users'}
-          >
-            <IdentificationIcon className="h-5 w-5 mr-2" />
-            Print Badges{selectedUserIds.length > 0 ? ` (${selectedUserIds.length})` : ''}
-          </button>
+          {canManageUsers && (
+            <button
+              onClick={handlePrintBadges}
+              className="btn-secondary flex items-center"
+              disabled={selectedUserIds.length === 0}
+              title={selectedUserIds.length === 0 ? 'Select users below to print badges' : 'Print badges for selected users'}
+            >
+              <IdentificationIcon className="h-5 w-5 mr-2" />
+              Print Badges{selectedUserIds.length > 0 ? ` (${selectedUserIds.length})` : ''}
+            </button>
+          )}
           <button
             onClick={() => setShowImportModal(true)}
             className="btn-secondary flex items-center"
@@ -480,7 +493,7 @@ export default function Users() {
                 <th className="px-4 py-3 text-left">
                   <input
                     type="checkbox"
-                    checked={users.length > 0 && selectedUserIds.length === users.length}
+                    checked={allVisibleSelected}
                     onChange={toggleSelectAllBadges}
                     className="rounded border-slate-600"
                     aria-label="Select all users for badge printing"

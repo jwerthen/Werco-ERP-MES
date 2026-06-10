@@ -310,6 +310,41 @@ def test_clock_in_gate_parity_happy_path(client: TestClient, db_session: Session
     assert real.status_code == 200, real.text
 
 
+def test_clock_in_gate_parity_wrong_work_center(client: TestClient, db_session: Session):
+    """Station-aware resolve: a mismatched work_center_id blocks clock_in with the real
+    endpoint's exact 400 text; with no station id (or the right one) behavior is unchanged."""
+    user = make_user(db_session)
+    wo, (op,), wc, _ = make_wo(db_session)
+    other_wc = WorkCenter(
+        name=f"A04SCAN-WC-OTHER-{_next()}",
+        code=f"A04SCAN-WC-OTHER-{_next()}",
+        work_center_type="welding",
+        hourly_rate=100.0,
+        is_active=True,
+        company_id=COMPANY_A,
+    )
+    db_session.add(other_wc)
+    db_session.commit()
+
+    body = resolve(client, user, f"OP:{op.id}", work_center_id=other_wc.id)
+    assert body["operation"]["work_center_match"] is False
+    assert "clock_in" not in body["legal_actions"]
+
+    real = client.post(
+        CLOCK_IN,
+        json={"work_order_id": wo.id, "operation_id": op.id, "work_center_id": other_wc.id, "entry_type": "run"},
+        headers=headers_for(user),
+    )
+    assert real.status_code == 400
+    assert real.json()["detail"] == "Operation does not belong to this work center"
+    assert body["blockers"]["clock_in"] == [real.json()["detail"]]
+
+    # No station id provided: the gate must not fire (behavior unchanged).
+    assert "clock_in" in resolve(client, user, f"OP:{op.id}")["legal_actions"]
+    # The matching station stays legal.
+    assert "clock_in" in resolve(client, user, f"OP:{op.id}", work_center_id=wc.id)["legal_actions"]
+
+
 def test_complete_blocked_on_terminal_work_order(client: TestClient, db_session: Session):
     user = make_user(db_session)
     _, (op,), _, _ = make_wo(db_session, wo_status=WorkOrderStatus.CANCELLED, op_statuses=[OperationStatus.IN_PROGRESS])
@@ -349,6 +384,47 @@ def test_work_order_scan_lists_operations_and_current_op(client: TestClient, db_
     assert body["operations"][0]["status"] == "complete"
     # current op = first non-complete by sequence, so a WO-level scan can jump there.
     assert body["work_order"]["current_operation_id"] == op2.id
+
+
+def test_work_order_current_op_is_canonical_active_operation(client: TestClient, db_session: Session):
+    """current_operation_id uses the canonical rule (first IN_PROGRESS, else first READY,
+    else first non-COMPLETE) -- NOT 'first non-complete by sequence', so a seq-10 ON_HOLD
+    op does not mask the seq-20 op actually being run."""
+    user = make_user(db_session)
+    wo, (op1, op2), _, _ = make_wo(db_session, op_statuses=[OperationStatus.ON_HOLD, OperationStatus.IN_PROGRESS])
+
+    body = resolve(client, user, f"WO:{wo.work_order_number}")
+    assert body["work_order"]["current_operation_id"] == op2.id
+
+
+def test_work_order_scan_rejects_sql_wildcards(client: TestClient, db_session: Session):
+    """'WO:%' (and '_' as any-char) must NOT resolve: the case-insensitive fallback is an
+    exact comparison, not ilike, so scanned wildcard characters cannot match arbitrary WOs."""
+    user = make_user(db_session)
+    wo, _, _, _ = make_wo(db_session)  # a real WO that ilike('%') would have matched
+
+    body = resolve(client, user, "WO:%")
+    assert body["kind"] == "unknown"
+    assert body["reason"] == "No work order matches this code"
+
+    # '_' must not act as a single-character wildcard against an existing number.
+    probe = wo.work_order_number[:-1] + "_"
+    assert probe != wo.work_order_number
+    assert resolve(client, user, f"WO:{probe}")["kind"] == "unknown"
+
+
+def test_work_order_number_with_literal_underscore_resolves(client: TestClient, db_session: Session):
+    """A literal '_' in a real WO number still resolves through the case-insensitive
+    fallback (lowercased scan forces the fallback path past the exact-match probe)."""
+    user = make_user(db_session)
+    wo, _, _, _ = make_wo(db_session)
+    n = _next()
+    wo.work_order_number = f"A04SCAN_WO_{n:05d}"
+    db_session.commit()
+
+    body = resolve(client, user, f"WO:a04scan_wo_{n:05d}")
+    assert body["kind"] == "work_order"
+    assert body["work_order"]["work_order_number"] == wo.work_order_number
 
 
 # ===========================================================================
@@ -410,6 +486,20 @@ def test_unknown_code_returns_structured_miss_with_200(client: TestClient, db_se
     assert resolve(client, user, "OP:notanumber")["reason"] == "Malformed operation code (expected OP:<id>)"
     assert resolve(client, user, "WO:NO-SUCH-WO")["reason"] == "No work order matches this code"
     assert resolve(client, user, "999999999")["reason"] == "No employee badge matches this id"
+
+
+def test_malformed_op_ids_are_structured_misses_not_500(client: TestClient, db_session: Session):
+    """OP:² passes str.isdigit() but int() raises; a 21-digit id overflows the DB int
+    range. Both must come back as kind="unknown" with HTTP 200 (asserted in resolve())."""
+    user = make_user(db_session)
+
+    for code in ["OP:²", "OP:999999999999999999999"]:
+        body = resolve(client, user, code)
+        assert body["kind"] == "unknown", code
+        assert body["reason"] == "Malformed operation code (expected OP:<id>)"
+
+    # Boundary: 18 ASCII digits is still parsed and looked up (a clean miss, not malformed).
+    assert resolve(client, user, "OP:" + "9" * 18)["reason"] == "No operation matches this code"
 
 
 # ===========================================================================
@@ -521,6 +611,21 @@ def test_routing_released_before_wo_creation_does_not_warn(client: TestClient, d
     assert body["routing_revision_check"]["released_routing_changed_after_wo_creation"] is False
 
 
+def test_routing_check_picks_latest_release_not_highest_id(client: TestClient, db_session: Session):
+    """Two released routings: the LATER-approved one is the routing in force, even though
+    it has the LOWER id (the staleness query orders by approved_at, id only as tiebreak)."""
+    user = make_user(db_session)
+    _, (op,), wc, part = make_wo(db_session)
+    # Lower id, later release -- this is the revision in force.
+    _make_released_routing(db_session, part, wc, approved_at=datetime.utcnow() + timedelta(hours=2), revision="B")
+    # Higher id, earlier release.
+    _make_released_routing(db_session, part, wc, approved_at=datetime.utcnow() - timedelta(days=30), revision="C")
+
+    body = resolve(client, user, f"OP:{op.id}")
+    assert body["routing_revision_check"]["current_released_revision"] == "B"
+    assert body["warning"] == "routing_revision_changed"
+
+
 def test_no_released_routing_means_no_check(client: TestClient, db_session: Session):
     user = make_user(db_session)
     _, (op,), _, _ = make_wo(db_session)
@@ -538,3 +643,24 @@ def test_no_released_routing_means_no_check(client: TestClient, db_session: Sess
 def test_resolve_requires_authentication(client: TestClient, db_session: Session):
     response = client.post(RESOLVE, json={"code": "OP:1"})
     assert response.status_code in (401, 403)
+
+
+# ===========================================================================
+# Per-route rate limit declaration
+# ===========================================================================
+
+
+def test_scanner_resolve_action_rate_limit_declared(client: TestClient):
+    """resolve-action carries a 60/minute per-route limit in main.py's central
+    path -> limit map (the same declaration style as the auth limits).
+
+    NOTE: like AUTH_RATE_LIMITS, this map feeds get_rate_limit_for_path, which is
+    not yet wired into the slowapi Limiter -- enforcement today is the global
+    default. This locks the declaration so the wiring fix has the value in place.
+    """
+    import app.main as app_main
+
+    endpoint_limits = getattr(app_main, "ENDPOINT_RATE_LIMITS", None)
+    if endpoint_limits is None:
+        pytest.skip("Rate limiting disabled in this environment (settings.RATE_LIMIT_ENABLED=False)")
+    assert endpoint_limits[RESOLVE] == "60/minute"
