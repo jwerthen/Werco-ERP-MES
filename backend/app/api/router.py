@@ -11,6 +11,7 @@ from app.api.endpoints import (
     calibration,
     carrier_webhooks,
     companies,
+    copilot,
     custom_fields,
     customer_complaints,
     customers,
@@ -65,6 +66,7 @@ api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(ai_learning.router, prefix="/ai", tags=["AI Learning"])
 api_router.include_router(ai_usage.router, prefix="/ai-usage", tags=["AI Usage"])
+api_router.include_router(copilot.router, prefix="/copilot", tags=["Werco Copilot"])
 api_router.include_router(work_centers.router, prefix="/work-centers", tags=["Work Centers"])
 api_router.include_router(parts.router, prefix="/parts", tags=["Parts"])
 api_router.include_router(materials.router, prefix="/materials", tags=["Materials & Supplies"])

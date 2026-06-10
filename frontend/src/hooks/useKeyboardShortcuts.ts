@@ -133,6 +133,7 @@ export const GLOBAL_SHORTCUTS = {
   HELP: { key: '/', ctrl: true, description: 'Show keyboard shortcuts' },
   SEARCH: { key: 'k', ctrl: true, description: 'Open global search' },
   REFRESH: { key: 'r', ctrl: true, shift: true, description: 'Refresh data' },
+  COPILOT: { key: '.', ctrl: true, description: 'Toggle Werco Copilot' },
 } as const;
 
 /**

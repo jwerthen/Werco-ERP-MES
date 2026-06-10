@@ -9,6 +9,7 @@ import GlobalSearch, { useGlobalSearch } from './GlobalSearch';
 import BottomNav from './ui/BottomNav';
 import SkipLink from './SkipLink';
 import AdaptivePromptPanel from './AdaptivePromptPanel';
+import { CopilotPanel } from './ai/CopilotPanel';
 import api from '../services/api';
 import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
 import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
@@ -348,6 +349,7 @@ export default function Layout({ children }: LayoutProps) {
   const [logoutEmployeeId, setLogoutEmployeeId] = useState('');
   const [logoutError, setLogoutError] = useState('');
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
+  const [copilotOpen, setCopilotOpen] = useState(false);
   const globalSearch = useGlobalSearch();
   const keyboardShortcuts = useKeyboardShortcutsContext();
   const isKiosk = isKioskMode(location.pathname, location.search) && user?.role === 'operator';
@@ -368,6 +370,13 @@ export default function Layout({ children }: LayoutProps) {
     {
       ...GLOBAL_SHORTCUTS.SEARCH,
       action: globalSearch.open,
+      preventDefault: true,
+    },
+    {
+      ...GLOBAL_SHORTCUTS.COPILOT,
+      action: () => {
+        if (!isKiosk) setCopilotOpen(open => !open);
+      },
       preventDefault: true,
     },
   ]);
@@ -663,6 +672,21 @@ export default function Layout({ children }: LayoutProps) {
                   </kbd>
                 </button>
 
+                {/* Werco Copilot toggle */}
+                {!isKiosk && (
+                  <button
+                    onClick={() => setCopilotOpen(open => !open)}
+                    className="flex items-center gap-2 px-3 h-[34px] rounded-[3px] text-fd-mute hover:text-fd-body transition-all duration-150"
+                    style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line)' }}
+                    title="Werco Copilot (Ctrl+.)"
+                    aria-label="Toggle Werco Copilot"
+                    data-tour="copilot"
+                  >
+                    <SparklesIcon className="h-4 w-4 text-fd-blue" />
+                    <span className="hidden md:inline font-mono text-xs">copilot</span>
+                  </button>
+                )}
+
                 {/* HUD status cluster */}
                 <div className="hidden xl:flex items-center gap-3.5 pl-1 font-mono text-[11px]">
                   <div>
@@ -753,6 +777,10 @@ export default function Layout({ children }: LayoutProps) {
       <SessionWarningModal />
 
       {!isKiosk && <AdaptivePromptPanel />}
+
+      {/* Werco Copilot drawer — stays mounted so the conversation survives open/close.
+          Not rendered in kiosk mode (and kiosk/wallboard screens bypass Layout entirely). */}
+      {!isKiosk && <CopilotPanel isOpen={copilotOpen} onClose={() => setCopilotOpen(false)} />}
 
       {/* Employee ID Logout Modal */}
       {logoutModalOpen && isShopFloorKiosk && (

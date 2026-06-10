@@ -29,6 +29,12 @@ import {
 import { AIUsageSummaryResponse } from '../types/aiUsage';
 import { DisplayToken, DisplayTokenCreateInput, DisplayTokenIssued } from '../types/wallboard';
 import {
+  CopilotChatRequest,
+  CopilotChatResponse,
+  CopilotStreamEvent,
+  CopilotStreamHandlers,
+} from '../types/copilot';
+import {
   EntityImportResponse,
   ImportTemplateIndexResponse,
   PurchaseOrderImportResponse,
@@ -863,6 +869,106 @@ class ApiService {
   async naturalLanguageSearch(query: string, limit = 20): Promise<NaturalLanguageSearchResponse> {
     const response = await this.api.post<NaturalLanguageSearchResponse>('/search/nl', { query, limit });
     return response.data;
+  }
+
+  /** Werco Copilot chat — non-streaming variant (single JSON response). */
+  async copilotChat(request: CopilotChatRequest): Promise<CopilotChatResponse> {
+    const response = await this.api.post<CopilotChatResponse>('/copilot/chat', request, {
+      params: { stream: false },
+    });
+    return response.data;
+  }
+
+  /**
+   * Werco Copilot chat — streaming variant (Server-Sent Events over fetch).
+   *
+   * Axios cannot stream response bodies in the browser, so this uses fetch
+   * against the same base URL with the same Authorization header the axios
+   * client carries. Frames are `data: <json>` SSE events; handlers fire per
+   * event and the final payload is also returned. Throws on transport/HTTP
+   * errors and when the stream ends with an in-band `error` frame.
+   */
+  async copilotChatStream(
+    request: CopilotChatRequest,
+    handlers: CopilotStreamHandlers = {},
+    signal?: AbortSignal
+  ): Promise<CopilotChatResponse> {
+    const baseURL = this.api.defaults.baseURL || API_BASE_URL;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+      Accept: 'text/event-stream',
+    };
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(`${baseURL}/copilot/chat?stream=true`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(request),
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      throw new Error(`Copilot request failed (${response.status})`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const state: { final: CopilotChatResponse | null; error: string | null } = { final: null, error: null };
+
+    const handleFrame = (frame: string) => {
+      const line = frame.trim();
+      if (!line.startsWith('data:')) return;
+      let event: CopilotStreamEvent;
+      try {
+        event = JSON.parse(line.slice(5).trim()) as CopilotStreamEvent;
+      } catch {
+        return; // skip malformed frame
+      }
+      if (event.type === 'tool_use') {
+        handlers.onToolUse?.(event.tool, event.summary);
+      } else if (event.type === 'delta') {
+        handlers.onDelta?.(event.text);
+      } else if (event.type === 'final') {
+        state.final = {
+          answer: event.answer,
+          references: event.references,
+          tool_trace: event.tool_trace,
+          interaction_id: event.interaction_id,
+          rounds: event.rounds,
+          truncated: event.truncated,
+        };
+        handlers.onFinal?.(state.final);
+      } else if (event.type === 'error') {
+        state.error = event.message;
+        handlers.onError?.(event.message);
+      }
+    };
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let separatorIndex = buffer.indexOf('\n\n');
+      while (separatorIndex >= 0) {
+        handleFrame(buffer.slice(0, separatorIndex));
+        buffer = buffer.slice(separatorIndex + 2);
+        separatorIndex = buffer.indexOf('\n\n');
+      }
+    }
+    if (buffer.trim()) {
+      handleFrame(buffer);
+    }
+
+    if (state.error) {
+      throw new Error(state.error);
+    }
+    if (!state.final) {
+      throw new Error('Copilot stream ended without a final answer');
+    }
+    return state.final;
   }
 
   async recordAIEvent(data: AIInteractionEventInput) {

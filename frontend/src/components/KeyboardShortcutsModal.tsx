@@ -48,6 +48,7 @@ export function KeyboardShortcutsModal({
         GLOBAL_SHORTCUTS.HELP,
         GLOBAL_SHORTCUTS.SEARCH,
         GLOBAL_SHORTCUTS.REFRESH,
+        GLOBAL_SHORTCUTS.COPILOT,
       ],
     },
     {

@@ -272,6 +272,8 @@ def run_llm_task(
     *,
     messages: List[Dict[str, Any]],
     system: Optional[Union[str, List[Dict[str, Any]]]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Dict[str, Any]] = None,
     max_tokens: int = 4096,
     company_id: Optional[int] = None,
     feature: Optional[str] = None,
@@ -288,6 +290,15 @@ def run_llm_task(
         system: Optional system prompt — a plain string or a list of content
             blocks. Use block form with ``cache_control: {"type": "ephemeral"}``
             to enable prompt caching on the stable prefix.
+        tools: Optional tool definitions, forwarded verbatim. Tools render
+            *before* ``system`` in the prompt prefix, so keep the tool list
+            deterministic (stable order, stable JSON) — a ``cache_control``
+            breakpoint on the last system block then caches tools + system
+            together. Multi-turn tool-use loops call this function once per
+            iteration; each iteration records its own AIUsageEvent row.
+        tool_choice: Optional Anthropic ``tool_choice`` dict (e.g.
+            ``{"type": "none"}`` to force a final text answer while keeping
+            the cached tool prefix intact).
         max_tokens: Response token cap.
         company_id: Active company for tenant-scoped usage telemetry. When
             None the call still runs; telemetry is skipped with a warning.
@@ -313,6 +324,10 @@ def run_llm_task(
     }
     if system is not None:
         create_kwargs["system"] = system
+    if tools is not None:
+        create_kwargs["tools"] = tools
+    if tool_choice is not None:
+        create_kwargs["tool_choice"] = tool_choice
 
     started = time.monotonic()
     try:

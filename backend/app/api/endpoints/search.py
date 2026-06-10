@@ -11,8 +11,15 @@ Searches across all major entities in the system:
 - Inventory Items
 - Purchase Orders
 - Quotes
+
+The entity-search core lives in ``app/services/search_service.py`` (shared
+with Werco Copilot's ``search_erp`` tool); this module keeps the HTTP contract
+and the natural-language search interpreter.
 """
 
+import json
+import logging
+import re
 from datetime import date
 from typing import List, Optional
 
@@ -23,41 +30,18 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user
 from app.db.database import get_db
-from app.models.bom import BOM
-from app.models.customer import Customer
 from app.models.part import Part
-from app.models.purchasing import PurchaseOrder, Vendor
-from app.models.quote import Quote
-from app.models.routing import Routing
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerStatus
+from app.services.search_service import SearchResponse, SearchResult, run_global_search
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-
-class SearchResult(BaseModel):
-    """Individual search result"""
-
-    id: int
-    type: str  # part, work_order, customer, bom, routing, user, inventory, purchase_order, quote, vendor
-    title: str
-    subtitle: Optional[str] = None
-    url: str
-    icon: str  # Icon identifier for frontend
-
-    class Config:
-        from_attributes = True
-
-
-class SearchResponse(BaseModel):
-    """Search response with categorized results"""
-
-    query: str
-    total: int
-    results: List[SearchResult]
-    categories: dict  # Count by category
+__all__ = ["router", "SearchResult", "SearchResponse"]
 
 
 class NaturalLanguageSearchRequest(BaseModel):
@@ -102,303 +86,7 @@ def global_search(
     - quote: Quotes by number, customer
     - vendor: Vendors/Suppliers by name, code
     """
-    results: List[SearchResult] = []
-    categories = {}
-    search_term = f"%{q.lower()}%"
-
-    # Parse types filter
-    allowed_types = None
-    if types:
-        allowed_types = [t.strip().lower() for t in types.split(",")]
-
-    def should_search(type_name: str) -> bool:
-        return allowed_types is None or type_name in allowed_types
-
-    # Search Parts
-    if should_search("part"):
-        parts = (
-            db.query(Part)
-            .filter(
-                Part.company_id == company_id,
-                Part.is_active == True,
-                or_(
-                    func.lower(Part.part_number).like(search_term),
-                    func.lower(Part.name).like(search_term),
-                    func.lower(Part.description).like(search_term),
-                    func.lower(Part.customer_part_number).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for part in parts:
-            results.append(
-                SearchResult(
-                    id=part.id,
-                    type="part",
-                    title=part.part_number,
-                    subtitle=part.name,
-                    url=f"/parts/{part.id}",
-                    icon="cube",
-                )
-            )
-        categories["part"] = len(parts)
-
-    # Search Work Orders
-    if should_search("work_order"):
-        work_orders = (
-            db.query(WorkOrder)
-            .filter(
-                WorkOrder.company_id == company_id,
-                or_(
-                    func.lower(WorkOrder.work_order_number).like(search_term),
-                    func.lower(WorkOrder.customer_po).like(search_term),
-                    func.lower(WorkOrder.lot_number).like(search_term),
-                    func.lower(WorkOrder.customer_name).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for wo in work_orders:
-            results.append(
-                SearchResult(
-                    id=wo.id,
-                    type="work_order",
-                    title=wo.work_order_number,
-                    subtitle=f"{wo.customer_name or ''} - {wo.status.value}".strip(" -"),
-                    url=f"/work-orders/{wo.id}",
-                    icon="clipboard",
-                )
-            )
-        categories["work_order"] = len(work_orders)
-
-    # Search Customers
-    if should_search("customer"):
-        customers = (
-            db.query(Customer)
-            .filter(
-                Customer.company_id == company_id,
-                Customer.is_active == True,
-                or_(
-                    func.lower(Customer.name).like(search_term),
-                    func.lower(Customer.code).like(search_term),
-                    func.lower(Customer.email).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for customer in customers:
-            results.append(
-                SearchResult(
-                    id=customer.id,
-                    type="customer",
-                    title=customer.name,
-                    subtitle=customer.code,
-                    url=f"/customers?id={customer.id}",
-                    icon="building",
-                )
-            )
-        categories["customer"] = len(customers)
-
-    # Search BOMs
-    if should_search("bom"):
-        boms = (
-            db.query(BOM)
-            .join(Part, BOM.part_id == Part.id)
-            .filter(
-                BOM.company_id == company_id,
-                BOM.is_active == True,
-                or_(
-                    func.lower(Part.part_number).like(search_term),
-                    func.lower(Part.name).like(search_term),
-                    func.lower(BOM.description).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for bom in boms:
-            results.append(
-                SearchResult(
-                    id=bom.id,
-                    type="bom",
-                    title=bom.part.part_number if bom.part else f"BOM #{bom.id}",
-                    subtitle=f"{bom.part.name if bom.part else 'BOM'} - Rev {bom.revision}".strip(" -"),
-                    url=f"/bom?id={bom.id}",
-                    icon="document",
-                )
-            )
-        categories["bom"] = len(boms)
-
-    # Search Routings
-    if should_search("routing"):
-        routings = (
-            db.query(Routing)
-            .join(Part, Routing.part_id == Part.id)
-            .filter(
-                Routing.company_id == company_id,
-                Routing.is_active == True,
-                or_(
-                    func.lower(Part.part_number).like(search_term),
-                    func.lower(Part.name).like(search_term),
-                    func.lower(Routing.description).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for routing in routings:
-            results.append(
-                SearchResult(
-                    id=routing.id,
-                    type="routing",
-                    title=routing.part.part_number if routing.part else f"Routing #{routing.id}",
-                    subtitle=f"{routing.part.name if routing.part else 'Routing'} - Rev {routing.revision}".strip(" -"),
-                    url=f"/routing?id={routing.id}",
-                    icon="list",
-                )
-            )
-        categories["routing"] = len(routings)
-
-    # Search Users (admin/manager only can see all users)
-    if should_search("user") and current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
-        users = (
-            db.query(User)
-            .filter(
-                User.company_id == company_id,
-                User.is_active == True,
-                or_(
-                    func.lower(User.first_name).like(search_term),
-                    func.lower(User.last_name).like(search_term),
-                    func.lower(User.email).like(search_term),
-                    func.lower(User.employee_id).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for user in users:
-            results.append(
-                SearchResult(
-                    id=user.id,
-                    type="user",
-                    title=user.full_name,
-                    subtitle=user.email,
-                    url=f"/users?id={user.id}",
-                    icon="user",
-                )
-            )
-        categories["user"] = len(users)
-
-    # Search Vendors
-    if should_search("vendor"):
-        vendors = (
-            db.query(Vendor)
-            .filter(
-                Vendor.company_id == company_id,
-                Vendor.is_active == True,
-                or_(
-                    func.lower(Vendor.name).like(search_term),
-                    func.lower(Vendor.code).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for vendor in vendors:
-            results.append(
-                SearchResult(
-                    id=vendor.id,
-                    type="vendor",
-                    title=vendor.name,
-                    subtitle=vendor.code,
-                    url=f"/purchasing?vendor={vendor.id}",
-                    icon="truck",
-                )
-            )
-        categories["vendor"] = len(vendors)
-
-    # Search Purchase Orders
-    if should_search("purchase_order"):
-        pos = (
-            db.query(PurchaseOrder)
-            .filter(
-                PurchaseOrder.company_id == company_id,
-                or_(
-                    func.lower(PurchaseOrder.po_number).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for po in pos:
-            results.append(
-                SearchResult(
-                    id=po.id,
-                    type="purchase_order",
-                    title=po.po_number,
-                    subtitle=po.status,
-                    url=f"/purchasing?po={po.id}",
-                    icon="document",
-                )
-            )
-        categories["purchase_order"] = len(pos)
-
-    # Search Quotes
-    if should_search("quote"):
-        quotes = (
-            db.query(Quote)
-            .filter(
-                Quote.company_id == company_id,
-                or_(
-                    func.lower(Quote.quote_number).like(search_term),
-                    func.lower(Quote.customer_name).like(search_term),
-                    func.lower(Quote.project_name).like(search_term),
-                ),
-            )
-            .limit(limit)
-            .all()
-        )
-
-        for quote in quotes:
-            results.append(
-                SearchResult(
-                    id=quote.id,
-                    type="quote",
-                    title=quote.quote_number,
-                    subtitle=quote.customer_name or quote.project_name,
-                    url=f"/quotes?id={quote.id}",
-                    icon="currency",
-                )
-            )
-        categories["quote"] = len(quotes)
-
-    # Sort results by relevance (exact matches first)
-    def sort_key(result: SearchResult):
-        # Exact match on title gets priority
-        if result.title.lower() == q.lower():
-            return 0
-        # Starts with query
-        if result.title.lower().startswith(q.lower()):
-            return 1
-        return 2
-
-    results.sort(key=sort_key)
-
-    # Limit total results
-    results = results[:limit]
-
-    return SearchResponse(query=q, total=len(results), results=results, categories=categories)
+    return run_global_search(db=db, company_id=company_id, current_user=current_user, q=q, limit=limit, types=types)
 
 
 def _contains_any(query: str, terms: List[str]) -> bool:
@@ -423,11 +111,109 @@ def _parse_nl_search(query: str) -> dict:
         "work_center_terms": work_center_terms,
         "active_jobs": _contains_any(normalized, ["job", "jobs", "work order", "work orders", "wo"]),
     }
-    filter_count = sum(1 for key, value in filters.items() if key != "work_center_terms" and value) + len(
-        work_center_terms
-    )
-    filters["filter_count"] = filter_count
+    filters["filter_count"] = _count_filters(filters)
+    filters["parser"] = "rules"
     return filters
+
+
+def _count_filters(filters: dict) -> int:
+    boolean_keys = ("late", "blocked", "material_missing", "hot", "active_jobs")
+    return sum(1 for key in boolean_keys if filters.get(key)) + len(filters.get("work_center_terms") or [])
+
+
+# Rule-parser confidence is 0.35 + 0.15 per filter; at >= 2 filters (0.65) the
+# rules alone are confident enough that the LLM adds latency without value.
+_NL_HIGH_CONFIDENCE_FILTER_COUNT = 2
+_NL_LLM_TIMEOUT_SECONDS = 3.0
+_NL_MAX_WORK_CENTER_TERMS = 5
+
+
+def _sanitize_work_center_term(term: str) -> Optional[str]:
+    """Lowercase and strip a model-supplied term before it reaches a SQL LIKE."""
+    if not isinstance(term, str):
+        return None
+    cleaned = re.sub(r"[^a-z0-9 \-]", "", term.lower().strip())[:40].strip()
+    return cleaned or None
+
+
+def _llm_interpret_nl_search(query: str, *, company_id: int) -> Optional[dict]:
+    """Fast-tier (Haiku via router) intent parse emitting the rule-parser filter shape.
+
+    Returns None on any failure (LLM unconfigured, API error, timeout, invalid
+    JSON) so the caller can fall back to the rule parser. Telemetry is recorded
+    per call under task="nl_search".
+    """
+    from app.services.llm_client import LLMNotConfiguredError, run_llm_task
+    from app.services.llm_model_router import LLMTaskContext
+    from app.services.prompts import NL_SEARCH_INTENT_PROMPT
+
+    try:
+        result = run_llm_task(
+            LLMTaskContext(task="nl_search", input_chars=len(query), max_output_tokens=300),
+            messages=[{"role": "user", "content": query[:500]}],
+            system=[
+                {
+                    "type": "text",
+                    "text": NL_SEARCH_INTENT_PROMPT.text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            max_tokens=300,
+            company_id=company_id,
+            feature="nl_search",
+            prompt_version=NL_SEARCH_INTENT_PROMPT.version,
+            timeout=_NL_LLM_TIMEOUT_SECONDS,
+        )
+    except LLMNotConfiguredError:
+        return None
+    except Exception as exc:  # API error / timeout — rule parser covers us
+        logger.warning("NL search LLM intent parse failed; using rule parser: %s", exc)
+        return None
+
+    try:
+        raw = json.loads(result.text)
+    except (TypeError, ValueError):
+        logger.warning("NL search LLM returned non-JSON output; using rule parser")
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    terms = []
+    for term in raw.get("work_center_terms") or []:
+        cleaned = _sanitize_work_center_term(term)
+        if cleaned:
+            terms.append(cleaned)
+        if len(terms) >= _NL_MAX_WORK_CENTER_TERMS:
+            break
+
+    filters = {
+        "late": bool(raw.get("late")),
+        "blocked": bool(raw.get("blocked")),
+        "material_missing": bool(raw.get("material_missing")),
+        "hot": bool(raw.get("hot")),
+        "work_center_terms": terms,
+        "active_jobs": bool(raw.get("active_jobs")),
+    }
+    filters["filter_count"] = _count_filters(filters)
+    filters["parser"] = "llm"
+    return filters
+
+
+def _interpret_nl_search(query: str, *, company_id: int) -> dict:
+    """Cheap-first NL interpretation: rules always run; LLM only when rules are weak.
+
+    The LLM path emits the SAME filter structure as ``_parse_nl_search`` so the
+    downstream query builder and the frontend contract are unchanged. Any LLM
+    failure falls back to the rule result.
+    """
+    rule_filters = _parse_nl_search(query)
+    if rule_filters["filter_count"] >= _NL_HIGH_CONFIDENCE_FILTER_COUNT:
+        return rule_filters
+
+    llm_filters = _llm_interpret_nl_search(query, company_id=company_id)
+    if llm_filters is not None and llm_filters["filter_count"] > rule_filters["filter_count"]:
+        return llm_filters
+    return rule_filters
 
 
 def _literal_work_order_fallback(
@@ -479,9 +265,16 @@ def natural_language_search(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Interpret natural-language operational searches into explainable ERP filters."""
+    """Interpret natural-language operational searches into explainable ERP filters.
+
+    Interpretation is cheap-first: the deterministic rule parser always runs,
+    and a fast-tier LLM intent parse (same filter structure, ~3s timeout,
+    telemetry task ``nl_search``) is consulted only when the rules score low
+    confidence. The LLM never changes the response contract; on any LLM
+    failure the rule result is used unchanged.
+    """
     limit = max(1, min(request.limit or 20, 50))
-    filters = _parse_nl_search(request.query)
+    filters = _interpret_nl_search(request.query, company_id=company_id)
     if filters["filter_count"] == 0:
         return NaturalLanguageSearchResponse(
             query=request.query,
@@ -610,7 +403,7 @@ def get_recent_items(
     # Recent parts (last 5)
     recent_parts = (
         db.query(Part)
-        .filter(Part.company_id == company_id, Part.is_active == True)
+        .filter(Part.company_id == company_id, Part.is_active == True)  # noqa: E712
         .order_by(Part.updated_at.desc())
         .limit(5)
         .all()
