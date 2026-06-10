@@ -67,40 +67,50 @@ jobs:
           service_name="${RAILWAY_FRONTEND_SERVICE:-werco-frontend}"
           railway up . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}" --service "${service_name}"
 
-      - name: Verify deployment no longer serves stale dashboard bundle
+      - name: Verify deployment serves the Vite frontend bundle
         env:
           PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
         run: |
+          # The root must serve the Vite-built index.html and its /assets/*.js
+          # bundle must be fetchable (nginx returns a real 404 for missing JS).
+          # This catches the observed production failure modes: the service
+          # running the wrong image (no SPA on /) or serving nothing at all.
+          # Build freshness needs no separate check - `railway up` above fails
+          # the job unless the new image built and deployed.
           python - <<'PY'
-          import json
           import os
+          import re
+          import sys
           import time
           import urllib.request
-          import sys
 
           base = (os.environ.get("PRODUCTION_URL") or "").strip().rstrip("/")
           if not base:
             print("PRODUCTION_URL is not configured")
             sys.exit(1)
 
-          stale_main = "/static/js/main.5b05fd32.js"
-          last_main = None
+          last_err = None
 
           for attempt in range(1, 13):
             try:
-              with urllib.request.urlopen(base + "/asset-manifest.json", timeout=20) as resp:
-                manifest = json.loads(resp.read().decode())
-              main_js = manifest.get("files", {}).get("main.js")
-              last_main = main_js
-              print(f"Attempt {attempt}: main.js={main_js}")
-              if main_js and main_js != stale_main:
-                print("Frontend manifest updated.")
-                sys.exit(0)
+              with urllib.request.urlopen(base + "/", timeout=20) as resp:
+                html = resp.read().decode("utf-8", "replace")
+              match = re.search(r'src="(/assets/[^"]+\.js)"', html)
+              if not match:
+                raise RuntimeError("no /assets/*.js script tag in served index.html")
+              bundle = match.group(1)
+              with urllib.request.urlopen(base + bundle, timeout=20) as resp:
+                ctype = resp.headers.get("Content-Type", "")
+              if "javascript" not in ctype:
+                raise RuntimeError(f"{bundle} served with Content-Type {ctype!r}")
+              print(f"Attempt {attempt}: serving Vite bundle {bundle}")
+              sys.exit(0)
             except Exception as exc:
-              print(f"Attempt {attempt}: failed to read manifest: {exc}")
+              last_err = exc
+              print(f"Attempt {attempt}: {exc}")
 
             time.sleep(10)
 
-          print(f"Stale bundle still detected after retries: {last_main}")
+          print(f"Frontend verification failed after retries: {last_err}")
           sys.exit(1)
           PY
