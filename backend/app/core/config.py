@@ -109,20 +109,14 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
         """Harden production settings."""
-        if self.ENVIRONMENT in ("production", "staging"):
-            # Carrier-integration secrets (API keys / webhook secrets) are Fernet-
-            # encrypted at rest with INTEGRATION_ENCRYPTION_KEY (fallback
-            # WEBHOOK_ENCRYPTION_KEY). It MUST be operator-provided in prod/staging
-            # (CMMC SC-28): an ephemeral key would make stored secrets undecryptable
-            # after a restart. Fail loud at startup rather than silently generating
-            # one (see app/services/carriers/crypto.py).
-            if not self.INTEGRATION_ENCRYPTION_KEY and not self.WEBHOOK_ENCRYPTION_KEY:
-                raise ValueError(
-                    "INTEGRATION_ENCRYPTION_KEY (or WEBHOOK_ENCRYPTION_KEY) must be set in "
-                    f"{self.ENVIRONMENT}. It encrypts carrier API keys / webhook secrets at rest "
-                    '(CMMC SC-28). Generate one with: python -c "from cryptography.fernet import '
-                    'Fernet; print(Fernet.generate_key().decode())"'
-                )
+        # NOTE: the carrier-secret encryption key (INTEGRATION_ENCRYPTION_KEY /
+        # WEBHOOK_ENCRYPTION_KEY) is intentionally NOT required here. It is enforced
+        # LAZILY, at the point a carrier/webhook secret is actually encrypted or
+        # decrypted (see app/services/carriers/crypto.py), so a deployment that does
+        # not (yet) use carrier integration still boots and runs Alembic migrations
+        # without a key. In production/staging, attempting to store or use a carrier
+        # secret without an operator-provided key fails loudly there (CMMC SC-28)
+        # rather than silently using an ephemeral key.
         if self.ENVIRONMENT == "production":
             if self.DEBUG:
                 raise ValueError("DEBUG must be false in production.")
