@@ -4,7 +4,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.time_utils import to_utc_iso
-from app.models.time_entry import TimeEntryType
+from app.models.time_entry import TimeEntrySource, TimeEntryType
 from app.schemas.work_order import QualityExceptionInfo
 
 
@@ -24,6 +24,13 @@ class ClockIn(BaseModel):
     work_center_id: int
     entry_type: TimeEntryType = TimeEntryType.RUN
     notes: Optional[str] = None
+    # A0.1 adoption telemetry: client channel (kiosk/desktop/scanner/import/backfill).
+    # Optional -- omitted means unknown (stored NULL); unknown values are a 422.
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel that produced this clock-in "
+        "(kiosk | desktop | scanner | import | backfill). Omit when unknown -- stored NULL, never guessed.",
+    )
 
 
 class ClockOut(BaseModel):
@@ -33,6 +40,13 @@ class ClockOut(BaseModel):
     quantity_scrapped: float = 0.0
     scrap_reason: Optional[str] = None
     notes: Optional[str] = None
+    # A0.1 adoption telemetry: channel of THIS clock-out write. Optional; when
+    # omitted the entry keeps whatever channel clock-in recorded.
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this clock-out write "
+        "(kiosk | desktop | scanner | import | backfill). Omit to keep the channel recorded at clock-in.",
+    )
 
 
 class TimeEntryCreate(TimeEntryBase):
@@ -63,6 +77,14 @@ class TimeEntryResponse(TimeEntryBase):
     downtime_reason: Optional[str]
     approved: Optional[datetime]
     approved_by: Optional[int]
+    # A0.1 adoption telemetry: channel that produced this labor record (NULL = unknown).
+    # Deliberately plain str on the read path (requests validate against TimeEntrySource):
+    # the column is a plain VARCHAR so a row written by a newer release (or a bulk
+    # import) with a channel this code doesn't know yet must read back fine, not 500.
+    source: Optional[str] = Field(
+        None,
+        description="Adoption-telemetry channel that produced this labor record; null = unknown/legacy.",
+    )
     created_at: datetime
     updated_at: datetime
     # Warn-and-record (Batch 4 / rank 7): quality gates that were unsatisfied when a

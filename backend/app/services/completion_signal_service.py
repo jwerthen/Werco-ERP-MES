@@ -31,12 +31,17 @@ def emit_operation_completed_event(
     operation: WorkOrderOperation,
     user_id: Optional[int],
     source_module: str,
+    source: Optional[str] = None,
 ) -> None:
     """Emit an ``operation_completed`` OperationalEvent (EVT-1/EVT-2).
 
     In-process, tenant-scoped (``OperationalEventService.emit`` validates the
     WO/op belong to ``company_id``). Best-effort: a signal failure must not fail
     the completion, so emission errors are swallowed and logged.
+
+    ``source`` is the A0.1 adoption-telemetry client channel
+    (kiosk/desktop/scanner/import/backfill) when the triggering request supplied
+    one; None means unknown/not reported (e.g. office or reconcile paths).
     """
     try:
         OperationalEventService(db).emit(
@@ -54,6 +59,7 @@ def emit_operation_completed_event(
                 "operation_number": operation.operation_number,
                 "quantity_complete": float(operation.quantity_complete or 0),
                 "quantity_scrapped": float(operation.quantity_scrapped or 0),
+                "source": source,
             },
         )
     except Exception:  # pragma: no cover - signal failure must not fail completion
@@ -67,10 +73,12 @@ def emit_work_order_completed_event(
     work_order: WorkOrder,
     user_id: Optional[int],
     source_module: str,
+    source: Optional[str] = None,
 ) -> None:
     """Emit a ``work_order_completed`` OperationalEvent (EVT-1/EVT-2).
 
-    In-process, tenant-scoped, best-effort (see ``emit_operation_completed_event``).
+    In-process, tenant-scoped, best-effort (see ``emit_operation_completed_event``,
+    including the A0.1 ``source`` channel semantics).
     """
     try:
         status = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
@@ -88,6 +96,7 @@ def emit_work_order_completed_event(
                 "status": status,
                 "quantity_complete": float(work_order.quantity_complete or 0),
                 "quantity_scrapped": float(work_order.quantity_scrapped or 0),
+                "source": source,
             },
         )
     except Exception:  # pragma: no cover - signal failure must not fail completion

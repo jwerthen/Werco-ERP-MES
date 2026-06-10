@@ -26,7 +26,7 @@ from app.core.websocket import (
 )
 from app.db.database import get_db
 from app.models.audit_log import AuditLog
-from app.models.time_entry import TimeEntry, TimeEntryType
+from app.models.time_entry import TimeEntry, TimeEntrySource, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
@@ -86,12 +86,26 @@ from app.services.work_order_state_service import (
 class OperationCompleteRequest(BaseModel):
     quantity_complete: float
     notes: Optional[str] = None
+    # A0.1 adoption telemetry: client channel (kiosk/desktop/scanner/import/backfill).
+    # Optional -- omitted means unknown; unknown values are rejected with a 422.
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this completion (kiosk | desktop | scanner | import | "
+        "backfill). Also fills the channel on auto-closed open entries that have none; never overwrites "
+        "a recorded channel. Omit when unknown.",
+    )
 
 
 class ProductionReportRequest(BaseModel):
     quantity_complete_delta: float = 0.0
     quantity_scrapped_delta: float = 0.0
     notes: Optional[str] = None
+    # A0.1 adoption telemetry: client channel (kiosk/desktop/scanner/import/backfill).
+    source: Optional[TimeEntrySource] = Field(
+        None,
+        description="Adoption-telemetry channel of this production report (kiosk | desktop | scanner | "
+        "import | backfill). Omit to keep the active entry's existing channel.",
+    )
 
 
 class OperationHoldRequest(BaseModel):
@@ -661,6 +675,8 @@ def clock_in(
         entry_type=clock_in_data.entry_type,
         clock_in=datetime.utcnow(),
         notes=clock_in_data.notes,
+        # A0.1 adoption telemetry: channel the client reported, or NULL (never guessed).
+        source=clock_in_data.source.value if clock_in_data.source else None,
         company_id=company_id,
     )
 
@@ -699,6 +715,8 @@ def clock_in(
                 if hasattr(clock_in_data.entry_type, "value")
                 else clock_in_data.entry_type
             ),
+            # A0.1 adoption telemetry: client channel (None = not reported).
+            "source": clock_in_data.source.value if clock_in_data.source else None,
         },
     )
     try:
@@ -871,6 +889,10 @@ def clock_out(
     )
     time_entry.scrap_reason = clock_out_data.scrap_reason
     time_entry.notes = clock_out_data.notes or time_entry.notes
+    # A0.1 adoption telemetry: record the clock-out channel when the client sent one;
+    # omitted -> keep whatever channel clock-in recorded (NULL stays NULL, never guessed).
+    if clock_out_data.source:
+        time_entry.source = clock_out_data.source.value
 
     # G6-A: terminal WO -> close the labor entry (above) but never roll its hours /
     # produced / scrapped quantities up onto the operation. The TimeEntry remains the
@@ -925,6 +947,8 @@ def clock_out(
             # G6-A: flag so AI/realtime consumers know this labor closed against a
             # terminal WO and was deliberately NOT rolled up into op/cost.
             "wo_terminal": wo_is_terminal,
+            # A0.1 adoption telemetry: client channel (None = not reported).
+            "source": clock_out_data.source.value if clock_out_data.source else None,
         },
     )
 
@@ -1036,6 +1060,7 @@ def clock_out(
                 operation=operation,
                 user_id=current_user.id,
                 source_module="shop_floor",
+                source=clock_out_data.source.value if clock_out_data.source else None,
             )
         if work_order_completed:
             emit_work_order_completed_event(
@@ -1044,6 +1069,7 @@ def clock_out(
                 work_order=work_order,
                 user_id=current_user.id,
                 source_module="shop_floor",
+                source=clock_out_data.source.value if clock_out_data.source else None,
             )
             # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): on WO COMPLETE,
             # receive the finished good into inventory (ALWAYS, lot-only, idempotent)
@@ -2307,6 +2333,10 @@ def report_operation_production(
         active_entry.notes = (
             f"{active_entry.notes}\n{production_data.notes}" if active_entry.notes else production_data.notes
         )
+    # A0.1 adoption telemetry: record the reporting channel when the client sent one;
+    # omitted -> keep whatever channel the entry already carries (never guessed).
+    if production_data.source:
+        active_entry.source = production_data.source.value
     active_entry.updated_at = datetime.utcnow()
 
     sync_work_order_quantity_complete(work_order, operation, all_operations_complete=False)
@@ -2572,6 +2602,11 @@ def complete_operation(
             entry.clock_out = now
             if entry.clock_in:
                 entry.duration_hours = (now - entry.clock_in).total_seconds() / 3600.0
+            # A0.1 adoption telemetry: this completion auto-closes OTHER operators'
+            # open entries too, so only FILL a missing channel -- never overwrite an
+            # entry's own recorded clock-in channel with the completer's channel.
+            if completion_data.source and entry.source is None:
+                entry.source = completion_data.source.value
         if open_entries and completion_delta > 0:
             open_entries[0].quantity_produced = float(open_entries[0].quantity_produced or 0) + completion_delta
 
@@ -2609,6 +2644,7 @@ def complete_operation(
             operation=operation,
             user_id=current_user.id,
             source_module="shop_floor",
+            source=completion_data.source.value if completion_data.source else None,
         )
     if work_order_completed:
         emit_work_order_completed_event(
@@ -2617,6 +2653,7 @@ def complete_operation(
             work_order=work_order,
             user_id=current_user.id,
             source_module="shop_floor",
+            source=completion_data.source.value if completion_data.source else None,
         )
         # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): FG receipt (always,
         # lot-only, idempotent) + gated backflush, atomic with this completion.
