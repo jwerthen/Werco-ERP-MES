@@ -175,8 +175,18 @@ export default function ActionInbox() {
     () => [...aiRecommendations].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)),
     [aiRecommendations]
   );
-  const topThree = rankedRecommendations.slice(0, 3);
-  const remainingRecommendations = rankedRecommendations.slice(3);
+  // The hero only renders on the default view. With a non-default filter or an active search,
+  // it would disagree with the queue (showing recommendations the filtered list excludes), so
+  // it is hidden and every recommendation folds back into the queue for filtering/searching.
+  const heroVisible = filter === 'open' && query.trim() === '';
+  const topThree = useMemo(
+    () => (heroVisible ? rankedRecommendations.slice(0, 3) : []),
+    [heroVisible, rankedRecommendations]
+  );
+  const queueRecommendations = useMemo(
+    () => (heroVisible ? rankedRecommendations.slice(3) : rankedRecommendations),
+    [heroVisible, rankedRecommendations]
+  );
 
   const items = useMemo<InboxItem[]>(() => {
     const setupItems: InboxItem[] = (health?.steps || [])
@@ -214,8 +224,8 @@ export default function ActionInbox() {
       };
     });
 
-    // The top 3 recommendations render in the hero above; only the rest join the queue.
-    const aiItems: InboxItem[] = remainingRecommendations.map((recommendation) => ({
+    // While the hero is visible the top 3 render above; otherwise every recommendation joins the queue.
+    const aiItems: InboxItem[] = queueRecommendations.map((recommendation) => ({
       id: `ai:${recommendation.id}`,
       source: 'ai',
       severity: recommendation.priority === 'high' ? 'high' : recommendation.priority === 'low' ? 'low' : recommendation.priority === 'info' ? 'info' : 'medium',
@@ -226,7 +236,7 @@ export default function ActionInbox() {
     }));
 
     return [...aiItems, ...masterDataItems, ...setupItems, ...notificationItems];
-  }, [remainingRecommendations, health, notifications]);
+  }, [queueRecommendations, health, notifications]);
 
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();

@@ -109,7 +109,9 @@ def _impact_magnitude(impact: Any) -> float:
             continue
         value = float(raw)
         if not math.isfinite(value) or value <= 0:
-            return 1.0
+            # An unusable numeric (0, negative, NaN, inf) falls through to the next
+            # candidate key, just like a non-numeric value does.
+            continue
         if value <= 1.0:
             return max(MIN_IMPACT_MAGNITUDE, value)
         return min(MAX_IMPACT_MAGNITUDE, 1.0 + math.log10(value) / 3.0)
@@ -354,9 +356,10 @@ class AILearningService:
         event trail (the wake-up time lives in the snooze event payload) — no schema change.
         """
         if days < SNOOZE_MIN_DAYS or days > SNOOZE_MAX_DAYS:
-            raise RecommendationStateError(
-                f"Snooze duration must be between {SNOOZE_MIN_DAYS} and {SNOOZE_MAX_DAYS} days"
-            )
+            # Unreachable via the API (the request schema enforces ge=1/le=30 with a 422);
+            # plain ValueError keeps a defensive guard for internal callers without posing as
+            # a 409-shaped recommendation-state conflict.
+            raise ValueError(f"Snooze duration must be between {SNOOZE_MIN_DAYS} and {SNOOZE_MAX_DAYS} days")
         recommendation = self._get_recommendation_or_raise(recommendation_id, company_id)
         if _normalize_status(recommendation.status) != "pending":
             raise RecommendationStateError("Only pending recommendations can be snoozed")
@@ -504,8 +507,11 @@ class AILearningService:
             .filter(AIRecommendation.company_id == company_id, AIRecommendation.status == "snoozed")
             .all()
         )
+        if not snoozed:
+            return woken
+        wake_times = self._snoozed_until_by_recommendation(company_id, [rec.id for rec in snoozed])
         for recommendation in snoozed:
-            snoozed_until = self._snoozed_until(recommendation)
+            snoozed_until = wake_times.get(recommendation.id)
             if snoozed_until is not None and snoozed_until > now:
                 continue
             recommendation.status = "pending"
@@ -514,29 +520,41 @@ class AILearningService:
             woken += 1
         return woken
 
-    def _snoozed_until(self, recommendation: AIRecommendation) -> Optional[datetime]:
-        """Read the wake-up time from the most recent snooze interaction event."""
+    def _snoozed_until_by_recommendation(self, company_id: int, recommendation_ids: List[int]) -> Dict[int, datetime]:
+        """Batch-read wake-up times from snooze interaction events (one query for the whole sweep).
+
+        Semantics match the old per-recommendation lookup: events are scanned newest-first and the
+        first parseable `snoozed_until` wins per recommendation; a recommendation with no parseable
+        snooze payload stays absent from the map, which the sweep treats as wake-now.
+        """
+        wake_times: Dict[int, datetime] = {}
+        if not recommendation_ids:
+            return wake_times
         events = (
             self.db.query(AIInteractionEvent)
             .filter(
-                AIInteractionEvent.company_id == recommendation.company_id,
-                AIInteractionEvent.recommendation_id == recommendation.id,
+                AIInteractionEvent.company_id == company_id,
+                AIInteractionEvent.recommendation_id.in_(recommendation_ids),
                 AIInteractionEvent.event_type == "ignored",
             )
             .order_by(AIInteractionEvent.created_at.desc(), AIInteractionEvent.id.desc())
-            .limit(5)
             .all()
         )
         for event in events:
+            recommendation_id = event.recommendation_id
+            if recommendation_id is None or recommendation_id in wake_times:
+                continue
             payload = event.event_payload or {}
             raw = payload.get("snoozed_until")
             if not isinstance(raw, str):
                 continue
             try:
-                return _as_utc_naive(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+                parsed = _as_utc_naive(datetime.fromisoformat(raw.replace("Z", "+00:00")))
             except ValueError:
                 continue
-        return None
+            if parsed is not None:
+                wake_times[recommendation_id] = parsed
+        return wake_times
 
     def _create_correction(
         self,
@@ -609,9 +627,7 @@ class AILearningService:
 
         created = 0
         for source_module, event_count in rows:
-            if self._pending_recommendation_exists(
-                company_id, "workflow_friction", source_module, "source_module", None
-            ):
+            if self._open_recommendation_exists(company_id, "workflow_friction", source_module, "source_module", None):
                 continue
             priority = "high" if event_count >= 10 else "medium"
             self.db.add(
@@ -661,7 +677,7 @@ class AILearningService:
         created = 0
         for source_module, field_path, correction_count in rows:
             target_key = f"{source_module}:{field_path}"
-            if self._pending_recommendation_exists(
+            if self._open_recommendation_exists(
                 company_id, "correction_pattern", source_module, "field_path", None, target_key
             ):
                 continue
@@ -695,7 +711,7 @@ class AILearningService:
             created += 1
         return created
 
-    def _pending_recommendation_exists(
+    def _open_recommendation_exists(
         self,
         company_id: int,
         recommendation_type: str,
@@ -704,11 +720,16 @@ class AILearningService:
         target_entity_id: Optional[int],
         dedupe_key: Optional[str] = None,
     ) -> bool:
+        """True when a matching recommendation is still open (pending or snoozed).
+
+        Snoozed counts as open: the user deferred the item, so the nightly aggregation must
+        not re-create an identical pending duplicate while the original sleeps.
+        """
         query = self.db.query(AIRecommendation.id).filter(
             AIRecommendation.company_id == company_id,
             AIRecommendation.recommendation_type == recommendation_type,
             AIRecommendation.source_module == source_module,
-            AIRecommendation.status == "pending",
+            AIRecommendation.status.in_(["pending", "snoozed"]),
         )
         if target_entity_type:
             query = query.filter(AIRecommendation.target_entity_type == target_entity_type)

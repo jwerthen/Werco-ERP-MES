@@ -107,6 +107,16 @@ class TestImpactMagnitude:
         assert _impact_magnitude({"magnitude": float("nan")}) == 1.0
         assert _impact_magnitude({"magnitude": float("inf")}) == 1.0
 
+    def test_unusable_numeric_falls_through_to_next_candidate_key(self):
+        # A non-positive/non-finite numeric is skipped like a non-numeric, so a later
+        # candidate key still contributes its magnitude.
+        assert _impact_magnitude({"magnitude": 0, "estimated_value": 50000}) == MAX_IMPACT_MAGNITUDE
+        assert _impact_magnitude({"magnitude": 0, "estimated_value": 10}) == pytest.approx(1.0 + 1.0 / 3.0)
+        assert _impact_magnitude({"magnitude": -5, "impact_score": 0.75}) == 0.75
+        assert _impact_magnitude({"magnitude": float("nan"), "estimated_value": 0.5}) == 0.5
+        # All candidates unusable still defaults to 1.0.
+        assert _impact_magnitude({"magnitude": 0, "estimated_value": float("inf")}) == 1.0
+
     def test_fractional_values_pass_through_with_floor(self):
         assert _impact_magnitude({"magnitude": 0.5}) == 0.5
         assert _impact_magnitude({"magnitude": 1.0}) == 1.0

@@ -345,6 +345,59 @@ class TestAILearningSweep:
         assert elapsed.status_reason is None
         assert active.status == "snoozed"
 
+    def test_aggregation_does_not_recreate_a_snoozed_generated_recommendation(self, db_session: Session, admin_user):
+        """Snooze must survive the nightly aggregation: the dedupe check treats snoozed as open."""
+        # Seed repeated corrections so aggregation generates a correction_pattern recommendation
+        # through the same path the nightly job uses.
+        for index in range(3):
+            event = AIInteractionEvent(
+                company_id=1,
+                event_type="edited",
+                source_module="quoting",
+                entity_type="quote",
+                entity_id=index + 1,
+                event_payload={},
+            )
+            db_session.add(event)
+            db_session.flush()
+            db_session.add(
+                AICorrection(
+                    company_id=1,
+                    event_id=event.id,
+                    source_module="quoting",
+                    entity_type="quote",
+                    entity_id=index + 1,
+                    field_path="lead_time_days",
+                    proposed_value=10,
+                    final_value=14,
+                )
+            )
+        db_session.commit()
+
+        service = AILearningService(db_session)
+        service.aggregate_learning_signals(company_ids=[1])
+        db_session.commit()
+
+        generated_query = db_session.query(AIRecommendation).filter(
+            AIRecommendation.company_id == 1,
+            AIRecommendation.recommendation_type == "correction_pattern",
+        )
+        generated = generated_query.all()
+        assert len(generated) == 1
+
+        service.snooze_recommendation(recommendation_id=generated[0].id, company_id=1, user=admin_user, days=7)
+        db_session.commit()
+
+        # Re-running aggregation while the recommendation sleeps must not create a duplicate
+        # (and must not wake it early — the 7-day window has not elapsed).
+        service.aggregate_learning_signals(company_ids=[1])
+        db_session.commit()
+
+        survivors = generated_query.all()
+        assert len(survivors) == 1
+        assert survivors[0].id == generated[0].id
+        assert survivors[0].status == "snoozed"
+
     def test_snoozed_recommendation_past_expiry_goes_stale_not_pending(self, db_session: Session, admin_user):
         service = AILearningService(db_session)
         recommendation = make_recommendation(

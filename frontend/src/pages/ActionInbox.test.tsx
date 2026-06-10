@@ -94,6 +94,44 @@ describe('ActionInbox Top 3 hero', () => {
     expect(await screen.findByText('No actions in this view')).toBeInTheDocument();
   });
 
+  it('hides the hero and folds all recommendations into the queue when the AI filter is active', async () => {
+    mockApi.getAIRecommendations.mockResolvedValue([
+      makeRecommendation({ id: 31, title: 'First suggestion', score: 0.8 }),
+      makeRecommendation({ id: 32, title: 'Second suggestion', score: 0.6 }),
+    ]);
+
+    renderInbox();
+
+    // Default view: both recommendations live in the hero, not the queue.
+    await screen.findByRole('region', { name: 'Top 3 today' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'AI' }));
+
+    // Non-default filter: no hero, and the filtered queue shows the full recommendation set.
+    expect(screen.queryByRole('region', { name: 'Top 3 today' })).not.toBeInTheDocument();
+    expect(screen.getByText('First suggestion')).toBeInTheDocument();
+    expect(screen.getByText('Second suggestion')).toBeInTheDocument();
+    expect(screen.queryByText('No actions in this view')).not.toBeInTheDocument();
+  });
+
+  it('hides the hero and searches across all recommendations when a query is active', async () => {
+    mockApi.getAIRecommendations.mockResolvedValue([
+      makeRecommendation({ id: 41, title: 'Tune lead time defaults', score: 0.9 }),
+      makeRecommendation({ id: 42, title: 'Review vendor overrides', score: 0.7 }),
+    ]);
+
+    renderInbox();
+
+    await screen.findByRole('region', { name: 'Top 3 today' });
+
+    fireEvent.change(screen.getByPlaceholderText('Search actions...'), { target: { value: 'lead time' } });
+
+    expect(screen.queryByRole('region', { name: 'Top 3 today' })).not.toBeInTheDocument();
+    // The matching top-ranked recommendation is searchable in the queue; the other is filtered out.
+    expect(screen.getByText('Tune lead time defaults')).toBeInTheDocument();
+    expect(screen.queryByText('Review vendor overrides')).not.toBeInTheDocument();
+  });
+
   it('snoozes a hero recommendation through the API and removes it', async () => {
     mockApi.getAIRecommendations.mockResolvedValue([
       makeRecommendation({ id: 21, title: 'Snooze me', score: 0.9 }),
