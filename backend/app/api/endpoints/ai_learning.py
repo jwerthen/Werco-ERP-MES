@@ -16,10 +16,11 @@ from app.schemas.ai_learning import (
     AIRecommendationCreate,
     AIRecommendationFeedbackRequest,
     AIRecommendationResponse,
+    AIRecommendationSnoozeRequest,
 )
 from app.services.ai_context_service import AIContextService
 from app.services.ai_governance_service import AIGovernanceService
-from app.services.ai_learning_service import AILearningService
+from app.services.ai_learning_service import AILearningService, RecommendationStateError
 
 router = APIRouter()
 
@@ -45,7 +46,7 @@ def record_ai_event(
 
 @router.get("/recommendations", response_model=List[AIRecommendationResponse])
 def list_ai_recommendations(
-    status: Optional[str] = Query("pending", pattern="^(pending|accepted|dismissed|stale)$"),
+    status: Optional[str] = Query("pending", pattern="^(pending|accepted|dismissed|stale|snoozed)$"),
     source_module: Optional[str] = Query(None, max_length=80),
     target_entity_type: Optional[str] = Query(None, max_length=80),
     target_entity_id: Optional[int] = None,
@@ -132,6 +133,35 @@ def dismiss_ai_recommendation(
         db.commit()
         db.refresh(recommendation)
         return recommendation
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/recommendations/{recommendation_id}/snooze", response_model=AIRecommendationResponse)
+def snooze_ai_recommendation(
+    recommendation_id: int,
+    data: AIRecommendationSnoozeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Snooze a pending recommendation; the nightly learning sweep returns it to pending."""
+    service = AILearningService(db)
+    try:
+        recommendation = service.snooze_recommendation(
+            recommendation_id=recommendation_id,
+            company_id=company_id,
+            user=current_user,
+            days=data.days,
+            reason=data.reason,
+        )
+        db.commit()
+        db.refresh(recommendation)
+        return recommendation
+    except RecommendationStateError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc

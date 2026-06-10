@@ -7,7 +7,7 @@ export type AIEventType =
   | 'feedback'
   | 'outcome_observed';
 
-export type AIRecommendationStatus = 'pending' | 'accepted' | 'dismissed' | 'stale';
+export type AIRecommendationStatus = 'pending' | 'accepted' | 'dismissed' | 'stale' | 'snoozed';
 export type AIRecommendationPriority = 'high' | 'medium' | 'low' | 'info';
 
 export interface AICorrectionInput {
@@ -59,6 +59,8 @@ export interface AIRecommendation {
   updated_at: string;
   acted_at?: string;
   expires_at?: string;
+  /** Deterministic Action Inbox ranking score; only populated by the list endpoint. */
+  score?: number | null;
 }
 
 export interface AIRecommendationInput {

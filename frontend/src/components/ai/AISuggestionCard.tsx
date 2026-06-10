@@ -8,9 +8,12 @@ import { WhyThisSuggestion } from './WhyThisSuggestion';
 interface AISuggestionCardProps {
   recommendation: AIRecommendation;
   disabled?: boolean;
+  /** 1-based position in a ranked surface (e.g. the Action Inbox "Top 3 today" hero). */
+  rank?: number;
   onAccept?: (recommendation: AIRecommendation) => void | Promise<void>;
   onDismiss?: (recommendation: AIRecommendation) => void | Promise<void>;
   onFeedback?: (recommendation: AIRecommendation, feedback: string) => void | Promise<void>;
+  onSnooze?: (recommendation: AIRecommendation, days: number) => void | Promise<void>;
 }
 
 const priorityStyles: Record<string, string> = {
@@ -23,9 +26,11 @@ const priorityStyles: Record<string, string> = {
 export function AISuggestionCard({
   recommendation,
   disabled = false,
+  rank,
   onAccept,
   onDismiss,
   onFeedback,
+  onSnooze,
 }: AISuggestionCardProps) {
   return (
     <article className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
@@ -35,6 +40,11 @@ export function AISuggestionCard({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
+            {rank !== undefined && (
+              <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 font-mono text-xs text-cyan-200">
+                #{rank}
+              </span>
+            )}
             <h3 className="font-semibold text-white">{recommendation.title}</h3>
             <ConfidenceBadge score={recommendation.confidence_score} />
             <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${priorityStyles[recommendation.priority] || priorityStyles.info}`}>
@@ -56,6 +66,7 @@ export function AISuggestionCard({
               onAccept={onAccept ? () => onAccept(recommendation) : undefined}
               onDismiss={onDismiss ? () => onDismiss(recommendation) : undefined}
               onFeedback={onFeedback ? (feedback) => onFeedback(recommendation, feedback) : undefined}
+              onSnooze={onSnooze ? (days) => onSnooze(recommendation, days) : undefined}
             />
           )}
         </div>

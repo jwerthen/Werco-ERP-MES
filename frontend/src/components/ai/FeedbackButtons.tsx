@@ -1,16 +1,30 @@
 import React, { useState } from 'react';
-import { ChatBubbleLeftRightIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { ChatBubbleLeftRightIcon, CheckIcon, ClockIcon, XMarkIcon } from '@heroicons/react/24/outline';
+
+export const SNOOZE_CHOICES: Array<{ label: string; days: number }> = [
+  { label: '1 day', days: 1 },
+  { label: '3 days', days: 3 },
+  { label: '1 week', days: 7 },
+];
 
 interface FeedbackButtonsProps {
   disabled?: boolean;
   onAccept?: () => void | Promise<void>;
   onDismiss?: () => void | Promise<void>;
   onFeedback?: (feedback: string) => void | Promise<void>;
+  onSnooze?: (days: number) => void | Promise<void>;
 }
 
-export function FeedbackButtons({ disabled = false, onAccept, onDismiss, onFeedback }: FeedbackButtonsProps) {
+export function FeedbackButtons({ disabled = false, onAccept, onDismiss, onFeedback, onSnooze }: FeedbackButtonsProps) {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [feedback, setFeedback] = useState('');
+
+  const chooseSnooze = async (days: number) => {
+    if (!onSnooze) return;
+    await onSnooze(days);
+    setSnoozeOpen(false);
+  };
 
   const submitFeedback = async () => {
     const trimmed = feedback.trim();
@@ -45,6 +59,17 @@ export function FeedbackButtons({ disabled = false, onAccept, onDismiss, onFeedb
             Dismiss
           </button>
         )}
+        {onSnooze && (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => setSnoozeOpen((value) => !value)}
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-2 text-sm font-medium text-slate-300 hover:border-amber-500/60 hover:text-amber-200 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <ClockIcon className="h-4 w-4" />
+            Snooze
+          </button>
+        )}
         {onFeedback && (
           <button
             type="button"
@@ -57,6 +82,22 @@ export function FeedbackButtons({ disabled = false, onAccept, onDismiss, onFeedb
           </button>
         )}
       </div>
+      {snoozeOpen && onSnooze && (
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Snooze for">
+          <span className="text-xs uppercase tracking-wide text-slate-500">Snooze for</span>
+          {SNOOZE_CHOICES.map((choice) => (
+            <button
+              key={choice.days}
+              type="button"
+              disabled={disabled}
+              onClick={() => chooseSnooze(choice.days)}
+              className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-amber-500/60 hover:text-amber-200 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {choice.label}
+            </button>
+          ))}
+        </div>
+      )}
       {feedbackOpen && (
         <div className="flex flex-col gap-2 sm:flex-row">
           <input

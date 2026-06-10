@@ -1173,6 +1173,47 @@ already gathered.
 > (`source_module = "copilot"`, content redacted by the learning service). The copilot performs
 > zero domain writes, so nothing lands on the `audit_log` hash chain.
 
+### AI Recommendations (Action Inbox)
+
+Suggest-only recommendations that feed the **Action Inbox** (`/action-inbox`) — they never mutate
+controlled ERP records. All routes are scoped to the caller's active company
+(`get_current_company_id`); status changes flow through the learning service, which records an
+`AIInteractionEvent` per transition (telemetry, not the `audit_log` hash chain).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/ai/recommendations` | List recommendations sorted by the deterministic score (see below) | Yes |
+| POST | `/ai/recommendations` | Create a suggest-only recommendation | Admin / Manager / Supervisor |
+| POST | `/ai/recommendations/{id}/accept` | Mark accepted (suggest-only; no ERP record is changed) | Yes |
+| POST | `/ai/recommendations/{id}/dismiss` | Dismiss with optional reason | Yes |
+| POST | `/ai/recommendations/{id}/snooze` | Snooze a **pending** recommendation; body `{ "days": 1–30, "reason"? }` | Yes |
+| POST | `/ai/recommendations/{id}/feedback` | Attach free-text feedback / rating | Yes |
+| POST | `/ai/aggregate` | Run learning aggregation + expiry/snooze sweep for the active tenant | Admin / Manager / Supervisor |
+
+**List query parameters:** `status` — `pending` (default) | `accepted` | `dismissed` | `stale` |
+`snoozed`; `source_module`, `target_entity_type`, `target_entity_id`, `limit` (1–100, default 50).
+
+**Scoring.** Each listed recommendation carries an additive `score` field, computed at read time
+(never persisted): `priority_weight × confidence × age_decay × impact_magnitude` — priority
+weights `high 1.0 / medium 0.6 / low 0.35 / info 0.2`; confidence is `confidence_score`
+(0.5 when null); `age_decay` declines linearly from 1.0 (fresh) to 0.2 at `expires_at` (without
+an expiry: mild decay to a 0.5 floor over 30 days); `impact_magnitude` is read from a numeric
+`magnitude`/`impact_score`/`estimated_value`/`estimated_savings`/`value` key in the `impact`
+JSON — fractions (0, 1] pass through (0.25 floor), larger values are log-scaled and capped at
+2.0, default 1.0. The list is sorted by this score, descending. `score` is `null` on
+single-recommendation responses (accept/dismiss/snooze).
+
+**Snooze / expiry lifecycle.** Snoozing sets `status = "snoozed"` (409 if not pending; the
+wake-up time is recorded on the snooze interaction event — no schema change). The nightly
+AI-learning job (5:30 AM, and `POST /ai/aggregate` for the active tenant) is a tenant-scoped
+fan-out that marks pending/snoozed recommendations past `expires_at` as `stale` and returns
+elapsed snoozes to `pending`; its summary reports `companies_processed`,
+`recommendations_created`, `stale_recommendations`, and `snoozed_recommendations_woken`.
+
+> **Front door.** After login, Admin / Manager / Supervisor users land on `/action-inbox` by
+> default (operators keep the kiosk station screen; deep links are unaffected). The page shows a
+> "Top 3 today" hero — the three highest-scoring pending recommendations.
+
 ### Bulk Imports & Templates (Excel Migration Kit)
 
 One shared CSV/XLSX upload kit for go-live data migration — see
