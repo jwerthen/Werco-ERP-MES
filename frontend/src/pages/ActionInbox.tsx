@@ -9,10 +9,11 @@ import {
   FunnelIcon,
   InboxIcon,
   MagnifyingGlassIcon,
+  SparklesIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
-import { ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
+import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
 import { AIRecommendation } from '../types/aiLearning';
 
 type Severity = 'high' | 'medium' | 'low' | 'info';
@@ -168,6 +169,25 @@ export default function ActionInbox() {
     loadInbox();
   }, []);
 
+  // Backend already returns recommendations sorted by the deterministic score; re-sort
+  // defensively client-side so the "Top 3 today" hero is stable even on stale caches.
+  const rankedRecommendations = useMemo(
+    () => [...aiRecommendations].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)),
+    [aiRecommendations]
+  );
+  // The hero only renders on the default view. With a non-default filter or an active search,
+  // it would disagree with the queue (showing recommendations the filtered list excludes), so
+  // it is hidden and every recommendation folds back into the queue for filtering/searching.
+  const heroVisible = filter === 'open' && query.trim() === '';
+  const topThree = useMemo(
+    () => (heroVisible ? rankedRecommendations.slice(0, 3) : []),
+    [heroVisible, rankedRecommendations]
+  );
+  const queueRecommendations = useMemo(
+    () => (heroVisible ? rankedRecommendations.slice(3) : rankedRecommendations),
+    [heroVisible, rankedRecommendations]
+  );
+
   const items = useMemo<InboxItem[]>(() => {
     const setupItems: InboxItem[] = (health?.steps || [])
       .filter((step) => step.status !== 'complete')
@@ -204,7 +224,8 @@ export default function ActionInbox() {
       };
     });
 
-    const aiItems: InboxItem[] = aiRecommendations.map((recommendation) => ({
+    // While the hero is visible the top 3 render above; otherwise every recommendation joins the queue.
+    const aiItems: InboxItem[] = queueRecommendations.map((recommendation) => ({
       id: `ai:${recommendation.id}`,
       source: 'ai',
       severity: recommendation.priority === 'high' ? 'high' : recommendation.priority === 'low' ? 'low' : recommendation.priority === 'info' ? 'info' : 'medium',
@@ -215,7 +236,7 @@ export default function ActionInbox() {
     }));
 
     return [...aiItems, ...masterDataItems, ...setupItems, ...notificationItems];
-  }, [aiRecommendations, health, notifications]);
+  }, [queueRecommendations, health, notifications]);
 
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -281,6 +302,16 @@ export default function ActionInbox() {
     }
   };
 
+  const snoozeAIRecommendation = async (recommendation: AIRecommendation, days: number) => {
+    setActioningId(recommendation.id);
+    try {
+      await api.snoozeAIRecommendation(recommendation.id, days, 'Snoozed from Action Inbox');
+      setAiRecommendations((current) => current.filter((item) => item.id !== recommendation.id));
+    } finally {
+      setActioningId(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
@@ -325,6 +356,30 @@ export default function ActionInbox() {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-100">
           {error}
         </div>
+      )}
+
+      {!loading && topThree.length > 0 && (
+        <section aria-label="Top 3 today" className="rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-4">
+          <div className="flex items-center gap-2">
+            <SparklesIcon className="h-5 w-5 text-cyan-300" />
+            <h2 className="text-lg font-semibold text-white">Top 3 today</h2>
+            <span className="text-sm text-slate-400">The highest-impact recommendations right now.</span>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-3">
+            {topThree.map((recommendation, index) => (
+              <AISuggestionCard
+                key={recommendation.id}
+                recommendation={recommendation}
+                rank={index + 1}
+                disabled={actioningId === recommendation.id}
+                onAccept={acceptAIRecommendation}
+                onDismiss={dismissAIRecommendation}
+                onFeedback={sendAIFeedback}
+                onSnooze={snoozeAIRecommendation}
+              />
+            ))}
+          </div>
+        </section>
       )}
 
       <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
@@ -399,6 +454,7 @@ export default function ActionInbox() {
                             onAccept={() => acceptAIRecommendation(item.recommendation as AIRecommendation)}
                             onDismiss={() => dismissAIRecommendation(item.recommendation as AIRecommendation)}
                             onFeedback={(feedback) => sendAIFeedback(item.recommendation as AIRecommendation, feedback)}
+                            onSnooze={(days) => snoozeAIRecommendation(item.recommendation as AIRecommendation, days)}
                           />
                         </>
                       )}

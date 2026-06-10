@@ -20,6 +20,7 @@ class AIRecommendationStatus(str, Enum):
     ACCEPTED = "accepted"
     DISMISSED = "dismissed"
     STALE = "stale"
+    SNOOZED = "snoozed"
 
 
 class AIRecommendationPriority(str, Enum):
@@ -137,12 +138,20 @@ class AIRecommendationResponse(BaseModel):
     updated_at: datetime
     acted_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
+    # Deterministic Action Inbox ranking score, computed at list time (never persisted).
+    # Only populated by the list endpoint; None on single-recommendation responses.
+    score: Optional[float] = None
 
     class Config:
         from_attributes = True
 
 
 class AIRecommendationActionRequest(BaseModel):
+    reason: Optional[str] = Field(None, max_length=2000)
+
+
+class AIRecommendationSnoozeRequest(BaseModel):
+    days: int = Field(..., ge=1, le=30)
     reason: Optional[str] = Field(None, max_length=2000)
 
 
@@ -190,3 +199,4 @@ class AIAggregationSummary(BaseModel):
     companies_processed: int
     recommendations_created: int
     stale_recommendations: int
+    snoozed_recommendations_woken: int = 0

@@ -1024,6 +1024,11 @@ class ApiService {
     return response.data;
   }
 
+  async snoozeAIRecommendation(id: number, days: number, reason?: string): Promise<AIRecommendation> {
+    const response = await this.api.post<AIRecommendation>(`/ai/recommendations/${id}/snooze`, { days, reason });
+    return response.data;
+  }
+
   async sendAIRecommendationFeedback(id: number, data: AIRecommendationFeedbackInput) {
     const response = await this.api.post(`/ai/recommendations/${id}/feedback`, data);
     return response.data;

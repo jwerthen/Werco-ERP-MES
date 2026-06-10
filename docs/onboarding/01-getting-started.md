@@ -81,7 +81,7 @@ Everything is reached from the menu on the left side of the screen — the sideb
 
 The main groups are:
 
-- **Dashboard** and **Action Inbox** — your home view and your to-do items.
+- **Dashboard** and **Action Inbox** — your home view and your to-do items. Admins, managers, and supervisors land on the Action Inbox right after signing in (it leads with the "Top 3 today" — the items most worth your attention); operators go straight to the station screen.
 - **Shop Floor** — Time Clock, Operations (the station view), and Downtime.
 - **Scheduling** and **Work Orders** — planning and tracking jobs.
 - **Engineering** — Parts, Bill of Materials, Routing, and Engineering Changes.

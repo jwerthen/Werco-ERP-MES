@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { getDefaultLandingPath } from '../utils/defaultLanding';
 import {
   ShieldCheckIcon,
   LockClosedIcon,
@@ -55,20 +56,21 @@ export default function Login() {
         const employeeLoginId = /^\d+$/.test(rawEmployeeId) ? digitsOnly.slice(-4).padStart(4, '0') : rawEmployeeId;
 
         await loginWithEmployeeId(employeeLoginId);
-        try {
-          const storedUser = sessionStorage.getItem('user');
-          const signedInUser = storedUser ? JSON.parse(storedUser) : null;
-          if (signedInUser?.role === 'operator') {
-            navigate('/shop-floor/operations?kiosk=1', { replace: true });
-            return;
-          }
-        } catch {
-          // Ignore parsing issues and fall back to default route below.
-        }
       } else {
         await login(email, password);
       }
-      navigate('/', { replace: true });
+
+      // Role-based default landing (see utils/defaultLanding.ts). Only the post-login
+      // DEFAULT is decided here; deep links elsewhere in the app are unaffected.
+      let landingPath = '/';
+      try {
+        const storedUser = sessionStorage.getItem('user');
+        const signedInUser = storedUser ? JSON.parse(storedUser) : null;
+        landingPath = getDefaultLandingPath(signedInUser?.role);
+      } catch {
+        // Ignore parsing issues and fall back to the classic dashboard.
+      }
+      navigate(landingPath, { replace: true });
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Login failed. Please try again.');
     } finally {

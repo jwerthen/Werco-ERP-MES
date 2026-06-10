@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import math
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import case, func
@@ -36,9 +37,97 @@ SENSITIVE_KEY_PARTS = {
 MAX_TEXT_LENGTH = 1000
 MAX_LIST_ITEMS = 50
 
+# --- Deterministic recommendation scoring (B0.3 Action Inbox) -------------------------------
+# score = priority_weight x confidence x age_decay x impact_magnitude, computed at list time.
+# No score column exists on purpose: the inputs (age, expiry) change continuously, so the
+# value is derived on every read instead of persisted.
+PRIORITY_SCORE_WEIGHTS: Dict[str, float] = {"high": 1.0, "medium": 0.6, "low": 0.35, "info": 0.2}
+DEFAULT_PRIORITY_WEIGHT = 0.2  # unknown priorities rank with "info", matching the old else_ ordering
+DEFAULT_CONFIDENCE = 0.5
+MIN_AGE_DECAY = 0.2  # decay value reached exactly at expires_at
+NO_EXPIRY_DECAY_FLOOR = 0.5  # mild decay floor for recommendations without an expiry
+NO_EXPIRY_DECAY_WINDOW_DAYS = 30.0  # days to glide from 1.0 down to the no-expiry floor
+MIN_IMPACT_MAGNITUDE = 0.25
+MAX_IMPACT_MAGNITUDE = 2.0
+IMPACT_NUMERIC_KEYS = ("magnitude", "impact_score", "estimated_value", "estimated_savings", "value")
+SCORING_FETCH_LIMIT = 500  # pre-ranked candidate window scored in Python before the final sort
+
+SNOOZE_MIN_DAYS = 1
+SNOOZE_MAX_DAYS = 30
+
+
+class RecommendationStateError(Exception):
+    """Raised when a recommendation is in a status that does not allow the requested transition."""
+
 
 def _normalize_status(value: str) -> str:
     return (value or "").strip().lower()
+
+
+def _as_utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+    """Normalize tz-aware datetimes (Postgres) and naive ones (SQLite/utcnow) onto one axis."""
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _priority_weight(priority: Optional[str]) -> float:
+    return PRIORITY_SCORE_WEIGHTS.get(_normalize_status(priority or ""), DEFAULT_PRIORITY_WEIGHT)
+
+
+def _age_decay(created_at: Optional[datetime], expires_at: Optional[datetime], now: datetime) -> float:
+    """1.0 when fresh, declining linearly to MIN_AGE_DECAY at expires_at; mild decay without expiry."""
+    created = _as_utc_naive(created_at) or now
+    expires = _as_utc_naive(expires_at)
+    if expires is not None:
+        if now >= expires:
+            return MIN_AGE_DECAY
+        total_seconds = (expires - created).total_seconds()
+        if total_seconds <= 0:
+            return 1.0
+        elapsed = max((now - created).total_seconds(), 0.0)
+        fraction = min(elapsed / total_seconds, 1.0)
+        return 1.0 - (1.0 - MIN_AGE_DECAY) * fraction
+    age_days = max((now - created).total_seconds(), 0.0) / 86400.0
+    decay = 1.0 - (age_days / NO_EXPIRY_DECAY_WINDOW_DAYS) * (1.0 - NO_EXPIRY_DECAY_FLOOR)
+    return max(NO_EXPIRY_DECAY_FLOOR, decay)
+
+
+def _impact_magnitude(impact: Any) -> float:
+    """Derive a multiplier from the impact JSON when it carries a numeric magnitude; default 1.0.
+
+    Values in (0, 1] are treated as already-normalized fractions (floored at MIN_IMPACT_MAGNITUDE);
+    values > 1 are log-scaled into (1.0, MAX_IMPACT_MAGNITUDE].
+    """
+    if not isinstance(impact, dict):
+        return 1.0
+    for key in IMPACT_NUMERIC_KEYS:
+        raw = impact.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        value = float(raw)
+        if not math.isfinite(value) or value <= 0:
+            # An unusable numeric (0, negative, NaN, inf) falls through to the next
+            # candidate key, just like a non-numeric value does.
+            continue
+        if value <= 1.0:
+            return max(MIN_IMPACT_MAGNITUDE, value)
+        return min(MAX_IMPACT_MAGNITUDE, 1.0 + math.log10(value) / 3.0)
+    return 1.0
+
+
+def score_recommendation(recommendation: AIRecommendation, *, now: Optional[datetime] = None) -> float:
+    """Deterministic Action Inbox ranking score; read-path only, never persisted."""
+    current = now or _now()
+    weight = _priority_weight(recommendation.priority)
+    confidence = _clamp_confidence(recommendation.confidence_score, default=DEFAULT_CONFIDENCE)
+    if confidence is None:  # defensive: _clamp_confidence returns the default for None inputs
+        confidence = DEFAULT_CONFIDENCE
+    decay = _age_decay(recommendation.created_at, recommendation.expires_at, current)
+    impact = _impact_magnitude(recommendation.impact)
+    return round(weight * confidence * decay * impact, 4)
 
 
 def _now() -> datetime:
@@ -179,7 +268,9 @@ class AILearningService:
         if target_entity_id is not None:
             query = query.filter(AIRecommendation.target_entity_id == target_entity_id)
 
-        return (
+        # Pre-rank in SQL (priority, confidence, recency) and cap the candidate window, then
+        # compute the deterministic score in Python and return the top `limit` by score.
+        recommendations = (
             query.order_by(
                 case(
                     (AIRecommendation.priority == "high", 0),
@@ -190,9 +281,23 @@ class AILearningService:
                 AIRecommendation.confidence_score.desc(),
                 AIRecommendation.created_at.desc(),
             )
-            .limit(limit)
+            .limit(max(limit, SCORING_FETCH_LIMIT))
             .all()
         )
+
+        now = _now()
+        for recommendation in recommendations:
+            setattr(recommendation, "score", score_recommendation(recommendation, now=now))
+
+        recommendations.sort(
+            key=lambda rec: (
+                float(getattr(rec, "score", 0.0)),
+                _as_utc_naive(rec.created_at) or now,
+                rec.id or 0,
+            ),
+            reverse=True,
+        )
+        return recommendations[:limit]
 
     def set_recommendation_status(
         self,
@@ -229,6 +334,62 @@ class AILearningService:
                 context_summary=reason,
                 event_payload={
                     "status": normalized,
+                    "note": "Suggest-only status change; no controlled ERP record was mutated.",
+                },
+                confidence_score=recommendation.confidence_score,
+            ),
+        )
+        return recommendation
+
+    def snooze_recommendation(
+        self,
+        *,
+        recommendation_id: int,
+        company_id: int,
+        user: User,
+        days: int,
+        reason: Optional[str] = None,
+    ) -> AIRecommendation:
+        """Snooze a pending recommendation for `days`; the nightly sweep returns it to pending.
+
+        Implemented purely with the existing plain-string `status` column plus the interaction
+        event trail (the wake-up time lives in the snooze event payload) — no schema change.
+        """
+        if days < SNOOZE_MIN_DAYS or days > SNOOZE_MAX_DAYS:
+            # Unreachable via the API (the request schema enforces ge=1/le=30 with a 422);
+            # plain ValueError keeps a defensive guard for internal callers without posing as
+            # a 409-shaped recommendation-state conflict.
+            raise ValueError(f"Snooze duration must be between {SNOOZE_MIN_DAYS} and {SNOOZE_MAX_DAYS} days")
+        recommendation = self._get_recommendation_or_raise(recommendation_id, company_id)
+        if _normalize_status(recommendation.status) != "pending":
+            raise RecommendationStateError("Only pending recommendations can be snoozed")
+
+        now = _now()
+        snoozed_until = now + timedelta(days=days)
+        status_reason = f"Snoozed until {snoozed_until.isoformat()}Z"
+        if reason:
+            status_reason = f"{status_reason} — {reason}"
+        recommendation.status = "snoozed"
+        recommendation.status_reason = redact_learning_payload(status_reason)
+        recommendation.acted_at = now
+        recommendation.updated_at = now
+        self.db.flush()
+
+        self.record_interaction(
+            company_id=company_id,
+            user=user,
+            data=AIInteractionEventCreate(
+                event_type="ignored",
+                source_module=recommendation.source_module,
+                ai_feature=recommendation.recommendation_type,
+                entity_type=recommendation.target_entity_type,
+                entity_id=recommendation.target_entity_id,
+                recommendation_id=recommendation.id,
+                context_summary=reason,
+                event_payload={
+                    "status": "snoozed",
+                    "snoozed_until": snoozed_until.isoformat(),
+                    "snooze_days": days,
                     "note": "Suggest-only status change; no controlled ERP record was mutated.",
                 },
                 confidence_score=recommendation.confidence_score,
@@ -303,19 +464,16 @@ class AILearningService:
 
     def aggregate_learning_signals(self, *, company_ids: Optional[Iterable[int]] = None) -> Dict[str, int]:
         now = _now()
-        stale_count = (
-            self.db.query(AIRecommendation)
-            .filter(
-                AIRecommendation.status == "pending",
-                AIRecommendation.expires_at.isnot(None),
-                AIRecommendation.expires_at < now,
-            )
-            .update({"status": "stale", "updated_at": now}, synchronize_session=False)
-        )
-
         companies = list(company_ids) if company_ids is not None else self._company_ids_with_learning_data()
+
         created = 0
+        stale_count = 0
+        woken_count = 0
         for company_id in companies:
+            # Tenant-scoped fan-out: each sweep only ever touches the company being processed,
+            # so a tenant-triggered run (/ai/aggregate) cannot write across tenants.
+            stale_count += self._expire_recommendations_for_company(company_id, now)
+            woken_count += self._wake_snoozed_recommendations_for_company(company_id, now)
             created += self._recommend_from_recent_friction(company_id)
             created += self._recommend_from_repeated_corrections(company_id)
 
@@ -323,8 +481,80 @@ class AILearningService:
         return {
             "companies_processed": len(companies),
             "recommendations_created": created,
-            "stale_recommendations": int(stale_count or 0),
+            "stale_recommendations": stale_count,
+            "snoozed_recommendations_woken": woken_count,
         }
+
+    def _expire_recommendations_for_company(self, company_id: int, now: datetime) -> int:
+        """Mark pending/snoozed recommendations past expires_at as stale for one tenant."""
+        count = (
+            self.db.query(AIRecommendation)
+            .filter(
+                AIRecommendation.company_id == company_id,
+                AIRecommendation.status.in_(["pending", "snoozed"]),
+                AIRecommendation.expires_at.isnot(None),
+                AIRecommendation.expires_at < now,
+            )
+            .update({"status": "stale", "updated_at": now}, synchronize_session=False)
+        )
+        return int(count or 0)
+
+    def _wake_snoozed_recommendations_for_company(self, company_id: int, now: datetime) -> int:
+        """Return snoozed recommendations to pending once their snooze window has elapsed."""
+        woken = 0
+        snoozed = (
+            self.db.query(AIRecommendation)
+            .filter(AIRecommendation.company_id == company_id, AIRecommendation.status == "snoozed")
+            .all()
+        )
+        if not snoozed:
+            return woken
+        wake_times = self._snoozed_until_by_recommendation(company_id, [rec.id for rec in snoozed])
+        for recommendation in snoozed:
+            snoozed_until = wake_times.get(recommendation.id)
+            if snoozed_until is not None and snoozed_until > now:
+                continue
+            recommendation.status = "pending"
+            recommendation.status_reason = None
+            recommendation.updated_at = now
+            woken += 1
+        return woken
+
+    def _snoozed_until_by_recommendation(self, company_id: int, recommendation_ids: List[int]) -> Dict[int, datetime]:
+        """Batch-read wake-up times from snooze interaction events (one query for the whole sweep).
+
+        Semantics match the old per-recommendation lookup: events are scanned newest-first and the
+        first parseable `snoozed_until` wins per recommendation; a recommendation with no parseable
+        snooze payload stays absent from the map, which the sweep treats as wake-now.
+        """
+        wake_times: Dict[int, datetime] = {}
+        if not recommendation_ids:
+            return wake_times
+        events = (
+            self.db.query(AIInteractionEvent)
+            .filter(
+                AIInteractionEvent.company_id == company_id,
+                AIInteractionEvent.recommendation_id.in_(recommendation_ids),
+                AIInteractionEvent.event_type == "ignored",
+            )
+            .order_by(AIInteractionEvent.created_at.desc(), AIInteractionEvent.id.desc())
+            .all()
+        )
+        for event in events:
+            recommendation_id = event.recommendation_id
+            if recommendation_id is None or recommendation_id in wake_times:
+                continue
+            payload = event.event_payload or {}
+            raw = payload.get("snoozed_until")
+            if not isinstance(raw, str):
+                continue
+            try:
+                parsed = _as_utc_naive(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+            except ValueError:
+                continue
+            if parsed is not None:
+                wake_times[recommendation_id] = parsed
+        return wake_times
 
     def _create_correction(
         self,
@@ -397,9 +627,7 @@ class AILearningService:
 
         created = 0
         for source_module, event_count in rows:
-            if self._pending_recommendation_exists(
-                company_id, "workflow_friction", source_module, "source_module", None
-            ):
+            if self._open_recommendation_exists(company_id, "workflow_friction", source_module, "source_module", None):
                 continue
             priority = "high" if event_count >= 10 else "medium"
             self.db.add(
@@ -449,7 +677,7 @@ class AILearningService:
         created = 0
         for source_module, field_path, correction_count in rows:
             target_key = f"{source_module}:{field_path}"
-            if self._pending_recommendation_exists(
+            if self._open_recommendation_exists(
                 company_id, "correction_pattern", source_module, "field_path", None, target_key
             ):
                 continue
@@ -483,7 +711,7 @@ class AILearningService:
             created += 1
         return created
 
-    def _pending_recommendation_exists(
+    def _open_recommendation_exists(
         self,
         company_id: int,
         recommendation_type: str,
@@ -492,11 +720,16 @@ class AILearningService:
         target_entity_id: Optional[int],
         dedupe_key: Optional[str] = None,
     ) -> bool:
+        """True when a matching recommendation is still open (pending or snoozed).
+
+        Snoozed counts as open: the user deferred the item, so the nightly aggregation must
+        not re-create an identical pending duplicate while the original sleeps.
+        """
         query = self.db.query(AIRecommendation.id).filter(
             AIRecommendation.company_id == company_id,
             AIRecommendation.recommendation_type == recommendation_type,
             AIRecommendation.source_module == source_module,
-            AIRecommendation.status == "pending",
+            AIRecommendation.status.in_(["pending", "snoozed"]),
         )
         if target_entity_type:
             query = query.filter(AIRecommendation.target_entity_type == target_entity_type)
