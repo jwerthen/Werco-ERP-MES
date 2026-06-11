@@ -28,6 +28,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
+import { ScanResolveResult } from '../types/scan';
 
 interface Operation {
   id: number;
@@ -81,6 +82,8 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> =
 
 const WORK_CENTER_STORAGE_KEY = 'shop_floor_work_center_id';
 
+const formatScanActions = (actions: string[]) => actions.map((action) => action.replace(/_/g, ' ')).join(', ');
+
 export default function ShopFloorSimple() {
   const { can } = usePermissions();
   const navigate = useNavigate();
@@ -120,6 +123,8 @@ export default function ShopFloorSimple() {
   const [showMobileCenters, setShowMobileCenters] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [scannerCode, setScannerCode] = useState('');
+  // A0.4: row to spotlight after an OP:{id} scan (box or ?scan= deep link).
+  const [highlightedOperationId, setHighlightedOperationId] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   
   // Toast notifications
@@ -312,13 +317,13 @@ export default function ShopFloorSimple() {
     setRefreshing(false);
   };
 
-  const showToast = (type: 'success' | 'error' | 'info', message: string) => {
+  const showToast = useCallback((type: 'success' | 'error' | 'info', message: string) => {
     const id = Date.now();
     setToasts(prev => [...prev, { id, type, message }]);
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 4000);
-  };
+  }, []);
 
   const isOverdue = (dueDate: string | null) => {
     if (!dueDate) return false;
@@ -654,13 +659,62 @@ export default function ShopFloorSimple() {
     }
   };
 
-  const handleScannerSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const code = scannerCode.trim();
+  const scrollToOperations = useCallback(() => {
+    setTimeout(() => operationsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+  }, []);
+
+  const openOperationDetails = useCallback(async (operationId: number) => {
+    try {
+      const details = await api.getOperationDetails(operationId);
+      setDetailsModal(details);
+    } catch {
+      showToast('error', 'Failed to load operation details');
+    }
+  }, [showToast]);
+
+  // A0.4 resolve-first scan flow. Traveler QRs (URL or OP:{id}/WO:{number}
+  // forms) resolve through /scanner/resolve-action into a typed union; codes
+  // it does not recognize (employee badges, supplier-part labels, part
+  // numbers) fall back to the legacy /scanner/lookup path.
+  const resolveScan = useCallback(async (rawCode: string) => {
+    const code = rawCode.trim();
     if (!code) return;
 
     setActionLoading(-1);
     try {
+      let resolved: ScanResolveResult | null = null;
+      try {
+        // Pass the station's work center so legal_actions reflect the
+        // station gate (a mismatched station removes clock_in server-side).
+        resolved = await api.resolveScanAction(code, workCenterIdRef.current || undefined);
+      } catch {
+        resolved = null; // resolver unavailable — legacy lookup below
+      }
+
+      setShowScanner(false);
+      setScannerCode('');
+
+      if (resolved?.kind === 'operation') {
+        const op = resolved.operation;
+        setSearch(op.work_order_number);
+        setHighlightedOperationId(op.id);
+        const actions = resolved.legal_actions.length > 0
+          ? ` — ${formatScanActions(resolved.legal_actions)} available`
+          : '';
+        showToast('success', `Found ${op.name} on ${op.work_order_number}${actions}`);
+        scrollToOperations();
+        await openOperationDetails(op.id);
+        return;
+      }
+
+      if (resolved?.kind === 'work_order') {
+        setSearch(resolved.work_order.work_order_number);
+        showToast('success', `Found ${resolved.work_order.work_order_number}`);
+        scrollToOperations();
+        return;
+      }
+
+      // kind 'employee' / 'unknown' (or resolver error): legacy behavior.
       const result = await api.scannerLookup(code);
       const nextSearch =
         result?.work_order?.work_order_number ||
@@ -669,27 +723,51 @@ export default function ShopFloorSimple() {
         result?.part_number ||
         code;
       setSearch(nextSearch);
-      setShowScanner(false);
-      setScannerCode('');
       showToast('success', `Found ${nextSearch}`);
-      setTimeout(() => operationsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      scrollToOperations();
     } catch {
       setSearch(code);
-      setShowScanner(false);
-      setScannerCode('');
       showToast('info', 'Showing scanned code in search');
     } finally {
       setActionLoading(null);
     }
+  }, [openOperationDetails, scrollToOperations, showToast]);
+
+  const handleScannerSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await resolveScan(scannerCode);
   };
 
-  const handleViewDetails = async (operation: Operation) => {
-    try {
-      const details = await api.getOperationDetails(operation.id);
-      setDetailsModal(details);
-    } catch {
-      showToast('error', 'Failed to load operation details');
+  // Phone-scanned traveler op QRs open /shop-floor/operations?scan=OP:{id}
+  // (kiosk mode included) — run the resolve flow once, then strip the param
+  // via history replace so reloads don't re-scan.
+  const scanParamHandledRef = useRef(false);
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const scanCode = params.get('scan');
+    if (!scanCode) {
+      // Param gone (we stripped it, or plain navigation): re-arm so a LATER
+      // client-side navigation to ?scan=... is handled. The ref still
+      // suppresses strict-mode's double-invoke within one scan handling.
+      scanParamHandledRef.current = false;
+      return;
     }
+    if (loading || scanParamHandledRef.current) return;
+    scanParamHandledRef.current = true;
+    params.delete('scan');
+    navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+    resolveScan(scanCode);
+  }, [loading, location.pathname, location.search, navigate, resolveScan]);
+
+  // Let the operator take in the spotlighted row, then fade it.
+  useEffect(() => {
+    if (highlightedOperationId === null) return;
+    const timer = setTimeout(() => setHighlightedOperationId(null), 8000);
+    return () => clearTimeout(timer);
+  }, [highlightedOperationId]);
+
+  const handleViewDetails = async (operation: Operation) => {
+    await openOperationDetails(operation.id);
   };
 
   const handleHold = async (operationId: number) => {
@@ -1333,9 +1411,12 @@ export default function ShopFloorSimple() {
             const targetReached = Boolean(activeJob && op.status === 'in_progress' && remainingQuantity <= 0);
             
             return (
-              <div 
-                key={op.id} 
-                className={`card hover:shadow-lg transition-shadow ${overdue ? 'border-red-500/30 bg-red-500/10' : ''}`}
+              <div
+                key={op.id}
+                data-testid={`shop-floor-op-${op.id}`}
+                className={`card hover:shadow-lg transition-shadow ${overdue ? 'border-red-500/30 bg-red-500/10' : ''} ${
+                  highlightedOperationId === op.id ? 'border-werco-500 ring-1 ring-werco-500/60' : ''
+                }`}
               >
                 {/* Header */}
                 <div className="flex items-start justify-between mb-3">

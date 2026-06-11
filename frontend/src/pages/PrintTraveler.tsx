@@ -42,8 +42,7 @@ export default function PrintTraveler() {
   const [part, setPart] = useState<Part | null>(null);
   const [materialReqs, setMaterialReqs] = useState<MaterialRequirementsResponse | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
-  // A0.4 scan plumbing: WO-level scan code (WO:{number}) + one OP:{id} code per routing step.
-  const [woCodeQrDataUrl, setWoCodeQrDataUrl] = useState<string>('');
+  // A0.4 scan plumbing: one URL QR per routing step (?scan=OP:{id} deep link).
   const [opQrDataUrls, setOpQrDataUrls] = useState<Record<number, string>>({});
   const [autoPrintStarted, setAutoPrintStarted] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -104,26 +103,28 @@ export default function PrintTraveler() {
     const generateQr = async () => {
       if (!workOrder) return;
       const baseUrl = window.location.origin;
+      // ONE header QR: the job-page URL. Works on phones; the backend scan
+      // resolver parses these URLs for wedge scanner guns too.
       const workOrderUrl = `${baseUrl}/work-orders/${workOrder.id}`;
       try {
-        const dataUrl = await QRCode.toDataURL(workOrderUrl, { width: 160, margin: 1 });
+        // width 320 / margin 2: URL payloads are denser than bare codes; extra
+        // pixels and quiet zone buy print headroom (free on screen).
+        const dataUrl = await QRCode.toDataURL(workOrderUrl, { width: 320, margin: 2 });
         setQrDataUrl(dataUrl);
       } catch (err) {
         console.error('Failed to generate QR code:', err);
       }
-      // A0.4: WO-level scan code for the resolve-action plumbing (plain text,
-      // wedge-scanner friendly) — separate from the phone URL QR above.
-      try {
-        const woCodeUrl = await QRCode.toDataURL(`WO:${workOrder.work_order_number}`, { width: 160, margin: 1 });
-        setWoCodeQrDataUrl(woCodeUrl);
-      } catch (err) {
-        console.error('Failed to generate WO scan QR code:', err);
-      }
-      // A0.4: one OP:{operation_id} code per routing step.
+      // A0.4: one URL QR per routing step. The URL opens the shop floor
+      // focused on that operation (?scan=OP:{id}); scanner guns resolve the
+      // same URL via /scanner/resolve-action. Default error correction (M)
+      // stays — these are denser than the old plain OP:{id} payloads at the
+      // same printed size; do not lower it.
       try {
         const entries = await Promise.all(
           (workOrder.operations ?? []).map(async (op) => {
-            const dataUrl = await QRCode.toDataURL(`OP:${op.id}`, { width: 160, margin: 1 });
+            const opUrl = `${baseUrl}/shop-floor/operations?scan=${encodeURIComponent('OP:' + op.id)}`;
+            // Same headroom rationale as the header QR, more critical at 0.65in.
+            const dataUrl = await QRCode.toDataURL(opUrl, { width: 320, margin: 2 });
             return [op.id, dataUrl] as const;
           })
         );
@@ -197,21 +198,12 @@ export default function PrintTraveler() {
         <div className="text-right">
           <img src="/Werco_Logo-PNG.png" alt="Werco" className="h-12 mb-2" />
           <p className="text-sm">AS9100D / ISO 9001 Certified</p>
-          <div className="mt-2 flex justify-end gap-3">
+          <div className="mt-2 flex justify-end">
             {qrDataUrl && (
               <div className="text-center">
                 <img src={qrDataUrl} alt="Work Order QR" className="h-20 w-20 print-qrcode qr-scan-header" />
-                <div className="text-[9px] text-gray-600">Job page</div>
-              </div>
-            )}
-            {woCodeQrDataUrl && (
-              <div className="text-center">
-                <img
-                  src={woCodeQrDataUrl}
-                  alt={`Scan code WO:${workOrder.work_order_number}`}
-                  className="h-20 w-20 qr-scan-header"
-                />
-                <div className="text-[9px] text-gray-600 font-mono">WO:{workOrder.work_order_number}</div>
+                <div className="text-[9px] text-gray-600">Scan for job</div>
+                <div className="text-[9px] text-gray-600 font-mono">{workOrder.work_order_number}</div>
               </div>
             )}
           </div>

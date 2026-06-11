@@ -28,9 +28,13 @@ def resolve_action(
     """Resolve a scanned traveler/badge code into a typed action context (A0.4).
 
     Code formats: ``OP:{operation_id}`` (traveler routing-step QR),
-    ``WO:{work_order_number}`` (traveler header QR), or a bare employee badge id.
-    Unknown codes return ``kind="unknown"`` with HTTP 200 -- a structured miss,
-    not an error, because wedge scanners hit unknown codes constantly.
+    ``WO:{work_order_number}`` (traveler header QR), a bare employee badge id,
+    or a URL-shaped code from a phone-friendly traveler QR --
+    ``{origin}/work-orders/{id}`` or any URL with a ``scan`` query param (see
+    scan_resolve_service for the URL rules; the host is not validated because
+    tenancy comes from the caller, never the code). Unknown codes return
+    ``kind="unknown"`` with HTTP 200 -- a structured miss, not an error,
+    because wedge scanners hit unknown codes constantly.
 
     READ-ONLY: no audit rows, no OperationalEvents (GET semantics in a POST body;
     POST keeps raw scanner text out of URLs/access logs). Tenant-scoped via the

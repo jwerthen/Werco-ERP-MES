@@ -569,10 +569,25 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 > `{ "code": "<raw scanned text>", "work_center_id": <optional station work center id> }` (`code`
 > 1–255 chars, whitespace stripped; `work_center_id` only drives the `work_center_match` flag on
 > operation scans — it never widens access). Open to **any authenticated user** — it mirrors the
-> read-broad shop-floor reads. Code formats (prefix matching is case-insensitive):
-> - `OP:{operation_id}` — a routing-step QR printed on the traveler → `kind: "operation"`.
-> - `WO:{work_order_number}` — the traveler header QR → `kind: "work_order"` (exact match, with a
->   case-insensitive exact fallback).
+> read-broad shop-floor reads. Code formats (prefix/scheme matching is case-insensitive):
+> - `OP:{operation_id}` — a traveler routing-step code → `kind: "operation"`.
+> - `WO:{work_order_number}` — a work-order code → `kind: "work_order"` (exact match, with a
+>   case-insensitive exact fallback). Still accepted, though current travelers print URL QRs
+>   (below) rather than bare `WO:` codes.
+> - **URL-shaped codes** (`http://` / `https://`) — what the printed traveler QRs now encode, so a
+>   phone camera opens the app while a wedge gun types the same text into this endpoint. Two URL
+>   forms resolve; the **host is deliberately not validated** (travelers may be printed against any
+>   deployment origin — the URL carries no tenant authority; tenancy comes from the authenticated
+>   caller, same as every other code shape):
+>   - a `scan` query param (the per-operation traveler QR, e.g.
+>     `{origin}/shop-floor/operations?scan=OP%3A123`) — URL-decoded **one level only** and
+>     re-resolved as `OP:` / `WO:` / badge; a `scan` value that is itself a URL is a structured
+>     miss.
+>   - a `/work-orders/{id}` path (the traveler header QR; trailing slash allowed) — resolves the
+>     work order by integer primary key → the same `kind: "work_order"` shape as `WO:{number}`.
+>
+>   Every result — hit or miss — echoes the **original scanned URL** in `code`, so operators see
+>   exactly what was scanned.
 > - anything else — probed as an employee badge id (exact match on an **active** user's
 >   `employee_id`) → `kind: "employee"`.
 > - no match / malformed → `kind: "unknown"` with `{ code, reason }`, returned with **HTTP 200** —
