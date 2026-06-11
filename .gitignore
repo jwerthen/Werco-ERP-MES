@@ -75,3 +75,4 @@ temp/
 uploads/
 backend/uploads/
 .vercel
+*.db-journal

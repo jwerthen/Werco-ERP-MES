@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.core.config import settings
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.part import Part, PartType
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.user import User, UserRole
@@ -536,16 +537,38 @@ def get_uploaded_pdf(
             raise HTTPException(status_code=404, detail="PDF not found")
         return StreamingResponse(open_ref_stream(ref), media_type="application/pdf")
 
-    # Security: ensure path is within uploads directory
+    # Local refs. All rejections below are 404 (matching the s3 branch, including
+    # traversal attempts) so foreign/forbidden paths are indistinguishable from
+    # missing ones.
     full_path = os.path.join("uploads", "purchase_orders", path)
-    if not os.path.exists(full_path):
+
+    # Containment guard: the path must resolve inside uploads/purchase_orders.
+    uploads_root = os.path.realpath(os.path.join("uploads", "purchase_orders"))
+    real_path = os.path.realpath(full_path)
+    if not real_path.startswith(uploads_root + os.sep):
         raise HTTPException(status_code=404, detail="PDF not found")
 
-    # Verify path doesn't escape uploads directory
-    real_path = os.path.realpath(full_path)
-    uploads_dir = os.path.realpath("uploads")
-    if not real_path.startswith(uploads_dir):
-        raise HTTPException(status_code=403, detail="Access denied")
+    # Tenant checks happen on the *resolved* segments (so "pending/1/../../x" can't
+    # smuggle a foreign path past them), and before any filesystem existence check.
+    segments = os.path.relpath(real_path, uploads_root).split(os.sep)
+    if segments[0] == "pending":
+        # Pre-PO previews have no DB row; tenancy is encoded in the path written by
+        # save_uploaded_document: pending/{company_id}/{filename}. Legacy un-tenanted
+        # pending files (pending/{filename}) get 404 — they are ephemeral pre-PO
+        # previews, so breaking them is acceptable; re-uploading regenerates them
+        # under the tenant-scoped layout.
+        if len(segments) < 3 or segments[1] != str(company_id):
+            raise HTTPException(status_code=404, detail="PDF not found")
+    else:
+        # PO-attached files ({po_id}/{filename}): serve only if this tenant owns a
+        # PurchaseOrder whose source_document_path is exactly this file.
+        canonical = "uploads/purchase_orders/" + "/".join(segments)
+        po = tenant_query(db, PurchaseOrder, company_id).filter(PurchaseOrder.source_document_path == canonical).first()
+        if po is None:
+            raise HTTPException(status_code=404, detail="PDF not found")
+
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="PDF not found")
 
     return FileResponse(full_path, media_type="application/pdf")
 

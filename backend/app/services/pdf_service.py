@@ -430,10 +430,16 @@ def save_uploaded_document(
         logger.info(f"Saved document to {ref}")
         return ref
 
-    # Legacy local layout, byte-for-byte: uploads/purchase_orders/{po_id|pending}/{name}.
+    # Local layout: uploads/purchase_orders/{po_id}/{name} for PO-attached files.
+    # Pending (pre-PO) files are tenant-scoped when a company is known —
+    # uploads/purchase_orders/pending/{company_id}/{name} — so the serving endpoint
+    # can enforce tenancy from the path alone. Callers without a company (scratch
+    # extraction, e.g. BOM import) keep the legacy un-tenanted pending/ layout.
     base_dir = Path("uploads/purchase_orders")
     if po_id:
         upload_dir = base_dir / str(po_id)
+    elif company_id is not None:
+        upload_dir = base_dir / "pending" / str(company_id)
     else:
         upload_dir = base_dir / "pending"
 
@@ -466,7 +472,8 @@ def move_pdf_to_po(temp_path: str, po_id: int, company_id: Optional[int] = None)
     ``temp_path`` comes from the request body, so the source ref is validated before
     any read/copy/delete: s3 refs must live in the configured bucket under this
     tenant's ``{company_id}/purchase_orders/`` prefix, and local paths must resolve
-    inside ``uploads/purchase_orders`` (same guard as the PO pdf serving endpoint).
+    inside ``uploads/purchase_orders`` (same guard as the PO pdf serving endpoint) —
+    pending sources additionally inside ``pending/{company_id}/``.
     Violations raise ``ValueError`` (same type ``parse_s3_ref`` uses for bad refs).
     """
     import shutil
@@ -505,6 +512,26 @@ def move_pdf_to_po(temp_path: str, po_id: int, company_id: Optional[int] = None)
     real_source = os.path.realpath(temp_path)
     if not real_source.startswith(allowed_root + os.sep):
         raise ValueError(f"Source document path is outside uploads/purchase_orders: {temp_path!r}")
+
+    # The upload flow only ever produces pending/ sources locally
+    # (save_uploaded_document with po_id=None), and pending sources are
+    # tenant-scoped on disk (pending/{company_id}/...). Reject anything else
+    # outright: a non-pending source would let a caller relocate another
+    # tenant's already-attached PO document (and make it servable under their
+    # own PO row). Mirrors the s3 branch's tenant-prefix check.
+    segments = os.path.relpath(real_source, allowed_root).split(os.sep)
+    if segments[0] != "pending":
+        raise ValueError(f"Source document path is not a pending upload: {temp_path!r}")
+    if company_id is not None:
+        tenant_segment = str(company_id)
+    else:
+        # Derive the tenant segment from the path, but only accept the canonical
+        # numeric-tenant shape (same rule as the s3 branch).
+        tenant_segment = segments[1] if len(segments) >= 3 else ""
+        if not tenant_segment.isdigit():
+            raise ValueError(f"Source document path has no tenant segment: {temp_path!r}")
+    if len(segments) < 3 or segments[1] != tenant_segment:
+        raise ValueError(f"Source document path is outside the tenant's pending directory: {temp_path!r}")
 
     source = Path(temp_path)
     if not source.exists():
