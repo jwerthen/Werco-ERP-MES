@@ -70,24 +70,18 @@ from app.services.carriers.types import (
     TrackingStatus,
 )
 from app.services.operational_event_service import OperationalEventService
+from app.services.storage_service import get_storage, resolve_upload_dir
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_upload_dir() -> str:
-    """Resolve the label/BOL storage directory.
+    """Resolve the label/BOL local storage directory.
 
-    Mirrors ``app/api/endpoints/documents.py`` so carrier artifacts land on the
-    SAME local-disk storage as every other ``Document`` (S3 is out of scope).
+    Delegates to the shared storage service so carrier artifacts land on the SAME
+    local-disk root as every other ``Document`` when ``STORAGE_BACKEND=local``.
     """
-    preferred_dir = os.getenv("UPLOAD_DIR", "/app/uploads")
-    try:
-        os.makedirs(preferred_dir, exist_ok=True)
-        return preferred_dir
-    except OSError:
-        fallback_dir = os.path.abspath(os.getenv("UPLOAD_DIR_FALLBACK", "./uploads"))
-        os.makedirs(fallback_dir, exist_ok=True)
-        return fallback_dir
+    return resolve_upload_dir()
 
 
 class ShippingService:
@@ -1020,11 +1014,15 @@ class ShippingService:
         file_path: Optional[str] = None
         file_size: Optional[int] = None
         if data:
-            upload_dir = _resolve_upload_dir()
+            storage = get_storage()
             unique_name = f"{uuid.uuid4()}{ext}"
-            file_path = os.path.join(upload_dir, unique_name)
-            with open(file_path, "wb") as fh:
-                fh.write(data)
+            if storage.is_remote:
+                # Tenant-prefixed object key; ext comes from _format_to_ext (never user input).
+                key = f"{company_id}/shipping/{unique_name}"
+            else:
+                # Legacy local layout, byte-for-byte: UPLOAD_DIR/{uuid}{ext}.
+                key = os.path.join(_resolve_upload_dir(), unique_name)
+            file_path = storage.save(data, key=key)
             file_size = len(data)
 
         document = Document(

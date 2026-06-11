@@ -251,26 +251,60 @@ REDIS_URL=redis://default:xxx@xxx.railway.internal:6379
 2. Generate an App Password at https://myaccount.google.com/apppasswords
 3. Use the app password as `SMTP_PASSWORD`
 
-### File Storage (S3)
+### File Storage
+
+Persistent document bytes — quality-document uploads, **purchased shipping labels /
+Bills of Lading** from the carrier integration, **RFQ package files**, and **uploaded
+PO source documents** — go through the shared storage service
+(`app/services/storage_service.py`) with two backends selected by `STORAGE_BACKEND`:
+
+- **`local`** (default) — today's on-disk behavior, byte-for-byte: files under the
+  resolved `UPLOAD_DIR` (or repo-relative `uploads/...`), and the stored reference is
+  the filesystem path.
+- **`s3`** — AWS S3 or any S3-compatible store (Railway buckets, Cloudflare R2 via
+  `S3_ENDPOINT_URL`). Stored references are `s3://{bucket}/{key}` with tenant-prefixed,
+  never-user-controlled keys (`{company_id}/documents/...`, `{company_id}/shipping/...`,
+  `{company_id}/rfq_packages/...`, `{company_id}/purchase_orders/...`).
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `AWS_ACCESS_KEY_ID` | No | - | AWS access key |
-| `AWS_SECRET_ACCESS_KEY` | No | - | AWS secret key |
-| `AWS_REGION` | No | `us-east-1` | AWS region |
-| `S3_BUCKET_NAME` | No | `werco-erp-documents` | S3 bucket for file storage |
+| `STORAGE_BACKEND` | No | `local` | Backend for **new** document writes: `local` or `s3`. With `s3`, the app **refuses to boot** unless `S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` are all set (fail-fast, validated at startup) |
+| `S3_BUCKET_NAME` | Conditional² | `werco-erp-documents` | Bucket for document storage (s3 backend) |
+| `AWS_ACCESS_KEY_ID` | Conditional² | - | Object-storage access key (AWS or any S3-compatible store) |
+| `AWS_SECRET_ACCESS_KEY` | Conditional² | - | Object-storage secret key |
+| `AWS_REGION` | No | `us-east-1` | Region passed to the S3 client |
+| `S3_ENDPOINT_URL` | No | - | Endpoint URL for S3-**compatible** stores (Railway buckets, Cloudflare R2). Leave unset/empty for AWS S3 |
+| `UPLOAD_DIR` | No | `/app/uploads` | (local backend) Primary directory for document / label / BOL files. **In production point this at a mounted, backed-up volume** (or it lives only in the container's ephemeral filesystem). |
+| `UPLOAD_DIR_FALLBACK` | No | `./uploads` | (local backend) Fallback directory used when `UPLOAD_DIR` is not writable (resolved to an absolute path). |
 
-### Local Document Storage
+> ² **Required when `STORAGE_BACKEND=s3`** — missing values abort startup with a clear
+> error rather than silently dropping documents.
 
-Document uploads — and **purchased shipping labels / Bills of Lading** from the
-carrier integration — are written to a local-disk directory (S3 is not used for
-these). The same resolver is used by `app/api/endpoints/documents.py` and the
-carrier `ShippingService`, so labels/BOLs land alongside every other `Document`.
+> **⚠️ Record retention (AS9100D / CMMC): `local` mode on a volume-less host loses every
+> stored document on redeploy.** Production Railway has **no persistent volume**, so the
+> container filesystem — and every quality document, label/BOL, RFQ file, and PO source
+> document on it — is discarded on each deploy. On such hosts set `STORAGE_BACKEND=s3`
+> (or mount a durable volume at `UPLOAD_DIR`).
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `UPLOAD_DIR` | No | `/app/uploads` | Primary directory for document / label / BOL files. **In production point this at a mounted, backed-up volume** (or it lives only in the container's ephemeral filesystem). |
-| `UPLOAD_DIR_FALLBACK` | No | `./uploads` | Fallback directory used when `UPLOAD_DIR` is not writable (resolved to an absolute path). |
+> **Switching to s3 is safe for existing rows but does not migrate files.** Stored
+> references are dispatched **per-row** (`s3://...` → object storage, anything else →
+> local path), so legacy local-path rows remain readable after flipping
+> `STORAGE_BACKEND=s3` — *provided the local files still exist*. Existing local files
+> are **not** copied to the bucket automatically; on hosts where local files are already
+> ephemeral, only documents written after the switch are durable.
+
+**Railway bucket example** (S3-compatible; the CLI provides the endpoint + keys):
+```bash
+railway bucket create werco-erp-documents
+railway bucket credentials      # prints the endpoint URL + access/secret key pair
+
+STORAGE_BACKEND=s3
+S3_BUCKET_NAME=werco-erp-documents
+S3_ENDPOINT_URL=<endpoint from `railway bucket credentials`>
+AWS_ACCESS_KEY_ID=<access key from `railway bucket credentials`>
+AWS_SECRET_ACCESS_KEY=<secret key from `railway bucket credentials`>
+AWS_REGION=us-east-1
+```
 
 ### External Services
 
@@ -399,6 +433,7 @@ Set these manually in Railway dashboard:
 - `REFRESH_TOKEN_SECRET_KEY` - Different secure random key
 - `CORS_ORIGINS` - Your frontend URL(s)
 - `ALLOWED_HOSTS` - Comma-separated hostnames the API serves (enables Host-header validation; see [Trusted Hosts](#trusted-hosts-http-host-header)). On Railway you **must** include `healthcheck.railway.app` and `localhost` (the health-check probes) alongside your public domain / `*.up.railway.app`, or the deploy's health check returns `400` and the release never goes live
+- `STORAGE_BACKEND=s3` + `S3_BUCKET_NAME` / `S3_ENDPOINT_URL` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` - Railway has **no persistent volume**, so the default `local` document storage loses files on every redeploy; see [File Storage](#file-storage)
 - `REACT_APP_API_URL` - Your backend URL (for frontend service)
 
 ## Security Best Practices

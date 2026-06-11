@@ -11,7 +11,7 @@ This guide covers deploying Werco ERP to production environments.
   - Redis (recommended for caching)
   - Nginx or similar reverse proxy
 - Domain name with SSL certificate
-- S3-compatible storage (for file uploads)
+- S3-compatible storage for document files (`STORAGE_BACKEND=s3`; alternatively a mounted, backed-up volume at `UPLOAD_DIR` for `STORAGE_BACKEND=local`)
 
 ## Environment Configuration
 
@@ -46,11 +46,19 @@ CORS_ALLOW_CREDENTIALS=true
 CORS_ALLOW_METHODS=GET,POST,PUT,DELETE,PATCH,OPTIONS
 CORS_ALLOW_HEADERS=*
 
-# File Storage (S3)
+# File Storage — durable bytes for document uploads, shipping labels/BOLs, RFQ
+# files, and PO source documents (app/services/storage_service.py). The default
+# STORAGE_BACKEND=local keeps files on the container filesystem (only durable if
+# /app/uploads is a mounted volume); "s3" uses AWS S3 or any S3-compatible store
+# and fails fast at boot if bucket/credentials are missing.
+# See docs/ENVIRONMENT_VARIABLES.md -> File Storage.
+STORAGE_BACKEND=s3
 AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
 AWS_REGION=us-east-1
 S3_BUCKET_NAME=werco-erp-documents-prod
+# Required for S3-compatible stores (Railway buckets, Cloudflare R2); omit for AWS S3
+# S3_ENDPOINT_URL=https://your-s3-compatible-endpoint
 
 # Monitoring
 SENTRY_DSN=https://your-sentry-dsn@sentry.io/project-id

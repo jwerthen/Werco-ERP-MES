@@ -124,6 +124,12 @@ Exit kiosk mode on a device:
 | DEBUG | Yes | Set to "false" |
 | CORS_ORIGINS | Yes | Frontend URL(s), comma-separated |
 | ALLOWED_HOSTS | Yes | Host-header allowlist. Must include the API's public hostname, `healthcheck.railway.app` (Railway's deploy probe — **not** covered by `*.up.railway.app`; deploys fail their health check without it), and `localhost` (container HEALTHCHECK). Example: `werco-api-production.up.railway.app,healthcheck.railway.app,localhost`. Default `*` disables validation. See docs/ENVIRONMENT_VARIABLES.md → Trusted Hosts |
+| STORAGE_BACKEND | Yes | Set to `s3` in production — Railway services have **no persistent volume**, so the default `local` loses every uploaded document / label / BOL / RFQ file on redeploy. See [Durable Document Storage](#durable-document-storage) below and docs/ENVIRONMENT_VARIABLES.md → File Storage |
+| S3_BUCKET_NAME | Yes (with s3) | Bucket name (e.g. `werco-erp-documents`). Required at boot when STORAGE_BACKEND=s3 |
+| S3_ENDPOINT_URL | Yes (with s3) | Bucket endpoint URL from `railway bucket credentials` (Railway buckets are S3-compatible; leave empty only for real AWS S3) |
+| AWS_ACCESS_KEY_ID | Yes (with s3) | Bucket access key from `railway bucket credentials`. Required at boot when STORAGE_BACKEND=s3 |
+| AWS_SECRET_ACCESS_KEY | Yes (with s3) | Bucket secret key from `railway bucket credentials`. Required at boot when STORAGE_BACKEND=s3 |
+| AWS_REGION | No | S3 client region (default `us-east-1`) |
 | SENTRY_DSN | No | Sentry error tracking |
 | ANTHROPIC_API_KEY | No | For AI features |
 
@@ -131,6 +137,34 @@ Exit kiosk mode on a device:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | REACT_APP_API_URL | Yes | Backend API URL with /api/v1 suffix |
+
+## Durable Document Storage
+
+Railway services have no persistent volume — with the default `STORAGE_BACKEND=local`,
+every uploaded document, shipping label/BOL, RFQ file, and PO source document is lost
+on redeploy. Production must use a Railway bucket (S3-compatible):
+
+```powershell
+# 1. Create the bucket
+railway bucket create werco-erp-documents
+
+# 2. Get the endpoint URL + access/secret keys
+railway bucket credentials
+
+# 3. Set the six storage variables on werco-api
+railway variables set STORAGE_BACKEND=s3
+railway variables set S3_BUCKET_NAME=werco-erp-documents
+railway variables set S3_ENDPOINT_URL=<endpoint from step 2>
+railway variables set AWS_ACCESS_KEY_ID=<access key from step 2>
+railway variables set AWS_SECRET_ACCESS_KEY=<secret key from step 2>
+railway variables set AWS_REGION=us-east-1
+```
+
+The variables take effect on the **next successful deploy** of `werco-api`. The app
+fails fast at boot if `STORAGE_BACKEND=s3` is set without bucket + credentials.
+Existing rows with local file paths stay readable (per-row dispatch), but local files
+are not migrated to the bucket automatically. Details: docs/ENVIRONMENT_VARIABLES.md →
+File Storage.
 
 ## Troubleshooting
 

@@ -12,6 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.core.config import settings
 from app.db.database import get_db
 from app.models.part import Part, PartType
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
@@ -105,8 +106,8 @@ async def _upload_and_extract_document(
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB")
 
-    # Save document
-    doc_path = save_uploaded_document(content, file.filename)
+    # Save document (durable storage; tenant-prefixed key on remote backends)
+    doc_path = save_uploaded_document(content, file.filename, company_id=company_id)
 
     try:
         # Extract text from document (PDF or Word)
@@ -466,9 +467,14 @@ def create_po_from_upload(
     po.subtotal = subtotal
     po.total = subtotal + (po.tax or 0) + (po.shipping or 0)
 
-    # Move PDF to PO directory
+    # Move PDF to PO directory (copy + delete on object storage). The source ref
+    # comes from the request body; move_pdf_to_po raises ValueError when it falls
+    # outside this tenant's purchase_orders storage.
     if data.pdf_path:
-        new_path = move_pdf_to_po(data.pdf_path, po.id)
+        try:
+            new_path = move_pdf_to_po(data.pdf_path, po.id, company_id=company_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid source document reference") from exc
         po.source_document_path = new_path
 
     # Audit log
@@ -495,9 +501,40 @@ def create_po_from_upload(
 
 
 @router.get("/pdf/{path:path}")
-def get_uploaded_pdf(path: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_uploaded_pdf(
+    path: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
     """Serve uploaded PDF file for preview."""
     import os
+
+    from fastapi.responses import StreamingResponse
+
+    from app.services.storage_service import open_ref_stream, parse_s3_ref, ref_exists
+
+    # s3-backed refs round-trip through the client verbatim ("s3://bucket/key").
+    # Some proxies collapse "//" in paths, so accept "s3:/bucket/key" too.
+    if path.startswith("s3:"):
+        ref = "s3://" + path.split(":", 1)[1].lstrip("/")
+        try:
+            bucket, key = parse_s3_ref(ref)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="PDF not found")
+        # Pin to the configured bucket and the caller's tenant prefix, and mirror the
+        # local uploads/purchase_orders containment guard: this endpoint only serves
+        # this tenant's PO source documents, never arbitrary bucket keys. Reject with
+        # 404 (not 403) so foreign keys are indistinguishable from missing ones.
+        if (
+            bucket != settings.S3_BUCKET_NAME
+            or not key.startswith(f"{company_id}/")
+            or "/purchase_orders/" not in f"/{key}"
+        ):
+            raise HTTPException(status_code=404, detail="PDF not found")
+        if not ref_exists(ref):
+            raise HTTPException(status_code=404, detail="PDF not found")
+        return StreamingResponse(open_ref_stream(ref), media_type="application/pdf")
 
     # Security: ensure path is within uploads directory
     full_path = os.path.join("uploads", "purchase_orders", path)

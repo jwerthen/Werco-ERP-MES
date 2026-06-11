@@ -253,11 +253,15 @@ refreshes tracking for in-flight shipments. It:
 Purchased labels and BOLs are persisted as standard `Document` rows
 (`DocumentType.SHIPPING_LABEL` / `BILL_OF_LADING`), linked from the shipment via
 `label_document_id` / `bol_document_id`. PDF/PNG/ZPL bytes (when the provider
-returns them) are written to the **same local-disk store as every other
-document** — the directory resolved from `UPLOAD_DIR` (default `/app/uploads`,
-falling back to `UPLOAD_DIR_FALLBACK` / `./uploads`). When the provider returns a
+returns them) go through the shared storage service
+(`app/services/storage_service.py`) — the **same store as every other document**:
+with `STORAGE_BACKEND=s3` (production) a tenant-prefixed object key
+(`{company_id}/shipping/{uuid}{ext}`); in local mode (dev default) the directory
+resolved from `UPLOAD_DIR` (default `/app/uploads`, falling back to
+`UPLOAD_DIR_FALLBACK` / `./uploads`). Either way the stored ref (local path or
+`s3://bucket/key`) lands on `Document.file_path`. When the provider returns a
 hosted label URL instead of bytes, the URL is stored on the document and the file
-stays retrievable from the carrier. (S3 is out of scope for carrier artifacts.)
+stays retrievable from the carrier.
 
 The frontend prints a purchased label at `/print/shipping-label/:id`
 (`frontend/src/pages/PrintShippingLabel.tsx`, gated `shipping:view`).
