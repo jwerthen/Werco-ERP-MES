@@ -32,7 +32,16 @@ def extract_text_from_document(file_path: str) -> DocumentExtractionResult:
     """
     Extract text from PDF or Word document.
     Automatically detects file type and uses appropriate extraction method.
+
+    ``file_path`` may be a local path or an ``s3://`` storage ref; remote refs are
+    materialized to a real local file first (pdf2image/pytesseract/antiword need one).
     """
+    from app.services.storage_service import is_s3_ref, ref_as_local_path
+
+    if is_s3_ref(file_path):
+        with ref_as_local_path(file_path) as local_path:
+            return extract_text_from_document(str(local_path))
+
     path = Path(file_path)
     ext = path.suffix.lower()
 
@@ -393,12 +402,35 @@ def _extract_ocr_text(pdf_path: str) -> Tuple[str, int]:
         return "", 0
 
 
-def save_uploaded_document(file_content: bytes, filename: str, po_id: Optional[int] = None) -> str:
+def save_uploaded_document(
+    file_content: bytes, filename: str, po_id: Optional[int] = None, company_id: Optional[int] = None
+) -> str:
     """
     Save uploaded document (PDF or Word) to storage location.
-    Returns the file path.
+    Returns the stored reference (local file path, or ``s3://...`` on the s3 backend).
+
+    Persistent PO source documents must pass ``company_id`` so the remote backend can
+    build a tenant-prefixed key. Callers that only need a scratch file for immediate
+    text extraction (e.g. BOM import) may omit it and always get local-disk behavior.
     """
-    # Create upload directory
+    import uuid
+
+    from app.services.storage_service import get_local_storage, get_storage
+
+    # Get original extension (sanitized against the supported-extension allowlist)
+    original_ext = Path(filename).suffix.lower()
+    if original_ext not in SUPPORTED_EXTENSIONS:
+        original_ext = '.pdf'  # Default
+
+    storage = get_storage()
+    if storage.is_remote and company_id is not None:
+        # Tenant-prefixed, never-user-controlled object key.
+        key = f"{company_id}/purchase_orders/{po_id or 'pending'}/{uuid.uuid4()}{original_ext}"
+        ref = storage.save(file_content, key=key)
+        logger.info(f"Saved document to {ref}")
+        return ref
+
+    # Legacy local layout, byte-for-byte: uploads/purchase_orders/{po_id|pending}/{name}.
     base_dir = Path("uploads/purchase_orders")
     if po_id:
         upload_dir = base_dir / str(po_id)
@@ -406,11 +438,6 @@ def save_uploaded_document(file_content: bytes, filename: str, po_id: Optional[i
         upload_dir = base_dir / "pending"
 
     upload_dir.mkdir(parents=True, exist_ok=True)
-
-    # Get original extension
-    original_ext = Path(filename).suffix.lower()
-    if original_ext not in SUPPORTED_EXTENSIONS:
-        original_ext = '.pdf'  # Default
 
     # Sanitize filename
     stem = Path(filename).stem
@@ -425,17 +452,59 @@ def save_uploaded_document(file_content: bytes, filename: str, po_id: Optional[i
         file_path = upload_dir / f"{safe_stem}_{counter}{original_ext}"
         counter += 1
 
-    # Write file
-    with open(file_path, 'wb') as f:
-        f.write(file_content)
-
-    logger.info(f"Saved document to {file_path}")
-    return str(file_path)
+    ref = get_local_storage().save(file_content, key=str(file_path))
+    logger.info(f"Saved document to {ref}")
+    return ref
 
 
-def move_pdf_to_po(temp_path: str, po_id: int) -> str:
-    """Move PDF from pending to PO-specific directory after PO creation."""
+def move_pdf_to_po(temp_path: str, po_id: int, company_id: Optional[int] = None) -> str:
+    """Move PDF from pending to PO-specific storage after PO creation.
+
+    On the s3 backend this is copy-to-new-key + delete-old (S3 has no move); the new
+    key is server-generated under the tenant prefix. Local behavior is unchanged.
+
+    ``temp_path`` comes from the request body, so the source ref is validated before
+    any read/copy/delete: s3 refs must live in the configured bucket under this
+    tenant's ``{company_id}/purchase_orders/`` prefix, and local paths must resolve
+    inside ``uploads/purchase_orders`` (same guard as the PO pdf serving endpoint).
+    Violations raise ``ValueError`` (same type ``parse_s3_ref`` uses for bad refs).
+    """
     import shutil
+    import uuid
+
+    from app.core.config import settings
+    from app.services.storage_service import backend_for_ref, is_s3_ref, parse_s3_ref, sanitize_ext
+
+    if is_s3_ref(temp_path):
+        bucket, old_key = parse_s3_ref(temp_path)
+        if bucket != settings.S3_BUCKET_NAME:
+            raise ValueError(f"Source document ref is not in the configured storage bucket: {temp_path!r}")
+        if company_id is not None:
+            prefix = str(company_id)
+        else:
+            # Derive the tenant prefix from the existing (server-generated) key, but
+            # only accept the canonical numeric-tenant shape.
+            prefix = old_key.split("/", 1)[0]
+            if not prefix.isdigit():
+                raise ValueError(f"Source document ref has no tenant prefix: {temp_path!r}")
+        if not old_key.startswith(f"{prefix}/purchase_orders/"):
+            raise ValueError(f"Source document ref is outside the tenant's purchase_orders prefix: {temp_path!r}")
+        backend = backend_for_ref(temp_path)
+        if not backend.exists(temp_path):
+            return temp_path
+        ext = sanitize_ext(temp_path) or ".pdf"
+        new_key = f"{prefix}/purchase_orders/{po_id}/{uuid.uuid4()}{ext}"
+        new_ref = backend.save(backend.read_bytes(temp_path), key=new_key)
+        backend.delete(temp_path)
+        logger.info(f"Moved PDF from {temp_path} to {new_ref}")
+        return new_ref
+
+    # Containment guard (mirrors po_upload.py's local serving path): the source must
+    # resolve inside uploads/purchase_orders before we move anything.
+    allowed_root = os.path.realpath(os.path.join("uploads", "purchase_orders"))
+    real_source = os.path.realpath(temp_path)
+    if not real_source.startswith(allowed_root + os.sep):
+        raise ValueError(f"Source document path is outside uploads/purchase_orders: {temp_path!r}")
 
     source = Path(temp_path)
     if not source.exists():

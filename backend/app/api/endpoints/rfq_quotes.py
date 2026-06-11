@@ -45,6 +45,7 @@ from app.services.sheet_metal_costing_service import (
     normalize_material,
     parse_thickness_to_inches,
 )
+from app.services.storage_service import get_storage
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -203,8 +204,10 @@ async def create_rfq_package(
         raise HTTPException(status_code=400, detail="At least one RFQ file is required.")
 
     rfq_number = _generate_rfq_number(db)
+    storage = get_storage()
     package_dir = UPLOAD_DIR / rfq_number
-    package_dir.mkdir(parents=True, exist_ok=True)
+    if not storage.is_remote:
+        package_dir.mkdir(parents=True, exist_ok=True)
 
     package = RfqPackage(
         rfq_number=rfq_number,
@@ -226,15 +229,20 @@ async def create_rfq_package(
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {upload.filename}")
         content = await upload.read()
         unique_name = f"{uuid.uuid4().hex}{ext}"
-        file_path = package_dir / unique_name
-        with open(file_path, "wb") as handle:
-            handle.write(content)
+        if storage.is_remote:
+            # Tenant-prefixed object key; rfq_number is server-generated and ext is
+            # validated against ALLOWED_EXTENSIONS above (never user-controlled).
+            key = f"{company_id}/rfq_packages/{rfq_number}/{unique_name}"
+        else:
+            # Legacy local layout, byte-for-byte: uploads/rfq_packages/{rfq}/{name}.
+            key = str(package_dir / unique_name)
+        stored_ref = storage.save(content, key=key)
 
         db.add(
             RfqPackageFile(
                 rfq_package_id=package.id,
                 file_name=upload.filename or unique_name,
-                file_path=str(file_path),
+                file_path=stored_ref,
                 file_ext=ext,
                 mime_type=upload.content_type,
                 file_size=len(content),

@@ -400,6 +400,95 @@ class TestSupabaseDatabaseConfiguration:
 
 
 @pytest.mark.unit
+class TestStorageBackendValidation:
+    """STORAGE_BACKEND fail-fast validation (durable document storage).
+
+    A deployment configured for s3 without credentials must refuse to boot rather
+    than silently dropping quality records (AS9100D/CMMC record retention).
+    """
+
+    _BASE_ENV = {
+        "SECRET_KEY": "a" * 64,
+        "REFRESH_TOKEN_SECRET_KEY": "b" * 64,
+    }
+
+    def test_default_local_backend_requires_no_credentials(self):
+        with mock.patch.dict(os.environ, dict(self._BASE_ENV), clear=True):
+            from app.core.config import Settings
+
+            settings = Settings()
+            assert settings.STORAGE_BACKEND == "local"
+            assert settings.S3_ENDPOINT_URL is None
+
+    def test_s3_backend_without_credentials_rejected(self):
+        from pydantic import ValidationError
+
+        with mock.patch.dict(
+            os.environ,
+            {**self._BASE_ENV, "STORAGE_BACKEND": "s3", "S3_BUCKET_NAME": "", "AWS_ACCESS_KEY_ID": ""},
+            clear=True,
+        ):
+            with pytest.raises(ValidationError) as exc_info:
+                from app.core.config import Settings
+
+                Settings()
+
+            message = str(exc_info.value)
+            # Every missing variable is named so ops can fix the deploy in one pass.
+            assert "S3_BUCKET_NAME" in message
+            assert "AWS_ACCESS_KEY_ID" in message
+            assert "AWS_SECRET_ACCESS_KEY" in message
+
+    def test_s3_backend_with_credentials_accepted(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                **self._BASE_ENV,
+                "STORAGE_BACKEND": "s3",
+                "S3_BUCKET_NAME": "werco-docs",
+                "AWS_ACCESS_KEY_ID": "key-id",
+                "AWS_SECRET_ACCESS_KEY": "secret",
+                "S3_ENDPOINT_URL": "https://storage.example.railway.app",
+            },
+            clear=True,
+        ):
+            from app.core.config import Settings
+
+            settings = Settings()
+            assert settings.STORAGE_BACKEND == "s3"
+            assert settings.S3_ENDPOINT_URL == "https://storage.example.railway.app"
+
+    def test_s3_backend_value_is_case_insensitive(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                **self._BASE_ENV,
+                "STORAGE_BACKEND": "S3",
+                "S3_BUCKET_NAME": "werco-docs",
+                "AWS_ACCESS_KEY_ID": "key-id",
+                "AWS_SECRET_ACCESS_KEY": "secret",
+            },
+            clear=True,
+        ):
+            from app.core.config import Settings
+
+            # Uppercase still routes through the s3 credential validation.
+            assert Settings().STORAGE_BACKEND == "S3"
+
+    @pytest.mark.parametrize("bad_backend", ["gcs", "azure", "disk", "s4"])
+    def test_unknown_backend_rejected(self, bad_backend):
+        from pydantic import ValidationError
+
+        with mock.patch.dict(os.environ, {**self._BASE_ENV, "STORAGE_BACKEND": bad_backend}, clear=True):
+            with pytest.raises(ValidationError) as exc_info:
+                from app.core.config import Settings
+
+                Settings()
+
+            assert "STORAGE_BACKEND must be 'local' or 's3'" in str(exc_info.value)
+
+
+@pytest.mark.unit
 class TestAllowedHostsList:
     """ALLOWED_HOSTS parsing + the deliberate fail-open-to-['*'] default.
 

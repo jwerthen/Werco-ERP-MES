@@ -322,11 +322,46 @@ class Settings(BaseSettings):
         hosts = [h.strip() for h in self.ALLOWED_HOSTS.split(",") if h.strip()]
         return hosts or ["*"]
 
-    # File Storage
+    # File Storage. STORAGE_BACKEND selects where PERSISTENT document bytes live
+    # (quality documents, carrier labels/BOLs, RFQ package files, uploaded PO source
+    # documents -- see app/services/storage_service.py):
+    #   - "local": today's on-disk layout under UPLOAD_DIR (default; byte-for-byte
+    #     unchanged behavior, but NOT durable on hosts without a volume).
+    #   - "s3": AWS S3 or any S3-compatible store. Requires S3_BUCKET_NAME +
+    #     AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (validated at startup); set
+    #     S3_ENDPOINT_URL for non-AWS stores (Railway buckets, Cloudflare R2).
+    # Stored refs are dispatched per-row ("s3://..." vs local path), so existing
+    # local rows remain servable after flipping to "s3".
+    STORAGE_BACKEND: str = "local"
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
     AWS_REGION: str = "us-east-1"
     S3_BUCKET_NAME: str = "werco-erp-documents"
+    S3_ENDPOINT_URL: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_storage_backend(self) -> "Settings":
+        """Fail fast on a misconfigured durable-storage backend (record retention)."""
+        backend = (self.STORAGE_BACKEND or "local").lower()
+        if backend not in ("local", "s3"):
+            raise ValueError(f"STORAGE_BACKEND must be 'local' or 's3' (got {self.STORAGE_BACKEND!r}).")
+        if backend == "s3":
+            missing = [
+                name
+                for name, value in (
+                    ("S3_BUCKET_NAME", self.S3_BUCKET_NAME),
+                    ("AWS_ACCESS_KEY_ID", self.AWS_ACCESS_KEY_ID),
+                    ("AWS_SECRET_ACCESS_KEY", self.AWS_SECRET_ACCESS_KEY),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "STORAGE_BACKEND=s3 requires object-storage credentials; missing: "
+                    + ", ".join(missing)
+                    + ". For S3-compatible stores (Railway buckets, Cloudflare R2) also set S3_ENDPOINT_URL."
+                )
+        return self
 
     # Monitoring
     SENTRY_DSN: Optional[str] = None

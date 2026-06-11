@@ -1,3 +1,4 @@
+import mimetypes
 import os
 import uuid
 from datetime import datetime
@@ -15,23 +16,19 @@ from app.models.part import Part
 from app.models.purchasing import Vendor
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.services.storage_service import (
+    delete_ref,
+    get_storage,
+    is_s3_ref,
+    open_ref_stream,
+    ref_exists,
+    resolve_upload_dir,
+    sanitize_ext,
+)
 
 router = APIRouter()
 
-
-def _resolve_upload_dir() -> str:
-    preferred_dir = os.getenv("UPLOAD_DIR", "/app/uploads")
-    try:
-        os.makedirs(preferred_dir, exist_ok=True)
-        return preferred_dir
-    except OSError:
-        # Fall back to a local writable directory for tests/dev environments.
-        fallback_dir = os.path.abspath(os.getenv("UPLOAD_DIR_FALLBACK", "./uploads"))
-        os.makedirs(fallback_dir, exist_ok=True)
-        return fallback_dir
-
-
-UPLOAD_DIR = _resolve_upload_dir()
+UPLOAD_DIR = resolve_upload_dir()
 
 
 class DocumentResponse(BaseModel):
@@ -57,6 +54,18 @@ class DocumentResponse(BaseModel):
 
 class WorkOrderDocumentAttachRequest(BaseModel):
     work_order_id: int
+
+
+def _content_disposition(file_name: Optional[str]) -> str:
+    """Attachment Content-Disposition matching Starlette's FileResponse filename handling."""
+    from urllib.parse import quote
+
+    if not file_name:
+        return "attachment"
+    quoted = quote(file_name)
+    if quoted != file_name:
+        return f"attachment; filename*=utf-8''{quoted}"
+    return f'attachment; filename="{file_name}"'
 
 
 def generate_document_number(db: Session, doc_type: str) -> str:
@@ -158,15 +167,17 @@ async def upload_document(
         if not vendor:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
-    # Generate unique filename
-    file_ext = os.path.splitext(file.filename)[1] if file.filename else ""
-    unique_name = f"{uuid.uuid4()}{file_ext}"
-    file_path = os.path.join(UPLOAD_DIR, unique_name)
-
-    # Save file
+    # Generate unique filename and persist through the configured storage backend.
     content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
+    storage = get_storage()
+    if storage.is_remote:
+        # Tenant-prefixed, never-user-controlled object key (extension sanitized).
+        key = f"{company_id}/documents/{uuid.uuid4()}{sanitize_ext(file.filename)}"
+    else:
+        # Legacy local layout, byte-for-byte: UPLOAD_DIR/{uuid}{ext}.
+        file_ext = os.path.splitext(file.filename)[1] if file.filename else ""
+        key = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}{file_ext}")
+    file_path = storage.save(content, key=key)
 
     # Create document record
     doc_number = generate_document_number(db, document_type)
@@ -221,11 +232,27 @@ def download_document(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, StreamingResponse
 
     document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Per-row dispatch on the stored ref: s3:// rows stream from object storage,
+    # legacy/local rows keep the exact FileResponse behavior.
+    if is_s3_ref(document.file_path):
+        if not ref_exists(document.file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        # NULL mime_type rows still get a sensible Content-Type (FileResponse used
+        # to guess from the filename on the local path; mirror that here).
+        media_type = (
+            document.mime_type or mimetypes.guess_type(document.file_name or "")[0] or "application/octet-stream"
+        )
+        return StreamingResponse(
+            open_ref_stream(document.file_path),
+            media_type=media_type,
+            headers={"Content-Disposition": _content_disposition(document.file_name)},
+        )
 
     if not document.file_path or not os.path.exists(document.file_path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -273,9 +300,11 @@ def delete_document(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Delete file if exists
-    if document.file_path and os.path.exists(document.file_path):
-        os.remove(document.file_path)
+    # Delete stored bytes if they exist (per-ref dispatch covers local and s3 rows).
+    # Document is hard-deleted today (no SoftDeleteMixin), so removing the bytes
+    # preserves the existing semantics.
+    if document.file_path and ref_exists(document.file_path):
+        delete_ref(document.file_path)
 
     db.delete(document)
     db.commit()

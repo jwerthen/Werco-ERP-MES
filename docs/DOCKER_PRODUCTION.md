@@ -303,6 +303,7 @@ deploy:
 | `ANTHROPIC_API_KEY` | No | AI features (optional) |
 | `SENTRY_DSN` | No | Error tracking (optional) |
 | `GUNICORN_WORKERS` | No | Backend workers (default: 4) |
+| `STORAGE_BACKEND` | No | Document-bytes backend: `local` (default) or `s3`. The default is durable **on this compose stack** because the named `uploads` volume is mounted at `/app/uploads` — keep that mount (and back it up) if you stay on `local`. Set `s3` (+ `S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `S3_ENDPOINT_URL`/`AWS_REGION`) to use object storage instead. See [File Storage](ENVIRONMENT_VARIABLES.md#file-storage). |
 | `AUDIT_ARCHIVE_DIR` | No | Cold-storage path for archived audit logs on the **worker** (default `/var/lib/werco/audit-archive`); mount a persistent, backed-up volume. See audit archival section. |
 
 ## Resource Requirements

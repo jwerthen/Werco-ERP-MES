@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.models.rfq_quote import RfqPackageFile
 from app.services.pdf_service import extract_text_from_pdf
+from app.services.storage_service import ref_as_local_path
 
 GAUGE_TO_INCHES: Dict[str, float] = {
     "24ga": 0.0239,
@@ -1385,75 +1386,81 @@ def parse_rfq_package_files(files: List[RfqPackageFile]) -> Dict[str, Any]:
         ext = (file_record.file_ext or "").lower()
         name = file_record.file_name
         try:
-            if ext in (".xlsx", ".xls"):
-                bom = parse_bom_xlsx(file_record.file_path, name)
-                bom_parts.extend(bom["parts"])
-                hardware_items.extend(bom["hardware"])
-                file_results[file_record.id] = {
-                    "parse_status": "parsed",
-                    "summary": {
-                        "parts_found": len(bom["parts"]),
-                        "hardware_found": len(bom["hardware"]),
-                    },
-                }
-            elif ext == ".pdf":
-                pdf = parse_pdf_drawing(file_record.file_path, name)
-                pdf_specs.append(pdf)
-                if pdf.get("text_length", 0) < 120:
-                    warnings.append(
-                        f"{name}: low extracted text volume. If this is a scanned drawing, upload DXF or machine-readable PDF for better accuracy."
-                    )
-                file_results[file_record.id] = {
-                    "parse_status": "parsed",
-                    "summary": {
-                        "text_length": pdf["text_length"],
-                        "document_kind": pdf.get("document_kind"),
-                        "part_hint": pdf["part_hint"],
-                        "drawing_number": pdf.get("drawing_number"),
-                        "revision": pdf.get("revision"),
-                        "assembly_items": len(pdf.get("bom_items") or []),
-                        "manufactured_details": len(pdf.get("manufactured_parts") or []),
-                        "material": pdf.get("material"),
-                        "thickness": pdf.get("thickness"),
-                        "finish": pdf.get("finish"),
-                        "holes": pdf.get("hole_count"),
-                        "bends": pdf.get("bend_count"),
-                    },
-                }
-            elif ext == ".dxf":
-                dxf = parse_dxf_geometry(file_record.file_path, name)
-                dxf_specs.append(dxf)
-                if not dxf.get("flat_area") or not dxf.get("cut_length"):
-                    warnings.append(
-                        f"{name}: geometry extracted with limited confidence. Verify units and closed outer profile."
-                    )
-                file_results[file_record.id] = {
-                    "parse_status": "parsed",
-                    "summary": {
-                        "part_hint": dxf.get("part_hint"),
-                        "flat_area": dxf["flat_area"],
-                        "cut_length": dxf["cut_length"],
-                        "holes": dxf.get("hole_count"),
-                        "bends": dxf.get("bend_count"),
-                        "layers": dxf.get("layers", [])[:8],
-                    },
-                }
-            elif ext in (".step", ".stp"):
-                step = parse_step_fallback(file_record.file_path, name)
-                step_specs.append(step)
-                file_results[file_record.id] = {
-                    "parse_status": "parsed_with_fallback",
-                    "summary": {
-                        "flat_area": step.get("flat_area"),
-                        "components": len(step.get("components") or []),
-                        "warning": step.get("warning"),
-                    },
-                }
-            else:
+            if ext not in (".xlsx", ".xls", ".pdf", ".dxf", ".step", ".stp"):
                 file_results[file_record.id] = {
                     "parse_status": "skipped",
                     "summary": {"reason": f"Unsupported extension {ext}"},
                 }
+                continue
+            # Stored refs may live on object storage (s3://...); the parsing libs
+            # (openpyxl, pdf2image, ezdxf) need a real local file, so materialize
+            # the ref first. Local refs pass through unchanged.
+            with ref_as_local_path(file_record.file_path) as local_file:
+                local_path = str(local_file)
+                if ext in (".xlsx", ".xls"):
+                    bom = parse_bom_xlsx(local_path, name)
+                    bom_parts.extend(bom["parts"])
+                    hardware_items.extend(bom["hardware"])
+                    file_results[file_record.id] = {
+                        "parse_status": "parsed",
+                        "summary": {
+                            "parts_found": len(bom["parts"]),
+                            "hardware_found": len(bom["hardware"]),
+                        },
+                    }
+                elif ext == ".pdf":
+                    pdf = parse_pdf_drawing(local_path, name)
+                    pdf_specs.append(pdf)
+                    if pdf.get("text_length", 0) < 120:
+                        warnings.append(
+                            f"{name}: low extracted text volume. If this is a scanned drawing, upload DXF or machine-readable PDF for better accuracy."
+                        )
+                    file_results[file_record.id] = {
+                        "parse_status": "parsed",
+                        "summary": {
+                            "text_length": pdf["text_length"],
+                            "document_kind": pdf.get("document_kind"),
+                            "part_hint": pdf["part_hint"],
+                            "drawing_number": pdf.get("drawing_number"),
+                            "revision": pdf.get("revision"),
+                            "assembly_items": len(pdf.get("bom_items") or []),
+                            "manufactured_details": len(pdf.get("manufactured_parts") or []),
+                            "material": pdf.get("material"),
+                            "thickness": pdf.get("thickness"),
+                            "finish": pdf.get("finish"),
+                            "holes": pdf.get("hole_count"),
+                            "bends": pdf.get("bend_count"),
+                        },
+                    }
+                elif ext == ".dxf":
+                    dxf = parse_dxf_geometry(local_path, name)
+                    dxf_specs.append(dxf)
+                    if not dxf.get("flat_area") or not dxf.get("cut_length"):
+                        warnings.append(
+                            f"{name}: geometry extracted with limited confidence. Verify units and closed outer profile."
+                        )
+                    file_results[file_record.id] = {
+                        "parse_status": "parsed",
+                        "summary": {
+                            "part_hint": dxf.get("part_hint"),
+                            "flat_area": dxf["flat_area"],
+                            "cut_length": dxf["cut_length"],
+                            "holes": dxf.get("hole_count"),
+                            "bends": dxf.get("bend_count"),
+                            "layers": dxf.get("layers", [])[:8],
+                        },
+                    }
+                else:
+                    step = parse_step_fallback(local_path, name)
+                    step_specs.append(step)
+                    file_results[file_record.id] = {
+                        "parse_status": "parsed_with_fallback",
+                        "summary": {
+                            "flat_area": step.get("flat_area"),
+                            "components": len(step.get("components") or []),
+                            "warning": step.get("warning"),
+                        },
+                    }
         except Exception as exc:
             warnings.append(f"{name}: parse failed ({exc})")
             file_results[file_record.id] = {
