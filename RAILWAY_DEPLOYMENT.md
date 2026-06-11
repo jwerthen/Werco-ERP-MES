@@ -123,6 +123,7 @@ Exit kiosk mode on a device:
 | ENVIRONMENT | Yes | Set to "production" |
 | DEBUG | Yes | Set to "false" |
 | CORS_ORIGINS | Yes | Frontend URL(s), comma-separated |
+| ALLOWED_HOSTS | Yes | Host-header allowlist. Must include the API's public hostname, `healthcheck.railway.app` (Railway's deploy probe — **not** covered by `*.up.railway.app`; deploys fail their health check without it), and `localhost` (container HEALTHCHECK). Example: `werco-api-production.up.railway.app,healthcheck.railway.app,localhost`. Default `*` disables validation. See docs/ENVIRONMENT_VARIABLES.md → Trusted Hosts |
 | SENTRY_DSN | No | Sentry error tracking |
 | ANTHROPIC_API_KEY | No | For AI features |
 
