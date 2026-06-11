@@ -79,27 +79,41 @@ no resume-from-hold, inspection, or labor-approval verb on the kiosk.
 
 ## Scanning (QR travelers & badges — A0.4)
 
-**What's printed.** Work-order travelers (`/print/traveler/{id}`) carry two kinds of scan code: a
-`WO:{work_order_number}` QR in the header and one `OP:{operation_id}` QR per routing step in the
-routing table. Employee badges (`/print/badges`, opened from the Users page via multi-select) are
-CR80 cards (3.375in × 2.125in, dashed cut lines) whose QR encodes the user's `employee_id`
-verbatim — the same payload `POST /auth/employee-login` and the resolver below accept. QR was
-chosen over Code128 deliberately: the floor's wedge scanners are 2D imagers that read both, and QR
-reuses the traveler's existing `qrcode` dependency (zero new dependencies).
+**What's printed.** Work-order travelers (`/print/traveler/{id}`) carry **URL QR codes** — phone
+cameras open the app, while wedge guns type the same URL into the resolver below: **one** header QR
+encoding the job-page URL (`https://{host}/work-orders/{id}`; the WO number prints beneath it as
+text) and one QR per routing step encoding a shop-floor deep link
+(`https://{host}/shop-floor/operations?scan=OP%3A{operation_id}` — a phone scan opens the shop
+floor focused on that operation). The earlier separate `WO:{work_order_number}` header QR is gone,
+but bare `WO:{number}` / `OP:{id}` text remains valid resolver input. Employee badges
+(`/print/badges`, opened from the Users page via multi-select) are CR80 cards (3.375in × 2.125in,
+dashed cut lines) whose QR encodes the user's `employee_id` verbatim — the same payload
+`POST /auth/employee-login` and the resolver below accept. QR was chosen over Code128 deliberately:
+the floor's wedge scanners are 2D imagers that read both, and QR reuses the traveler's existing
+`qrcode` dependency (zero new dependencies).
 
 **What scanning does TODAY (resolve/lookup only).** A scanned code is plumbed through
-`POST /api/v1/scanner/resolve-action`, which returns what the code *is* (operation / work order /
-employee / unknown) and — for an operation — which shop-floor actions the calling user could
-legally take right now, with display-ready blocker reasons (see `docs/API.md` → Scanner). It is
-read-only: no audit rows, no events, no auth side effects (a badge scan is a lookup; badge login
-stays on `POST /auth/employee-login`). **Scan-to-act — scan a traveler step and land directly in
-clock-in / report / complete — arrives in Phase 1**; today the kiosk's only scan-driven behavior
+`POST /api/v1/scanner/resolve-action`, which accepts the bare `OP:` / `WO:` / badge codes **and the
+traveler URL forms above** (host deliberately not validated — tenancy comes from the authenticated
+caller, never the code) and returns what the code *is* (operation / work order / employee /
+unknown) and — for an operation — which shop-floor actions the calling user could legally take
+right now, with display-ready blocker reasons (see `docs/API.md` → Scanner). It is read-only: no
+audit rows, no events, no auth side effects (a badge scan is a lookup; badge login stays on
+`POST /auth/employee-login`). The shop-floor operations screen's **Scan box** resolves through
+`resolve-action` first — an operation hit filters to the WO, spotlights the row, and opens its
+details with the legal actions in the toast; a work-order hit filters to the WO — and falls back to
+the legacy `POST /scanner/lookup` for codes the resolver doesn't claim (badge, supplier-part,
+part-number). A `?scan=` URL param on `/shop-floor/operations` (a phone-scanned traveler op QR)
+runs the same flow **once on load, kiosk mode included**, then strips itself from the URL so
+reloads don't re-scan. **Scan-to-act — scan a traveler step and land directly in clock-in / report
+/ complete — arrives in Phase 1**; today the `/kiosk` station screen's only scan-driven behavior
 remains badge login.
 
 **Wedge-scanner notes.** Stations need **2D imagers** (the codes are QR — a 1D laser scanner will
 not read them), configured in **keyboard-wedge mode** with an Enter/CR suffix, the same setup the
 badge-login screen already expects. Traveler scan codes print at ≥ 0.6 in so handheld imagers read
-them at arm's length.
+them at arm's length; the URL payloads are denser than the old bare `OP:{id}` codes at the same
+printed size, so the QR error-correction level stays at the default (M) — don't lower it.
 
 **Traveler print control.** Every traveler prints with a control footer: **UNCONTROLLED WHEN
 PRINTED**, the part revision, the printed-at timestamp, and printed-by (from the printing user's
@@ -107,7 +121,8 @@ session). The routing revision is *not* on the footer because work orders do not
 routing revision generated their operations — the footer says so and points at the released
 routing. Uncontrolled-when-printed is the standard AS9100D default stance for printed copies; the
 footer copy is intended to become configurable **pending the quality manager's controlled-copy
-decision**. Staleness signal: `resolve-action` on a traveler's `OP:` code returns
+decision**. Staleness signal: `resolve-action` on a traveler's operation QR (the `OP:` code it
+embeds) returns
 `warning: "routing_revision_changed"` (a documented timestamp proxy, not an exact revision check)
 when the part's released routing changed after the WO was released/created.
 

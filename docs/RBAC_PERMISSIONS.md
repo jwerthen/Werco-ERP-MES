@@ -65,7 +65,9 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > read-broad shop-floor reads it sits in front of. It is **read-only** (no audit rows, no
 > operational events, no auth side effects; a badge scan is a lookup only — badge **login** stays
 > exclusively on `POST /auth/employee-login`) and **tenant-scoped** (a cross-tenant code, or a
-> soft-deleted work order, resolves to `kind: "unknown"`). The per-action gating it reports
+> soft-deleted work order, resolves to `kind: "unknown"`). URL-shaped traveler codes resolve too;
+> the URL's host is deliberately **not** validated — a scanned URL carries no tenant authority, and
+> tenancy always derives from the authenticated caller. The per-action gating it reports
 > (`legal_actions` / `blockers`) reflects operation / time-entry **state**, not role — the
 > shop-floor write verbs it mirrors (clock-in, production, complete, hold, resume) are themselves
 > operator-facing (any authenticated user), so the resolver bypasses no role check. See

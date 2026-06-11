@@ -1,10 +1,13 @@
 /**
  * A0.4 traveler QR plumbing — /print/traveler/:id
  *
- * Locks: the traveler renders (1) the existing phone URL QR, (2) a WO-level
- * scan QR with payload WO:{work_order_number}, (3) one per-operation scan QR
- * per routing step with payload OP:{operation_id}, and (4) the print-control
- * footer (UNCONTROLLED WHEN PRINTED, printed-at, printed-by, part revision).
+ * Locks: every traveler QR is a URL (backend resolve-action parses these).
+ * (1) ONE header QR with payload {origin}/work-orders/{id} — the old second
+ * WO:{number} header QR is gone; (2) one per-operation QR per routing step
+ * with payload {origin}/shop-floor/operations?scan=OP:{operation_id}
+ * (URL-encoded), keeping the human-readable OP:{id} caption for manual
+ * entry; and (3) the print-control footer (UNCONTROLLED WHEN PRINTED,
+ * printed-at, printed-by, part revision).
  */
 
 import React from 'react';
@@ -112,20 +115,51 @@ describe('PrintTraveler scan QRs', () => {
     mockedToDataURL.mockImplementation(async (payload: string) => `data:image/png;base64,${encodeURIComponent(payload)}`);
   });
 
-  it('generates the WO-level scan QR and one OP QR per routing step', async () => {
+  it('renders ONE header QR with the job URL payload — the second WO scan QR is gone', async () => {
     renderTraveler();
 
     await waitFor(() => expect(screen.getByText('WORK ORDER TRAVELER')).toBeInTheDocument());
-    await waitFor(() => expect(mockedToDataURL).toHaveBeenCalledWith('WO:WO-2026-0042', expect.any(Object)));
-    expect(mockedToDataURL).toHaveBeenCalledWith('OP:101', expect.any(Object));
-    expect(mockedToDataURL).toHaveBeenCalledWith('OP:102', expect.any(Object));
-    // The original phone URL QR is preserved alongside the scan codes.
-    expect(mockedToDataURL).toHaveBeenCalledWith(expect.stringContaining('/work-orders/42'), expect.any(Object));
+    await waitFor(() =>
+      expect(mockedToDataURL).toHaveBeenCalledWith('http://localhost/work-orders/42', expect.any(Object))
+    );
 
-    await waitFor(() => expect(screen.getByAltText('Scan code WO:WO-2026-0042')).toBeInTheDocument());
-    expect(screen.getByAltText('Scan code OP:101')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByAltText('Work Order QR')).toBeInTheDocument());
+    expect(screen.getByText('Scan for job')).toBeInTheDocument();
+    // The second header QR (plain WO:{number} payload) is removed.
+    expect(screen.queryByAltText('Scan code WO:WO-2026-0042')).not.toBeInTheDocument();
+    expect(mockedToDataURL).not.toHaveBeenCalledWith('WO:WO-2026-0042', expect.any(Object));
+    // 1 header QR + 2 op QRs — nothing else.
+    expect(mockedToDataURL).toHaveBeenCalledTimes(3);
+
+    // The human-readable WO number is still printed (header, QR caption, footer).
+    expect(screen.getAllByText('WO-2026-0042').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('generates one URL QR per routing step that deep-links the shop floor to the operation', async () => {
+    renderTraveler();
+
+    await waitFor(() => expect(screen.getByText('WORK ORDER TRAVELER')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByAltText('Scan code OP:101')).toBeInTheDocument());
     expect(screen.getByAltText('Scan code OP:102')).toBeInTheDocument();
-    expect(screen.getByAltText('Work Order QR')).toBeInTheDocument();
+
+    // Plain-text OP:{id} payloads do nothing on phones — they must be URLs now.
+    expect(mockedToDataURL).not.toHaveBeenCalledWith('OP:101', expect.any(Object));
+    expect(mockedToDataURL).not.toHaveBeenCalledWith('OP:102', expect.any(Object));
+
+    for (const opId of [101, 102]) {
+      const payload = mockedToDataURL.mock.calls
+        .map(([value]) => value as string)
+        .find((value) => value.includes(`OP%3A${opId}`));
+      expect(payload).toBe(
+        `http://localhost/shop-floor/operations?scan=${encodeURIComponent(`OP:${opId}`)}`
+      );
+      // Decode and check: the scan param round-trips back to the op code.
+      const url = new URL(payload!);
+      expect(url.pathname).toBe('/shop-floor/operations');
+      expect(url.searchParams.get('scan')).toBe(`OP:${opId}`);
+      // The mono human-readable code stays printed for manual entry.
+      expect(screen.getByText(`OP:${opId}`)).toBeInTheDocument();
+    }
   });
 
   it('keeps each routing row whole across print page breaks (a split QR does not scan)', async () => {

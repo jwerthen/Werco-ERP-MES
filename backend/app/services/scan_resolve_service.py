@@ -10,10 +10,34 @@ Legal-action derivation REUSES the shop-floor gate predicates
 (``app/services/operation_action_gates.py``) -- the same code paths the write
 endpoints call -- so the resolver can never disagree with what
 ``/shop-floor/clock-in`` etc. would actually allow.
+
+Accepted code shapes:
+
+- ``OP:{operation_id}``      -- traveler routing-step QR
+- ``WO:{work_order_number}`` -- traveler header QR
+- anything else unprefixed   -- probed as an employee badge id
+- **URL-shaped codes** (``http://``/``https://``, scheme case-insensitive) --
+  phone-friendly traveler QRs encode URLs so a camera scan opens the app, while
+  wedge/gun scanners type the same text into this endpoint. Two URL forms
+  resolve; the host is deliberately NOT validated (travelers may be printed
+  against any deployment origin -- the URL carries no tenant authority; tenancy
+  comes from the authenticated caller, same as every other code shape):
+
+  - a ``scan`` query parameter (e.g. ``{origin}/shop-floor/operations?scan=OP%3A123``)
+    is URL-decoded and re-resolved through the prefix logic above. One level
+    only: a ``scan`` value that is itself a URL is a structured miss.
+  - a path matching ``/work-orders/{id}`` (e.g. ``{origin}/work-orders/42``,
+    trailing slash allowed) resolves the work order by integer primary key and
+    returns the same result shape as ``WO:{number}``.
+
+  Every result -- hit or miss -- echoes the ORIGINAL scanned URL in ``code``,
+  so kiosk operators see exactly what was scanned.
 """
 
+import re
 from datetime import datetime
 from typing import List, Optional, Tuple, Union
+from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -48,6 +72,14 @@ from app.services.work_order_state_service import _active_operation_id, operatio
 
 OP_PREFIX = "OP:"
 WO_PREFIX = "WO:"
+URL_SCHEMES = ("http://", "https://")
+
+# Traveler header URL: /work-orders/{numeric id}, optional trailing slash.
+# re.ASCII pins \d to [0-9] (Python's \d otherwise matches non-ASCII digit forms),
+# and 18 digits caps the value inside a signed 64-bit integer -- the same guard
+# rationale as the OP:<id> parser below. IGNORECASE because wedge scanners can
+# caps-lock-mangle the whole URL (same rationale as the WO-number fallback).
+WO_URL_PATH_RE = re.compile(r"/work-orders/(\d{1,18})/?", re.ASCII | re.IGNORECASE)
 
 ROUTING_CHECK_NOTE = (
     "Work orders do not snapshot the routing revision their operations were generated from, "
@@ -72,12 +104,74 @@ def resolve_scan_code(
     if not raw:
         return UnknownScanResult(code=code, reason="Empty code")
 
+    if _is_url(raw):
+        return _resolve_url(db, company_id=company_id, user=user, raw=raw, work_center_id=work_center_id)
+    return _dispatch_prefix_code(db, company_id=company_id, user=user, raw=raw, work_center_id=work_center_id)
+
+
+def _dispatch_prefix_code(
+    db: Session,
+    *,
+    company_id: int,
+    user: User,
+    raw: str,
+    work_center_id: Optional[int],
+) -> ScanResult:
+    """The non-URL dispatch: OP:/WO: prefixes, else an employee badge probe."""
     upper = raw.upper()
     if upper.startswith(OP_PREFIX):
         return _resolve_operation(db, company_id=company_id, user=user, raw=raw, work_center_id=work_center_id)
     if upper.startswith(WO_PREFIX):
         return _resolve_work_order(db, company_id=company_id, raw=raw)
     return _resolve_employee(db, company_id=company_id, raw=raw)
+
+
+def _is_url(text: str) -> bool:
+    return text.lower().startswith(URL_SCHEMES)
+
+
+def _resolve_url(
+    db: Session,
+    *,
+    company_id: int,
+    user: User,
+    raw: str,
+    work_center_id: Optional[int],
+) -> ScanResult:
+    """Resolve a URL-shaped code (phone-friendly traveler QR fed through a wedge scanner).
+
+    The host is intentionally not validated: the URL embeds no tenant authority,
+    so tenancy comes from the authenticated caller exactly like bare codes. Every
+    result echoes the ORIGINAL URL in ``code`` so operators see what was scanned.
+    """
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        # e.g. "http://[junk" (unbalanced bracket): a mangled wedge scan of a
+        # printed URL must be a structured miss, never a 500.
+        return UnknownScanResult(code=raw, reason="Unrecognized URL")
+
+    # keep_blank_values so "?scan=" reports "Empty code" (not "Unrecognized URL");
+    # the key match is case-insensitive for the same caps-lock-mangling reason as
+    # the path regex.
+    query = parse_qs(parts.query, keep_blank_values=True)
+    scan_values = next((v for k, v in query.items() if k.lower() == "scan"), None)
+    if scan_values is not None:
+        inner = scan_values[0].strip()  # parse_qs already URL-decoded (%3A -> :)
+        if not inner:
+            return UnknownScanResult(code=raw, reason="Empty code")
+        # One level of indirection only -- a scan param that is itself a URL
+        # must not recurse (no redirect-chasing semantics in a scan resolver).
+        if _is_url(inner):
+            return UnknownScanResult(code=raw, reason="Nested URL scan code")
+        result = _dispatch_prefix_code(db, company_id=company_id, user=user, raw=inner, work_center_id=work_center_id)
+        return result.model_copy(update={"code": raw})
+
+    path_match = WO_URL_PATH_RE.fullmatch(parts.path)
+    if path_match:
+        return _resolve_work_order_by_id(db, company_id=company_id, work_order_id=int(path_match.group(1)), code=raw)
+
+    return UnknownScanResult(code=raw, reason="Unrecognized URL")
 
 
 def _resolve_operation(
@@ -214,16 +308,21 @@ def _routing_revision_check(
     return check, ("routing_revision_changed" if changed else None)
 
 
+def _work_order_scan_query(db: Session, company_id: int):
+    """Tenant-scoped, soft-delete-aware WO query with the eager loads the result needs."""
+    return (
+        tenant_query(db, WorkOrder, company_id)
+        .options(joinedload(WorkOrder.part), selectinload(WorkOrder.operations))
+        .filter(WorkOrder.is_deleted == False)  # noqa: E712
+    )
+
+
 def _resolve_work_order(db: Session, *, company_id: int, raw: str) -> ScanResult:
     number = raw[len(WO_PREFIX) :].strip()
     if not number:
         return UnknownScanResult(code=raw, reason="Malformed work order code (expected WO:<number>)")
 
-    query = (
-        tenant_query(db, WorkOrder, company_id)
-        .options(joinedload(WorkOrder.part), selectinload(WorkOrder.operations))
-        .filter(WorkOrder.is_deleted == False)  # noqa: E712
-    )
+    query = _work_order_scan_query(db, company_id)
     work_order = query.filter(WorkOrder.work_order_number == number).first()
     if work_order is None:
         # Case-insensitive EXACT fallback (scanners/keyboards can mangle case).
@@ -232,7 +331,18 @@ def _resolve_work_order(db: Session, *, company_id: int, raw: str) -> ScanResult
         work_order = query.filter(func.lower(WorkOrder.work_order_number) == number.lower()).first()
     if work_order is None:
         return UnknownScanResult(code=raw, reason="No work order matches this code")
+    return _build_work_order_result(work_order, code=raw)
 
+
+def _resolve_work_order_by_id(db: Session, *, company_id: int, work_order_id: int, code: str) -> ScanResult:
+    """Traveler-URL path lookup ({origin}/work-orders/{id}) -- WO by integer primary key."""
+    work_order = _work_order_scan_query(db, company_id).filter(WorkOrder.id == work_order_id).first()
+    if work_order is None:
+        return UnknownScanResult(code=code, reason="No work order matches this code")
+    return _build_work_order_result(work_order, code=code)
+
+
+def _build_work_order_result(work_order: WorkOrder, *, code: str) -> WorkOrderScanResult:
     operations = sorted(work_order.operations or [], key=lambda op: op.sequence)
     briefs = [
         WorkOrderOperationBrief(
@@ -259,7 +369,7 @@ def _resolve_work_order(db: Session, *, company_id: int, raw: str) -> ScanResult
         part_name=work_order.part.name if work_order.part else None,
         current_operation_id=current_operation_id,
     )
-    return WorkOrderScanResult(code=raw, work_order=summary, operations=briefs)
+    return WorkOrderScanResult(code=code, work_order=summary, operations=briefs)
 
 
 def _resolve_employee(db: Session, *, company_id: int, raw: str) -> ScanResult:

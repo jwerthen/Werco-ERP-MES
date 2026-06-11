@@ -10,6 +10,11 @@ an exception path.
 Code formats (prefix-tagged plain text, wedge-scanner friendly):
 - ``OP:{operation_id}``      -- a routing-step QR on the printed traveler
 - ``WO:{work_order_number}`` -- the traveler header QR
+- URL-shaped codes           -- phone-friendly traveler QRs encode URLs; the
+                                resolver accepts ``{origin}/work-orders/{id}``
+                                and any URL carrying a ``scan`` query param
+                                (URL-decoded and re-resolved as OP:/WO:/badge,
+                                one level only). See scan_resolve_service.
 - anything else              -- treated as an employee badge id (digits per the
                                 badge spec, but any unprefixed code is probed
                                 against ``users.employee_id`` so legacy

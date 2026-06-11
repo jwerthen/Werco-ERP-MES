@@ -61,7 +61,7 @@ If the list is long, narrow it down. The filters are right at the top of the scr
 2. **Status pills** — **All**, **Open**, **In Progress**, **On Hold**, **Ready**, and **Due Today**. Tap one to show only that kind of work.
 3. **Actionable Only** — turns the list down to just the jobs you can act on right now (open, ready, in progress, or on hold). This is usually on by default when a station is selected.
 4. **Search** — type a work order number or part number in the **Search** box to jump straight to it.
-5. **Scan** (on phone/tablet) — tap **Scan**, then scan or type a traveler code to pull up that job.
+5. **Scan** (on phone/tablet) — tap **Scan**, then scan or type a traveler code. A step's code jumps straight to that operation and opens its details window; the job's header code pulls up the whole work order.
 
 > Tip: If your queue looks empty but you know there's work, you probably have a filter on. Tap **All**, turn off **Due Today**, and clear the search box.
 

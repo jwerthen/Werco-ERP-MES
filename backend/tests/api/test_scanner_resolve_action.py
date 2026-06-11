@@ -15,6 +15,10 @@ The resolver is the keystone every scan surface builds on; contracts locked:
    current released routing post-dates the work order baseline (documented proxy
    -- WOs carry no routing-revision snapshot).
 6. Badge resolution is lookup-only (no tokens) -- login stays on /auth/employee-login.
+7. URL-shaped codes (phone-friendly traveler QRs): ``{origin}/work-orders/{id}``
+   resolves the WO by primary key; a ``scan`` query param is URL-decoded and
+   re-resolved as OP:/WO:/badge (one level only -- nested URLs miss); any other
+   URL is a structured miss. ``code`` always echoes the FULL original URL.
 """
 
 from datetime import date, datetime, timedelta
@@ -500,6 +504,158 @@ def test_malformed_op_ids_are_structured_misses_not_500(client: TestClient, db_s
 
     # Boundary: 18 ASCII digits is still parsed and looked up (a clean miss, not malformed).
     assert resolve(client, user, "OP:" + "9" * 18)["reason"] == "No operation matches this code"
+
+
+# ===========================================================================
+# URL-shaped codes (phone-friendly traveler QRs)
+# ===========================================================================
+
+# Any origin works -- travelers may be printed against any deployment origin and
+# the URL carries no tenant authority (tenancy comes from the authenticated caller).
+ORIGIN = "https://erp.example.com"
+
+
+def _strip_code(body: dict) -> dict:
+    """Result body minus the code echo, for bare-code vs URL-scan parity asserts."""
+    return {k: v for k, v in body.items() if k != "code"}
+
+
+def test_url_work_order_by_id_resolves_like_wo_number_scan(client: TestClient, db_session: Session):
+    """The traveler header URL ({origin}/work-orders/{id}) returns the same
+    work_order payload as WO:{number}, with code echoing the full URL."""
+    user = make_user(db_session)
+    wo, ops, _, part = make_wo(db_session, op_statuses=[OperationStatus.COMPLETE, OperationStatus.READY])
+
+    url = f"{ORIGIN}/work-orders/{wo.id}"
+    body = resolve(client, user, url)
+
+    assert body["kind"] == "work_order"
+    assert body["code"] == url  # the ORIGINAL scanned text, not an extracted fragment
+    assert body["work_order"]["id"] == wo.id
+    assert body["work_order"]["part_number"] == part.part_number
+    assert _strip_code(body) == _strip_code(resolve(client, user, f"WO:{wo.work_order_number}"))
+
+
+def test_url_work_order_trailing_slash_and_scheme_variants(client: TestClient, db_session: Session):
+    user = make_user(db_session)
+    wo, _, _, _ = make_wo(db_session)
+
+    for url in [
+        f"https://erp.example.com/work-orders/{wo.id}/",  # trailing slash
+        f"http://erp.example.com/work-orders/{wo.id}",  # plain http
+        f"HTTPS://erp.example.com/work-orders/{wo.id}",  # scheme is case-insensitive
+    ]:
+        body = resolve(client, user, url)
+        assert body["kind"] == "work_order", url
+        assert body["work_order"]["id"] == wo.id
+        assert body["code"] == url
+
+
+def test_url_work_order_other_tenant_and_nonexistent_are_unknown(client: TestClient, db_session: Session):
+    user_a = make_user(db_session, company_id=COMPANY_A)
+    wo_b, (op_b,), _, _ = make_wo(db_session, company_id=COMPANY_B)
+
+    body = resolve(client, user_a, f"{ORIGIN}/work-orders/{wo_b.id}")
+    assert body["kind"] == "unknown"
+    assert body["reason"] == "No work order matches this code"
+    assert body["code"] == f"{ORIGIN}/work-orders/{wo_b.id}"
+
+    # The scan-param form is tenant-scoped identically to the bare OP code.
+    assert resolve(client, user_a, f"{ORIGIN}/shop-floor/operations?scan=OP%3A{op_b.id}")["kind"] == "unknown"
+
+    assert resolve(client, user_a, f"{ORIGIN}/work-orders/999999999")["kind"] == "unknown"
+
+    # The very same URLs resolve for a company-B caller: tenancy comes from the
+    # caller, never from the URL's host or ids.
+    user_b = make_user(db_session, company_id=COMPANY_B)
+    assert resolve(client, user_b, f"{ORIGIN}/work-orders/{wo_b.id}")["kind"] == "work_order"
+    assert resolve(client, user_b, f"{ORIGIN}/shop-floor/operations?scan=OP%3A{op_b.id}")["kind"] == "operation"
+
+
+def test_url_scan_param_operation_resolves_identically_to_bare_code(client: TestClient, db_session: Session):
+    """The per-operation traveler QR ({origin}/shop-floor/operations?scan=OP%3A{id})
+    resolves exactly like scanning OP:{id} -- legal actions, blockers, routing
+    check, and work_center_id pass-through -- with code echoing the full URL."""
+    user = make_user(db_session)
+    wo, (op,), wc, _ = make_wo(db_session)
+
+    url = f"{ORIGIN}/shop-floor/operations?scan=OP%3A{op.id}"
+    body = resolve(client, user, url)
+
+    assert body["kind"] == "operation"
+    assert body["code"] == url
+    assert body["operation"]["id"] == op.id
+    assert _strip_code(body) == _strip_code(resolve(client, user, f"OP:{op.id}"))
+
+    # Station pass-through: the matching work center stays legal...
+    with_station = resolve(client, user, url, work_center_id=wc.id)
+    assert with_station["operation"]["work_center_match"] is True
+    assert "clock_in" in with_station["legal_actions"]
+    # ...and a mismatched one gates clock-in exactly like a bare scan.
+    mismatched = resolve(client, user, url, work_center_id=wc.id + 999)
+    assert mismatched["operation"]["work_center_match"] is False
+    assert "clock_in" not in mismatched["legal_actions"]
+
+
+def test_url_scan_param_work_order_code(client: TestClient, db_session: Session):
+    user = make_user(db_session)
+    wo, _, _, _ = make_wo(db_session)
+
+    url = f"{ORIGIN}/shop-floor/operations?scan=WO%3A{wo.work_order_number}"
+    body = resolve(client, user, url)
+
+    assert body["kind"] == "work_order"
+    assert body["work_order"]["work_order_number"] == wo.work_order_number
+    assert body["code"] == url
+
+
+def test_url_nested_scan_param_is_unknown(client: TestClient, db_session: Session):
+    """One level of URL indirection only: a scan param that is itself a URL must
+    not recurse, even when the inner URL would have resolved on its own."""
+    user = make_user(db_session)
+    wo, _, _, _ = make_wo(db_session)
+
+    nested = f"{ORIGIN}/shop-floor/operations?scan=https%3A%2F%2Felsewhere.test%2Fwork-orders%2F{wo.id}"
+    body = resolve(client, user, nested)
+    assert body == {"kind": "unknown", "code": nested, "reason": "Nested URL scan code"}
+
+
+def test_unrecognized_url_is_structured_miss(client: TestClient, db_session: Session):
+    user = make_user(db_session)
+
+    for url in [
+        f"{ORIGIN}/parts/42",  # known app route, not a scan target
+        f"{ORIGIN}/work-orders/notanumber",
+        f"{ORIGIN}/work-orders/",  # no id
+        f"{ORIGIN}/work-orders/{'9' * 19}",  # over the 64-bit id guard: clean miss, not a 500
+        ORIGIN,  # bare origin, empty path
+        "http://[junk",  # unbalanced bracket: urlsplit raises ValueError -- miss, not a 500
+    ]:
+        body = resolve(client, user, url)
+        assert body == {"kind": "unknown", "code": url, "reason": "Unrecognized URL"}, url
+
+
+def test_url_caps_lock_mangled_forms_still_resolve(client: TestClient, db_session: Session):
+    """Wedge scanners can caps-lock-mangle the whole printed URL: the path and the
+    scan query key match case-insensitively (the inner OP:/WO: value already did)."""
+    user = make_user(db_session)
+    wo, (op,), _, _ = make_wo(db_session)
+
+    body = resolve(client, user, f"{ORIGIN.upper()}/WORK-ORDERS/{wo.id}")
+    assert body["kind"] == "work_order", body
+    assert body["work_order"]["id"] == wo.id
+
+    body = resolve(client, user, f"{ORIGIN.upper()}/SHOP-FLOOR/OPERATIONS?SCAN=OP%3A{op.id}")
+    assert body["kind"] == "operation", body
+    assert body["operation"]["id"] == op.id
+
+
+def test_url_blank_scan_param_is_empty_code_miss(client: TestClient, db_session: Session):
+    user = make_user(db_session)
+
+    url = f"{ORIGIN}/shop-floor/operations?scan="
+    body = resolve(client, user, url)
+    assert body == {"kind": "unknown", "code": url, "reason": "Empty code"}
 
 
 # ===========================================================================
