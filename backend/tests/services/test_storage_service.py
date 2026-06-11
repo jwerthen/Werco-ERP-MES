@@ -301,6 +301,17 @@ class TestPdfServiceStorageIntegration:
         assert first == str(Path("uploads/purchase_orders/12/My PO.pdf"))
         assert second == str(Path("uploads/purchase_orders/12/My PO_1.pdf"))
 
+    def test_save_uploaded_document_local_pending_is_tenant_scoped(self, tmp_path, monkeypatch):
+        # Pre-PO (pending) files with a known company land under pending/{company_id}
+        # so the serving endpoint can enforce tenancy from the path alone.
+        from app.services.pdf_service import save_uploaded_document
+
+        monkeypatch.chdir(tmp_path)
+        ref = save_uploaded_document(b"%PDF-1.4", "preview.pdf", company_id=7)
+
+        assert ref == str(Path("uploads/purchase_orders/pending/7/preview.pdf"))
+        assert (tmp_path / ref).read_bytes() == b"%PDF-1.4"
+
     def test_move_pdf_to_po_remote_copies_then_deletes(self, s3_backend):
         from app.services.pdf_service import move_pdf_to_po
 
@@ -370,26 +381,63 @@ class TestPdfServiceStorageIntegration:
             move_pdf_to_po("uploads/purchase_orders/../../secrets.pdf", po_id=5, company_id=7)
         assert outside.read_bytes() == b"%PDF-1.4 secret"  # never moved
 
-    def test_move_pdf_to_po_local_unchanged(self, tmp_path, monkeypatch):
+    def test_move_pdf_to_po_local_moves_tenant_pending_file(self, tmp_path, monkeypatch):
         from app.services.pdf_service import move_pdf_to_po
 
         monkeypatch.chdir(tmp_path)
-        pending = Path("uploads/purchase_orders/pending")
+        pending = Path("uploads/purchase_orders/pending/7")
         pending.mkdir(parents=True)
         (pending / "doc.pdf").write_bytes(b"%PDF-1.4")
 
-        new_path = move_pdf_to_po(str(pending / "doc.pdf"), po_id=5)
+        new_path = move_pdf_to_po(str(pending / "doc.pdf"), po_id=5, company_id=7)
 
         assert new_path == str(Path("uploads/purchase_orders/5/doc.pdf"))
         assert Path(new_path).read_bytes() == b"%PDF-1.4"
         assert not (pending / "doc.pdf").exists()
+
+    def test_move_pdf_to_po_local_rejects_pending_source_outside_tenant_dir(self, tmp_path, monkeypatch):
+        # Pending sources are tenant-scoped on disk; a pending path under another
+        # tenant's directory (or the legacy un-tenanted pending root) must be
+        # rejected before anything is moved, mirroring the s3 tenant-prefix check.
+        from app.services.pdf_service import move_pdf_to_po
+
+        monkeypatch.chdir(tmp_path)
+        foreign = Path("uploads/purchase_orders/pending/9")
+        foreign.mkdir(parents=True)
+        (foreign / "doc.pdf").write_bytes(b"%PDF-1.4 t9")
+        legacy = Path("uploads/purchase_orders/pending/old.pdf")
+        legacy.write_bytes(b"%PDF-1.4 legacy")
+
+        with pytest.raises(ValueError, match="pending"):
+            move_pdf_to_po(str(foreign / "doc.pdf"), po_id=5, company_id=7)
+        with pytest.raises(ValueError, match="tenant"):
+            move_pdf_to_po(str(legacy), po_id=5)  # no company: numeric segment required
+        # Sources untouched in both cases.
+        assert (foreign / "doc.pdf").read_bytes() == b"%PDF-1.4 t9"
+        assert legacy.read_bytes() == b"%PDF-1.4 legacy"
+
+    def test_move_pdf_to_po_local_rejects_non_pending_source(self, tmp_path, monkeypatch):
+        # Only pending/ sources are movable: a non-pending local source is another
+        # PO's already-attached document. Allowing it would let a caller relocate
+        # another tenant's PO document (passing only the containment guard) and make
+        # it servable under their own PO row via the tenant-scoped DB lookup.
+        from app.services.pdf_service import move_pdf_to_po
+
+        monkeypatch.chdir(tmp_path)
+        attached = Path("uploads/purchase_orders/41")
+        attached.mkdir(parents=True)
+        (attached / "doc.pdf").write_bytes(b"%PDF-1.4 victim")
+
+        with pytest.raises(ValueError, match="not a pending upload"):
+            move_pdf_to_po(str(attached / "doc.pdf"), po_id=5, company_id=7)
+        assert (attached / "doc.pdf").read_bytes() == b"%PDF-1.4 victim"  # never moved
 
     def test_move_pdf_to_po_local_missing_source_is_noop(self, tmp_path, monkeypatch):
         # Local equivalence of the s3 missing-source no-op: return the input untouched.
         from app.services.pdf_service import move_pdf_to_po
 
         monkeypatch.chdir(tmp_path)
-        missing = str(Path("uploads/purchase_orders/pending/never-written.pdf"))
+        missing = str(Path("uploads/purchase_orders/pending/7/never-written.pdf"))
 
         assert move_pdf_to_po(missing, po_id=5, company_id=7) == missing
         assert not Path("uploads/purchase_orders/5").exists()  # no destination dir created
