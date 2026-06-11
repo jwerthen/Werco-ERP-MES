@@ -22,6 +22,12 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 ARG CACHEBUST=1
 COPY --chown=appuser:appgroup . .
 
+# Writable dirs for the non-root user. COPY --chown does not change /app
+# itself (root-owned from WORKDIR), and documents.py makedirs /app/uploads at
+# import time - without this the app crashes with PermissionError on startup
+# (matches the mkdir/chown done in Dockerfile.prod).
+RUN mkdir -p /app/uploads /app/logs && chown appuser:appgroup /app /app/uploads /app/logs
+
 # Expose port (Railway sets PORT env var)
 EXPOSE 8000
 
