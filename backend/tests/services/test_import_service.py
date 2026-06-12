@@ -268,13 +268,25 @@ class TestBoundedScan:
         workbook.save(out)
 
         started = time.monotonic()
-        table = parse_import_file("upload.xlsx", out.getvalue(), required_columns={"part_number", "name"})
+        # max_scanned_rows tightened so the cutoff check is deterministic: with
+        # the blank-run cutoff working, the main loop scans ~1k rows (the 50k
+        # look-ahead runs outside this budget); if the cutoff ever regresses to
+        # unbounded blank scanning, the backstop raises ImportFileError here
+        # regardless of runner speed.
+        table = parse_import_file(
+            "upload.xlsx",
+            out.getvalue(),
+            required_columns={"part_number", "name"},
+            max_scanned_rows=60_000,
+        )
         elapsed = time.monotonic() - started
 
         assert [row["part_number"] for _, row in table.iter_rows()] == ["P-1", "P-2"]
-        # Generous wall-clock bound: a regression to full-grid scanning takes
-        # minutes; the bounded scan takes milliseconds.
-        assert elapsed < 10, f"bloated-dimension parse took {elapsed:.1f}s — grid scan regression"
+        # Wall-clock is only a loose backstop — coverage-traced CI runners take
+        # ~19s for the bounded scan, a full-grid regression takes many minutes.
+        # Column-cap regressions are caught deterministically by
+        # test_sheet_wider_than_column_cap_still_parses.
+        assert elapsed < 90, f"bloated-dimension parse took {elapsed:.1f}s — grid scan regression"
 
     def test_sheet_wider_than_column_cap_still_parses(self):
         extra_headers = [f"extra_{i}" for i in range(MAX_IMPORT_COLUMNS)]
