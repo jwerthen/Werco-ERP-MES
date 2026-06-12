@@ -217,7 +217,8 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 | POST | `/parts/` | Create part | Yes |
 | GET | `/parts/{id}` | Get part by ID | Yes |
 | PUT | `/parts/{id}` | Update part | Yes |
-| DELETE | `/parts/{id}` | Delete part | Admin |
+| DELETE | `/parts/{id}` | Delete part (soft delete — restorable) | Admin |
+| POST | `/parts/{id}/restore` | Restore a soft-deleted part | Admin / Manager |
 | GET | `/parts/{id}/bom` | Get BOM for part | Yes |
 
 #### Part Schema
@@ -293,6 +294,25 @@ uploads go through text extraction + LLM. See
 > standard Excel workbook."`. On `POST /bom/import` (the LLM path), Excel **text extraction
 > degrades gracefully** at the scan cap — partial text at `"medium"` confidence — rather than
 > refusing the file.
+
+> **Commits are audited.** `POST /bom/import` and `POST /bom/import/commit` write tamper-evident
+> `audit_log` entries via `AuditService` tagged `extra_data.source = "bom_import"`: one CREATE per
+> part created (assembly or component), one UPDATE when an existing part is promoted to
+> `part_type = assembly`, and one CREATE for the BOM with its items summarized on the parent row
+> (`item_count` + `component_part_numbers` in `extra_data` — the same parent-row pattern as the
+> WO/PO imports' audit rows). Audit rows are flushed before the terminal commit so they persist
+> atomically with the import. `POST /bom/import/preview` writes nothing.
+
+> **Conflicts are refused with actionable 400s** rather than silently reusing soft-deleted rows or
+> dying with an IntegrityError **500**. On refusal the whole import rolls back — no partial
+> parts/BOM (or their audit rows) persist. The cases: an assembly or component part number matching
+> a **soft-deleted part** → `"Part 'X' matches a deleted part. Restore it from Parts (or use a
+> different part number) and re-import."` (the deleted row still owns the number — same contract as
+> `POST /parts/`, recoverable via `POST /parts/{id}/restore`); a **deleted BOM** on the assembly
+> part → `"A deleted BOM exists for part 'X' — restore it before importing."`; an **inactive BOM**
+> → `"An inactive BOM exists for part 'X' — reactivate or delete it before importing."` (previously
+> an IntegrityError 500); an **active BOM** → `"A BOM already exists for assembly part 'X'"` (now
+> names the part).
 
 ### Work Centers
 

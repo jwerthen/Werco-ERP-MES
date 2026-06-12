@@ -1,12 +1,12 @@
 import logging
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, NoReturn, Optional, Sequence, Set, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem, BOMItemType, BOMLineType
 from app.models.part import Part, PartType, UnitOfMeasure
@@ -32,6 +32,7 @@ from app.schemas.bom_import import (
     BOMImportPreviewResponse,
     BOMImportResponse,
 )
+from app.services.audit_service import AuditService
 from app.services.import_service import (
     MAX_CONSECUTIVE_BLANK_ROWS,
     MAX_IMPORT_COLUMNS,
@@ -242,6 +243,58 @@ def _generate_fallback_part_number(prefix: str, index: int) -> str:
     return f"{prefix}-{timestamp}-{index:03d}"
 
 
+def _reject_deleted_part(db: Session, part_number: str) -> NoReturn:
+    """Fail the import when a part number collides with a soft-deleted part.
+
+    ``uq_parts_company_part_number`` has no soft-delete carve-out, so the
+    deleted row still owns the number: silently reusing it would resurrect
+    deleted data, and creating fresh would raise IntegrityError. Mirror the
+    POST /parts precedent (400 + the /parts/{id}/restore recovery path). The
+    import is a single transaction — roll back anything already staged so a
+    partial BOM never persists.
+    """
+    db.rollback()
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Part '{part_number}' matches a deleted part. Restore it from Parts "
+            "(or use a different part number) and re-import."
+        ),
+    )
+
+
+def _reject_existing_bom(db: Session, assembly_part: Part, company_id: int) -> None:
+    """Fail the import if ANY BOM row already occupies the assembly part.
+
+    ``BOM.part_id`` is unique with no soft-delete/active carve-out. The old
+    ``is_active == True`` lookup made soft-deleted or inactive BOM rows
+    invisible, so the import tried to create a second BOM and died with an
+    IntegrityError 500. Branch on the row's state instead and return an
+    actionable 400.
+    """
+    existing_bom = db.query(BOM).filter(BOM.part_id == assembly_part.id, BOM.company_id == company_id).first()
+    if existing_bom is None:
+        return
+    # Capture state before rollback expires the instances.
+    part_number = assembly_part.part_number
+    bom_is_deleted = bool(existing_bom.is_deleted)
+    bom_is_active = bool(existing_bom.is_active)
+    # Single-transaction import: discard anything already staged (e.g. the
+    # in-place part_type promotion and its audit row) before failing.
+    db.rollback()
+    if bom_is_deleted:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A deleted BOM exists for part '{part_number}' — restore it before importing.",
+        )
+    if not bom_is_active:
+        raise HTTPException(
+            status_code=400,
+            detail=f"An inactive BOM exists for part '{part_number}' — reactivate or delete it before importing.",
+        )
+    raise HTTPException(status_code=400, detail=f"A BOM already exists for assembly part '{part_number}'")
+
+
 def _ensure_part(
     db: Session,
     part_number: Optional[str],
@@ -253,11 +306,14 @@ def _ensure_part(
     create_missing: bool,
     fallback_index: int,
     company_id: int,
+    audit: AuditService,
     created_by: Optional[int] = None,
 ) -> Tuple[Optional[Part], Optional[str], bool]:
     if part_number:
         existing = db.query(Part).filter(Part.part_number == part_number, Part.company_id == company_id).first()
         if existing:
+            if existing.is_deleted:
+                _reject_deleted_part(db, part_number)
             return existing, None, False
     if not create_missing:
         return None, part_number or name, False
@@ -283,6 +339,8 @@ def _ensure_part(
     )
     db.add(part)
     db.flush()
+    # Before the terminal commit so the audit row persists atomically with the part.
+    audit.log_create("part", part.id, part.part_number, new_values=part, extra_data={"source": "bom_import"})
     return part, None, True
 
 
@@ -512,7 +570,7 @@ def _items_from_table(
 
 
 def _create_from_import_payload(
-    payload: BOMImportCommitRequest, db: Session, current_user: User, company_id: int
+    payload: BOMImportCommitRequest, db: Session, current_user: User, company_id: int, audit: AuditService
 ) -> BOMImportResponse:
     items = payload.items or []
     doc_type = (payload.document_type or ("bom" if items else "part")).lower()
@@ -539,10 +597,21 @@ def _create_from_import_payload(
     assembly_part_type = _resolve_import_parent_part_type(doc_type, assembly.part_type)
 
     existing_part = db.query(Part).filter(Part.part_number == assembly_number, Part.company_id == company_id).first()
+    if existing_part is not None and existing_part.is_deleted:
+        _reject_deleted_part(db, assembly_number)
     if existing_part:
         assembly_part = existing_part
         if doc_type == "bom" and _part_type_value(assembly_part.part_type) != PartType.ASSEMBLY.value:
+            old_part_type = _part_type_value(assembly_part.part_type)
             assembly_part.part_type = PartType.ASSEMBLY.value
+            audit.log_update(
+                "part",
+                assembly_part.id,
+                assembly_part.part_number,
+                old_values={"part_type": old_part_type},
+                new_values={"part_type": PartType.ASSEMBLY.value},
+                extra_data={"source": "bom_import"},
+            )
     else:
         assembly_part = Part(
             part_number=assembly_number,
@@ -557,6 +626,13 @@ def _create_from_import_payload(
         )
         db.add(assembly_part)
         db.flush()
+        audit.log_create(
+            "part",
+            assembly_part.id,
+            assembly_part.part_number,
+            new_values=assembly_part,
+            extra_data={"source": "bom_import"},
+        )
 
     created_parts = 0 if existing_part else 1
     created_bom_items = 0
@@ -575,13 +651,7 @@ def _create_from_import_payload(
             warnings=warnings,
         )
 
-    existing_bom = (
-        db.query(BOM)
-        .filter(BOM.part_id == assembly_part.id, BOM.company_id == company_id, BOM.is_active == True)
-        .first()
-    )
-    if existing_bom:
-        raise HTTPException(status_code=400, detail="A BOM already exists for this assembly part")
+    _reject_existing_bom(db, assembly_part, company_id)
 
     bom = BOM(
         part_id=assembly_part.id,
@@ -597,6 +667,7 @@ def _create_from_import_payload(
     bom_id = bom.id
 
     next_line = 10
+    component_part_numbers: List[str] = []
     for idx, item in enumerate(items, start=1):
         item_number = int(item.line_number or next_line)
         next_line = item_number + 10
@@ -622,6 +693,7 @@ def _create_from_import_payload(
             payload.create_missing_parts,
             idx,
             company_id=company_id,
+            audit=audit,
             created_by=current_user.id,
         )
         if missing:
@@ -629,6 +701,7 @@ def _create_from_import_payload(
             continue
         if was_created:
             created_parts += 1
+        component_part_numbers.append(component_part.part_number)
 
         quantity = float(item.quantity or 1)
         bom_item = BOMItem(
@@ -650,6 +723,21 @@ def _create_from_import_payload(
     if missing_parts:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Missing parts: {', '.join(missing_parts)}")
+
+    # One audit row for the BOM with the items summarized (house pattern: the
+    # WO import logs the parent and summarizes children in extra_data), before
+    # the terminal commit so it persists atomically with the import.
+    audit.log_create(
+        "bom",
+        bom.id,
+        assembly_part.part_number,
+        new_values=bom,
+        extra_data={
+            "source": "bom_import",
+            "item_count": created_bom_items,
+            "component_part_numbers": component_part_numbers,
+        },
+    )
 
     db.commit()
 
@@ -764,11 +852,19 @@ def import_bom_commit(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Commit a reviewed BOM/part import payload.
+
+    Writes tamper-evident audit_log entries (extra_data.source = "bom_import"): one CREATE per
+    created part, an UPDATE when an existing part is promoted to part_type=assembly, and one
+    CREATE for the BOM with item_count + component part numbers summarized on the parent row.
+    Conflicts are refused with actionable 400s and the whole import is rolled back: a part number
+    matching a soft-deleted part, or a deleted / inactive / active BOM already occupying the
+    assembly part.
     """
-    return _create_from_import_payload(payload, db, current_user, company_id)
+    return _create_from_import_payload(payload, db, current_user, company_id, audit)
 
 
 @router.post("/import", response_model=BOMImportResponse, status_code=status.HTTP_201_CREATED)
@@ -778,6 +874,7 @@ async def import_bom_or_part(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Upload a BOM or single-part document (PDF/DOC/DOCX/XLSX/XLS) and create parts/BOM items.
@@ -785,6 +882,11 @@ async def import_bom_or_part(
     The document is text-extracted and parsed by the LLM in one shot (no review step — prefer
     /bom/import/preview + /bom/import/commit for a reviewable flow). Excel text extraction is
     scan-bounded and degrades gracefully at the cap (partial text, "medium" confidence).
+
+    Writes the same tamper-evident audit_log entries as /bom/import/commit
+    (extra_data.source = "bom_import") and refuses the same conflicts with actionable 400s
+    (soft-deleted part number collision; deleted / inactive / active BOM on the assembly part),
+    rolling back the whole import.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="File name is required")
@@ -801,7 +903,7 @@ async def import_bom_or_part(
 
     # Save + extraction + LLM call + DB writes are CPU/DB-bound sync work; run
     # them in the threadpool so a large document can't stall the event loop
-    # (the request-scoped Session and its commits are used sequentially from
+    # (the request-scoped Session and audit service are used sequentially from
     # one worker thread — same as a sync endpoint).
     def _run_import() -> BOMImportResponse:
         doc_path = save_uploaded_document(content, filename)
@@ -845,10 +947,21 @@ async def import_bom_or_part(
         existing_part = (
             db.query(Part).filter(Part.part_number == assembly_number, Part.company_id == company_id).first()
         )
+        if existing_part is not None and existing_part.is_deleted:
+            _reject_deleted_part(db, assembly_number)
         if existing_part:
             assembly_part = existing_part
             if doc_type == "bom" and _part_type_value(assembly_part.part_type) != PartType.ASSEMBLY.value:
+                old_part_type = _part_type_value(assembly_part.part_type)
                 assembly_part.part_type = PartType.ASSEMBLY.value
+                audit.log_update(
+                    "part",
+                    assembly_part.id,
+                    assembly_part.part_number,
+                    old_values={"part_type": old_part_type},
+                    new_values={"part_type": PartType.ASSEMBLY.value},
+                    extra_data={"source": "bom_import"},
+                )
         else:
             assembly_part = Part(
                 part_number=assembly_number,
@@ -863,6 +976,13 @@ async def import_bom_or_part(
             )
             db.add(assembly_part)
             db.flush()
+            audit.log_create(
+                "part",
+                assembly_part.id,
+                assembly_part.part_number,
+                new_values=assembly_part,
+                extra_data={"source": "bom_import"},
+            )
 
         created_parts = 0 if existing_part else 1
         created_bom_items = 0
@@ -881,14 +1001,8 @@ async def import_bom_or_part(
                 warnings=warnings,
             )
 
-        # If BOM already exists for assembly part, block import
-        existing_bom = (
-            db.query(BOM)
-            .filter(BOM.part_id == assembly_part.id, BOM.company_id == company_id, BOM.is_active == True)
-            .first()
-        )
-        if existing_bom:
-            raise HTTPException(status_code=400, detail="A BOM already exists for this assembly part")
+        # If any BOM row already occupies the assembly part, block the import.
+        _reject_existing_bom(db, assembly_part, company_id)
 
         bom = BOM(
             part_id=assembly_part.id,
@@ -904,6 +1018,7 @@ async def import_bom_or_part(
         bom_id = bom.id
 
         next_line = 10
+        component_part_numbers: List[str] = []
         for idx, item in enumerate(items, start=1):
             item_number = int(item.get("line_number") or next_line)
             next_line = item_number + 10
@@ -929,6 +1044,7 @@ async def import_bom_or_part(
                 create_missing_parts,
                 idx,
                 company_id=company_id,
+                audit=audit,
                 created_by=current_user.id,
             )
             if missing:
@@ -937,6 +1053,7 @@ async def import_bom_or_part(
 
             if was_created:
                 created_parts += 1
+            component_part_numbers.append(component_part.part_number)
 
             quantity = float(item.get("quantity") or 1)
             bom_item = BOMItem(
@@ -958,6 +1075,21 @@ async def import_bom_or_part(
         if missing_parts:
             db.rollback()
             raise HTTPException(status_code=400, detail=f"Missing parts: {', '.join(missing_parts)}")
+
+        # One audit row for the BOM with the items summarized (house pattern:
+        # the WO import logs the parent and summarizes children in extra_data),
+        # before the terminal commit so it persists atomically with the import.
+        audit.log_create(
+            "bom",
+            bom.id,
+            assembly_part.part_number,
+            new_values=bom,
+            extra_data={
+                "source": "bom_import",
+                "item_count": created_bom_items,
+                "component_part_numbers": component_part_numbers,
+            },
+        )
 
         db.commit()
 
