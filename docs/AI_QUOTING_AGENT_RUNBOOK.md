@@ -112,6 +112,7 @@ Customer PDF excludes:
 
 ## Operational Notes
 - Parsing is resilient per file. One bad file should not abort all parsing.
+- Excel BOM scanning is bounded with the Import Center's shared caps (`backend/app/services/import_service.py`): at most 256 columns are read per row, a run of more than 1,000 consecutive blank rows ends that sheet's scan (used-range bloat; later sheets still parse), and a workbook is refused — recorded as that file's `error` state with an actionable message — past 100,000 scanned rows or 10,000 collected rows.
 - File parse state is tracked per RFQ package file (`pending`, `parsed`, `parsed_with_fallback`, `error`).
 - Logs include parsing failures and fallback conditions.
 

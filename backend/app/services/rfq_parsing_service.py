@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.models.rfq_quote import RfqPackageFile
+from app.services.import_service import (
+    MAX_CONSECUTIVE_BLANK_ROWS,
+    MAX_IMPORT_COLUMNS,
+    MAX_IMPORT_ROWS,
+    MAX_SCANNED_ROWS,
+    ImportFileError,
+)
 from app.services.pdf_service import extract_text_from_pdf
 from app.services.storage_service import ref_as_local_path
 
@@ -513,122 +520,188 @@ def _extract_assembly_payload(text: str, file_name: str) -> Optional[Dict[str, A
 
 
 def parse_bom_xlsx(file_path: str, file_name: str) -> Dict[str, Any]:
+    """Parse part/hardware rows out of an RFQ BOM workbook with a bounded scan.
+
+    Parsing semantics are unchanged: each sheet is searched independently for a
+    header row (one carrying both a qty-ish and a part-ish token) within its
+    first 30 rows, and data rows are read below it through the header map.
+    Blank rows anywhere — before the header or between data rows — are kept in
+    the collected row list (they're cheap once the scan is bounded), so the
+    rows[:30] header window and spreadsheet row numbering match the old
+    ``list(sheet.iter_rows())`` materialization exactly.
+
+    The scan is bounded with the Import Center's shared caps
+    (:mod:`app.services.import_service`) — the same fix as
+    ``app.api.endpoints.bom._extract_excel_table`` and
+    ``pdf_service.extract_text_from_excel``. A
+    workbook with a bloated used range (one stray formatted cell at XFD1048576
+    declares the full 16,384 x 1,048,576 grid) used to take minutes of CPU and
+    potentially GBs of memory here for a KB-sized upload:
+
+    * the workbook is opened ``read_only`` (streaming) and at most
+      :data:`MAX_IMPORT_COLUMNS` columns are read per row (read-only iteration
+      pads every row to that width, which is exactly what the header map's
+      positional indexing expects — padding cells read as ``None``, the same
+      value the old full-width rows held for empty cells);
+    * a run of more than :data:`MAX_CONSECUTIVE_BLANK_ROWS` blank rows ends the
+      scan of THAT sheet only (used-range bloat) and scanning continues with
+      the next sheet — the same quiet per-sheet cutoff as
+      ``_extract_excel_table``: the estimate review screen shows exactly which
+      parts parsed before anything is quoted;
+    * a workbook-wide counter of raw rows scanned refuses the file past
+      :data:`MAX_SCANNED_ROWS`;
+    * non-blank collected rows are capped at :data:`MAX_IMPORT_ROWS` — a
+      backstop only, real RFQ BOMs are orders of magnitude smaller. Slightly
+      stricter than ``_extract_excel_table`` (which counts only post-header
+      data rows): here every non-blank row counts, headers and cover-note
+      junk included.
+
+    Raises :class:`ImportFileError` past the caps; ``parse_rfq_package_files``
+    records it as that file's ``parse_error`` without aborting the package.
+    """
     from openpyxl import load_workbook
 
-    workbook = load_workbook(file_path, data_only=True)
+    workbook = load_workbook(file_path, read_only=True, data_only=True)
     part_rows: List[Dict[str, Any]] = []
     hardware_rows: List[Dict[str, Any]] = []
+    scanned_rows = 0
+    collected_data_rows = 0
 
-    for sheet in workbook.worksheets:
-        rows = list(sheet.iter_rows(values_only=True))
-        if not rows:
-            continue
-
-        header_row_index = None
-        header_map: Dict[str, int] = {}
-        for idx, row in enumerate(rows[:30]):
-            normalized = [str(cell).strip().lower() if cell is not None else "" for cell in row]
-            clean_tokens = [_clean_key(token) for token in normalized if token]
-            has_qty = any("qty" in token or "quantity" in token for token in clean_tokens)
-            has_part = any("part" in token or token in ("pn", "pn", "item", "itemno") for token in clean_tokens)
-            if has_qty and has_part:
-                header_row_index = idx
-                for col_idx, token in enumerate(normalized):
-                    if token:
-                        header_map[_clean_key(token)] = col_idx
-                break
-
-        if header_row_index is None:
-            continue
-
-        def _get_value(data_row: Tuple[Any, ...], *candidates: str) -> Any:
-            candidate_keys = [_clean_key(candidate) for candidate in candidates]
-            for key, col_idx in header_map.items():
-                if col_idx >= len(data_row):
-                    continue
-                if any(candidate_key in key for candidate_key in candidate_keys):
-                    return data_row[col_idx]
-            # Fallback: direct token startswith for noisy headers like "qty ea".
-            for key, col_idx in header_map.items():
-                if col_idx >= len(data_row):
-                    continue
-                if any(key.startswith(candidate_key) for candidate_key in candidate_keys):
-                    return data_row[col_idx]
-            return None
-
-        def _get_notes_blob(data_row: Tuple[Any, ...]) -> str:
-            notes_cells: List[str] = []
-            for key, col_idx in header_map.items():
-                if col_idx >= len(data_row):
-                    continue
-                if any(token in key for token in ("note", "remark", "comment", "description", "desc")):
-                    value = data_row[col_idx]
-                    if value is not None and str(value).strip():
-                        notes_cells.append(str(value).strip())
-            return " ".join(notes_cells)
-
-        for row_idx, row in enumerate(rows[header_row_index + 1 :], start=header_row_index + 2):
-            part_number = _get_value(row, "part number", "part no", "part", "pn", "p/n", "item", "item no")
-            description = _get_value(row, "description", "desc", "name", "part description")
-            qty = _safe_float(_get_value(row, "qty", "quantity", "order qty", "required qty")) or 0
-            if not part_number and not description:
+    try:
+        for sheet in workbook.worksheets:
+            rows: List[Tuple[Any, ...]] = []
+            consecutive_blank_rows = 0
+            for raw_row in sheet.iter_rows(values_only=True, max_col=MAX_IMPORT_COLUMNS):
+                scanned_rows += 1
+                if scanned_rows > MAX_SCANNED_ROWS:
+                    raise ImportFileError(
+                        f"The spreadsheet's used range is enormous (over {MAX_SCANNED_ROWS:,} rows scanned). "
+                        "Delete trailing empty rows/columns or re-save the workbook, then re-upload."
+                    )
+                if any(cell is not None and str(cell).strip() for cell in raw_row):
+                    consecutive_blank_rows = 0
+                    collected_data_rows += 1
+                    if collected_data_rows > MAX_IMPORT_ROWS:
+                        raise ImportFileError(
+                            f"Too many rows (max {MAX_IMPORT_ROWS}). Split the BOM across smaller workbooks."
+                        )
+                else:
+                    consecutive_blank_rows += 1
+                    if consecutive_blank_rows > MAX_CONSECUTIVE_BLANK_ROWS:
+                        break  # used-range bloat on this sheet — move on to the next sheet
+                rows.append(raw_row)
+            if not rows:
                 continue
-            if qty <= 0:
-                qty = 1
 
-            material = _get_value(row, "material", "matl", "alloy")
-            thickness = _get_value(row, "thickness", "gauge", "ga")
-            finish = _get_value(row, "finish", "coating", "paint", "plating")
-            item_type = str(_get_value(row, "type", "item type", "category") or "").lower()
-            notes_blob = _get_notes_blob(row)
+            header_row_index = None
+            header_map: Dict[str, int] = {}
+            for idx, row in enumerate(rows[:30]):
+                normalized = [str(cell).strip().lower() if cell is not None else "" for cell in row]
+                clean_tokens = [_clean_key(token) for token in normalized if token]
+                has_qty = any("qty" in token or "quantity" in token for token in clean_tokens)
+                has_part = any("part" in token or token in ("pn", "pn", "item", "itemno") for token in clean_tokens)
+                if has_qty and has_part:
+                    header_row_index = idx
+                    for col_idx, token in enumerate(normalized):
+                        if token:
+                            header_map[_clean_key(token)] = col_idx
+                    break
 
-            flat_area = _safe_float(_get_value(row, "flat area", "area in2", "area"))
-            cut_length = _safe_float(_get_value(row, "cut length", "perimeter", "total cut"))
-            hole_count = _parse_int(_get_value(row, "hole count", "holes"))
-            bend_count = _parse_int(_get_value(row, "bend count", "bends"))
-            length = _safe_float(_get_value(row, "flat length", "length"))
-            width = _safe_float(_get_value(row, "flat width", "width"))
-            if flat_area is None and length and width:
-                flat_area = length * width
-            if cut_length is None and length and width:
-                cut_length = 2.0 * (length + width)
+            if header_row_index is None:
+                continue
 
-            if (flat_area is None or cut_length is None) and notes_blob:
-                dim_pair = _find_dimension_pair(notes_blob)
-                if dim_pair:
-                    dim_l, dim_w = dim_pair
-                    if flat_area is None:
-                        flat_area = dim_l * dim_w
-                    if cut_length is None:
-                        cut_length = 2.0 * (dim_l + dim_w)
+            def _get_value(data_row: Tuple[Any, ...], *candidates: str) -> Any:
+                candidate_keys = [_clean_key(candidate) for candidate in candidates]
+                for key, col_idx in header_map.items():
+                    if col_idx >= len(data_row):
+                        continue
+                    if any(candidate_key in key for candidate_key in candidate_keys):
+                        return data_row[col_idx]
+                # Fallback: direct token startswith for noisy headers like "qty ea".
+                for key, col_idx in header_map.items():
+                    if col_idx >= len(data_row):
+                        continue
+                    if any(key.startswith(candidate_key) for candidate_key in candidate_keys):
+                        return data_row[col_idx]
+                return None
 
-            source_ref = f"{file_name}!{sheet.title}:row{row_idx}"
-            row_data = {
-                "part_number": str(part_number).strip() if part_number else None,
-                "part_name": str(description).strip() if description else str(part_number).strip(),
-                "qty": qty,
-                "material": str(material).strip() if material else None,
-                "thickness": str(thickness).strip() if thickness else None,
-                "finish": str(finish).strip() if finish else None,
-                "flat_area": flat_area,
-                "cut_length": cut_length,
-                "hole_count": hole_count,
-                "bend_count": bend_count,
-                "notes": (str(description).strip() if description else "") + (f" | {notes_blob}" if notes_blob else ""),
-                "source": source_ref,
-            }
+            def _get_notes_blob(data_row: Tuple[Any, ...]) -> str:
+                notes_cells: List[str] = []
+                for key, col_idx in header_map.items():
+                    if col_idx >= len(data_row):
+                        continue
+                    if any(token in key for token in ("note", "remark", "comment", "description", "desc")):
+                        value = data_row[col_idx]
+                        if value is not None and str(value).strip():
+                            notes_cells.append(str(value).strip())
+                return " ".join(notes_cells)
 
-            combined = " ".join([str(part_number or ""), str(description or ""), item_type, notes_blob]).lower()
-            part_number_value = str(part_number or "").upper()
-            is_hardware = (
-                "hardware" in item_type
-                or part_number_value.startswith(("HW", "BOLT", "NUT", "SCREW", "RVT", "PEM"))
-                or any(keyword in combined for keyword in HARDWARE_HINTS)
-            )
-            if is_hardware:
-                hardware_rows.append(row_data)
-            else:
-                part_rows.append(row_data)
+            for row_idx, row in enumerate(rows[header_row_index + 1 :], start=header_row_index + 2):
+                part_number = _get_value(row, "part number", "part no", "part", "pn", "p/n", "item", "item no")
+                description = _get_value(row, "description", "desc", "name", "part description")
+                qty = _safe_float(_get_value(row, "qty", "quantity", "order qty", "required qty")) or 0
+                if not part_number and not description:
+                    continue
+                if qty <= 0:
+                    qty = 1
+
+                material = _get_value(row, "material", "matl", "alloy")
+                thickness = _get_value(row, "thickness", "gauge", "ga")
+                finish = _get_value(row, "finish", "coating", "paint", "plating")
+                item_type = str(_get_value(row, "type", "item type", "category") or "").lower()
+                notes_blob = _get_notes_blob(row)
+
+                flat_area = _safe_float(_get_value(row, "flat area", "area in2", "area"))
+                cut_length = _safe_float(_get_value(row, "cut length", "perimeter", "total cut"))
+                hole_count = _parse_int(_get_value(row, "hole count", "holes"))
+                bend_count = _parse_int(_get_value(row, "bend count", "bends"))
+                length = _safe_float(_get_value(row, "flat length", "length"))
+                width = _safe_float(_get_value(row, "flat width", "width"))
+                if flat_area is None and length and width:
+                    flat_area = length * width
+                if cut_length is None and length and width:
+                    cut_length = 2.0 * (length + width)
+
+                if (flat_area is None or cut_length is None) and notes_blob:
+                    dim_pair = _find_dimension_pair(notes_blob)
+                    if dim_pair:
+                        dim_l, dim_w = dim_pair
+                        if flat_area is None:
+                            flat_area = dim_l * dim_w
+                        if cut_length is None:
+                            cut_length = 2.0 * (dim_l + dim_w)
+
+                source_ref = f"{file_name}!{sheet.title}:row{row_idx}"
+                row_data = {
+                    "part_number": str(part_number).strip() if part_number else None,
+                    "part_name": str(description).strip() if description else str(part_number).strip(),
+                    "qty": qty,
+                    "material": str(material).strip() if material else None,
+                    "thickness": str(thickness).strip() if thickness else None,
+                    "finish": str(finish).strip() if finish else None,
+                    "flat_area": flat_area,
+                    "cut_length": cut_length,
+                    "hole_count": hole_count,
+                    "bend_count": bend_count,
+                    "notes": (str(description).strip() if description else "")
+                    + (f" | {notes_blob}" if notes_blob else ""),
+                    "source": source_ref,
+                }
+
+                combined = " ".join([str(part_number or ""), str(description or ""), item_type, notes_blob]).lower()
+                part_number_value = str(part_number or "").upper()
+                is_hardware = (
+                    "hardware" in item_type
+                    or part_number_value.startswith(("HW", "BOLT", "NUT", "SCREW", "RVT", "PEM"))
+                    or any(keyword in combined for keyword in HARDWARE_HINTS)
+                )
+                if is_hardware:
+                    hardware_rows.append(row_data)
+                else:
+                    part_rows.append(row_data)
+
+    finally:
+        workbook.close()
 
     return {"parts": part_rows, "hardware": hardware_rows}
 

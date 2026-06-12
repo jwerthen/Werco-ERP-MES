@@ -1,11 +1,19 @@
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import ezdxf
+import pytest
 from openpyxl import Workbook
 
 from app.services import rfq_parsing_service as rfq_parser
-from app.services.rfq_parsing_service import build_normalized_part_specs, parse_bom_xlsx, parse_dxf_geometry
+from app.services.import_service import MAX_CONSECUTIVE_BLANK_ROWS, ImportFileError
+from app.services.rfq_parsing_service import (
+    build_normalized_part_specs,
+    parse_bom_xlsx,
+    parse_dxf_geometry,
+    parse_rfq_package_files,
+)
 
 
 def test_parse_bom_xlsx_extracts_parts_and_hardware(tmp_path: Path):
@@ -194,3 +202,180 @@ PART 3
     assert part4["thickness_in"] == 0.0647
     assert part4["quantity_per_assembly"] == 2.0
     assert len([part for part in parts if part["line_type"] == "hardware"]) == 2
+
+
+def _save_simple_bom(path: Path, *data_rows: list) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "BOM"
+    sheet.append(["Part Number", "Description", "Qty"])
+    for row in data_rows:
+        sheet.append(row)
+    workbook.save(path)
+
+
+def test_parse_bom_xlsx_bloated_used_range_parses_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The production failure mode for this bug class: a single stray
+    whitespace cell at XFD1048576 bloats the declared used range to
+    16,384 x 1,048,576 — the old ``list(sheet.iter_rows())`` materialized the
+    whole grid (minutes of CPU and potentially GBs of memory for a KB-sized
+    upload)."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "BOM"
+    sheet.append(["Part Number", "Description", "Qty"])
+    sheet.append(["P-1", "Bracket", 2])
+    sheet.append(["P-2", "Spacer", 4])
+    sheet.cell(row=1_048_576, column=16_384, value=" ")
+    file_path = tmp_path / "bloated.xlsx"
+    workbook.save(file_path)
+
+    # Deterministic guard (wall clock alone is too loose on coverage-traced CI
+    # runners): with the per-sheet blank-run cutoff working, the scan stops
+    # after ~1k consecutive blank rows; if the cutoff ever regresses to
+    # unbounded blank scanning, this tightened backstop raises ImportFileError
+    # regardless of runner speed.
+    monkeypatch.setattr("app.services.rfq_parsing_service.MAX_SCANNED_ROWS", 60_000)
+
+    started = time.monotonic()
+    result = parse_bom_xlsx(str(file_path), "bloated.xlsx")
+    elapsed = time.monotonic() - started
+
+    assert [part["part_number"] for part in result["parts"]] == ["P-1", "P-2"]
+    assert [part["qty"] for part in result["parts"]] == [2, 4]
+    assert result["hardware"] == []
+    # Wall clock is only a loose backstop — coverage-traced CI runners are
+    # ~60x slower than local; a full-grid regression takes many minutes.
+    assert elapsed < 90, f"bloated-dimension BOM parse took {elapsed:.1f}s — grid scan regression"
+
+
+def test_parse_bom_xlsx_blank_run_cutoff_is_per_sheet(tmp_path: Path):
+    """A gap longer than MAX_CONSECUTIVE_BLANK_ROWS ends only THAT sheet's
+    scan (treated as used-range bloat); later sheets still parse with their
+    own headers."""
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "First"
+    first.append(["Part Number", "Description", "Qty"])
+    first.append(["P-1", "Bracket", 2])
+    first.cell(row=MAX_CONSECUTIVE_BLANK_ROWS + 100, column=1, value="P-DROPPED")
+    second = workbook.create_sheet("Second")
+    second.append(["Part Number", "Description", "Qty"])
+    second.append(["P-2", "Spacer", 4])
+    file_path = tmp_path / "gap.xlsx"
+    workbook.save(file_path)
+
+    result = parse_bom_xlsx(str(file_path), "gap.xlsx")
+
+    part_numbers = [part["part_number"] for part in result["parts"]]
+    assert "P-1" in part_numbers
+    assert "P-2" in part_numbers
+    assert "P-DROPPED" not in part_numbers
+    p2 = next(part for part in result["parts"] if part["part_number"] == "P-2")
+    assert p2["source"] == "gap.xlsx!Second:row2"
+
+
+def test_parse_bom_xlsx_header_found_late_with_leading_junk_and_blank_gaps(tmp_path: Path):
+    """A header anywhere in a sheet's first 30 rows is still honored, and
+    blank rows — before the header and between the header and the data — are
+    tolerated exactly as before bounding: collected blank rows stay in the row
+    list, so the rows[:30] header window and spreadsheet row numbering are
+    unchanged."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "BOM"
+    # Rows 1-24: scattered title junk; the rest of the rows are genuinely blank.
+    for row_num in range(1, 25):
+        if row_num % 3 == 0:
+            sheet.cell(row=row_num, column=1, value=f"cover note {row_num}")
+    sheet.cell(row=25, column=1, value="Part Number")
+    sheet.cell(row=25, column=2, value="Description")
+    sheet.cell(row=25, column=3, value="Qty")
+    # Rows 26-27 stay blank between the header and the data row.
+    sheet.cell(row=28, column=1, value="P-1")
+    sheet.cell(row=28, column=2, value="Bracket")
+    sheet.cell(row=28, column=3, value=2)
+    file_path = tmp_path / "late_header.xlsx"
+    workbook.save(file_path)
+
+    result = parse_bom_xlsx(str(file_path), "late_header.xlsx")
+
+    assert len(result["parts"]) == 1
+    part = result["parts"][0]
+    assert part["part_number"] == "P-1"
+    assert part["qty"] == 2
+    assert part["source"] == "late_header.xlsx!BOM:row28"
+
+
+def test_parse_bom_xlsx_header_beyond_first_30_rows_is_still_skipped(tmp_path: Path):
+    """Pins the existing header-window semantics: a header past a sheet's
+    first 30 rows is not detected. Bounding the scan must neither widen nor
+    narrow that window."""
+    workbook = Workbook()
+    sheet = workbook.active
+    for row_num in range(1, 31):
+        sheet.cell(row=row_num, column=1, value=f"cover note {row_num}")
+    sheet.cell(row=31, column=1, value="Part Number")
+    sheet.cell(row=31, column=2, value="Qty")
+    sheet.cell(row=32, column=1, value="P-1")
+    sheet.cell(row=32, column=2, value=2)
+    file_path = tmp_path / "buried_header.xlsx"
+    workbook.save(file_path)
+
+    result = parse_bom_xlsx(str(file_path), "buried_header.xlsx")
+
+    assert result == {"parts": [], "hardware": []}
+
+
+def test_parse_bom_xlsx_scanned_row_cap_refuses_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The workbook-wide scanned-row backstop refuses pathological files
+    loudly with an actionable message instead of spinning."""
+    monkeypatch.setattr("app.services.rfq_parsing_service.MAX_SCANNED_ROWS", 5)
+    file_path = tmp_path / "huge.xlsx"
+    _save_simple_bom(file_path, *[[f"P-{i}", "Bracket", 1] for i in range(10)])
+
+    with pytest.raises(ImportFileError, match="used range is enormous"):
+        parse_bom_xlsx(str(file_path), "huge.xlsx")
+
+
+def test_parse_bom_xlsx_collected_row_cap_refuses_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The collected-row cap (MAX_IMPORT_ROWS) is a backstop on non-blank rows
+    per workbook — RFQ BOMs are far smaller."""
+    monkeypatch.setattr("app.services.rfq_parsing_service.MAX_IMPORT_ROWS", 3)
+    file_path = tmp_path / "many_rows.xlsx"
+    _save_simple_bom(file_path, *[[f"P-{i}", "Bracket", 1] for i in range(4)])
+
+    with pytest.raises(ImportFileError, match="Too many rows"):
+        parse_bom_xlsx(str(file_path), "many_rows.xlsx")
+
+
+def test_parse_rfq_package_files_records_import_file_error_per_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An ImportFileError raised by parse_bom_xlsx must land as THAT file's
+    parse_error (parse_status "error") and must not abort the package parse;
+    an openpyxl-unreadable .xls keeps failing into the same per-file path
+    (pre-existing behavior, pinned here)."""
+    monkeypatch.setattr("app.services.rfq_parsing_service.MAX_SCANNED_ROWS", 5)
+
+    bloated_path = tmp_path / "huge.xlsx"
+    _save_simple_bom(bloated_path, *[[f"P-{i}", "Bracket", 1] for i in range(10)])
+    good_path = tmp_path / "good.xlsx"
+    _save_simple_bom(good_path, ["P-2", "Spacer", 4])
+    xls_path = tmp_path / "legacy.xls"
+    xls_path.write_bytes(b"not really an xls workbook")
+
+    files = [
+        SimpleNamespace(id=1, file_ext=".xlsx", file_name="huge.xlsx", file_path=str(bloated_path)),
+        SimpleNamespace(id=2, file_ext=".xlsx", file_name="good.xlsx", file_path=str(good_path)),
+        SimpleNamespace(id=3, file_ext=".xls", file_name="legacy.xls", file_path=str(xls_path)),
+    ]
+
+    result = parse_rfq_package_files(files)
+
+    assert result["file_results"][1]["parse_status"] == "error"
+    assert "used range is enormous" in result["file_results"][1]["parse_error"]
+    assert any("huge.xlsx: parse failed" in warning for warning in result["warnings"])
+    # The good file still parses — the package parse was not aborted.
+    assert result["file_results"][2]["parse_status"] == "parsed"
+    assert result["file_results"][2]["summary"] == {"parts_found": 1, "hardware_found": 0}
+    assert result["file_results"][3]["parse_status"] == "error"
+    assert result["file_results"][3]["parse_error"]
