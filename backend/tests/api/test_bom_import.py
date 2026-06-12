@@ -1,5 +1,6 @@
 import io
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi import status
@@ -8,10 +9,46 @@ from openpyxl import Workbook
 from sqlalchemy.orm import Session
 
 from app.api.endpoints.bom import _extract_excel_table
+from app.models.audit_log import AuditLog
 from app.models.bom import BOM, BOMItem
 from app.models.part import Part
+from app.models.user import User
 from app.services.import_service import MAX_CONSECUTIVE_BLANK_ROWS, MAX_IMPORT_COLUMNS, XLSX_MEDIA_TYPE, ImportFileError
 from app.services.pdf_service import extract_text_from_excel
+
+
+def _make_part(db_session: Session, part_number: str, part_type: str = "manufactured", **kwargs) -> Part:
+    part = Part(
+        part_number=part_number,
+        name=part_number,
+        part_type=part_type,
+        unit_of_measure="each",
+        company_id=1,
+        **kwargs,
+    )
+    db_session.add(part)
+    db_session.commit()
+    db_session.refresh(part)
+    return part
+
+
+def _commit_payload(assembly_number: str, component_numbers=("COMP-A", "COMP-B")) -> dict:
+    return {
+        "document_type": "bom",
+        "assembly": {"part_number": assembly_number, "name": "Imported Assembly", "revision": "A"},
+        "items": [
+            {
+                "line_number": (idx + 1) * 10,
+                "part_number": component_number,
+                "description": f"Component {component_number}",
+                "quantity": 1,
+                "item_type": "make",
+                "line_type": "component",
+            }
+            for idx, component_number in enumerate(component_numbers)
+        ],
+        "create_missing_parts": True,
+    }
 
 
 def _workbook_bytes(*sheets) -> bytes:
@@ -262,3 +299,272 @@ class TestExtractTextFromExcelBounded:
         assert "r2" in result.text  # rows inside the cap survive
         assert "r3" not in result.text  # rows past the cap are dropped, not an error
         assert "r4" not in result.text
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestBOMImportAudit:
+    """BOM imports create tenant data (parts, a BOM, BOM items) and must leave
+    an audit trail: one CREATE row per created part, one CREATE row for the
+    BOM with the items summarized in extra_data (the WO-import house pattern),
+    and an UPDATE row for the in-place part_type promotion."""
+
+    def test_commit_writes_part_and_bom_audit_rows(self, client: TestClient, auth_headers: dict, db_session: Session):
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-AUD"),
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        data = response.json()
+
+        part_creates = (
+            db_session.query(AuditLog).filter(AuditLog.resource_type == "part", AuditLog.action == "CREATE").all()
+        )
+        assert {row.resource_identifier for row in part_creates} == {"ASSY-AUD", "COMP-A", "COMP-B"}
+        assert len(part_creates) == 3  # exactly one CREATE per created part
+        assert all(row.extra_data.get("source") == "bom_import" for row in part_creates)
+
+        bom_creates = (
+            db_session.query(AuditLog).filter(AuditLog.resource_type == "bom", AuditLog.action == "CREATE").all()
+        )
+        assert len(bom_creates) == 1
+        bom_row = bom_creates[0]
+        assert bom_row.resource_id == data["bom_id"]
+        assert bom_row.resource_identifier == "ASSY-AUD"
+        assert bom_row.extra_data["source"] == "bom_import"
+        assert bom_row.extra_data["item_count"] == 2
+        assert bom_row.extra_data["component_part_numbers"] == ["COMP-A", "COMP-B"]
+
+        # Every audit row carries the requesting user's company scope.
+        assert {row.company_id for row in part_creates + bom_creates} == {1}
+
+    def test_commit_part_type_promotion_writes_update_audit(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        existing = _make_part(db_session, "ASSY-PROMO", part_type="manufactured")
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-PROMO", component_numbers=("COMP-P",)),
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+
+        db_session.refresh(existing)
+        assert existing.part_type == "assembly"
+
+        updates = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "part",
+                AuditLog.resource_id == existing.id,
+                AuditLog.action == "UPDATE",
+            )
+            .all()
+        )
+        assert len(updates) == 1
+        assert updates[0].old_values["part_type"] == "manufactured"
+        assert updates[0].new_values["part_type"] == "assembly"
+        assert updates[0].extra_data["source"] == "bom_import"
+        # The pre-existing assembly part must NOT get a CREATE row.
+        assert (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "part",
+                AuditLog.resource_id == existing.id,
+                AuditLog.action == "CREATE",
+            )
+            .count()
+            == 0
+        )
+
+    def test_llm_import_writes_part_and_bom_audit_rows(
+        self,
+        client: TestClient,
+        auth_headers: dict,
+        db_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """POST /bom/import (one-shot LLM path) must audit like the commit path.
+        The LLM/extraction seams are stubbed at the endpoint module."""
+        monkeypatch.setattr("app.api.endpoints.bom.save_uploaded_document", lambda content, filename: "/tmp/fake.pdf")
+        monkeypatch.setattr(
+            "app.api.endpoints.bom.extract_text_from_document",
+            lambda path: SimpleNamespace(text="BOM document text " * 10, is_ocr=False),
+        )
+        monkeypatch.setattr(
+            "app.api.endpoints.bom.extract_bom_data_with_llm",
+            lambda text, is_ocr=False, company_id=None: {
+                "document_type": "bom",
+                "assembly": {"part_number": "ASSY-LLM", "name": "LLM Assembly", "revision": "A"},
+                "items": [
+                    {
+                        "line_number": 10,
+                        "part_number": "COMP-LLM",
+                        "description": "Machined bracket",
+                        "quantity": 2,
+                        "item_type": "make",
+                        "line_type": "component",
+                    }
+                ],
+                "extraction_confidence": "high",
+            },
+        )
+
+        response = client.post(
+            "/api/v1/bom/import",
+            headers=auth_headers,
+            files={"file": ("bom.pdf", io.BytesIO(b"%PDF-1.4 fake"), "application/pdf")},
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        data = response.json()
+
+        part_creates = (
+            db_session.query(AuditLog).filter(AuditLog.resource_type == "part", AuditLog.action == "CREATE").all()
+        )
+        assert {row.resource_identifier for row in part_creates} == {"ASSY-LLM", "COMP-LLM"}
+        assert all(row.extra_data.get("source") == "bom_import" for row in part_creates)
+
+        bom_creates = (
+            db_session.query(AuditLog).filter(AuditLog.resource_type == "bom", AuditLog.action == "CREATE").all()
+        )
+        assert len(bom_creates) == 1
+        assert bom_creates[0].resource_id == data["bom_id"]
+        assert bom_creates[0].extra_data["item_count"] == 1
+        assert bom_creates[0].extra_data["component_part_numbers"] == ["COMP-LLM"]
+        assert {row.company_id for row in part_creates + bom_creates} == {1}
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestBOMImportSoftDeleteConflicts:
+    """Soft-deleted rows still occupy their unique keys (part_number, BOM.part_id
+    has no soft-delete carve-out), so import collisions must fail loudly with an
+    actionable 400 — never silently resurrect deleted data or 500 on the unique
+    constraint. The whole import is one transaction: nothing may persist."""
+
+    def test_soft_deleted_assembly_part_rejected(
+        self, client: TestClient, auth_headers: dict, db_session: Session, test_user: User
+    ):
+        deleted = _make_part(db_session, "ASSY-DEL")
+        deleted.soft_delete(test_user.id)
+        db_session.commit()
+        audit_before = db_session.query(AuditLog).count()
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-DEL"),
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        detail = response.json()["detail"]
+        assert "ASSY-DEL" in detail
+        assert "deleted part" in detail
+        db_session.refresh(deleted)
+        assert deleted.is_deleted is True  # not resurrected
+        assert db_session.query(BOM).count() == 0
+        assert db_session.query(BOMItem).count() == 0
+        assert db_session.query(AuditLog).count() == audit_before
+
+    def test_soft_deleted_component_part_rejected(
+        self, client: TestClient, auth_headers: dict, db_session: Session, test_user: User
+    ):
+        deleted = _make_part(db_session, "COMP-DEL")
+        deleted.soft_delete(test_user.id)
+        db_session.commit()
+        audit_before = db_session.query(AuditLog).count()
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-ROLLBACK", component_numbers=("COMP-DEL",)),
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        detail = response.json()["detail"]
+        assert "COMP-DEL" in detail
+        assert "deleted part" in detail
+        db_session.refresh(deleted)
+        assert deleted.is_deleted is True
+        # Single transaction: the assembly part flushed before the conflict is rolled back too.
+        assert db_session.query(Part).filter(Part.part_number == "ASSY-ROLLBACK").first() is None
+        assert db_session.query(BOM).count() == 0
+        assert db_session.query(BOMItem).count() == 0
+        assert db_session.query(AuditLog).count() == audit_before
+
+    def test_soft_deleted_bom_rejected(
+        self, client: TestClient, auth_headers: dict, db_session: Session, test_user: User
+    ):
+        assembly = _make_part(db_session, "ASSY-BOMDEL", part_type="assembly")
+        bom = BOM(part_id=assembly.id, revision="A", status="draft", bom_type="standard", company_id=1)
+        bom.soft_delete(test_user.id)
+        db_session.add(bom)
+        db_session.commit()
+        audit_before = db_session.query(AuditLog).count()
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-BOMDEL"),
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        detail = response.json()["detail"]
+        assert "deleted BOM exists" in detail
+        assert "ASSY-BOMDEL" in detail
+        assert db_session.query(BOM).count() == 1  # only the pre-existing soft-deleted row
+        assert db_session.query(BOMItem).count() == 0
+        assert db_session.query(AuditLog).count() == audit_before
+
+    def test_inactive_bom_rejected_with_400_not_integrity_error(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """An inactive BOM was invisible to the old is_active==True lookup; the
+        import then violated the unique part_id constraint and 500ed."""
+        assembly = _make_part(db_session, "ASSY-INACTIVE", part_type="assembly")
+        bom = BOM(part_id=assembly.id, revision="A", status="draft", bom_type="standard", is_active=False, company_id=1)
+        db_session.add(bom)
+        db_session.commit()
+        audit_before = db_session.query(AuditLog).count()
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-INACTIVE"),
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        detail = response.json()["detail"]
+        assert "inactive BOM exists" in detail
+        assert "ASSY-INACTIVE" in detail
+        assert db_session.query(BOM).count() == 1
+        assert db_session.query(BOMItem).count() == 0
+        assert db_session.query(AuditLog).count() == audit_before
+
+    def test_promotion_rolled_back_when_bom_conflict_follows(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """The part_type promotion (and its UPDATE audit row) is staged BEFORE the
+        existing-BOM check; a conflict must discard both — the rollback inside
+        _reject_existing_bom, not session teardown, is what guarantees it."""
+        assembly = _make_part(db_session, "ASSY-PROMO", part_type="manufactured")
+        bom = BOM(part_id=assembly.id, revision="A", status="draft", bom_type="standard", company_id=1)
+        db_session.add(bom)
+        db_session.commit()
+        audit_before = db_session.query(AuditLog).count()
+
+        response = client.post(
+            "/api/v1/bom/import/commit",
+            headers=auth_headers,
+            json=_commit_payload("ASSY-PROMO"),
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        detail = response.json()["detail"]
+        assert "already exists" in detail
+        assert "ASSY-PROMO" in detail
+        db_session.refresh(assembly)
+        assert assembly.part_type == "manufactured"  # promotion rolled back
+        assert db_session.query(AuditLog).count() == audit_before  # incl. no UPDATE row

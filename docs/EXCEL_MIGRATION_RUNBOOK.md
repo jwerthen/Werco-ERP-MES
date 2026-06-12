@@ -228,9 +228,10 @@ The night before / morning of:
 | "role 'platform_admin' cannot be assigned via import" | A user row tried to grant the cross-company oversight role | Use a normal role; platform admins are provisioned outside tenant imports, by design |
 | "…already exists" on a row you don't think is a duplicate | Duplicate detection is **case-insensitive**: `wo-1001` collides with `WO-1001`, `EMP-7` with `emp-7`, and in-file duplicates are caught too | Find and fix the casing variant; don't just re-submit |
 | "part 'X' has no released routing" (open-WO import) | The routing exists but wasn't **released**, or doesn't exist | Step 8: build/release the routing, then re-import just the failed rows |
+| "matches a deleted part…" / "A deleted/inactive BOM exists for part 'X'…" / "A BOM already exists for assembly part 'X'" (BOM wizard commit) | The assembly or a component part number collides with an existing record — **including soft-deleted ones**, common after cleaning up an earlier commit by deleting (records soft-delete, they don't vanish) | Follow the message: restore the deleted part/BOM (or use a different part number), reactivate or delete the inactive BOM, or edit the existing BOM on the BOM page instead of re-importing. The refused import writes nothing |
 | "skipped: row N in the same purchase order failed validation" | POs import whole-or-not-at-all — one bad line skips its whole `po_number` group | Fix the named row; re-import that PO's rows together |
 | Committed a file twice by mistake | Rows with system-generated numbers may have imported twice (rows with explicit numbers are rejected as duplicates) | Find the duplicates (sort by created date), remove/cancel them, and note it in your migration log |
 
 ---
 
-*Every committed import row is on the tamper-evident audit trail (source `import`), and paper-completed work-order operations are recorded as exactly that — see [API.md](API.md) → Bulk Imports & Templates for the contract details.*
+*Every committed import row is on the tamper-evident audit trail (the direct imports tag source `import`; the BOM wizard's commits tag source `bom_import`), and paper-completed work-order operations are recorded as exactly that — see [API.md](API.md) → Bulk Imports & Templates for the contract details.*
