@@ -1,8 +1,9 @@
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
@@ -30,6 +31,13 @@ from app.schemas.bom_import import (
     BOMImportItem,
     BOMImportPreviewResponse,
     BOMImportResponse,
+)
+from app.services.import_service import (
+    MAX_CONSECUTIVE_BLANK_ROWS,
+    MAX_IMPORT_COLUMNS,
+    MAX_IMPORT_ROWS,
+    MAX_SCANNED_ROWS,
+    ImportFileError,
 )
 from app.services.llm_service import extract_bom_data_with_llm
 from app.services.part_number_service import generate_werco_part_number
@@ -329,56 +337,108 @@ def _normalize_header(value: str) -> str:
 
 
 def _extract_excel_table(file_path: str, ext: str) -> Tuple[List[str], List[List[str]]]:
+    """Extract ``(columns, data rows)`` from an uploaded Excel BOM with a bounded scan.
+
+    Semantics are unchanged from the original implementation: the first
+    non-empty row found anywhere in the workbook becomes ``columns``; every
+    later non-empty row across ALL sheets becomes a data row; cell values are
+    stringified and stripped.
+
+    The scan is bounded the same way as the Import Center's shared parser
+    (:func:`app.services.import_service.parse_import_file`), which fixed this
+    exact bug class — one stray formatted/whitespace cell at XFD1048576 used to
+    make openpyxl iterate the full 16,384 x 1,048,576 declared grid (minutes of
+    CPU for a KB-sized file):
+
+    * at most :data:`MAX_IMPORT_COLUMNS` columns are read per row;
+    * a run of more than :data:`MAX_CONSECUTIVE_BLANK_ROWS` blank rows ends the
+      scan of THAT sheet only — sheets are independent documents here, so the
+      cutoff unit is the sheet and scanning continues with the next one.
+      Unlike ``parse_import_file`` there is deliberately NO loud-refusal
+      look-ahead past the gap: BOM spreadsheets legitimately scatter data
+      blocks down a sheet, and the preview flow shows users exactly which rows
+      parsed before anything is committed, so a quiet per-sheet cutoff after a
+      1,000-row gap is the right trade-off;
+    * a workbook-wide counter of raw rows scanned refuses the file past
+      :data:`MAX_SCANNED_ROWS`;
+    * collected data rows are capped at :data:`MAX_IMPORT_ROWS`.
+
+    Raises :class:`ImportFileError` (mapped to HTTP 400 by the import
+    endpoints) for corrupt/unreadable files and for workbooks that exceed the
+    caps.
+    """
     columns: List[str] = []
     rows: List[List[str]] = []
-    try:
-        import pandas as pd
+    scanned_rows = 0
 
-        sheets = pd.read_excel(file_path, sheet_name=None, dtype=str, header=None)
-        for _, df in sheets.items():
-            df = df.fillna("")
-            raw_rows = df.astype(str).values.tolist()
-            for row in raw_rows:
-                clean = [str(cell).strip() for cell in row if str(cell).strip()]
-                if clean and not columns:
-                    columns = [str(cell).strip() for cell in row]
-                    continue
-                if any(str(cell).strip() for cell in row):
-                    rows.append([str(cell).strip() for cell in row])
-        if columns:
-            return columns, rows
-    except Exception:
-        pass
+    def _consume_sheet(sheet_rows: Iterable[Sequence[Any]]) -> None:
+        """Fold one sheet's raw rows into ``columns``/``rows`` under the shared caps."""
+        nonlocal columns, scanned_rows
+        consecutive_blank_rows = 0
+        for raw_row in sheet_rows:
+            scanned_rows += 1
+            if scanned_rows > MAX_SCANNED_ROWS:
+                raise ImportFileError(
+                    f"The spreadsheet's used range is enormous (over {MAX_SCANNED_ROWS:,} rows scanned). "
+                    "Delete trailing empty rows/columns or re-save the data as CSV, then try again."
+                )
+            row_vals = ["" if cell is None else str(cell).strip() for cell in raw_row]
+            # Read-only iteration pads every row to max_col; drop the trailing
+            # padding so columns/rows keep the used range's natural width (the
+            # shape the mapping UI and _items_from_table indexing expect).
+            while row_vals and not row_vals[-1]:
+                row_vals.pop()
+            if not row_vals:
+                consecutive_blank_rows += 1
+                if consecutive_blank_rows > MAX_CONSECUTIVE_BLANK_ROWS:
+                    return  # used-range bloat on this sheet — move on to the next sheet
+                continue
+            consecutive_blank_rows = 0
+            if not columns:
+                columns = row_vals
+                continue
+            if len(rows) >= MAX_IMPORT_ROWS:
+                raise ImportFileError(f"Too many rows (max {MAX_IMPORT_ROWS}). Split the file and import in batches.")
+            rows.append(row_vals)
 
     if ext == ".xlsx":
         from openpyxl import load_workbook
 
-        wb = load_workbook(file_path, data_only=True)
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            for row in ws.iter_rows(values_only=True):
-                row_vals = ["" if cell is None else str(cell).strip() for cell in row]
-                if not columns and any(val for val in row_vals):
-                    columns = row_vals
-                    continue
-                if any(val for val in row_vals):
-                    rows.append(row_vals)
+        try:
+            wb = load_workbook(file_path, read_only=True, data_only=True)
+        except Exception as exc:
+            raise ImportFileError("Could not read the Excel file. Re-save it as a standard Excel workbook.") from exc
+        try:
+            for ws in wb.worksheets:
+                _consume_sheet(ws.iter_rows(values_only=True, max_col=MAX_IMPORT_COLUMNS))
+        except ImportFileError:
+            raise
+        except Exception as exc:  # read-only mode parses lazily; corruption can surface mid-iteration
+            raise ImportFileError("Could not read the Excel file. Re-save it as a standard Excel workbook.") from exc
+        finally:
+            wb.close()
     else:
         import xlrd
 
-        wb = xlrd.open_workbook(file_path)
-        for sheet in wb.sheets():
-            for r in range(sheet.nrows):
-                row_vals = [str(sheet.cell_value(r, c)).strip() for c in range(sheet.ncols)]
-                if not columns and any(val for val in row_vals):
-                    columns = row_vals
-                    continue
-                if any(val for val in row_vals):
-                    rows.append(row_vals)
+        try:
+            book = xlrd.open_workbook(file_path)
+        except Exception as exc:
+            raise ImportFileError("Could not read the Excel file. Re-save it as a standard Excel workbook.") from exc
+        # The .xls grid is natively capped at 65,536 x 256; the same per-sheet
+        # structure, column slice, and workbook-wide counter apply for uniformity.
+        for sheet in book.sheets():
+            _consume_sheet(
+                [sheet.cell_value(r, c) for c in range(min(sheet.ncols, MAX_IMPORT_COLUMNS))]
+                for r in range(sheet.nrows)
+            )
 
-    if not columns and rows:
-        max_cols = max(len(r) for r in rows)
-        columns = [f"col{idx+1}" for idx in range(max_cols)]
+    # Pad the header out to the widest data row: an unheadered trailing column
+    # (notes/vendor exports) must still appear in the mapping UI as "Col N" and
+    # stay manually mappable, as it did before the trailing-blank trim.
+    max_width = max((len(r) for r in rows), default=0)
+    if len(columns) < max_width:
+        columns = columns + [""] * (max_width - len(columns))
+
     return columns, rows
 
 
@@ -613,7 +673,14 @@ async def import_bom_preview(
     company_id: int = Depends(get_current_company_id),
 ):
     """
-    Upload a BOM or single-part drawing (PDF/DOC/DOCX) and return a preview for review.
+    Upload a BOM or single-part document (PDF/DOC/DOCX/XLSX/XLS) and return a preview for review.
+
+    Excel uploads are parsed directly into a raw table plus a suggested column mapping (no LLM
+    call) with a bounded scan: all sheets are read, at most 256 columns per row, more than
+    1,000 consecutive blank rows ends that sheet's scan (later sheets are still read — review
+    the preview rows), and a file is refused with 400 if it yields more than 10,000 data rows,
+    scans more than 100,000 raw rows workbook-wide, or cannot be read as an Excel workbook.
+    PDF/Word uploads go through text extraction + LLM extraction.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="File name is required")
@@ -626,49 +693,69 @@ async def import_bom_preview(
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    doc_path = save_uploaded_document(content, file.filename)
-    extraction_result = extract_text_from_document(doc_path)
-    if ext in [".xlsx", ".xls"]:
-        columns, rows = _extract_excel_table(doc_path, ext)
-        if not rows:
-            raise HTTPException(status_code=400, detail="No data rows found in Excel file.")
-        mapping = _suggest_mapping(columns)
-        items = _items_from_table(columns, rows, mapping)
-        warnings = []
-        if not mapping.get("part_number"):
-            warnings.append("Part number column not detected. Map it in the preview.")
-        if not mapping.get("quantity"):
-            warnings.append("Quantity column not detected. Map it in the preview.")
-        assembly = BOMImportAssembly()
+    filename = file.filename
+
+    # Save + extraction + table parse + LLM call are CPU-bound sync work; run
+    # them in the threadpool so a pathological upload can't stall the event
+    # loop (the request-scoped Session is used sequentially from one worker
+    # thread — same as a sync endpoint).
+    def _build_preview_response() -> BOMImportPreviewResponse:
+        doc_path = save_uploaded_document(content, filename)
+
+        if ext in [".xlsx", ".xls"]:
+            # Excel goes straight to the bounded table parser; the generic
+            # text extraction below only feeds the LLM path, so running it
+            # here would pay a full-workbook scan for output nobody reads.
+            columns, rows = _extract_excel_table(doc_path, ext)
+            if not rows:
+                raise HTTPException(status_code=400, detail="No data rows found in Excel file.")
+            mapping = _suggest_mapping(columns)
+            items = _items_from_table(columns, rows, mapping)
+            warnings: List[str] = []
+            if not mapping.get("part_number"):
+                warnings.append("Part number column not detected. Map it in the preview.")
+            if not mapping.get("quantity"):
+                warnings.append("Quantity column not detected. Map it in the preview.")
+            assembly = BOMImportAssembly()
+            return BOMImportPreviewResponse(
+                document_type="bom",
+                assembly=assembly,
+                items=items,
+                extraction_confidence="medium",
+                warnings=warnings,
+                raw_columns=columns,
+                raw_rows=rows,
+                suggested_mapping=mapping,
+                source_format="excel",
+            )
+
+        extraction_result = extract_text_from_document(doc_path)
+        if not extraction_result.text or len(extraction_result.text.strip()) < 50:
+            raise HTTPException(status_code=400, detail="Could not extract text from document")
+
+        extracted = extract_bom_data_with_llm(
+            extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
+        )
+        if extracted.get("_error"):
+            raise HTTPException(status_code=400, detail=extracted.get("_error"))
+
+        llm_assembly, llm_items, llm_warnings, confidence = _build_preview(extracted)
+        doc_type = (extracted.get("document_type") or ("bom" if llm_items else "part")).lower()
+        if llm_items and doc_type != "bom":
+            doc_type = "bom"
+
         return BOMImportPreviewResponse(
-            document_type="bom",
-            assembly=assembly,
-            items=items,
-            extraction_confidence="medium",
-            warnings=warnings,
-            raw_columns=columns,
-            raw_rows=rows,
-            suggested_mapping=mapping,
-            source_format="excel",
+            document_type=doc_type,
+            assembly=llm_assembly,
+            items=llm_items,
+            extraction_confidence=confidence,
+            warnings=llm_warnings,
         )
 
-    if not extraction_result.text or len(extraction_result.text.strip()) < 50:
-        raise HTTPException(status_code=400, detail="Could not extract text from document")
-
-    extracted = extract_bom_data_with_llm(
-        extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
-    )
-    if extracted.get("_error"):
-        raise HTTPException(status_code=400, detail=extracted.get("_error"))
-
-    assembly, items, warnings, confidence = _build_preview(extracted)
-    doc_type = (extracted.get("document_type") or ("bom" if items else "part")).lower()
-    if items and doc_type != "bom":
-        doc_type = "bom"
-
-    return BOMImportPreviewResponse(
-        document_type=doc_type, assembly=assembly, items=items, extraction_confidence=confidence, warnings=warnings
-    )
+    try:
+        return await run_in_threadpool(_build_preview_response)
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/import/commit", response_model=BOMImportResponse, status_code=status.HTTP_201_CREATED)
@@ -693,7 +780,11 @@ async def import_bom_or_part(
     company_id: int = Depends(get_current_company_id),
 ):
     """
-    Upload a BOM or single-part drawing (PDF/DOC/DOCX) and create parts/BOM items.
+    Upload a BOM or single-part document (PDF/DOC/DOCX/XLSX/XLS) and create parts/BOM items.
+
+    The document is text-extracted and parsed by the LLM in one shot (no review step — prefer
+    /bom/import/preview + /bom/import/commit for a reviewable flow). Excel text extraction is
+    scan-bounded and degrades gracefully at the cap (partial text, "medium" confidence).
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="File name is required")
@@ -706,171 +797,185 @@ async def import_bom_or_part(
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    doc_path = save_uploaded_document(content, file.filename)
-    extraction_result = extract_text_from_document(doc_path)
-    if not extraction_result.text or len(extraction_result.text.strip()) < 50:
-        raise HTTPException(status_code=400, detail="Could not extract text from document")
+    filename = file.filename
 
-    extracted = extract_bom_data_with_llm(
-        extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
-    )
-    if extracted.get("_error"):
-        raise HTTPException(status_code=400, detail=extracted.get("_error"))
+    # Save + extraction + LLM call + DB writes are CPU/DB-bound sync work; run
+    # them in the threadpool so a large document can't stall the event loop
+    # (the request-scoped Session and its commits are used sequentially from
+    # one worker thread — same as a sync endpoint).
+    def _run_import() -> BOMImportResponse:
+        doc_path = save_uploaded_document(content, filename)
+        extraction_result = extract_text_from_document(doc_path)
+        if not extraction_result.text or len(extraction_result.text.strip()) < 50:
+            raise HTTPException(status_code=400, detail="Could not extract text from document")
 
-    items = extracted.get("items", []) or []
-    assembly = extracted.get("assembly", {}) or {}
-    doc_type = (extracted.get("document_type") or ("bom" if items else "part")).lower()
-    if items and doc_type != "bom":
-        doc_type = "bom"
-
-    warnings: List[str] = []
-    missing_parts: List[str] = []
-
-    assembly_number = _safe_part_number(assembly.get("part_number")) or _safe_part_number(
-        assembly.get("drawing_number")
-    )
-    if not assembly_number:
-        assembly_number = (
-            _generate_fallback_part_number("ASSY", 1)
-            if doc_type == "bom"
-            else _generate_fallback_part_number("PART", 1)
+        extracted = extract_bom_data_with_llm(
+            extraction_result.text, is_ocr=extraction_result.is_ocr, company_id=company_id
         )
-        warnings.append("Assembly/part number not found; generated a temporary number.")
+        if extracted.get("_error"):
+            raise HTTPException(status_code=400, detail=extracted.get("_error"))
 
-    assembly_name = (assembly.get("name") or assembly.get("description") or assembly_number).strip()
-    assembly_description = (assembly.get("description") or assembly.get("name") or "").strip()
-    assembly_revision = (assembly.get("revision") or "A").strip()
-    assembly_drawing = _safe_part_number(assembly.get("drawing_number"))
-    assembly_part_type = _resolve_import_parent_part_type(doc_type, assembly.get("part_type"))
+        items = extracted.get("items", []) or []
+        assembly = extracted.get("assembly", {}) or {}
+        doc_type = (extracted.get("document_type") or ("bom" if items else "part")).lower()
+        if items and doc_type != "bom":
+            doc_type = "bom"
 
-    # Get or create assembly part
-    existing_part = db.query(Part).filter(Part.part_number == assembly_number, Part.company_id == company_id).first()
-    if existing_part:
-        assembly_part = existing_part
-        if doc_type == "bom" and _part_type_value(assembly_part.part_type) != PartType.ASSEMBLY.value:
-            assembly_part.part_type = PartType.ASSEMBLY.value
-    else:
-        assembly_part = Part(
-            part_number=assembly_number,
-            revision=assembly_revision,
-            name=assembly_name,
+        warnings: List[str] = []
+        missing_parts: List[str] = []
+
+        assembly_number = _safe_part_number(assembly.get("part_number")) or _safe_part_number(
+            assembly.get("drawing_number")
+        )
+        if not assembly_number:
+            assembly_number = (
+                _generate_fallback_part_number("ASSY", 1)
+                if doc_type == "bom"
+                else _generate_fallback_part_number("PART", 1)
+            )
+            warnings.append("Assembly/part number not found; generated a temporary number.")
+
+        assembly_name = (assembly.get("name") or assembly.get("description") or assembly_number).strip()
+        assembly_description = (assembly.get("description") or assembly.get("name") or "").strip()
+        assembly_revision = (assembly.get("revision") or "A").strip()
+        assembly_drawing = _safe_part_number(assembly.get("drawing_number"))
+        assembly_part_type = _resolve_import_parent_part_type(doc_type, assembly.get("part_type"))
+
+        # Get or create assembly part
+        existing_part = (
+            db.query(Part).filter(Part.part_number == assembly_number, Part.company_id == company_id).first()
+        )
+        if existing_part:
+            assembly_part = existing_part
+            if doc_type == "bom" and _part_type_value(assembly_part.part_type) != PartType.ASSEMBLY.value:
+                assembly_part.part_type = PartType.ASSEMBLY.value
+        else:
+            assembly_part = Part(
+                part_number=assembly_number,
+                revision=assembly_revision,
+                name=assembly_name,
+                description=assembly_description,
+                part_type=assembly_part_type,
+                unit_of_measure=UnitOfMeasure.EACH.value,
+                drawing_number=assembly_drawing,
+                created_by=current_user.id,
+                company_id=company_id,
+            )
+            db.add(assembly_part)
+            db.flush()
+
+        created_parts = 0 if existing_part else 1
+        created_bom_items = 0
+        bom_id: Optional[int] = None
+
+        if doc_type == "part" and not items:
+            db.commit()
+            return BOMImportResponse(
+                document_type="part",
+                assembly_part_id=assembly_part.id,
+                assembly_part_number=assembly_part.part_number,
+                bom_id=None,
+                created_parts=created_parts,
+                created_bom_items=0,
+                extraction_confidence=extracted.get("extraction_confidence", "low"),
+                warnings=warnings,
+            )
+
+        # If BOM already exists for assembly part, block import
+        existing_bom = (
+            db.query(BOM)
+            .filter(BOM.part_id == assembly_part.id, BOM.company_id == company_id, BOM.is_active == True)
+            .first()
+        )
+        if existing_bom:
+            raise HTTPException(status_code=400, detail="A BOM already exists for this assembly part")
+
+        bom = BOM(
+            part_id=assembly_part.id,
+            revision=assembly_revision or "A",
             description=assembly_description,
-            part_type=assembly_part_type,
-            unit_of_measure=UnitOfMeasure.EACH.value,
-            drawing_number=assembly_drawing,
+            status="draft",
+            bom_type="standard",
             created_by=current_user.id,
             company_id=company_id,
         )
-        db.add(assembly_part)
+        db.add(bom)
         db.flush()
+        bom_id = bom.id
 
-    created_parts = 0 if existing_part else 1
-    created_bom_items = 0
-    bom_id: Optional[int] = None
+        next_line = 10
+        for idx, item in enumerate(items, start=1):
+            item_number = int(item.get("line_number") or next_line)
+            next_line = item_number + 10
+            description = (item.get("description") or "").strip()
+            item_part_number = _safe_part_number(item.get("part_number"))
+            line_type = _classify_line_type(description, item.get("line_type"))
+            item_type = _coerce_item_type(item.get("item_type"))
+            part_type = _infer_part_type(line_type, item_type, description)
+            uom = item.get("unit_of_measure")
 
-    if doc_type == "part" and not items:
+            part_name = description or item_part_number or f"Item {item_number}"
+            if not item_part_number:
+                warnings.append(f"Line {item_number}: missing part number; generated automatically.")
+
+            component_part, missing, was_created = _ensure_part(
+                db,
+                item_part_number,
+                part_name,
+                description,
+                part_type,
+                None,
+                uom,
+                create_missing_parts,
+                idx,
+                company_id=company_id,
+                created_by=current_user.id,
+            )
+            if missing:
+                missing_parts.append(missing)
+                continue
+
+            if was_created:
+                created_parts += 1
+
+            quantity = float(item.get("quantity") or 1)
+            bom_item = BOMItem(
+                bom_id=bom.id,
+                component_part_id=component_part.id,
+                item_number=item_number,
+                quantity=quantity if quantity > 0 else 1.0,
+                item_type=item_type,
+                line_type=line_type,
+                unit_of_measure=_normalize_uom(uom),
+                reference_designator=item.get("reference_designator"),
+                find_number=item.get("find_number"),
+                notes=item.get("notes"),
+                company_id=company_id,
+            )
+            db.add(bom_item)
+            created_bom_items += 1
+
+        if missing_parts:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Missing parts: {', '.join(missing_parts)}")
+
         db.commit()
+
         return BOMImportResponse(
-            document_type="part",
+            document_type="bom",
             assembly_part_id=assembly_part.id,
             assembly_part_number=assembly_part.part_number,
-            bom_id=None,
+            bom_id=bom_id,
             created_parts=created_parts,
-            created_bom_items=0,
+            created_bom_items=created_bom_items,
             extraction_confidence=extracted.get("extraction_confidence", "low"),
             warnings=warnings,
         )
 
-    # If BOM already exists for assembly part, block import
-    existing_bom = (
-        db.query(BOM)
-        .filter(BOM.part_id == assembly_part.id, BOM.company_id == company_id, BOM.is_active == True)
-        .first()
-    )
-    if existing_bom:
-        raise HTTPException(status_code=400, detail="A BOM already exists for this assembly part")
-
-    bom = BOM(
-        part_id=assembly_part.id,
-        revision=assembly_revision or "A",
-        description=assembly_description,
-        status="draft",
-        bom_type="standard",
-        created_by=current_user.id,
-        company_id=company_id,
-    )
-    db.add(bom)
-    db.flush()
-    bom_id = bom.id
-
-    next_line = 10
-    for idx, item in enumerate(items, start=1):
-        item_number = int(item.get("line_number") or next_line)
-        next_line = item_number + 10
-        description = (item.get("description") or "").strip()
-        item_part_number = _safe_part_number(item.get("part_number"))
-        line_type = _classify_line_type(description, item.get("line_type"))
-        item_type = _coerce_item_type(item.get("item_type"))
-        part_type = _infer_part_type(line_type, item_type, description)
-        uom = item.get("unit_of_measure")
-
-        part_name = description or item_part_number or f"Item {item_number}"
-        if not item_part_number:
-            warnings.append(f"Line {item_number}: missing part number; generated automatically.")
-
-        component_part, missing, was_created = _ensure_part(
-            db,
-            item_part_number,
-            part_name,
-            description,
-            part_type,
-            None,
-            uom,
-            create_missing_parts,
-            idx,
-            company_id=company_id,
-            created_by=current_user.id,
-        )
-        if missing:
-            missing_parts.append(missing)
-            continue
-
-        if was_created:
-            created_parts += 1
-
-        quantity = float(item.get("quantity") or 1)
-        bom_item = BOMItem(
-            bom_id=bom.id,
-            component_part_id=component_part.id,
-            item_number=item_number,
-            quantity=quantity if quantity > 0 else 1.0,
-            item_type=item_type,
-            line_type=line_type,
-            unit_of_measure=_normalize_uom(uom),
-            reference_designator=item.get("reference_designator"),
-            find_number=item.get("find_number"),
-            notes=item.get("notes"),
-            company_id=company_id,
-        )
-        db.add(bom_item)
-        created_bom_items += 1
-
-    if missing_parts:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=f"Missing parts: {', '.join(missing_parts)}")
-
-    db.commit()
-
-    return BOMImportResponse(
-        document_type="bom",
-        assembly_part_id=assembly_part.id,
-        assembly_part_number=assembly_part.part_number,
-        bom_id=bom_id,
-        created_parts=created_parts,
-        created_bom_items=created_bom_items,
-        extraction_confidence=extracted.get("extraction_confidence", "low"),
-        warnings=warnings,
-    )
+    try:
+        return await run_in_threadpool(_run_import)
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/", response_model=List[BOMResponse])

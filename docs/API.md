@@ -266,6 +266,34 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 }
 ```
 
+#### BOM Import (document upload)
+
+AI-assisted BOM/part import from an uploaded document — a separate flow from the
+[Bulk Imports kit](#bulk-imports--templates-excel-migration-kit). Excel uploads are parsed
+directly into a reviewable table plus a suggested column mapping (no LLM call); PDF/Word
+uploads go through text extraction + LLM. See
+[docs/EXCEL_MIGRATION_RUNBOOK.md](EXCEL_MIGRATION_RUNBOOK.md) Step 7 for the migration flow.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/bom/import/preview` | Upload a BOM/part document (PDF/DOC/DOCX/XLSX/XLS), get a reviewable preview (Excel: raw table + suggested mapping; PDF/Word: LLM extraction) | Admin / Manager / Supervisor |
+| POST | `/bom/import/commit` | Commit a reviewed preview payload — creates parts, the BOM, and BOM items | Admin / Manager / Supervisor |
+| POST | `/bom/import` | One-shot upload → LLM extraction → create parts/BOM items (`create_missing_parts` form flag, default `true`) | Admin / Manager / Supervisor |
+
+> **Excel scanning is bounded** with the same caps as the shared Bulk Imports parser: at most
+> **256 columns** are read per row, more than **10,000 collected data rows** refuses the file
+> (**400**), and scanning more than **100,000 raw rows** workbook-wide refuses the file (**400**).
+> Two deliberate differences from the Import Center parser: **all sheets are read** (not just the
+> first worksheet), and a run of more than **1,000 consecutive blank rows ends that sheet's scan
+> only** — scanning continues with the next sheet, and there is **no refusal** for data sitting
+> past such a gap (BOM spreadsheets legitimately scatter data blocks down a sheet; the preview
+> shows exactly which rows parsed before anything is committed). The header row is padded to the
+> widest data row, so unheadered trailing data columns remain mappable in the preview.
+> Corrupt/unreadable Excel returns **400** `"Could not read the Excel file. Re-save it as a
+> standard Excel workbook."`. On `POST /bom/import` (the LLM path), Excel **text extraction
+> degrades gracefully** at the scan cap — partial text at `"medium"` confidence — rather than
+> refusing the file.
+
 ### Work Centers
 
 | Method | Endpoint | Description | Auth Required |
