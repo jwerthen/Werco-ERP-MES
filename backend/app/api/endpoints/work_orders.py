@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
@@ -1341,12 +1342,18 @@ async def import_open_work_orders_endpoint(
     routing expansion) inside a savepoint that is rolled back.
     """
     content = await file.read()
+    # Parse + import are CPU/DB-bound sync work; run them in the threadpool so a
+    # large upload can't stall the event loop (the request-scoped Session/audit
+    # are used sequentially from one worker thread — same as a sync endpoint).
     try:
-        table = parse_import_file(file.filename, content, required_columns={"part_number", "quantity"})
+        table = await run_in_threadpool(
+            parse_import_file, file.filename, content, required_columns={"part_number", "quantity"}
+        )
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return import_open_work_orders(
+    return await run_in_threadpool(
+        import_open_work_orders,
         db,
         table=table,
         current_user=current_user,

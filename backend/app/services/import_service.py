@@ -19,6 +19,18 @@ One parsing front door for every tabular import endpoint:
   DATA: part numbers like ``#10-32X1/2`` are common and must import.
 * Sane caps on file size and row count so a stray 300 MB workbook can't take
   the API down.
+* Bounded scanning, because real-world XLSX files routinely carry bloated
+  "used ranges" (one stray formatted cell at XFD1048576 makes openpyxl iterate
+  a 16,384 x 1,048,576 declared grid — minutes of CPU for a 5 KB file): at
+  most :data:`MAX_IMPORT_COLUMNS` columns are read per row, a run of more than
+  :data:`MAX_CONSECUTIVE_BLANK_ROWS` blank rows is treated as end of data, and
+  scanning more than :data:`MAX_SCANNED_ROWS` raw rows refuses the file with
+  an actionable error. The blank-run cutoff is LOUD, never silent truncation:
+  a bounded look-ahead (:data:`BLANK_RUN_LOOKAHEAD_ROWS` further raw rows)
+  checks whether real data exists past the gap and refuses the whole file if
+  so — quietly dropping rows would be data loss in a migration tool. Only a
+  gap with nothing but used-range bloat behind it parses as a clean end of
+  file (and still does so in well under a second).
 
 It also builds the downloadable per-entity XLSX templates (styled header row,
 a ``#``-marked plain-English guidance row, and example rows on a separate
@@ -39,6 +51,25 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 # (thousands of rows), small enough that parsing stays interactive.
 MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_IMPORT_ROWS = 10_000
+
+# No import template comes close to this many columns; bounding the read keeps
+# per-row cost sane when a bloated workbook declares the full 16,384-column grid.
+MAX_IMPORT_COLUMNS = 256
+
+# Blank rows are tolerated anywhere, but a run longer than this is used-range
+# bloat (millions of trailing empty rows), not data — treat it as end of file
+# so the upload still parses (in milliseconds) instead of scanning the grid.
+MAX_CONSECUTIVE_BLANK_ROWS = 1_000
+
+# After the blank-run cutoff fires, look ahead this many further raw rows for
+# real data; finding any refuses the file loudly instead of truncating it.
+# Bounds the post-gap scan so bloated-but-empty sheets stay fast.
+BLANK_RUN_LOOKAHEAD_ROWS = 50_000
+
+# Hard backstop on TOTAL raw rows scanned (blank or not). Only reachable by a
+# pathological alternating blank/data pattern that survives the blank-run
+# cutoff; refuse such a file with an actionable error instead of spinning.
+MAX_SCANNED_ROWS = 100_000
 
 # Rows whose FIRST cell starts with this marker are guidance rows and are
 # skipped on import. This must match EXACTLY what build_import_template_workbook
@@ -167,9 +198,10 @@ def _rows_from_xlsx(content: bytes) -> Iterator[Tuple[Any, ...]]:
         raise ImportFileError("Could not read the .xlsx file. Re-save it as a standard Excel workbook.") from exc
     try:
         # Import reads the FIRST sheet only; the template's "Examples" sheet is
-        # therefore ignored by design.
+        # therefore ignored by design. max_col bounds per-row cost when the
+        # declared used range is bloated (e.g. one stray cell in column XFD).
         worksheet = workbook.worksheets[0]
-        yield from worksheet.iter_rows(values_only=True)
+        yield from worksheet.iter_rows(values_only=True, max_col=MAX_IMPORT_COLUMNS)
     finally:
         workbook.close()
 
@@ -181,8 +213,19 @@ def parse_import_file(
     required_columns: Optional[Set[str]] = None,
     max_rows: int = MAX_IMPORT_ROWS,
     max_bytes: int = MAX_IMPORT_FILE_BYTES,
+    max_scanned_rows: int = MAX_SCANNED_ROWS,
+    blank_run_lookahead_rows: int = BLANK_RUN_LOOKAHEAD_ROWS,
 ) -> ParsedTable:
     """Parse an uploaded CSV/XLSX into normalized row dicts.
+
+    The scan is bounded (``MAX_IMPORT_COLUMNS`` per row, a consecutive-blank-row
+    cutoff treated as end of data, and ``max_scanned_rows`` raw rows total) so a
+    workbook with a bloated used range parses quickly instead of iterating its
+    entire declared grid. The blank-run cutoff fails LOUD rather than silently
+    truncating: a bounded look-ahead (``blank_run_lookahead_rows`` further raw
+    rows, outside the ``max_scanned_rows`` budget) checks for real data past the
+    gap and raises if any is found, so a user who kept rows below a huge cleared
+    block gets an actionable error instead of a partial import.
 
     Raises :class:`ImportFileError` for any file-level problem; row-level
     validation stays in the calling endpoint so its error contract is unchanged.
@@ -199,11 +242,23 @@ def parse_import_file(
 
     headers: List[str] = []
     table_rows: List[Tuple[int, Dict[str, str]]] = []
+    consecutive_blank_rows = 0
+    blank_run_cutoff_row = 0  # raw row number where the blank-run cutoff fired (0 = never fired)
 
     for row_number, raw_row in enumerate(raw_rows, start=1):
-        cells = [coerce_cell(cell) for cell in raw_row]
+        if row_number > max_scanned_rows:
+            raise ImportFileError(
+                f"The spreadsheet's used range is enormous (over {max_scanned_rows:,} rows scanned). "
+                "Delete trailing empty rows/columns or re-save the data as CSV, then try again."
+            )
+        cells = [coerce_cell(cell) for cell in raw_row[:MAX_IMPORT_COLUMNS]]
         if not any(cells):
+            consecutive_blank_rows += 1
+            if consecutive_blank_rows > MAX_CONSECUTIVE_BLANK_ROWS:
+                blank_run_cutoff_row = row_number
+                break  # presumed used-range bloat — but verify via the look-ahead below before trusting it
             continue  # tolerate blank rows anywhere
+        consecutive_blank_rows = 0
         if not headers:
             headers = [normalize_import_header(cell) for cell in cells]
             # Two distinct columns that collide after normalization would
@@ -231,7 +286,30 @@ def parse_import_file(
             row[header] = cells[idx] if idx < len(cells) else ""
         table_rows.append((row_number, row))
 
+    if blank_run_cutoff_row:
+        # The cutoff treats the gap as end of data. Verify that before dropping
+        # anything: keep consuming raw rows for a bounded window, checking only
+        # "is there any content?" (cheap — rows are already sliced to
+        # MAX_IMPORT_COLUMNS). This runs as its own loop, deliberately outside
+        # the max_scanned_rows budget, so the look-ahead can never trip that
+        # backstop. Finding data here means a user kept real rows below a huge
+        # cleared block — refuse loudly instead of silently truncating.
+        for lookahead_offset, raw_row in enumerate(raw_rows, start=1):
+            if lookahead_offset > blank_run_lookahead_rows:
+                break  # innocent used-range bloat: nothing but blanks behind the gap
+            if any(coerce_cell(cell) for cell in raw_row[:MAX_IMPORT_COLUMNS]):
+                raise ImportFileError(
+                    f"Found data at row {blank_run_cutoff_row + lookahead_offset} after a gap of more than "
+                    f"{MAX_CONSECUTIVE_BLANK_ROWS:,} blank rows — scanning treats such a gap as end of data. "
+                    "Delete the blank rows (or re-save as CSV) and try again."
+                )
+
     if not headers:
+        if blank_run_cutoff_row:
+            raise ImportFileError(
+                "File must include a header row "
+                f"(scanning stops after {MAX_CONSECUTIVE_BLANK_ROWS:,} consecutive blank rows)"
+            )
         raise ImportFileError("File must include a header row")
 
     if required_columns:

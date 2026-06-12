@@ -1299,8 +1299,14 @@ import endpoints below accept **`.csv`** (UTF-8) or **`.xlsx`** (first worksheet
 shared parser (`app/services/import_service.py`): headers are normalized to snake_case
 (`"Part Number"` → `part_number`), rows whose **first cell starts with `"# "`** (hash + space — the
 template guidance marker; a bare `#` is data) are skipped, blank rows are tolerated, and files are
-capped at **10 MB / 10,000 data rows**. File-level problems (type, encoding, missing required
-columns, duplicate-after-normalization headers, caps) return **400** with a plain-English `detail`;
+capped at **10 MB / 10,000 data rows / 256 columns** (columns past the 256th are ignored). Scanning
+is **bounded** so an XLSX with a bloated used range (one stray formatted cell can declare a
+16,384 × 1,048,576 grid) parses in milliseconds instead of stalling a worker: a run of **more than
+1,000 consecutive blank rows** is treated as end of data — and if a bounded look-ahead finds real
+data past such a gap, the file is **refused** (400) rather than silently truncated — and scanning
+more than **100,000 raw rows** total refuses the file outright. File-level problems (type, encoding,
+missing required columns, duplicate-after-normalization headers, caps/scan bounds) return **400**
+with a plain-English `detail`;
 two distinct columns that collide after normalization are a **hard error** naming both offenders
 (refusing the file beats silently merging columns in a migration tool). Row-level validation stays
 per-endpoint with the partial-success contract: on commit each row (each PO, for the PO import) is

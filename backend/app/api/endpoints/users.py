@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
@@ -221,187 +222,198 @@ async def import_users_csv(
 ):
     """Import users from CSV or XLSX (Admin only)."""
     content = await file.read()
+    # Parse + import are CPU/DB-bound sync work; run them in the threadpool so a
+    # large upload can't stall the event loop (the request-scoped Session/audit
+    # are used sequentially from one worker thread — same as a sync endpoint).
     try:
-        table = parse_import_file(file.filename, content, required_columns={"employee_id", "first_name", "last_name"})
+        table = await run_in_threadpool(
+            parse_import_file, file.filename, content, required_columns={"employee_id", "first_name", "last_name"}
+        )
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    existing_employee_ids = {
-        (value or "").strip().lower()
-        for (value,) in db.query(User.employee_id).filter(User.company_id == company_id).all()
-    }
-    existing_emails = {
-        (value or "").strip().lower() for (value,) in db.query(User.email).filter(User.company_id == company_id).all()
-    }
+    def _run_import() -> UserCsvImportResponse:
+        existing_employee_ids = {
+            (value or "").strip().lower()
+            for (value,) in db.query(User.employee_id).filter(User.company_id == company_id).all()
+        }
+        existing_emails = {
+            (value or "").strip().lower()
+            for (value,) in db.query(User.email).filter(User.company_id == company_id).all()
+        }
 
-    audit = AuditService(db, current_user, request)
-    errors: List[UserCsvImportError] = []
-    created_ids: List[int] = []
-    total_rows = 0
-    accepted_count = 0
-    default_password = (default_password or "").strip()
-    # platform_admin is the cross-company Werco oversight role; it must never be
-    # mintable from a tenant spreadsheet, so don't advertise it as valid either.
-    valid_roles = sorted(role.value for role in UserRole if role != UserRole.PLATFORM_ADMIN)
+        audit = AuditService(db, current_user, request)
+        errors: List[UserCsvImportError] = []
+        created_ids: List[int] = []
+        total_rows = 0
+        accepted_count = 0
+        # New name (not a rebind): assigning to `default_password` here would make
+        # the captured Form parameter an unbound local inside this closure.
+        fallback_password = (default_password or "").strip()
+        # platform_admin is the cross-company Werco oversight role; it must never be
+        # mintable from a tenant spreadsheet, so don't advertise it as valid either.
+        valid_roles = sorted(role.value for role in UserRole if role != UserRole.PLATFORM_ADMIN)
 
-    for row_number, row in table.iter_rows():
-        total_rows += 1
-        employee_id = row.get("employee_id", "")
-        first_name = row.get("first_name", "")
-        last_name = row.get("last_name", "")
-        email = row.get("email", "")
-        password = row.get("password", "") or default_password
-        role_raw = (row.get("role", UserRole.OPERATOR.value) or UserRole.OPERATOR.value).strip().lower()
-        department = row.get("department") or None
+        for row_number, row in table.iter_rows():
+            total_rows += 1
+            employee_id = row.get("employee_id", "")
+            first_name = row.get("first_name", "")
+            last_name = row.get("last_name", "")
+            email = row.get("email", "")
+            password = row.get("password", "") or fallback_password
+            role_raw = (row.get("role", UserRole.OPERATOR.value) or UserRole.OPERATOR.value).strip().lower()
+            department = row.get("department") or None
 
-        if not employee_id:
-            errors.append(UserCsvImportError(row=row_number, reason="employee_id is required"))
-            continue
+            if not employee_id:
+                errors.append(UserCsvImportError(row=row_number, reason="employee_id is required"))
+                continue
 
-        employee_key = employee_id.lower()
-        if employee_key in existing_employee_ids:
-            errors.append(
-                UserCsvImportError(
-                    row=row_number,
-                    employee_id=employee_id,
-                    email=email or None,
-                    reason="Employee ID already exists",
-                )
-            )
-            continue
-
-        if not first_name or not last_name:
-            errors.append(
-                UserCsvImportError(
-                    row=row_number,
-                    employee_id=employee_id,
-                    email=email or None,
-                    reason="first_name and last_name are required",
-                )
-            )
-            continue
-
-        try:
-            role = UserRole(role_raw)
-        except ValueError:
-            errors.append(
-                UserCsvImportError(
-                    row=row_number,
-                    employee_id=employee_id,
-                    email=email or None,
-                    reason=f"Invalid role '{role_raw}'. Valid roles: {', '.join(valid_roles)}",
-                )
-            )
-            continue
-
-        if role == UserRole.PLATFORM_ADMIN:
-            # A company admin must not be able to mint a cross-company platform
-            # admin from a spreadsheet row.
-            errors.append(
-                UserCsvImportError(
-                    row=row_number,
-                    employee_id=employee_id,
-                    email=email or None,
-                    reason="role 'platform_admin' cannot be assigned via import",
-                )
-            )
-            continue
-
-        if not password:
-            if role == UserRole.OPERATOR:
-                password = _generate_system_password()
-            else:
+            employee_key = employee_id.lower()
+            if employee_key in existing_employee_ids:
                 errors.append(
                     UserCsvImportError(
                         row=row_number,
                         employee_id=employee_id,
                         email=email or None,
-                        reason="password is required for non-operator roles (CSV column or default_password form value)",
+                        reason="Employee ID already exists",
                     )
                 )
                 continue
 
-        if not password:
-            errors.append(
-                UserCsvImportError(
-                    row=row_number,
-                    employee_id=employee_id,
-                    email=email or None,
-                    reason="password is required",
+            if not first_name or not last_name:
+                errors.append(
+                    UserCsvImportError(
+                        row=row_number,
+                        employee_id=employee_id,
+                        email=email or None,
+                        reason="first_name and last_name are required",
+                    )
                 )
-            )
-            continue
+                continue
 
-        if not email:
-            email = _generated_email(employee_id, existing_emails)
+            try:
+                role = UserRole(role_raw)
+            except ValueError:
+                errors.append(
+                    UserCsvImportError(
+                        row=row_number,
+                        employee_id=employee_id,
+                        email=email or None,
+                        reason=f"Invalid role '{role_raw}'. Valid roles: {', '.join(valid_roles)}",
+                    )
+                )
+                continue
 
-        email_key = email.lower()
-        if email_key in existing_emails:
-            errors.append(
-                UserCsvImportError(
-                    row=row_number,
-                    employee_id=employee_id,
+            if role == UserRole.PLATFORM_ADMIN:
+                # A company admin must not be able to mint a cross-company platform
+                # admin from a spreadsheet row.
+                errors.append(
+                    UserCsvImportError(
+                        row=row_number,
+                        employee_id=employee_id,
+                        email=email or None,
+                        reason="role 'platform_admin' cannot be assigned via import",
+                    )
+                )
+                continue
+
+            if not password:
+                if role == UserRole.OPERATOR:
+                    password = _generate_system_password()
+                else:
+                    errors.append(
+                        UserCsvImportError(
+                            row=row_number,
+                            employee_id=employee_id,
+                            email=email or None,
+                            reason="password is required for non-operator roles (CSV column or default_password form value)",
+                        )
+                    )
+                    continue
+
+            if not password:
+                errors.append(
+                    UserCsvImportError(
+                        row=row_number,
+                        employee_id=employee_id,
+                        email=email or None,
+                        reason="password is required",
+                    )
+                )
+                continue
+
+            if not email:
+                email = _generated_email(employee_id, existing_emails)
+
+            email_key = email.lower()
+            if email_key in existing_emails:
+                errors.append(
+                    UserCsvImportError(
+                        row=row_number,
+                        employee_id=employee_id,
+                        email=email,
+                        reason="Email already registered",
+                    )
+                )
+                continue
+
+            if dry_run:
+                accepted_count += 1
+                existing_employee_ids.add(employee_key)
+                existing_emails.add(email_key)
+                continue
+
+            try:
+                user = User(
                     email=email,
-                    reason="Email already registered",
+                    employee_id=employee_id,
+                    first_name=first_name,
+                    last_name=last_name,
+                    hashed_password=get_password_hash(password),
+                    role=role,
+                    department=department,
                 )
-            )
-            continue
+                user.company_id = company_id
+                db.add(user)
+                db.flush()
+                audit.log_create(
+                    "user",
+                    user.id,
+                    user.employee_id,
+                    # Deliberately not passing new_values: the model carries
+                    # hashed_password and secrets must never land in the audit log.
+                    description=f"Created user {user.employee_id} via import",
+                    extra_data={"source": "import", "role": role.value, "email": user.email},
+                )
+                db.commit()
+                db.refresh(user)
+            except Exception:
+                db.rollback()
+                errors.append(
+                    UserCsvImportError(
+                        row=row_number,
+                        employee_id=employee_id,
+                        email=email,
+                        reason="Failed to create user due to a database constraint",
+                    )
+                )
+                continue
 
-        if dry_run:
+            created_ids.append(user.id)
             accepted_count += 1
             existing_employee_ids.add(employee_key)
             existing_emails.add(email_key)
-            continue
 
-        try:
-            user = User(
-                email=email,
-                employee_id=employee_id,
-                first_name=first_name,
-                last_name=last_name,
-                hashed_password=get_password_hash(password),
-                role=role,
-                department=department,
-            )
-            user.company_id = company_id
-            db.add(user)
-            db.flush()
-            audit.log_create(
-                "user",
-                user.id,
-                user.employee_id,
-                # Deliberately not passing new_values: the model carries
-                # hashed_password and secrets must never land in the audit log.
-                description=f"Created user {user.employee_id} via import",
-                extra_data={"source": "import", "role": role.value, "email": user.email},
-            )
-            db.commit()
-            db.refresh(user)
-        except Exception:
-            db.rollback()
-            errors.append(
-                UserCsvImportError(
-                    row=row_number,
-                    employee_id=employee_id,
-                    email=email,
-                    reason="Failed to create user due to a database constraint",
-                )
-            )
-            continue
+        return UserCsvImportResponse(
+            total_rows=total_rows,
+            created_count=accepted_count,
+            skipped_count=total_rows - accepted_count,
+            created_ids=created_ids,
+            errors=errors,
+            dry_run=dry_run,
+        )
 
-        created_ids.append(user.id)
-        accepted_count += 1
-        existing_employee_ids.add(employee_key)
-        existing_emails.add(email_key)
-
-    return UserCsvImportResponse(
-        total_rows=total_rows,
-        created_count=accepted_count,
-        skipped_count=total_rows - accepted_count,
-        created_ids=created_ids,
-        errors=errors,
-        dry_run=dry_run,
-    )
+    return await run_in_threadpool(_run_import)
 
 
 @router.put("/{user_id}", response_model=UserResponse)

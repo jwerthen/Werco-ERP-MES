@@ -11,6 +11,7 @@ Covers:
 """
 
 import io
+import time
 from datetime import date, timedelta
 from io import BytesIO
 
@@ -497,6 +498,42 @@ class TestOpenWorkOrderImport:
             files=_csv_file("part_number,quantity\nX,1\n"),
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_bloated_used_range_xlsx_dry_run_returns_quickly(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """End-to-end regression test for the Import Center "stuck validating" bug:
+        a tiny upload whose declared used range is the FULL Excel grid (one stray
+        whitespace cell at XFD1048576) must preview in seconds, not scan
+        16,384 x 1,048,576 cells (~5 minutes of CPU on the event loop in prod)."""
+        _make_routed_part(db_session, "WOIMP-BLOAT")
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["wo_number", "part_number", "quantity"])
+        sheet.append(["", "WOIMP-BLOAT", 10])
+        # The production failure mode: one stray whitespace cell in the very last
+        # cell of the grid bloats the declared dimension to the maximum.
+        sheet.cell(row=1_048_576, column=16_384, value=" ")
+        out = io.BytesIO()
+        workbook.save(out)
+        out.seek(0)
+
+        started = time.monotonic()
+        response = client.post(
+            "/api/v1/work-orders/import?dry_run=true",
+            headers=auth_headers,
+            files={"file": ("import.xlsx", out, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+        elapsed = time.monotonic() - started
+
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        assert body["dry_run"] is True
+        assert body["created_count"] == 1
+        assert body["errors"] == []
+        # Generous wall-clock bound (suite runs under -n auto load): a regression
+        # to full-grid scanning takes minutes; the bounded scan takes milliseconds.
+        assert elapsed < 30, f"bloated-dimension dry run took {elapsed:.1f}s — grid-scan regression"
 
 
 @pytest.mark.api

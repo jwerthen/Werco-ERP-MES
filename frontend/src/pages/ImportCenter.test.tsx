@@ -224,6 +224,65 @@ describe('ImportCenter preview-before-commit flow', () => {
     expect(screen.getByText('WO-2026-0100')).toBeInTheDocument();
   });
 
+  it('renders slim-the-file guidance when a dry-run validation times out (ECONNABORTED)', async () => {
+    // Axios timeout shape: code ECONNABORTED + raw "timeout of Nms exceeded" message.
+    mockedApi.importPartsCsv.mockRejectedValue(
+      Object.assign(new Error('timeout of 120000ms exceeded'), { code: 'ECONNABORTED' })
+    );
+
+    renderImportCenter('?type=parts');
+    chooseFile(xlsxFile);
+    fireEvent.click(validateButton());
+
+    // Validation parses are bounded server-side, so the advice is to slim the file down.
+    await screen.findByText(/the server took too long to read this file/i);
+    expect(screen.getByText(/trim empty rows\/columns or re-save as CSV/i)).toBeInTheDocument();
+    // The raw axios message must not leak through.
+    expect(screen.queryByText(/timeout of 120000ms exceeded/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Dry run preview')).not.toBeInTheDocument();
+  });
+
+  it('renders may-still-be-processing guidance when a commit times out', async () => {
+    mockedApi.importPartsCsv
+      .mockResolvedValueOnce({
+        dry_run: true,
+        total_rows: 2,
+        imported_count: 2,
+        skipped_count: 0,
+        created_ids: [],
+        errors: [],
+      })
+      .mockRejectedValueOnce(Object.assign(new Error('timeout of 600000ms exceeded'), { code: 'ECONNABORTED' }));
+
+    renderImportCenter('?type=parts');
+    chooseFile(xlsxFile);
+    fireEvent.click(validateButton());
+
+    await screen.findByText('Dry run preview');
+    fireEvent.click(screen.getByRole('button', { name: /commit import/i }));
+
+    // A commit timeout must NOT claim the import failed — the server may still be
+    // writing rows. Steer the user back through a fresh dry run instead of a blind retry.
+    await screen.findByText(/the import may still be processing/i);
+    expect(screen.getByText(/re-run "Validate file \(dry run\)" before retrying/i)).toBeInTheDocument();
+    expect(screen.queryByText(/timeout of 600000ms exceeded/i)).not.toBeInTheDocument();
+    // No false "Import committed" panel either.
+    expect(screen.queryByText('Import committed')).not.toBeInTheDocument();
+  });
+
+  it('surfaces the backend detail message for non-timeout import failures', async () => {
+    mockedApi.importPartsCsv.mockRejectedValue({
+      message: 'Request failed with status code 400',
+      response: { data: { detail: 'Unsupported file type' } },
+    });
+
+    renderImportCenter('?type=parts');
+    chooseFile(xlsxFile);
+    fireEvent.click(validateButton());
+
+    await screen.findByText('Unsupported file type');
+  });
+
   it('downloads the server XLSX template for the selected entity', async () => {
     mockedApi.downloadImportTemplate.mockResolvedValue({
       blob: new Blob(['xlsx-bytes']),

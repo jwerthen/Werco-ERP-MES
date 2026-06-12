@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, EmailStr, ValidationError
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
@@ -208,106 +209,114 @@ async def _import_customers_csv_impl(
 ):
     """Import customer master records from CSV or XLSX with row-level errors."""
     content = await file.read()
+    # Parse + import are CPU/DB-bound sync work; run them in the threadpool so a
+    # large upload can't stall the event loop (the request-scoped Session/audit
+    # are used sequentially from one worker thread — same as a sync endpoint).
     try:
-        table = parse_import_file(file.filename, content, required_columns={"name"})
+        table = await run_in_threadpool(parse_import_file, file.filename, content, required_columns={"name"})
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    existing_names = {
-        (value or "").strip().lower()
-        for (value,) in db.query(Customer.name).filter(Customer.company_id == company_id).all()
-    }
-    existing_codes = {
-        (value or "").strip().lower()
-        for (value,) in db.query(Customer.code).filter(Customer.company_id == company_id).all()
-        if value
-    }
+    def _run_import() -> CustomerCsvImportResponse:
+        existing_names = {
+            (value or "").strip().lower()
+            for (value,) in db.query(Customer.name).filter(Customer.company_id == company_id).all()
+        }
+        existing_codes = {
+            (value or "").strip().lower()
+            for (value,) in db.query(Customer.code).filter(Customer.company_id == company_id).all()
+            if value
+        }
 
-    audit = AuditService(db, current_user, request)
-    errors: List[CustomerCsvImportError] = []
-    created_ids: List[int] = []
-    total_rows = 0
-    accepted_count = 0
+        audit = AuditService(db, current_user, request)
+        errors: List[CustomerCsvImportError] = []
+        created_ids: List[int] = []
+        total_rows = 0
+        accepted_count = 0
 
-    for row_number, row in table.iter_rows():
-        total_rows += 1
-        name = row.get("name", "")
-        code = row.get("code", "")
+        for row_number, row in table.iter_rows():
+            total_rows += 1
+            name = row.get("name", "")
+            code = row.get("code", "")
 
-        try:
-            if not name:
-                raise ValueError("name is required")
-            if name.lower() in existing_names:
-                raise ValueError("Customer name already exists")
-            if code and code.lower() in existing_codes:
-                raise ValueError("Customer code already exists")
+            try:
+                if not name:
+                    raise ValueError("name is required")
+                if name.lower() in existing_names:
+                    raise ValueError("Customer name already exists")
+                if code and code.lower() in existing_codes:
+                    raise ValueError("Customer code already exists")
 
-            customer_in = CustomerCreate(
-                name=name,
-                code=code or None,
-                contact_name=row.get("contact_name") or None,
-                email=row.get("email") or None,
-                phone=row.get("phone") or None,
-                address_line1=row.get("address_line1") or None,
-                address_line2=row.get("address_line2") or None,
-                city=row.get("city") or None,
-                state=row.get("state") or None,
-                zip_code=row.get("zip_code") or row.get("postal_code") or None,
-                country=row.get("country") or "USA",
-                ship_to_name=row.get("ship_to_name") or None,
-                ship_address_line1=row.get("ship_address_line1") or None,
-                ship_city=row.get("ship_city") or None,
-                ship_state=row.get("ship_state") or None,
-                ship_zip_code=row.get("ship_zip_code") or None,
-                payment_terms=row.get("payment_terms") or "Net 30",
-                requires_coc=_parse_bool(row.get("requires_coc", ""), True),
-                requires_fai=_parse_bool(row.get("requires_fai", ""), False),
-                special_requirements=row.get("special_requirements") or None,
-                notes=row.get("notes") or None,
-            )
-            is_active = _parse_bool(row.get("is_active", ""), True)
-        except (ValueError, ValidationError) as exc:
-            errors.append(CustomerCsvImportError(row=row_number, name=name or None, code=code or None, reason=str(exc)))
-            continue
+                customer_in = CustomerCreate(
+                    name=name,
+                    code=code or None,
+                    contact_name=row.get("contact_name") or None,
+                    email=row.get("email") or None,
+                    phone=row.get("phone") or None,
+                    address_line1=row.get("address_line1") or None,
+                    address_line2=row.get("address_line2") or None,
+                    city=row.get("city") or None,
+                    state=row.get("state") or None,
+                    zip_code=row.get("zip_code") or row.get("postal_code") or None,
+                    country=row.get("country") or "USA",
+                    ship_to_name=row.get("ship_to_name") or None,
+                    ship_address_line1=row.get("ship_address_line1") or None,
+                    ship_city=row.get("ship_city") or None,
+                    ship_state=row.get("ship_state") or None,
+                    ship_zip_code=row.get("ship_zip_code") or None,
+                    payment_terms=row.get("payment_terms") or "Net 30",
+                    requires_coc=_parse_bool(row.get("requires_coc", ""), True),
+                    requires_fai=_parse_bool(row.get("requires_fai", ""), False),
+                    special_requirements=row.get("special_requirements") or None,
+                    notes=row.get("notes") or None,
+                )
+                is_active = _parse_bool(row.get("is_active", ""), True)
+            except (ValueError, ValidationError) as exc:
+                errors.append(
+                    CustomerCsvImportError(row=row_number, name=name or None, code=code or None, reason=str(exc))
+                )
+                continue
 
-        if dry_run:
-            existing_names.add(name.lower())
-            if code:
-                existing_codes.add(code.lower())
+            if dry_run:
+                existing_names.add(name.lower())
+                if code:
+                    existing_codes.add(code.lower())
+                accepted_count += 1
+                continue
+
+            try:
+                customer_code = customer_in.code or generate_customer_code(db, customer_in.name, company_id)
+                customer = Customer(**customer_in.model_dump(exclude={"code"}), code=customer_code)
+                customer.company_id = company_id
+                customer.is_active = is_active
+                db.add(customer)
+                db.flush()
+                audit.log_create(
+                    "customer", customer.id, customer.name, new_values=customer, extra_data={"source": "import"}
+                )
+                db.commit()
+                db.refresh(customer)
+            except Exception as exc:
+                db.rollback()
+                errors.append(CustomerCsvImportError(row=row_number, name=name, code=code or None, reason=str(exc)))
+                continue
+
+            existing_names.add(customer.name.lower())
+            if customer.code:
+                existing_codes.add(customer.code.lower())
+            created_ids.append(customer.id)
             accepted_count += 1
-            continue
 
-        try:
-            customer_code = customer_in.code or generate_customer_code(db, customer_in.name, company_id)
-            customer = Customer(**customer_in.model_dump(exclude={"code"}), code=customer_code)
-            customer.company_id = company_id
-            customer.is_active = is_active
-            db.add(customer)
-            db.flush()
-            audit.log_create(
-                "customer", customer.id, customer.name, new_values=customer, extra_data={"source": "import"}
-            )
-            db.commit()
-            db.refresh(customer)
-        except Exception as exc:
-            db.rollback()
-            errors.append(CustomerCsvImportError(row=row_number, name=name, code=code or None, reason=str(exc)))
-            continue
+        return CustomerCsvImportResponse(
+            imported_count=accepted_count,
+            skipped_count=len(errors),
+            total_rows=total_rows,
+            created_ids=created_ids,
+            errors=errors,
+            dry_run=dry_run,
+        )
 
-        existing_names.add(customer.name.lower())
-        if customer.code:
-            existing_codes.add(customer.code.lower())
-        created_ids.append(customer.id)
-        accepted_count += 1
-
-    return CustomerCsvImportResponse(
-        imported_count=accepted_count,
-        skipped_count=len(errors),
-        total_rows=total_rows,
-        created_ids=created_ids,
-        errors=errors,
-        dry_run=dry_run,
-    )
+    return await run_in_threadpool(_run_import)
 
 
 @router.get("/{customer_id}/stats")
