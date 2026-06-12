@@ -6,7 +6,9 @@ Handles PDF (native + OCR) and Word document (.doc, .docx) text extraction.
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
+
+from app.services.import_service import MAX_CONSECUTIVE_BLANK_ROWS, MAX_IMPORT_COLUMNS, MAX_SCANNED_ROWS
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,18 @@ def extract_text_from_word(doc_path: str) -> DocumentExtractionResult:
 def extract_text_from_excel(excel_path: str) -> DocumentExtractionResult:
     """
     Extract text from Excel document (.xlsx or .xls).
+
+    The scan is bounded with the Import Center's shared caps
+    (``app.services.import_service``) so a workbook with a bloated used range —
+    one stray formatted cell at XFD1048576 declares the full
+    16,384 x 1,048,576 grid, minutes of CPU for a KB-sized file — extracts in
+    milliseconds: at most ``MAX_IMPORT_COLUMNS`` columns are read per row, a
+    per-sheet run of more than ``MAX_CONSECUTIVE_BLANK_ROWS`` blank rows ends
+    that sheet (later sheets are still read), and a workbook-wide cap of
+    ``MAX_SCANNED_ROWS`` raw rows stops extraction entirely, returning the text
+    gathered so far at "medium" confidence. Text extraction degrades
+    gracefully — this function never raises; failures return an empty
+    low-confidence result.
     """
     path = Path(excel_path)
     ext = path.suffix.lower()
@@ -103,57 +117,57 @@ def extract_text_from_excel(excel_path: str) -> DocumentExtractionResult:
         logger.error("[EXCEL] File is empty (0 bytes)")
         return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
 
-    try:
-        import pandas as pd
+    all_text: List[str] = []
+    scanned_rows = 0
 
-        sheets = pd.read_excel(excel_path, sheet_name=None, dtype=str)
-        all_text = []
-        for sheet_name, df in sheets.items():
-            all_text.append(f"--- Sheet: {sheet_name} ---")
-            df = df.fillna("")
-            all_text.extend(
-                df.astype(str)
-                .apply(lambda row: " | ".join([cell.strip() for cell in row.tolist() if cell.strip()]), axis=1)
-                .tolist()
-            )
-        text = "\n".join([line for line in all_text if line.strip()])
-        return DocumentExtractionResult(text=text, confidence="medium", file_type=ext.strip('.'))
-    except ImportError as e:
-        logger.warning(f"[EXCEL] pandas not installed: {e}. Falling back to direct reader.")
-    except Exception as e:
-        logger.warning(f"[EXCEL] pandas extraction failed: {e}. Falling back to direct reader.")
+    def _append_sheet(sheet_name: str, sheet_rows: Iterable[Any]) -> bool:
+        """Fold one sheet into ``all_text``; False when the workbook-wide cap was hit."""
+        nonlocal scanned_rows
+        all_text.append(f"--- Sheet: {sheet_name} ---")
+        consecutive_blank_rows = 0
+        for raw_row in sheet_rows:
+            scanned_rows += 1
+            if scanned_rows > MAX_SCANNED_ROWS:
+                logger.warning(f"[EXCEL] Scanned-row cap hit ({MAX_SCANNED_ROWS:,} raw rows) — returning partial text")
+                return False
+            cells = [str(cell).strip() for cell in raw_row if cell is not None and str(cell).strip()]
+            if not cells:
+                consecutive_blank_rows += 1
+                if consecutive_blank_rows > MAX_CONSECUTIVE_BLANK_ROWS:
+                    return True  # used-range bloat on this sheet — move on to the next sheet
+                continue
+            consecutive_blank_rows = 0
+            all_text.append(" | ".join(cells))
+        return True
 
-    # Fallback: use openpyxl for xlsx, xlrd for xls
     try:
-        all_text = []
         if ext == ".xlsx":
             try:
                 from openpyxl import load_workbook
             except ImportError as e:
                 logger.error(f"[EXCEL] openpyxl not installed: {e}")
                 return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
-            wb = load_workbook(excel_path, data_only=True)
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                all_text.append(f"--- Sheet: {sheet_name} ---")
-                for row in ws.iter_rows(values_only=True):
-                    cells = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
-                    if cells:
-                        all_text.append(" | ".join(cells))
+            workbook = load_workbook(excel_path, read_only=True, data_only=True)
+            try:
+                for ws in workbook.worksheets:
+                    if not _append_sheet(ws.title, ws.iter_rows(values_only=True, max_col=MAX_IMPORT_COLUMNS)):
+                        break
+            finally:
+                workbook.close()
         elif ext == ".xls":
             try:
                 import xlrd
             except ImportError as e:
                 logger.error(f"[EXCEL] xlrd not installed: {e}")
                 return DocumentExtractionResult(text="", confidence="low", file_type=ext.strip('.'))
-            wb = xlrd.open_workbook(excel_path)
-            for sheet in wb.sheets():
-                all_text.append(f"--- Sheet: {sheet.name} ---")
-                for r in range(sheet.nrows):
-                    row = [str(sheet.cell_value(r, c)).strip() for c in range(sheet.ncols)]
-                    row = [cell for cell in row if cell]
-                    if row:
-                        all_text.append(" | ".join(row))
+            book = xlrd.open_workbook(excel_path)
+            for sheet in book.sheets():
+                sheet_rows = (
+                    [sheet.cell_value(r, c) for c in range(min(sheet.ncols, MAX_IMPORT_COLUMNS))]
+                    for r in range(sheet.nrows)
+                )
+                if not _append_sheet(sheet.name, sheet_rows):
+                    break
         text = "\n".join([line for line in all_text if line.strip()])
         return DocumentExtractionResult(text=text, confidence="medium", file_type=ext.strip('.'))
     except Exception as e:
