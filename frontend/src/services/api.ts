@@ -97,6 +97,12 @@ function pruneEtagCache(): void {
 // Cache TTL in milliseconds (5 minutes)
 const CACHE_TTL = 5 * 60 * 1000;
 
+// Import Center uploads: dry-run validation is a bounded server-side parse, so 120s is
+// generous. Commits write per-row (with audit logging, and bcrypt for user imports), so a
+// legitimate max-size commit can run past 120s — aborting the client while the server keeps
+// importing would misreport an in-flight import as a failure. Allow commits up to 10 minutes.
+const importTimeout = (dryRun: boolean): number => (dryRun ? 120_000 : 600_000);
+
 class ApiService {
   private api: AxiosInstance;
   private token: string | null = null;
@@ -432,7 +438,8 @@ class ApiService {
     formData.append('file', file);
     const response = await this.api.post('/work-centers/import-csv', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      params: { dry_run: dryRun }
+      params: { dry_run: dryRun },
+      timeout: importTimeout(dryRun)
     });
     return response.data;
   }
@@ -496,7 +503,8 @@ class ApiService {
     formData.append('file', file);
     const response = await this.api.post('/parts/import-csv', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      params: { dry_run: dryRun }
+      params: { dry_run: dryRun },
+      timeout: importTimeout(dryRun)
     });
     return response.data;
   }
@@ -561,7 +569,8 @@ class ApiService {
     formData.append('file', file);
     const response = await this.api.post('/materials/import-csv', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      params: { dry_run: dryRun }
+      params: { dry_run: dryRun },
+      timeout: importTimeout(dryRun)
     });
     return response.data;
   }
@@ -1396,7 +1405,8 @@ class ApiService {
     formData.append('file', file);
     const response = await this.api.post('/purchasing/vendors/import-csv', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      params: { dry_run: dryRun }
+      params: { dry_run: dryRun },
+      timeout: importTimeout(dryRun)
     });
     return response.data;
   }
@@ -1847,7 +1857,8 @@ class ApiService {
 
     const response = await this.api.post('/users/import-csv', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      params: { dry_run: dryRun }
+      params: { dry_run: dryRun },
+      timeout: importTimeout(dryRun)
     });
     return response.data;
   }
@@ -1898,7 +1909,8 @@ class ApiService {
     formData.append('file', file);
     const response = await this.api.post('/customers/import-csv', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      params: { dry_run: dryRun }
+      params: { dry_run: dryRun },
+      timeout: importTimeout(dryRun)
     });
     return response.data;
   }
@@ -3405,7 +3417,7 @@ class ApiService {
   }
 
   async downloadImportTemplate(entity: string): Promise<{ blob: Blob; filename: string }> {
-    const response = await this.api.get(`/import/templates/${entity}`, { responseType: 'blob' });
+    const response = await this.api.get(`/import/templates/${entity}`, { responseType: 'blob', timeout: 30000 });
     const disposition: string | undefined = response.headers?.['content-disposition'];
     const match = disposition?.match(/filename="?([^";]+)"?/i);
     return { blob: response.data, filename: match?.[1] || `${entity}_template.xlsx` };
@@ -3416,7 +3428,8 @@ class ApiService {
     formData.append('file', file);
     const response = await this.api.post<WorkOrderImportResponse>('/work-orders/import', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      params: { dry_run: dryRun }
+      params: { dry_run: dryRun },
+      timeout: importTimeout(dryRun)
     });
     return response.data;
   }
@@ -3426,7 +3439,8 @@ class ApiService {
     formData.append('file', file);
     const response = await this.api.post<PurchaseOrderImportResponse>('/purchasing/purchase-orders/import', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      params: { dry_run: dryRun }
+      params: { dry_run: dryRun },
+      timeout: importTimeout(dryRun)
     });
     return response.data;
   }

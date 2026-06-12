@@ -16,6 +16,7 @@ import {
   IdentificationIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { importTimeoutMessage } from '../utils/apiError';
 
 interface UserData {
   id: number;
@@ -305,7 +306,9 @@ export default function Users() {
         await loadUsers();
       }
     } catch (err: any) {
-      alert(getApiErrorMessage(err, 'Failed to import CSV'));
+      // This modal commits directly (no dry run), so an Axios timeout means the server
+      // may still be importing — translate it before falling back to the generic handler.
+      alert(importTimeoutMessage(err, 'commit') ?? getApiErrorMessage(err, 'Failed to import CSV'));
     } finally {
       setImporting(false);
     }

@@ -15,6 +15,7 @@ import {
   PurchaseOrderImportRowResult,
   WorkOrderImportRowResult,
 } from '../types/importKit';
+import { importTimeoutMessage, ImportPhase } from '../utils/apiError';
 
 interface ImportTypeConfig {
   label: string;
@@ -147,7 +148,12 @@ function normalizeErrors(errors: ImportRowError[] | undefined): NormalizedResult
   }));
 }
 
-function extractApiError(err: any): string {
+function extractApiError(err: any, phase?: ImportPhase): string {
+  // Axios timeouts carry a raw "timeout of Nms exceeded" message — translate that into
+  // phase-aware guidance via the shared helper (validate: slim the file; commit: the
+  // server may still be importing).
+  const timeoutMessage = importTimeoutMessage(err, phase);
+  if (timeoutMessage) return timeoutMessage;
   const detail = err?.response?.data?.detail;
   if (typeof detail === 'string') return detail;
   return err?.message || 'Import request failed';
@@ -302,7 +308,7 @@ export default function ImportCenter() {
       setPreview(await runImport(selectedFile, true));
     } catch (err: any) {
       setPreview(null);
-      setErrorMessage(extractApiError(err));
+      setErrorMessage(extractApiError(err, 'validate'));
     } finally {
       setBusy(null);
     }
@@ -320,7 +326,7 @@ export default function ImportCenter() {
       setFileInputKey((key) => key + 1);
       setDefaultPassword('');
     } catch (err: any) {
-      setErrorMessage(extractApiError(err));
+      setErrorMessage(extractApiError(err, 'commit'));
     } finally {
       setBusy(null);
     }

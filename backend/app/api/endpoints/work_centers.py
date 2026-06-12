@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
@@ -153,97 +154,109 @@ async def import_work_centers_csv(
 ):
     """Import work centers from CSV or XLSX with row-level errors."""
     content = await file.read()
+    # Parse + import are CPU/DB-bound sync work; run them in the threadpool so a
+    # large upload can't stall the event loop (the request-scoped Session/audit
+    # are used sequentially from one worker thread — same as a sync endpoint).
     try:
-        table = parse_import_file(file.filename, content, required_columns={"code", "name", "work_center_type"})
+        table = await run_in_threadpool(
+            parse_import_file, file.filename, content, required_columns={"code", "name", "work_center_type"}
+        )
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    existing_codes = {
-        (value or "").strip().upper()
-        for (value,) in db.query(WorkCenter.code).filter(WorkCenter.company_id == company_id).all()
-    }
-    valid_types = set(get_work_center_types(db, company_id=company_id))
-    valid_statuses = {"available", "in_use", "maintenance", "offline"}
+    def _run_import() -> WorkCenterCsvImportResponse:
+        existing_codes = {
+            (value or "").strip().upper()
+            for (value,) in db.query(WorkCenter.code).filter(WorkCenter.company_id == company_id).all()
+        }
+        valid_types = set(get_work_center_types(db, company_id=company_id))
+        valid_statuses = {"available", "in_use", "maintenance", "offline"}
 
-    audit = AuditService(db, current_user, request)
-    errors: List[WorkCenterCsvImportError] = []
-    created_ids: List[int] = []
-    total_rows = 0
-    accepted_count = 0
+        audit = AuditService(db, current_user, request)
+        errors: List[WorkCenterCsvImportError] = []
+        created_ids: List[int] = []
+        total_rows = 0
+        accepted_count = 0
 
-    for row_number, row in table.iter_rows():
-        total_rows += 1
-        code = row.get("code", "").upper()
-        work_center_type = normalize_work_center_type(row.get("work_center_type", ""))
-        current_status = row.get("current_status") or "available"
+        for row_number, row in table.iter_rows():
+            total_rows += 1
+            code = row.get("code", "").upper()
+            work_center_type = normalize_work_center_type(row.get("work_center_type", ""))
+            current_status = row.get("current_status") or "available"
 
-        try:
-            if not code:
-                raise ValueError("code is required")
-            if code in existing_codes:
-                raise ValueError("Work center code already exists")
-            if work_center_type not in valid_types:
-                raise ValueError(f"Invalid work_center_type '{work_center_type}'")
-            if current_status not in valid_statuses:
-                raise ValueError(f"Invalid current_status '{current_status}'")
+            try:
+                if not code:
+                    raise ValueError("code is required")
+                if code in existing_codes:
+                    raise ValueError("Work center code already exists")
+                if work_center_type not in valid_types:
+                    raise ValueError(f"Invalid work_center_type '{work_center_type}'")
+                if current_status not in valid_statuses:
+                    raise ValueError(f"Invalid current_status '{current_status}'")
 
-            work_center_in = WorkCenterCreate(
-                code=code,
-                name=row.get("name", ""),
-                work_center_type=work_center_type,
-                description=row.get("description") or None,
-                hourly_rate=_parse_float(row.get("hourly_rate", ""), "hourly_rate"),
-                capacity_hours_per_day=_parse_float(
-                    row.get("capacity_hours_per_day", ""), "capacity_hours_per_day", 8.0
-                ),
-                efficiency_factor=_parse_float(row.get("efficiency_factor", ""), "efficiency_factor", 1.0),
-                building=row.get("building") or None,
-                area=row.get("area") or None,
-            )
-            is_active = _parse_bool(row.get("is_active", ""), True)
-            availability_rate = _parse_float(row.get("availability_rate", ""), "availability_rate", 100.0)
-        except (ValueError, ValidationError) as exc:
-            errors.append(WorkCenterCsvImportError(row=row_number, code=code or None, reason=str(exc)))
-            continue
+                work_center_in = WorkCenterCreate(
+                    code=code,
+                    name=row.get("name", ""),
+                    work_center_type=work_center_type,
+                    description=row.get("description") or None,
+                    hourly_rate=_parse_float(row.get("hourly_rate", ""), "hourly_rate"),
+                    capacity_hours_per_day=_parse_float(
+                        row.get("capacity_hours_per_day", ""), "capacity_hours_per_day", 8.0
+                    ),
+                    efficiency_factor=_parse_float(row.get("efficiency_factor", ""), "efficiency_factor", 1.0),
+                    building=row.get("building") or None,
+                    area=row.get("area") or None,
+                )
+                is_active = _parse_bool(row.get("is_active", ""), True)
+                availability_rate = _parse_float(row.get("availability_rate", ""), "availability_rate", 100.0)
+            except (ValueError, ValidationError) as exc:
+                errors.append(WorkCenterCsvImportError(row=row_number, code=code or None, reason=str(exc)))
+                continue
 
-        if dry_run:
-            existing_codes.add(code)
+            if dry_run:
+                existing_codes.add(code)
+                accepted_count += 1
+                continue
+
+            try:
+                work_center = WorkCenter(**work_center_in.model_dump())
+                work_center.company_id = company_id
+                work_center.current_status = current_status
+                work_center.is_active = is_active
+                work_center.availability_rate = availability_rate
+                db.add(work_center)
+                db.flush()
+                audit.log_create(
+                    "work_center",
+                    work_center.id,
+                    work_center.code,
+                    new_values=work_center,
+                    extra_data={"source": "import"},
+                )
+                db.commit()
+                db.refresh(work_center)
+            except Exception as exc:
+                db.rollback()
+                errors.append(WorkCenterCsvImportError(row=row_number, code=code, reason=str(exc)))
+                continue
+
+            existing_codes.add(work_center.code.upper())
+            created_ids.append(work_center.id)
             accepted_count += 1
-            continue
 
-        try:
-            work_center = WorkCenter(**work_center_in.model_dump())
-            work_center.company_id = company_id
-            work_center.current_status = current_status
-            work_center.is_active = is_active
-            work_center.availability_rate = availability_rate
-            db.add(work_center)
-            db.flush()
-            audit.log_create(
-                "work_center", work_center.id, work_center.code, new_values=work_center, extra_data={"source": "import"}
-            )
-            db.commit()
-            db.refresh(work_center)
-        except Exception as exc:
-            db.rollback()
-            errors.append(WorkCenterCsvImportError(row=row_number, code=code, reason=str(exc)))
-            continue
+        if created_ids:
+            invalidate_work_centers_cache()
 
-        existing_codes.add(work_center.code.upper())
-        created_ids.append(work_center.id)
-        accepted_count += 1
+        return WorkCenterCsvImportResponse(
+            imported_count=accepted_count,
+            skipped_count=len(errors),
+            total_rows=total_rows,
+            created_ids=created_ids,
+            errors=errors,
+            dry_run=dry_run,
+        )
 
-    if created_ids:
-        invalidate_work_centers_cache()
-
-    return WorkCenterCsvImportResponse(
-        imported_count=accepted_count,
-        skipped_count=len(errors),
-        total_rows=total_rows,
-        created_ids=created_ids,
-        errors=errors,
-        dry_run=dry_run,
-    )
+    return await run_in_threadpool(_run_import)
 
 
 @router.get("/{work_center_id}", response_model=WorkCenterResponse)

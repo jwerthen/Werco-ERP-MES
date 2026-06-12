@@ -4,11 +4,14 @@ Covers the parsing edge cases the migration depends on: header normalization,
 duplicate-header rejection, blank-row tolerance, ``"# "`` guidance-row skipping
 (while ``#``-prefixed part numbers like ``#10-32X1/2`` stay importable),
 defensive cell coercion (Excel floats/dates/bools, numbers-as-text), size/row
-caps, and the invariant that every server-generated template round-trips
-through the parser.
+caps, the bounded-scan limits (column cap, blank-run cutoff with its loud
+look-ahead — data past the gap refuses the file rather than silently
+truncating — and the scanned-row backstop), and the invariant that every
+server-generated template round-trips through the parser.
 """
 
 import io
+import time
 from datetime import date, datetime
 
 import pytest
@@ -16,6 +19,8 @@ from openpyxl import Workbook, load_workbook
 
 from app.services.import_service import (
     IMPORT_TEMPLATES,
+    MAX_CONSECUTIVE_BLANK_ROWS,
+    MAX_IMPORT_COLUMNS,
     ImportFileError,
     build_import_template_workbook,
     coerce_cell,
@@ -238,6 +243,118 @@ class TestParseImportFileGuards:
     def test_header_only_blank_file(self):
         with pytest.raises(ImportFileError, match="header"):
             parse_import_file("upload.csv", b"\n\n\n")
+
+
+@pytest.mark.unit
+class TestBoundedScan:
+    """The parser must never iterate a workbook's full *declared* grid: one stray
+    formatted/whitespace cell at XFD1048576 used to make a 5 KB upload scan
+    16,384 x 1,048,576 cells (~5 minutes of CPU on the event loop in prod).
+
+    The bounds must also never *silently* drop data: the blank-run cutoff is
+    followed by a bounded look-ahead that refuses the file loudly when real
+    data exists past the gap."""
+
+    def test_bloated_used_range_parses_fast_and_succeeds(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["part_number", "name"])
+        sheet.append(["P-1", "One"])
+        sheet.append(["P-2", "Two"])
+        # The production failure mode: a single stray whitespace cell in the very
+        # last cell of the grid bloats the declared used range to the maximum.
+        sheet.cell(row=1_048_576, column=16_384, value=" ")
+        out = io.BytesIO()
+        workbook.save(out)
+
+        started = time.monotonic()
+        table = parse_import_file("upload.xlsx", out.getvalue(), required_columns={"part_number", "name"})
+        elapsed = time.monotonic() - started
+
+        assert [row["part_number"] for _, row in table.iter_rows()] == ["P-1", "P-2"]
+        # Generous wall-clock bound: a regression to full-grid scanning takes
+        # minutes; the bounded scan takes milliseconds.
+        assert elapsed < 10, f"bloated-dimension parse took {elapsed:.1f}s — grid scan regression"
+
+    def test_sheet_wider_than_column_cap_still_parses(self):
+        extra_headers = [f"extra_{i}" for i in range(MAX_IMPORT_COLUMNS)]
+        content = _xlsx_bytes(
+            [
+                ["part_number", "name"] + extra_headers,
+                ["P-1", "One"] + ["x"] * MAX_IMPORT_COLUMNS,
+            ]
+        )
+        table = parse_import_file("upload.xlsx", content, required_columns={"part_number", "name"})
+        _, row = next(table.iter_rows())
+        assert row["part_number"] == "P-1"
+        assert row["name"] == "One"
+        # Columns beyond the cap are ignored, not an error.
+        assert len(table.headers) == MAX_IMPORT_COLUMNS
+        assert f"extra_{MAX_IMPORT_COLUMNS - 3}" in table.headers  # last column inside the cap
+        assert f"extra_{MAX_IMPORT_COLUMNS - 2}" not in table.headers  # first column past the cap
+
+    def test_csv_columns_sliced_to_cap(self):
+        header = ",".join(["part_number"] + [f"c{i}" for i in range(MAX_IMPORT_COLUMNS + 10)])
+        data = ",".join(["P-1"] + ["x"] * (MAX_IMPORT_COLUMNS + 10))
+        table = parse_import_file("upload.csv", f"{header}\n{data}\n".encode())
+        assert len(table.headers) == MAX_IMPORT_COLUMNS
+        _, row = next(table.iter_rows())
+        assert row["part_number"] == "P-1"
+
+    def test_data_after_blank_run_cutoff_refuses_file_loudly(self):
+        """A run of blank rows longer than the cutoff is treated as end of data —
+        but if real data sits past the gap (user cleared a block mid-sheet and
+        kept rows below), the parser must refuse the whole file, not silently
+        truncate it: silent truncation is data loss in a migration tool."""
+        content = b"part_number\nP-1\n" + b"\n" * (MAX_CONSECUTIVE_BLANK_ROWS + 1) + b"P-AFTER-GAP\n"
+        with pytest.raises(ImportFileError) as excinfo:
+            parse_import_file("upload.csv", content)
+        message = str(excinfo.value)
+        assert "gap of more than" in message
+        assert f"{MAX_CONSECUTIVE_BLANK_ROWS:,} blank rows" in message
+        # Header=1, P-1=2, blanks 3..1003 (cutoff), so the post-gap data is row 1004.
+        assert "row 1004" in message
+
+    def test_data_beyond_lookahead_window_is_end_of_data(self):
+        """Past the bounded look-ahead the gap really is end of data (innocent
+        used-range bloat must stay a fast, clean parse). The window is shrunk
+        via the kwarg so the fixture stays small, mirroring max_scanned_rows."""
+        gap = MAX_CONSECUTIVE_BLANK_ROWS + 1 + 20  # cutoff fires, then 20 more blanks
+        content = b"part_number\nP-1\n" + b"\n" * gap + b"P-FAR-AWAY\n"
+        table = parse_import_file("upload.csv", content, blank_run_lookahead_rows=10)
+        assert [row["part_number"] for _, row in table.iter_rows()] == ["P-1"]
+
+    def test_lookahead_does_not_trip_scanned_row_backstop(self):
+        """The post-gap look-ahead runs outside the max_scanned_rows budget: a
+        file that is nothing but trailing blanks after the cutoff must stay a
+        clean end-of-data, not become the 'used range is enormous' error just
+        because the look-ahead crosses that count."""
+        content = b"part_number\nP-1\n" + b"\n" * 2000  # cutoff at row 1003 < 1500; look-ahead crosses 1500
+        table = parse_import_file("upload.csv", content, max_scanned_rows=1500)
+        assert [row["part_number"] for _, row in table.iter_rows()] == ["P-1"]
+
+    def test_header_not_found_after_cutoff_mentions_cutoff(self):
+        """When the blank-run cutoff fired before any header was seen, the plain
+        'must include a header row' message would be misleading — say why."""
+        content = b"\n" * (MAX_CONSECUTIVE_BLANK_ROWS + 5)
+        with pytest.raises(ImportFileError) as excinfo:
+            parse_import_file("upload.csv", content)
+        message = str(excinfo.value)
+        assert "header row" in message
+        assert f"{MAX_CONSECUTIVE_BLANK_ROWS:,} consecutive blank rows" in message
+
+    def test_blank_runs_at_the_cutoff_still_tolerated(self):
+        content = b"part_number\n" + b"\n" * MAX_CONSECUTIVE_BLANK_ROWS + b"P-1\n"
+        table = parse_import_file("upload.csv", content)
+        assert [row["part_number"] for _, row in table.iter_rows()] == ["P-1"]
+
+    def test_scanned_row_backstop_raises_actionable_error(self):
+        # Alternating data/blank rows defeat the consecutive-blank cutoff; the
+        # hard scanned-row cap still bounds the scan (kwarg mirrors max_rows so
+        # the test doesn't need 100k real rows).
+        content = b"part_number\n" + b"P-1\n\n" * 10
+        with pytest.raises(ImportFileError, match="used range is enormous"):
+            parse_import_file("upload.csv", content, max_scanned_rows=10)
 
 
 @pytest.mark.unit

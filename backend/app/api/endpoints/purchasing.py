@@ -2,6 +2,7 @@ from datetime import date, datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -132,103 +133,109 @@ async def import_vendors_csv(
 ):
     """Import vendor master records from CSV or XLSX with row-level errors."""
     content = await file.read()
+    # Parse + import are CPU/DB-bound sync work; run them in the threadpool so a
+    # large upload can't stall the event loop (the request-scoped Session/audit
+    # are used sequentially from one worker thread — same as a sync endpoint).
     try:
-        table = parse_import_file(file.filename, content, required_columns={"name"})
+        table = await run_in_threadpool(parse_import_file, file.filename, content, required_columns={"name"})
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    existing_codes = {
-        (value or "").strip().upper()
-        for (value,) in db.query(Vendor.code).filter(Vendor.company_id == company_id).all()
-    }
+    def _run_import() -> VendorCsvImportResponse:
+        existing_codes = {
+            (value or "").strip().upper()
+            for (value,) in db.query(Vendor.code).filter(Vendor.company_id == company_id).all()
+        }
 
-    audit = AuditService(db, current_user, request)
-    errors: List[VendorCsvImportError] = []
-    created_ids: List[int] = []
-    total_rows = 0
-    accepted_count = 0
+        audit = AuditService(db, current_user, request)
+        errors: List[VendorCsvImportError] = []
+        created_ids: List[int] = []
+        total_rows = 0
+        accepted_count = 0
 
-    for row_number, row in table.iter_rows():
-        total_rows += 1
-        name = row.get("name", "")
-        code = (row.get("code") or "").upper()
-        code_was_provided = bool(code)
+        for row_number, row in table.iter_rows():
+            total_rows += 1
+            name = row.get("name", "")
+            code = (row.get("code") or "").upper()
+            code_was_provided = bool(code)
 
-        try:
-            if not name:
-                raise ValueError("name is required")
-            if not code:
-                code = _generate_vendor_code(db, name, company_id)
-            if code in existing_codes:
-                raise ValueError("Vendor code already exists")
+            try:
+                if not name:
+                    raise ValueError("name is required")
+                if not code:
+                    code = _generate_vendor_code(db, name, company_id)
+                if code in existing_codes:
+                    raise ValueError("Vendor code already exists")
 
-            vendor_in = VendorCreate(
-                code=code,
-                name=name,
-                contact_name=row.get("contact_name") or None,
-                email=row.get("email") or None,
-                phone=row.get("phone") or None,
-                address_line1=row.get("address_line1") or None,
-                address_line2=row.get("address_line2") or None,
-                city=row.get("city") or None,
-                state=(row.get("state") or "").upper() or None,
-                postal_code=row.get("postal_code") or row.get("zip_code") or None,
-                country=row.get("country") or "US",
-                payment_terms=row.get("payment_terms") or None,
-                lead_time_days=_parse_int(row.get("lead_time_days", ""), "lead_time_days", 14),
-                is_approved=_parse_bool(row.get("is_approved", ""), False),
-                is_as9100_certified=_parse_bool(row.get("is_as9100_certified", ""), False),
-                is_iso9001_certified=_parse_bool(row.get("is_iso9001_certified", ""), False),
-                notes=row.get("notes") or None,
-            )
-            is_active = _parse_bool(row.get("is_active", ""), True)
-        except (ValueError, ValidationError) as exc:
-            errors.append(
-                VendorCsvImportError(
-                    row=row_number,
-                    code=code or None,
-                    name=name or None,
-                    reason=str(exc),
+                vendor_in = VendorCreate(
+                    code=code,
+                    name=name,
+                    contact_name=row.get("contact_name") or None,
+                    email=row.get("email") or None,
+                    phone=row.get("phone") or None,
+                    address_line1=row.get("address_line1") or None,
+                    address_line2=row.get("address_line2") or None,
+                    city=row.get("city") or None,
+                    state=(row.get("state") or "").upper() or None,
+                    postal_code=row.get("postal_code") or row.get("zip_code") or None,
+                    country=row.get("country") or "US",
+                    payment_terms=row.get("payment_terms") or None,
+                    lead_time_days=_parse_int(row.get("lead_time_days", ""), "lead_time_days", 14),
+                    is_approved=_parse_bool(row.get("is_approved", ""), False),
+                    is_as9100_certified=_parse_bool(row.get("is_as9100_certified", ""), False),
+                    is_iso9001_certified=_parse_bool(row.get("is_iso9001_certified", ""), False),
+                    notes=row.get("notes") or None,
                 )
-            )
-            continue
+                is_active = _parse_bool(row.get("is_active", ""), True)
+            except (ValueError, ValidationError) as exc:
+                errors.append(
+                    VendorCsvImportError(
+                        row=row_number,
+                        code=code or None,
+                        name=name or None,
+                        reason=str(exc),
+                    )
+                )
+                continue
 
-        if dry_run:
-            # Generated codes are only reserved at commit; don't let a
-            # would-be-generated code trip the in-file duplicate check.
-            if code_was_provided:
-                existing_codes.add(code.upper())
+            if dry_run:
+                # Generated codes are only reserved at commit; don't let a
+                # would-be-generated code trip the in-file duplicate check.
+                if code_was_provided:
+                    existing_codes.add(code.upper())
+                accepted_count += 1
+                continue
+
+            try:
+                vendor = Vendor(**vendor_in.model_dump())
+                vendor.company_id = company_id
+                vendor.is_active = is_active
+                if vendor.is_approved:
+                    vendor.approval_date = date.today()
+                db.add(vendor)
+                db.flush()
+                audit.log_create("vendor", vendor.id, vendor.code, new_values=vendor, extra_data={"source": "import"})
+                db.commit()
+                db.refresh(vendor)
+            except Exception as exc:
+                db.rollback()
+                errors.append(VendorCsvImportError(row=row_number, code=code, name=name, reason=str(exc)))
+                continue
+
+            existing_codes.add(vendor.code.upper())
+            created_ids.append(vendor.id)
             accepted_count += 1
-            continue
 
-        try:
-            vendor = Vendor(**vendor_in.model_dump())
-            vendor.company_id = company_id
-            vendor.is_active = is_active
-            if vendor.is_approved:
-                vendor.approval_date = date.today()
-            db.add(vendor)
-            db.flush()
-            audit.log_create("vendor", vendor.id, vendor.code, new_values=vendor, extra_data={"source": "import"})
-            db.commit()
-            db.refresh(vendor)
-        except Exception as exc:
-            db.rollback()
-            errors.append(VendorCsvImportError(row=row_number, code=code, name=name, reason=str(exc)))
-            continue
+        return VendorCsvImportResponse(
+            imported_count=accepted_count,
+            skipped_count=len(errors),
+            total_rows=total_rows,
+            created_ids=created_ids,
+            errors=errors,
+            dry_run=dry_run,
+        )
 
-        existing_codes.add(vendor.code.upper())
-        created_ids.append(vendor.id)
-        accepted_count += 1
-
-    return VendorCsvImportResponse(
-        imported_count=accepted_count,
-        skipped_count=len(errors),
-        total_rows=total_rows,
-        created_ids=created_ids,
-        errors=errors,
-        dry_run=dry_run,
-    )
+    return await run_in_threadpool(_run_import)
 
 
 @router.get("/vendors/{vendor_id}", response_model=VendorResponse)
@@ -444,14 +451,21 @@ async def import_open_purchase_orders_endpoint(
     without writing.
     """
     content = await file.read()
+    # Parse + import are CPU/DB-bound sync work; run them in the threadpool so a
+    # large upload can't stall the event loop (the request-scoped Session/audit
+    # are used sequentially from one worker thread — same as a sync endpoint).
     try:
-        table = parse_import_file(
-            file.filename, content, required_columns={"vendor_code", "part_number", "quantity", "unit_price"}
+        table = await run_in_threadpool(
+            parse_import_file,
+            file.filename,
+            content,
+            required_columns={"vendor_code", "part_number", "quantity", "unit_price"},
         )
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return import_open_purchase_orders(
+    return await run_in_threadpool(
+        import_open_purchase_orders,
         db,
         table=table,
         current_user=current_user,
