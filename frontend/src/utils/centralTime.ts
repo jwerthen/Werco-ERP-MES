@@ -139,6 +139,34 @@ export const formatCentralTime = (
     }
   );
 
+/**
+ * Minutes elapsed since midnight in Central time (0–1439), e.g. 5:30 AM → 330.
+ * Returns NaN for an unparseable value. Used for time-of-day comparisons such
+ * as shift detection that must key off the shop's local (Central) wall clock
+ * regardless of the viewer's browser timezone.
+ */
+export const getCentralMinutesOfDay = (value: DateInput = new Date()): number => {
+  const date = toDate(value);
+  if (!date) {
+    return Number.NaN;
+  }
+
+  const parts = getFormatter({
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  // en-US with hour12:false can emit '24' for midnight — normalize to 0.
+  const hour = parseInt(lookup.hour, 10) % 24;
+  const minute = parseInt(lookup.minute, 10);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) {
+    return Number.NaN;
+  }
+  return hour * 60 + minute;
+};
+
 export const getCentralDateStamp = (value: DateInput = new Date()) => getNormalizedDateStamp(value);
 
 export const getCentralTodayISODate = () => getCentralDateStamp(new Date());

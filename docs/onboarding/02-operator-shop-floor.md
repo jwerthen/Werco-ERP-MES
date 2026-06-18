@@ -15,6 +15,8 @@ When you sign in, the system takes you straight to the **Shop Floor Operations**
 ![Shop floor kiosk showing the Most Important Next focus list and work cards](images/shopfloor-kiosk-queue.png)
 *The kiosk opens to your station's work, ranked so the most important job is on top.*
 
+> Heads up: The **SHIFT** marker in the top bar shows which shift is running right now, based on the shop clock (Central time): **A** for the day shift (5:30 AM – 4:00 PM) and **B** for the night shift (3:30 PM – 2:00 AM). During the 3:30–4:00 PM overlap it reads **A** until 4:00 PM, then flips to **B**. Between 2:00 AM and 5:30 AM, when no shift is scheduled, it shows a dash (**—**). The marker is informational only — it doesn't change what work you see or what you can do.
+
 ### Start-of-shift checklist
 
 Run through this every time you start, before you touch a part:
