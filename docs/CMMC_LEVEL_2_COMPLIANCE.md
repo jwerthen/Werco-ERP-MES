@@ -423,6 +423,35 @@
   any detail via the authenticated API. A richer outbound payload is an explicit
   data-classification decision, not the default. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`
   (Batch 5 / rank 8).
+- [x] Carrier-shipping outbound egress is a **per-company, default-off kill switch** (SC-3.13.1
+  boundary / CUI-egress control). `allow_carrier_egress` on `CompanyShippingProfile`
+  (`company_shipping_profiles`) is `nullable=False, default=False, server_default="false"` — it
+  requires an **explicit human opt-in** before any customer ship-to/ship-from address or
+  package/parcel data leaves the boundary for EasyPost. `ShippingService._require_egress`
+  (`app/services/shipping_service.py`) gates every outbound carrier call — address validation,
+  rate-shop, buy-label, freight BOL, pickup scheduling, void/refund — and the tracking-poll job
+  (`app/jobs/shipping_jobs.py`) re-checks the flag before any provider call; with it OFF, **no
+  customer-data-bearing carrier call is made** — a credential-only connection test (an EasyPost
+  `GET /users` carrying no customer data) is the sole deliberate exemption. The egress state is
+  captured on the tamper-evident `audit_log` at profile creation (via `log_create`); every later
+  toggle is recorded as an `egress_enabled` / `egress_disabled` status change. See
+  `docs/SHIPPING_CARRIER_INTEGRATION.md`.
+- [x] Thermal-label print egress is a **per-company, default-off kill switch** (SC-3.13.1 boundary /
+  CUI-egress control). `allow_print_egress` on `CompanyPrintProfile` (`company_print_profiles`) is
+  `nullable=False, default=False, server_default="false"` — it requires an **explicit human opt-in**
+  before a rendered label is transmitted to the pbxz.io ProxyBox cloud relay. The payload that
+  crosses the boundary is the receiving-label field set — part number + revision, description,
+  quantity/UoM, lot/heat/serial, PO number, vendor, receipt number, received date, destination
+  location, and the critical-characteristic marker (full inventory in
+  `docs/THERMAL_LABEL_PRINTING.md`). Egress is **necessary-but-not-sufficient**:
+  `PrintService._require_egress` (`app/services/print_service.py`) raises `PrintEgressDisabledError`
+  before any `ProxyBoxClient` call unless the profile is active, fully configured (base URL, target,
+  API key), **and** the flag is on; the auto-print ARQ job (`app/jobs/label_jobs.py`) gates on a
+  **second, independent** toggle (`auto_print_on_receipt`) on top of egress and returns early — no
+  outbound call — when either is off. With egress OFF, **no print call is made**. The egress state is
+  captured on the tamper-evident `audit_log` at profile creation (via `log_create`); every later
+  toggle is recorded as an `egress_enabled` / `egress_disabled` status change. See
+  `docs/THERMAL_LABEL_PRINTING.md`.
 
 **GAPS:**
 - [ ] **SC-3.13.8 - Data at Rest Encryption** 🔴 CRITICAL
@@ -628,6 +657,8 @@ Backend:
 | 2026-06-09 | AC-3.1.3 / AC-3.1.5 / AU-3.3.1 (operator-certifications write hardening, branch `fix/operator-cert-write-rbac-audit`): the seven `operator_certifications.py` write endpoints — previously open to any authenticated user, unaudited, and accepting a cross-tenant FK on create — are now least-privilege role-gated (cert/training writes → ADMIN/MANAGER/QUALITY; skill-matrix writes → ADMIN/MANAGER/SUPERVISOR; other roles → 403), write a tamper-evident `audit_log` row per create/update/delete (`operator_certification` / `training_record` / `skill_matrix`), and reject a `user_id`/`work_center_id` outside the active company with 422 before insert. Role sets are new defaults (the RBAC matrix had no rows for these record types); reads unchanged (any authenticated user, tenant-scoped). No migration, no new env var; strengthens the existing posture, no compliance claim changed. See `docs/RBAC_PERMISSIONS.md` / `docs/API.md` / `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
 | 2026-06-09 | AU-3.3.1 / AU-3.3.8 / AC-3.1.3 (work-order completion round-2 follow-ups): closed five tracked items. **Audit integrity (AU-3.3.8):** the residual follow-up **A1** is resolved — `audit_log.sequence_number` allocation in `AuditService.log()` is now serialized (transaction-level Postgres advisory lock + savepoint/retry), so concurrent audited writes no longer collide on the unique sequence (occasional 500) or poison the caller's transaction; the tamper-evident hash-chain semantics are unchanged. **Audit coverage (AU-3.3.1):** OEE record/target create/update/delete + auto-calc now write tamper-evident `audit_log` rows (were RBAC-gated but unaudited). **Authorization:** `POST /shipping/{shipment_id}/ship` (`mark_shipped`, closes the WO) is now `require_role`-gated to ADMIN/MANAGER/SUPERVISOR/SHIPPING — previously any authenticated user (non-privileged → 403). **Tenant isolation (AC-3.1.3):** the remaining cross-tenant read/write leak in `operator_certifications.py` is closed (cert dashboard aggregates + by-id cert/training/skill reads/updates now company-scoped, 404 cross-tenant); the `SkillMatrix` unique constraint is now tenant-qualified (`company_id, user_id, work_center_id`; migration `045_skillmatrix_company_unique`). All strengthen the existing posture; no compliance claim changed. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` | Droid |
 | 2026-06-10 | AC-3.1.2 / IA / AU-3.3.1 (TV wallboard, A0.5, branch `feat/tv-wallboard`): added scoped display tokens for unattended shop TVs — `type="display"` JWTs that authenticate **only** the new zero-write `GET /shop-floor/wallboard` (401 everywhere else via `verify_token`'s type check, so they can never act as a user session); issuance/revocation ADMIN/MANAGER-gated, tenant-scoped, and tamper-evidently audit-logged; the `display_tokens` DB row is the revocation/expiry/tenant authority re-checked per request; raw JWT shown once at issuance, never stored; operator names truncated to "First L." for public screens. Additive mechanism — no existing compliance claim changed. See `docs/WALLBOARD.md` / `docs/API.md` / `docs/RBAC_PERMISSIONS.md` | Droid |
+| 2026-06-18 | SC-3.13.1 (carrier-shipping egress kill switch): catalogued the **per-company, default-off** outbound-egress control `allow_carrier_egress` on `CompanyShippingProfile` (`company_shipping_profiles`, `nullable=False, default=False, server_default="false"`) — requires explicit human opt-in before any customer address/parcel data leaves the boundary for EasyPost; `ShippingService._require_egress` gates every outbound carrier call (validate/rate/buy-label/freight-BOL/pickup/void) and the tracking-poll job re-checks it (no provider call when OFF); flag flips are tamper-evidently audit-logged as a status change. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/SHIPPING_CARRIER_INTEGRATION.md` | Claude |
+| 2026-06-18 | SC-3.13.1 (thermal-label print egress kill switch): catalogued the **per-company, default-off** outbound-egress control `allow_print_egress` on `CompanyPrintProfile` (`company_print_profiles`, `nullable=False, default=False, server_default="false"`) — requires explicit human opt-in before a rendered label (part number, lot/heat/serial, critical-characteristic marker) is transmitted to the pbxz.io ProxyBox cloud relay; both the request path (`PrintService._require_egress`) and the auto-print ARQ job (`app/jobs/label_jobs.py`) gate on it (no outbound call when OFF); flag flips are tamper-evidently audit-logged as a status change. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/THERMAL_LABEL_PRINTING.md` | Claude |
 
 ---
 
