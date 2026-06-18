@@ -24,6 +24,7 @@ class DocumentType(str, enum.Enum):
     FAI = "fai"  # First Article Inspection
     SHIPPING_LABEL = "shipping_label"  # Purchased carrier parcel label (PDF/PNG/ZPL)
     BILL_OF_LADING = "bill_of_lading"  # Purchased LTL freight Bill of Lading
+    RECEIVING_LABEL = "receiving_label"  # 4x6 thermal label for received inventory (PDF)
     OTHER = "other"
 
 

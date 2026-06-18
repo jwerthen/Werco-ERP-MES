@@ -70,6 +70,7 @@ from .operator_certification import (
     TrainingRecord,
 )
 from .part import Part, PartType, UnitOfMeasure
+from .print_profile import CompanyPrintProfile
 from .purchasing import (
     DefectType,
     InspectionMethod,
@@ -315,5 +316,6 @@ __all__ = [
     "CertificateOfConformance",
     "CarrierAccount",
     "CompanyShippingProfile",
+    "CompanyPrintProfile",
     "SupplierPartMapping",
 ]

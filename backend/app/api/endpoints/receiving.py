@@ -1,16 +1,18 @@
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import (
+    get_admin_user,
     get_audit_service,
     get_current_company_id,
     get_current_user,
     require_role,
 )
+from app.core.queue import enqueue_job_best_effort
 from app.db.database import get_db
 from app.db.locks import acquire_generator_lock
 from app.models.inventory import (
@@ -20,6 +22,7 @@ from app.models.inventory import (
     TransactionType,
 )
 from app.models.part import Part
+from app.models.print_profile import CompanyPrintProfile
 from app.models.purchasing import (
     DefectType,
     InspectionMethod,
@@ -37,6 +40,12 @@ from app.models.quality import (
     NonConformanceReport,
 )
 from app.models.user import User, UserRole
+from app.schemas.print_profile import (
+    PrintLabelRequest,
+    PrintLabelResponse,
+    PrintProfileRead,
+    PrintProfileUpdate,
+)
 from app.schemas.purchasing import (
     InspectionQueueItem,
     InspectionResultResponse,
@@ -46,6 +55,8 @@ from app.schemas.purchasing import (
 )
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.print_service import PrintEgressDisabledError, PrintService
+from app.services.proxybox_client import ProxyBoxError
 
 router = APIRouter()
 
@@ -415,6 +426,19 @@ def receive_material(
 
     db.commit()
     db.refresh(receipt)
+
+    # Best-effort auto-print of the 4x6 receiving label. The job ITSELF decides
+    # whether to print (gated on the per-company auto_print_on_receipt + egress
+    # toggles), so this enqueue is unconditional and minimal. enqueue_job_best_effort
+    # swallows any Redis/enqueue error so a printer/tunnel problem can NEVER fail or
+    # block an already-committed receipt.
+    enqueue_job_best_effort(
+        "print_receiving_label_job",
+        company_id=company_id,
+        receipt_id=receipt.id,
+        user_id=current_user.id,
+    )
+
     return receipt
 
 
@@ -1022,3 +1046,171 @@ def get_receiving_locations(
     )
 
     return [{"id": loc.id, "code": loc.code, "name": loc.name} for loc in locations]
+
+
+# ===========================================================================
+# Thermal receiving-label printing (ProxyBox / WHTP203e).
+#
+# The router stays THIN: it delegates to ``PrintService`` (the egress kill switch,
+# the ProxyBox round-trip, Document persistence, and audit all live there). The
+# manual reprint route is ``async def`` so it can await the print and return a real
+# success/failure. The per-company profile routes are admin-only so the printer can
+# actually be configured (there is otherwise no way to enter the API key).
+# ===========================================================================
+
+
+def _print_profile_to_read(profile: CompanyPrintProfile) -> PrintProfileRead:
+    """Safe read shape -- the plaintext key is never exposed (last4 only)."""
+    return PrintProfileRead(
+        id=profile.id,
+        proxybox_base_url=profile.proxybox_base_url,
+        proxybox_target=profile.proxybox_target,
+        api_key_last4=profile.api_key_last4,
+        has_api_key=bool(profile.encrypted_api_key),
+        default_paper_size=profile.default_paper_size,
+        default_copies=profile.default_copies,
+        auto_print_on_receipt=bool(profile.auto_print_on_receipt),
+        allow_print_egress=bool(profile.allow_print_egress),
+        is_active=bool(profile.is_active),
+        created_at=profile.created_at,
+    )
+
+
+@router.post("/receipt/{receipt_id}/print-label", response_model=PrintLabelResponse)
+async def print_receiving_label(
+    receipt_id: int,
+    payload: Optional[PrintLabelRequest] = None,
+    db: Session = Depends(get_db),
+    # Same role gate as receive_material (ADMIN / MANAGER / SUPERVISOR).
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Manually (re)print the 4x6 receiving label for a receipt.
+
+    Egress-gated (409 when ``allow_print_egress`` is OFF), tenant-scoped (404 for a
+    missing/cross-tenant receipt), and audited. A ProxyBox/printer failure maps to
+    502 -- the rendered label Document is still persisted, so a later reprint works.
+    """
+    copies = payload.copies if payload else None
+    service = PrintService(db, audit)
+    try:
+        document, printed = await service.print_receipt_label(company_id, receipt_id, current_user.id, copies=copies)
+    except PrintEgressDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except LookupError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found")
+    except ProxyBoxError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    # Resolve the receipt number for the response (tenant-scoped, lightweight).
+    receipt = db.query(POReceipt).filter(POReceipt.id == receipt_id, POReceipt.company_id == company_id).first()
+    return PrintLabelResponse(
+        receipt_id=receipt_id,
+        receipt_number=receipt.receipt_number if receipt else None,
+        label_document_id=document.id,
+        printed=printed,
+        message="Label sent to printer" if printed else "Label generated",
+    )
+
+
+@router.get("/print-profile", response_model=PrintProfileRead)
+def get_print_profile(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Return the company print profile (admin-only; 404 until one is created)."""
+    profile = db.query(CompanyPrintProfile).filter(CompanyPrintProfile.company_id == company_id).first()
+    if not profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Print profile not configured")
+    return _print_profile_to_read(profile)
+
+
+@router.put("/print-profile", response_model=PrintProfileRead)
+def upsert_print_profile(
+    data: PrintProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Create or update the company print profile (admin-only).
+
+    SAFETY: ``allow_print_egress`` is the outbound-egress kill switch. It is created
+    OFF (model + this upsert default) and only flips when an admin sets it here; the
+    toggle is audited as a status change so enabling/disabling print egress is on the
+    tamper-evident trail. ``api_key`` is write-only: encrypted at rest, never returned.
+    """
+    profile = db.query(CompanyPrintProfile).filter(CompanyPrintProfile.company_id == company_id).first()
+    update = data.model_dump(exclude_unset=True)
+    is_create = profile is None
+    previous_egress: Optional[bool] = None
+    api_key_rotated = False
+
+    if profile is None:
+        profile = CompanyPrintProfile(allow_print_egress=False)
+        profile.company_id = company_id
+        profile.created_by = current_user.id
+        db.add(profile)
+    else:
+        previous_egress = profile.allow_print_egress
+
+    # api_key is write-only -- rotate via the model helper, never store/return raw.
+    if "api_key" in update:
+        api_key_value = update.pop("api_key")
+        if api_key_value:
+            profile.set_api_key(api_key_value)
+            api_key_rotated = True
+
+    for field, value in update.items():
+        # Don't null out the kill switch / toggles when omitted (exclude_unset
+        # already drops omitted fields; this guards an explicit null).
+        if value is None and field in ("allow_print_egress", "auto_print_on_receipt", "is_active"):
+            continue
+        setattr(profile, field, value)
+
+    db.flush()
+
+    if is_create:
+        audit.log_create(
+            resource_type="company_print_profile",
+            resource_id=profile.id,
+            resource_identifier=f"company:{company_id}",
+            new_values={
+                "allow_print_egress": profile.allow_print_egress,
+                "auto_print_on_receipt": profile.auto_print_on_receipt,
+                "proxybox_target": profile.proxybox_target,
+            },
+            description="Company print profile created",
+            extra_data={"api_key_rotated": api_key_rotated},
+        )
+    else:
+        audit.log_update(
+            resource_type="company_print_profile",
+            resource_id=profile.id,
+            resource_identifier=f"company:{company_id}",
+            old_values={"allow_print_egress": previous_egress},
+            new_values={"allow_print_egress": profile.allow_print_egress},
+            description="Company print profile updated",
+            extra_data={"api_key_rotated": api_key_rotated},
+        )
+
+    # Flipping the print-egress kill switch is a security-relevant status change --
+    # record it explicitly on the tamper-evident trail whenever it actually changed.
+    if previous_egress is not None and previous_egress != profile.allow_print_egress:
+        audit.log_status_change(
+            "company_print_profile",
+            profile.id,
+            f"company:{company_id}",
+            "egress_enabled" if previous_egress else "egress_disabled",
+            "egress_enabled" if profile.allow_print_egress else "egress_disabled",
+            description=(
+                "Label-print egress "
+                f"{'ENABLED' if profile.allow_print_egress else 'DISABLED'} for company {company_id}"
+            ),
+        )
+
+    db.commit()
+    db.refresh(profile)
+    return _print_profile_to_read(profile)

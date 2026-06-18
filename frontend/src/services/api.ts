@@ -62,6 +62,11 @@ import {
   ShipmentTracking,
   VoidRefundResult,
 } from '../types/shipping';
+import {
+  PrintLabelResponse,
+  PrintProfile,
+  PrintProfileUpdate,
+} from '../types/print';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api/v1';
 
@@ -2347,6 +2352,31 @@ class ApiService {
 
   async getReceivingLocations() {
     const response = await this.api.get('/receiving/locations');
+    return response.data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Thermal receiving-label printing (ProxyBox / WHTP203e bridge).
+  //
+  // Egress-gated server-side (409 when allow_print_egress is OFF). The print
+  // profile routes are admin-only; the read profile 404s until first configured.
+  // The ProxyBox API key is WRITE-ONLY — the read shape exposes only
+  // api_key_last4 + has_api_key, never a full key.
+  // ---------------------------------------------------------------------------
+
+  async printReceiptLabel(receiptId: number, opts?: { copies?: number }): Promise<PrintLabelResponse> {
+    const body = opts?.copies != null ? { copies: opts.copies } : {};
+    const response = await this.api.post(`/receiving/receipt/${receiptId}/print-label`, body);
+    return response.data;
+  }
+
+  async getPrintProfile(): Promise<PrintProfile> {
+    const response = await this.api.get('/receiving/print-profile');
+    return response.data;
+  }
+
+  async updatePrintProfile(data: PrintProfileUpdate): Promise<PrintProfile> {
+    const response = await this.api.put('/receiving/print-profile', data);
     return response.data;
   }
 

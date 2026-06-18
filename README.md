@@ -28,6 +28,7 @@ Shipped modules, grouped by domain:
 ### Warehouse
 - Unified, tabbed warehouse: **inventory** (on-hand, reorder, low-stock, transfers), **receiving** with accept/reject inspection and lot capture, and **shipping** (create shipment, mark shipped, print packing slip).
 - **Multi-carrier shipping** via a swappable aggregator (EasyPost-first): address validation, rate-shopping, label purchase, pickups, and inbound tracking — behind a per-company customer-data egress kill switch (default OFF) for CUI control. Parcel is fully implemented; LTL freight is scaffolded behind the same interface (see [docs/SHIPPING_CARRIER_INTEGRATION.md](docs/SHIPPING_CARRIER_INTEGRATION.md)).
+- **Thermal receiving labels** — a 4×6 label (part / rev / qty / lot / Code128, CRITICAL banner for critical parts) printed on inventory receipt to a Westinghouse WHTP203e via a ProxyBox Zero (pbxz.io) bridge; manual reprint and auto-print-on-receipt, behind a per-company outbound-egress kill switch (default OFF) for CUI control (see [docs/THERMAL_LABEL_PRINTING.md](docs/THERMAL_LABEL_PRINTING.md)).
 - **Lot/serial traceability** and genealogy.
 
 ### Purchasing & Supply Chain
@@ -175,6 +176,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 | [docs/ONBOARDING.md](docs/ONBOARDING.md) | Developer onboarding & local setup |
 | [docs/BROWSER_HARNESS.md](docs/BROWSER_HARNESS.md) | Safe headless-Chromium CLI for screenshots/snapshots/logs/PDFs |
 | [docs/WALLBOARD.md](docs/WALLBOARD.md) | Shop-floor TV wallboard: display-token setup, kiosk-mode TVs, revocation |
+| [docs/THERMAL_LABEL_PRINTING.md](docs/THERMAL_LABEL_PRINTING.md) | 4×6 thermal receiving labels: ProxyBox/WHTP203e setup, egress kill switch, manual reprint vs. auto-print, troubleshooting |
 | [docs/SMOKE_TESTS.md](docs/SMOKE_TESTS.md) · [docs/LAUNCH_CHECKLIST.md](docs/LAUNCH_CHECKLIST.md) · [docs/PRODUCTION_CHECKLIST.md](docs/PRODUCTION_CHECKLIST.md) | Pre-launch verification |
 
 ## Compliance

@@ -204,6 +204,11 @@ class POReceipt(Base, TenantMixin):
     # Location
     location_id = Column(Integer, ForeignKey("inventory_locations.id"), nullable=True)
 
+    # Rendered 4x6 receiving label (stored as a Document for record retention).
+    # Nullable: set once a label has been generated (auto-print on receipt or a
+    # manual reprint). The migration specialist creates the actual FK column.
+    label_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
+
     # Inspection status and result
     status = Column(SQLEnum(ReceiptStatus), default=ReceiptStatus.PENDING_INSPECTION)
     inspection_status = Column(SQLEnum(InspectionStatus), default=InspectionStatus.PENDING)
@@ -234,3 +239,4 @@ class POReceipt(Base, TenantMixin):
     location = relationship("InventoryLocation")
     inspector = relationship("User", foreign_keys=[inspected_by])
     receiver = relationship("User", foreign_keys=[received_by])
+    label_document = relationship("Document", foreign_keys=[label_document_id])

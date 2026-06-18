@@ -315,7 +315,7 @@ AWS_REGION=us-east-1
 | `ANTHROPIC_NL_SEARCH_MODEL` | No | (router auto) | Per-task model override for the `/search/nl` natural-language intent parse (task `nl_search`). Unset: pinned to the Fast tier (Haiku) |
 | `SENTRY_DSN` | No | - | Sentry DSN for error tracking |
 | `WEBHOOK_ENCRYPTION_KEY` | Conditional¹ | - | Fernet key for encrypting outbound-webhook secrets at rest. Also the **fallback** for `INTEGRATION_ENCRYPTION_KEY` when that is unset. |
-| `INTEGRATION_ENCRYPTION_KEY` | Conditional¹ | (falls back to `WEBHOOK_ENCRYPTION_KEY`) | Fernet key that encrypts **carrier-integration secrets at rest** (carrier-account API keys and inbound-webhook signing secrets — see [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md)). Resolution order: `INTEGRATION_ENCRYPTION_KEY` → `WEBHOOK_ENCRYPTION_KEY` → (dev/test only) an ephemeral generated key. |
+| `INTEGRATION_ENCRYPTION_KEY` | Conditional¹ | (falls back to `WEBHOOK_ENCRYPTION_KEY`) | Fernet key that encrypts **integration secrets at rest** — carrier-account API keys and inbound-webhook signing secrets (see [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md)) **and the ProxyBox thermal-printer API key** (see [docs/THERMAL_LABEL_PRINTING.md](THERMAL_LABEL_PRINTING.md)). **Reused, not new** for thermal printing. Resolution order: `INTEGRATION_ENCRYPTION_KEY` → `WEBHOOK_ENCRYPTION_KEY` → (dev/test only) an ephemeral generated key. |
 
 > ¹ **Required to *use* carrier integration in `production`/`staging`** — not for boot. The app and Alembic migrations start fine without a key. But because carrier API keys / inbound-webhook secrets are encrypted at rest with it (CMMC SC-28), in prod/staging **creating or using a carrier account — or verifying an inbound carrier webhook — fails loudly** until at least one of `INTEGRATION_ENCRYPTION_KEY` / `WEBHOOK_ENCRYPTION_KEY` is set (a loud startup WARNING is logged while it's absent). The ephemeral-generated-key fallback exists **only** in dev/test — a generated key does not survive a restart and differs per worker/replica, which would leave stored secrets permanently undecryptable, so it is refused outright in prod/staging rather than used silently.
 
@@ -339,6 +339,26 @@ optional; the defaults are the shipped behavior.
 | `COPILOT_MAX_TOOL_ROUNDS` | No | `8` | Tool-use rounds per chat turn before the model is forced to answer from gathered data (`truncated: true` in the response) |
 | `COPILOT_MAX_OUTPUT_TOKENS` | No | `1024` | Output-token cap per model call in the tool loop |
 | `COPILOT_LLM_TIMEOUT_SECONDS` | No | `45` | Upstream Anthropic timeout per model call (seconds) |
+
+### ProxyBox Thermal-Label Printing
+
+HTTP timing knobs for the 4×6 thermal **receiving label** sent to a ProxyBox Zero
+(pbxz.io) bridge → Westinghouse WHTP203e printer (see
+[docs/THERMAL_LABEL_PRINTING.md](THERMAL_LABEL_PRINTING.md)). All optional; the
+defaults are the shipped behavior. The per-company connection details (base URL /
+target / API key / egress toggle) live on `CompanyPrintProfile`, **not** here.
+
+The ProxyBox API key is **Fernet-encrypted at rest** with the same
+`INTEGRATION_ENCRYPTION_KEY` (falling back to `WEBHOOK_ENCRYPTION_KEY`) used for
+carrier secrets — **no new encryption key is required**. In `production`/`staging`,
+storing or using a ProxyBox key fails loudly until one of those keys is set (CMMC
+SC-28), exactly as for carrier secrets.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `PROXYBOX_TIMEOUT_SECONDS` | No | `30.0` | Per-request httpx timeout for the ProxyBox bridge |
+| `PROXYBOX_POLL_INTERVAL_SECONDS` | No | `1.0` | Cadence for polling `GET /jobs/{id}` for a terminal print-job state |
+| `PROXYBOX_MAX_WAIT_SECONDS` | No | `30.0` | Max wait for a terminal job state; on timeout the print returns a non-failed `timeout` result (the job may still print) rather than erroring |
 
 ### Audit Log Retention / Archival (CMMC AU-3.3.8)
 

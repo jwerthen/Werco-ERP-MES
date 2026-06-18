@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
+import { useAuth } from '../context/AuthContext';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   TruckIcon,
@@ -12,6 +13,7 @@ import {
   InboxArrowDownIcon,
   DocumentCheckIcon,
   ClockIcon,
+  PrinterIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
 
@@ -127,6 +129,16 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  // Receipt id offered for a one-click "Print label" on the success toast right
+  // after a receipt is created.
+  const [lastReceiptId, setLastReceiptId] = useState<number | null>(null);
+  // Receipt currently being sent to the printer (disables that row's button).
+  const [printingReceiptId, setPrintingReceiptId] = useState<number | null>(null);
+
+  const { user } = useAuth();
+  // Label printing is gated to the same roles that can receive (ADMIN / MANAGER
+  // / SUPERVISOR) so the UI matches what the backend will allow.
+  const canPrintLabel = !!user && ['admin', 'manager', 'supervisor'].includes(user.role);
 
   const isPartialLine = (line: POLine) => (
     !line.is_closed && line.quantity_received > 0 && line.quantity_remaining > 0
@@ -250,11 +262,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     const selectedPOId = selectedPO?.po_id;
 
     try {
-      await api.receiveNewMaterial({
+      const receipt = await api.receiveNewMaterial({
         ...formData,
         location_id: formData.location_id || undefined,
       });
       setSuccess('Material received successfully');
+      // Offer a one-click label print/reprint on the success toast.
+      setLastReceiptId(receipt?.id ?? null);
       if (selectedPO && selectedLine && selectedLineId !== undefined) {
         setSelectedPO((prev) => (prev ? applyReceiptToPO(prev, selectedLineId, receivedQty) : prev));
       }
@@ -265,14 +279,38 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       if (selectedPOId !== undefined) {
         refreshSelectedPO(selectedPOId);
       }
-      
+
       if (formData.requires_inspection) {
         loadInspectionQueue();
       }
-      
-      setTimeout(() => setSuccess(''), 3000);
+
+      // Keep the toast (and its Print label action) up a touch longer.
+      setTimeout(() => { setSuccess(''); setLastReceiptId(null); }, 8000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to receive material');
+    }
+  };
+
+  // Manually (re)print the 4x6 thermal receiving label for a receipt. Surfaces
+  // the server message on success, and gives a friendly hint when the print
+  // egress kill switch is OFF (HTTP 409) so an admin knows where to enable it.
+  const handlePrintLabel = async (receiptId: number) => {
+    if (!receiptId) return;
+    setError('');
+    setPrintingReceiptId(receiptId);
+    try {
+      const result = await api.printReceiptLabel(receiptId);
+      setSuccess(result?.message || 'Label sent to printer');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err: any) {
+      const status = err.response?.status;
+      if (status === 409) {
+        setError("Label printing isn't enabled — an admin can configure it in print settings.");
+      } else {
+        setError(err.response?.data?.detail || 'Failed to print label');
+      }
+    } finally {
+      setPrintingReceiptId(null);
     }
   };
 
@@ -386,6 +424,16 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 flex items-center gap-3">
           <CheckCircleIcon className="h-5 w-5 text-green-600" />
           <span className="text-emerald-300">{success}</span>
+          {canPrintLabel && lastReceiptId !== null && (
+            <button
+              onClick={() => handlePrintLabel(lastReceiptId)}
+              disabled={printingReceiptId === lastReceiptId}
+              className="ml-auto inline-flex items-center gap-1.5 border border-werco-primary/60 text-werco-primary hover:bg-werco-primary/10 text-sm font-medium px-3 py-1 transition-colors disabled:opacity-50"
+            >
+              <PrinterIcon className="h-4 w-4" />
+              {printingReceiptId === lastReceiptId ? 'Printing…' : 'Print label'}
+            </button>
+          )}
         </div>
       )}
       {error && (
@@ -766,12 +814,25 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <button
-                          onClick={() => handleOpenInspection(item)}
-                          className="btn-primary text-sm px-3 py-1"
-                        >
-                          Inspect
-                        </button>
+                        <div className="flex items-center justify-end gap-2">
+                          {canPrintLabel && (
+                            <button
+                              onClick={() => handlePrintLabel(item.receipt_id)}
+                              disabled={printingReceiptId === item.receipt_id}
+                              title="Print 4×6 receiving label"
+                              className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors disabled:opacity-50"
+                            >
+                              <PrinterIcon className="h-4 w-4" />
+                              {printingReceiptId === item.receipt_id ? 'Printing…' : 'Label'}
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleOpenInspection(item)}
+                            className="btn-primary text-sm px-3 py-1"
+                          >
+                            Inspect
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

@@ -162,6 +162,19 @@ async def process_tracking_webhook_job(
     )
 
 
+async def print_receiving_label_job(ctx, *, company_id: int, receipt_id: int, user_id: int):
+    """Auto-print the 4x6 receiving label for a committed PO receipt.
+
+    Enqueued best-effort from ``receive_material`` with the tenant passed explicitly
+    as ``company_id``. The task is the SOLE decider of whether to print (gated on the
+    per-company ``auto_print_on_receipt`` + ``allow_print_egress`` toggles) and is
+    best-effort -- it never raises out of the worker.
+    """
+    from app.jobs.label_jobs import print_receiving_label_task
+
+    return await print_receiving_label_task(company_id=company_id, receipt_id=receipt_id, user_id=user_id)
+
+
 async def poll_tracking_job(ctx):
     """Cron fallback: refresh tracking for in-flight shipments, fanned out per tenant.
 
@@ -220,6 +233,7 @@ class WorkerSettings:
         aggregate_ai_learning_job,
         dispatch_work_order_completion_signals_job,
         process_tracking_webhook_job,
+        print_receiving_label_job,
     ]
 
     # Cron jobs (scheduled tasks)

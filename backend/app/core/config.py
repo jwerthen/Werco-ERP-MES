@@ -396,10 +396,17 @@ class Settings(BaseSettings):
     # Webhook Configuration
     WEBHOOK_ENCRYPTION_KEY: str = ""
 
-    # Integration secret encryption (carrier-account API keys / webhook secrets).
-    # Fernet key; falls back to WEBHOOK_ENCRYPTION_KEY when unset (see
-    # app/services/carriers/crypto.py).
+    # Integration secret encryption (carrier-account API keys / webhook secrets,
+    # and the ProxyBox thermal-printer API key). Fernet key; falls back to
+    # WEBHOOK_ENCRYPTION_KEY when unset (see app/services/carriers/crypto.py).
     INTEGRATION_ENCRYPTION_KEY: str = ""
+
+    # ProxyBox (pbxz.io) thermal-label print bridge tunables. Per-company connection
+    # details (base URL / target / API key / egress toggle) live on
+    # CompanyPrintProfile, NOT here -- these are only the HTTP timing knobs.
+    PROXYBOX_TIMEOUT_SECONDS: float = 30.0  # per-request httpx timeout
+    PROXYBOX_POLL_INTERVAL_SECONDS: float = 1.0  # job-status poll cadence
+    PROXYBOX_MAX_WAIT_SECONDS: float = 30.0  # max wait for a terminal job state
 
     # Labor-cost / hour rollup on work-order completion (Batch 7 / rank 10).
     #

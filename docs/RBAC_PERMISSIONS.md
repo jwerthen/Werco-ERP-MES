@@ -133,6 +133,8 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | View | ✓ | ✓ | ✓ | | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Inspect | ✓ | ✓ | | | ✓ | | |
+| Print / reprint receiving label | ✓ | ✓ | ✓ | | | | |
+| Configure print profile | ✓ | | | | | | |
 
 > **Write enforcement:** The Create and Inspect rows above are now enforced **in code** on
 > the canonical `/api/v1/receiving` endpoints (`app/api/endpoints/receiving.py`):
@@ -143,6 +145,16 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > path existed under `/api/v1/purchasing`; that duplicate has been removed, so `/api/v1/receiving`
 > is the single source of truth. Receiving reads follow the same read-broad / write-restricted
 > pattern noted for Purchasing above.
+
+> **Thermal receiving-label printing (ProxyBox / WHTP203e).** Manually (re)printing the
+> 4×6 receiving label — `POST /receiving/receipt/{receipt_id}/print-label` — is enforced
+> to **Admin / Manager / Supervisor** via `require_role([ADMIN, MANAGER, SUPERVISOR])`,
+> the same gate as `POST /receiving/receive`. Configuring the per-company print profile —
+> `GET` / `PUT /receiving/print-profile` (ProxyBox base URL / target / API key, copies,
+> paper size, and the `auto_print_on_receipt` + `allow_print_egress` toggles) — is
+> **admin-only** via `get_admin_user`, so only an admin can enter the printer credential
+> or flip the outbound-egress kill switch (default OFF, audited as a status change). See
+> [docs/THERMAL_LABEL_PRINTING.md](THERMAL_LABEL_PRINTING.md).
 
 ### Shipping
 

@@ -859,6 +859,34 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/history` | Receiving history with inspection results | Yes |
 | GET | `/receiving/stats` | Receiving statistics for dashboard | Yes |
 | GET | `/receiving/locations` | Receivable inventory locations | Yes |
+| POST | `/receiving/receipt/{receipt_id}/print-label` | Manually (re)print the 4×6 thermal receiving label | Admin / Manager / Supervisor |
+| GET | `/receiving/print-profile` | Get the company ProxyBox print profile (key masked; **404** until created) | Admin |
+| PUT | `/receiving/print-profile` | Create / update the print profile, incl. the `allow_print_egress` kill switch | Admin |
+
+> **Thermal receiving-label printing (ProxyBox / WHTP203e).** A 4×6 PDF (part / rev /
+> qty / lot / Code128, CRITICAL banner for critical parts) is rendered, stored as a
+> `Document` (`RECEIVING_LABEL`, linked via `POReceipt.label_document_id`), and sent to
+> a ProxyBox Zero bridge. See [docs/THERMAL_LABEL_PRINTING.md](THERMAL_LABEL_PRINTING.md).
+>
+> - **`POST /receiving/receipt/{receipt_id}/print-label`** — body (optional)
+>   `{ "copies": <1–20> }` overrides the profile default. Response:
+>   `{ receipt_id, receipt_number, label_document_id, printed, message }`. Errors:
+>   **409** when `allow_print_egress` is OFF / the profile is incomplete, **404** for a
+>   missing or cross-tenant receipt, **502** on a ProxyBox / printer failure (the label
+>   `Document` is still persisted, so a later reprint works). Same role gate as
+>   `POST /receiving/receive` (Admin / Manager / Supervisor).
+> - **`PUT /receiving/print-profile`** — fields: `proxybox_base_url` (full base incl.
+>   `/api/v1`), `proxybox_target`, `api_key` (**write-only**, Fernet-encrypted at rest,
+>   never returned — sending it rotates the stored key), `default_paper_size`,
+>   `default_copies` (1–20), `auto_print_on_receipt`, `allow_print_egress`, `is_active`.
+>   Omitted fields are left unchanged. Read responses expose only `api_key_last4` /
+>   `has_api_key`; secrets never appear in audit / event payloads. Flipping
+>   `allow_print_egress` (default OFF) is recorded as a **status change** on the
+>   tamper-evident audit trail.
+>
+> Auto-print on receipt is a separate, best-effort ARQ job enqueued by
+> `POST /receiving/receive` after commit; it no-ops unless the profile is active with
+> **both** `auto_print_on_receipt` and `allow_print_egress` ON.
 
 ### Inventory
 
