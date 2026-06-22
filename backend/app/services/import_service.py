@@ -583,10 +583,11 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                 _col("operation_name", "REQUIRED.", "Saw cut", "CNC mill", "Final assembly"),
                 _col(
                     "work_center_code",
-                    "REQUIRED. Must match an active work center code.",
+                    "Optional. Leave blank to assign the work center in the wizard after upload. "
+                    "If filled, must match an active work center code.",
                     "SAW-01",
                     "MILL-01",
-                    "ASSY-01",
+                    "",
                 ),
                 _col("setup_hours", "Optional number. Defaults to 0.", "0.5", "1.0", "0.25"),
                 _col("run_hours_per_unit", "Optional number. Defaults to 0.", "0.1", "0.75", "0.5"),

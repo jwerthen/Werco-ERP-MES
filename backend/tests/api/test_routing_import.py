@@ -9,7 +9,12 @@ Covered behaviors:
   by ``calculate_routing_totals``, operations carry company_id + resolved
   work_center_id + parsed inspection/outside flags, one audit CREATE per routing;
 * dry-run preview — zero routings and zero audit rows persisted, results carry
-  ``routing_id=None`` and ``dry_run=True``;
+  ``routing_id=None`` and ``dry_run=True``, with per-operation detail;
+* optional work_center_code — a blank code previews with ``needs_work_center`` and
+  no error; a non-blank UNKNOWN code is still a row error;
+* UI assignments — commit with an ``assignments`` map persists the chosen
+  work_center_id; an unassigned op makes its routing error (creates nothing); an
+  assigned cross-tenant / inactive work_center_id is rejected;
 * row errors — unknown part, non-engineering part, missing/inactive work center
   (whole-group skip with sibling "skipped" errors), duplicate sequence,
   existing-revision conflict (and the untouched existing routing), all with
@@ -19,6 +24,7 @@ Covered behaviors:
 """
 
 import io
+import json
 from io import BytesIO
 
 import pytest
@@ -52,6 +58,11 @@ def _xlsx_file(rows, filename="routings.xlsx"):
     workbook.save(out)
     out.seek(0)
     return {"file": (filename, out, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+
+
+def _assignments(mapping: dict) -> dict:
+    """Build the multipart ``data`` payload carrying the assignments JSON field."""
+    return {"assignments": json.dumps({str(k): v for k, v in mapping.items()})}
 
 
 CSV_HEADER = (
@@ -143,6 +154,7 @@ class TestRoutingImportCommit:
         assert body["parts_detected"] == 2
         assert body["routings_created"] == 2
         assert body["total_operations"] == 3
+        assert body["operations_needing_work_center"] == 0
         assert body["skipped_count"] == 0
         assert body["errors"] == []
         assert len(body["created_ids"]) == 2
@@ -153,6 +165,13 @@ class TestRoutingImportCommit:
         assert rt100["routing_revision"] == "A"
         assert rt100["operation_count"] == 2
         assert rt100["routing_id"] is not None
+        # Per-operation detail with resolved work centers (no op needs assignment).
+        ops_detail = sorted(rt100["operations"], key=lambda o: o["sequence"])
+        assert [o["sequence"] for o in ops_detail] == [10, 20]
+        assert [o["work_center_code"] for o in ops_detail] == ["MILL-1", "INSP-1"]
+        assert all(o["work_center_id"] is not None for o in ops_detail)
+        assert all(o["needs_work_center"] is False for o in ops_detail)
+        assert ops_detail[0]["work_center_name"] == "WC MILL-1"
         # totals == calculate_routing_totals(): setup 1.5+0.5, run 0.25+0.1
         assert rt100["total_setup_hours"] == pytest.approx(2.0)
         assert rt100["total_run_hours_per_unit"] == pytest.approx(0.35)
@@ -395,6 +414,292 @@ class TestRoutingImportPreview:
         assert any("not found" in e["reason"] for e in body["errors"])
         assert db_session.query(Routing).filter_by(company_id=1).count() == 0
         assert db_session.query(AuditLog).count() == before_audit
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestRoutingImportOptionalWorkCenter:
+    """work_center_code is OPTIONAL — blank = assign-in-UI; the UI sends back assignments."""
+
+    def test_blank_work_center_previews_with_needs_flag_and_no_error(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        _make_work_center(db_session, "MILL-OPT")
+        _make_part(db_session, "RT-OPT", part_type="manufactured")
+        db_session.commit()
+
+        # Row 2 names a real WC; rows 3 & 4 leave work_center_code BLANK.
+        csv_text = CSV_HEADER + (
+            "RT-OPT,A,,10,Mill,MILL-OPT,1.5,0.25,,N,N\n"
+            "RT-OPT,A,,20,Deburr,,0.5,0.1,,N,N\n"  # blank WC
+            "RT-OPT,A,,30,Inspect,,0.5,0.1,,Y,N\n"  # blank WC
+        )
+        response = client.post(PREVIEW_URL, headers=auth_headers, files=_csv_file(csv_text))
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+
+        # Blank WC is NOT an error; the routing previews fine.
+        assert body["dry_run"] is True
+        assert body["routings_created"] == 1
+        assert body["errors"] == []
+        assert body["operations_needing_work_center"] == 2
+
+        result = body["results"][0]
+        ops = sorted(result["operations"], key=lambda o: o["sequence"])
+        assert [o["needs_work_center"] for o in ops] == [False, True, True]
+        # The resolved op carries its work_center_id; the blank ones don't.
+        assert ops[0]["work_center_id"] is not None
+        assert ops[1]["work_center_id"] is None and ops[1]["work_center_code"] is None
+        # Totals are still summed (don't depend on the work center).
+        assert result["total_setup_hours"] == pytest.approx(2.5)
+        assert result["total_run_hours_per_unit"] == pytest.approx(0.45)
+        assert db_session.query(Routing).filter_by(company_id=1).count() == 0
+
+    def test_unknown_non_blank_work_center_code_is_still_a_row_error(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        _make_part(db_session, "RT-BADCODE", part_type="manufactured")
+        db_session.commit()
+
+        csv_text = CSV_HEADER + "RT-BADCODE,A,,10,Mill,NO-SUCH-WC,1,0.1,,N,N\n"
+        response = client.post(PREVIEW_URL, headers=auth_headers, files=_csv_file(csv_text))
+        body = response.json()
+        # A typo'd code (non-blank, unresolvable) remains an error, not a needs-assignment.
+        assert body["routings_created"] == 0
+        assert any("NO-SUCH-WC" in e["reason"] for e in body["errors"])
+
+    def test_preview_accepts_assignments_and_clears_needs_flag(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        wc = _make_work_center(db_session, "ASSIGN-WC")
+        _make_part(db_session, "RT-PVA", part_type="manufactured")
+        db_session.commit()
+
+        csv_text = CSV_HEADER + (
+            "RT-PVA,A,,10,Mill,,1,0.1,,N,N\n"  # blank WC -> assign row 2
+            "RT-PVA,A,,20,Deburr,,1,0.1,,N,N\n"  # blank WC -> assign row 3
+        )
+        response = client.post(
+            PREVIEW_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: wc.id, 3: wc.id}),
+        )
+        body = response.json()
+        assert body["operations_needing_work_center"] == 0
+        ops = body["results"][0]["operations"]
+        assert all(o["work_center_id"] == wc.id for o in ops)
+        assert all(o["needs_work_center"] is False for o in ops)
+        # Still a dry run — nothing persisted.
+        assert body["dry_run"] is True
+        assert db_session.query(Routing).filter_by(company_id=1).count() == 0
+
+    def test_commit_with_assignments_persists_chosen_work_center(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        wc_a = _make_work_center(db_session, "WCA")
+        wc_b = _make_work_center(db_session, "WCB")
+        _make_part(db_session, "RT-CMA", part_type="manufactured")
+        db_session.commit()
+        before_audit = db_session.query(AuditLog).count()
+
+        # Both ops have a blank WC; the UI assigns row 2 -> WCA, row 3 -> WCB.
+        csv_text = CSV_HEADER + ("RT-CMA,A,,10,Mill,,1,0.1,,N,N\n" "RT-CMA,A,,20,Deburr,,1,0.1,,N,N\n")
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: wc_a.id, 3: wc_b.id}),
+        )
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        assert body["routings_created"] == 1
+        assert body["operations_needing_work_center"] == 0
+        assert body["errors"] == []
+
+        routing_id = body["results"][0]["routing_id"]
+        routing = db_session.query(Routing).filter_by(id=routing_id).one()
+        ops = sorted(routing.operations, key=lambda op: op.sequence)
+        assert [op.work_center_id for op in ops] == [wc_a.id, wc_b.id]
+        # Audited like any other created routing.
+        assert db_session.query(AuditLog).count() == before_audit + 1
+
+    def test_commit_mixed_code_and_assignment_resolve_per_operation(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        wc_file = _make_work_center(db_session, "FILE-WC")
+        wc_assigned = _make_work_center(db_session, "UI-WC")
+        _make_part(db_session, "RT-MIX", part_type="manufactured")
+        db_session.commit()
+
+        # Row 2 resolves from the file code (no assignment); row 3 is blank ->
+        # assigned in the UI.
+        csv_text = CSV_HEADER + ("RT-MIX,A,,10,Mill,FILE-WC,1,0.1,,N,N\n" "RT-MIX,A,,20,Deburr,,1,0.1,,N,N\n")
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({3: wc_assigned.id}),
+        )
+        body = response.json()
+        assert body["routings_created"] == 1
+        routing = db_session.query(Routing).filter_by(id=body["results"][0]["routing_id"]).one()
+        ops = sorted(routing.operations, key=lambda op: op.sequence)
+        assert ops[0].work_center_id == wc_file.id
+        assert ops[1].work_center_id == wc_assigned.id
+
+    def test_commit_assignment_overrides_file_work_center_code(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """The user's UI selection is authoritative: an assignment on a row whose
+        file already carries a ``work_center_code`` OVERRIDES the file code."""
+        wc_file = _make_work_center(db_session, "FILE-OVR")
+        wc_assigned = _make_work_center(db_session, "UI-OVR")
+        _make_part(db_session, "RT-OVR", part_type="manufactured")
+        db_session.commit()
+
+        # Row 2 carries a VALID file code (FILE-OVR) AND an assignment to a
+        # different work center (UI-OVR). The assignment must win.
+        csv_text = CSV_HEADER + "RT-OVR,A,,10,Mill,FILE-OVR,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: wc_assigned.id}),
+        )
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        assert body["routings_created"] == 1
+        assert body["operations_needing_work_center"] == 0
+        assert body["errors"] == []
+
+        routing = db_session.query(Routing).filter_by(id=body["results"][0]["routing_id"]).one()
+        op = routing.operations[0]
+        # The committed op uses the ASSIGNED work center, NOT the file code's.
+        assert op.work_center_id == wc_assigned.id
+        assert op.work_center_id != wc_file.id
+
+    def test_assignment_overrides_even_unresolvable_file_code(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """An assignment wins before the file code is ever resolved, so a row with
+        a typo'd file code but an explicit assignment commits cleanly."""
+        wc_assigned = _make_work_center(db_session, "UI-WINS")
+        _make_part(db_session, "RT-TYPO", part_type="manufactured")
+        db_session.commit()
+
+        # Row 2's file code NO-SUCH-WC does not exist, but the user assigned a
+        # real work center -> the assignment wins, no row error.
+        csv_text = CSV_HEADER + "RT-TYPO,A,,10,Mill,NO-SUCH-WC,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: wc_assigned.id}),
+        )
+        body = response.json()
+        assert body["routings_created"] == 1
+        assert body["errors"] == []
+        routing = db_session.query(Routing).filter_by(id=body["results"][0]["routing_id"]).one()
+        assert routing.operations[0].work_center_id == wc_assigned.id
+
+    def test_commit_with_unassigned_operation_errors_and_creates_nothing(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        wc = _make_work_center(db_session, "WC-PARTIAL")
+        _make_part(db_session, "RT-UNASSIGNED", part_type="manufactured")
+        db_session.commit()
+
+        # Row 2 assigned, row 3 left blank with NO assignment -> whole routing errors.
+        csv_text = CSV_HEADER + ("RT-UNASSIGNED,A,,10,Mill,,1,0.1,,N,N\n" "RT-UNASSIGNED,A,,20,Deburr,,1,0.1,,N,N\n")
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: wc.id}),  # row 3 unassigned
+        )
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        assert body["routings_created"] == 0
+        # The error names the unassigned row(s).
+        reasons = " ".join(e["reason"] for e in body["errors"])
+        assert "without a work center" in reasons and "3" in reasons
+        # Nothing persisted — not even the assigned op.
+        assert db_session.query(Routing).filter_by(company_id=1).count() == 0
+        assert db_session.query(RoutingOperation).filter_by(company_id=1).count() == 0
+
+    def test_commit_assigned_inactive_work_center_is_rejected(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        dead_wc = _make_work_center(db_session, "DEAD-ASSIGN", is_active=False)
+        _make_part(db_session, "RT-DEADASSIGN", part_type="manufactured")
+        db_session.commit()
+
+        csv_text = CSV_HEADER + "RT-DEADASSIGN,A,,10,Mill,,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: dead_wc.id}),
+        )
+        body = response.json()
+        assert body["routings_created"] == 0
+        assert any("not found or inactive" in e["reason"] for e in body["errors"])
+        assert db_session.query(Routing).filter_by(company_id=1).count() == 0
+
+    def test_commit_assigned_cross_tenant_work_center_is_rejected(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        other = Company(id=2, name="Other Assign Co", slug="other-assign", is_active=True)
+        db_session.add(other)
+        db_session.flush()
+        foreign_wc = _make_work_center(db_session, "FOREIGN-ASSIGN", company_id=2)
+        _make_part(db_session, "RT-XTENANT", part_type="manufactured", company_id=1)
+        db_session.commit()
+
+        csv_text = CSV_HEADER + "RT-XTENANT,A,,10,Mill,,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,  # company 1 token
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: foreign_wc.id}),  # id belongs to company 2
+        )
+        body = response.json()
+        assert body["routings_created"] == 0
+        assert any("not found or inactive" in e["reason"] for e in body["errors"])
+        # No routing landed in either company.
+        assert db_session.query(Routing).count() == 0
+
+    def test_malformed_assignments_json_is_a_400(self, client: TestClient, auth_headers: dict, db_session: Session):
+        _make_part(db_session, "RT-BADJSON", part_type="manufactured")
+        db_session.commit()
+
+        csv_text = CSV_HEADER + "RT-BADJSON,A,,10,Mill,,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data={"assignments": "{not valid json"},
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_boolean_assignment_value_is_a_400(self, client: TestClient, auth_headers: dict, db_session: Session):
+        """A JSON boolean value must be rejected: ``int(True)`` would silently
+        coerce ``{"2": true}`` to work_center_id=1."""
+        _make_part(db_session, "RT-BOOLASSIGN", part_type="manufactured")
+        db_session.commit()
+
+        csv_text = CSV_HEADER + "RT-BOOLASSIGN,A,,10,Mill,,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            # Raw JSON with a boolean value (the _assignments helper would int-cast).
+            data={"assignments": '{"2": true}'},
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        # Nothing was created from the rejected request.
+        assert db_session.query(Routing).filter_by(company_id=1).count() == 0
 
 
 @pytest.mark.api
