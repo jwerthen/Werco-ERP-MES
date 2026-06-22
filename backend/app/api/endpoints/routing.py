@@ -4,9 +4,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.bom import BOM, BOMItem
 from app.models.part import Part, PartType
@@ -31,8 +32,12 @@ from app.schemas.routing_generation import (
     RoutingCreateFromGeneration,
     RoutingGenerationResult,
 )
+from app.schemas.routing_import import RoutingImportResponse
 from app.services.ai_learning_service import AILearningService
+from app.services.audit_service import AuditService
+from app.services.import_service import ImportFileError, parse_import_file
 from app.services.prompts import ROUTING_GENERATION_PROMPT
+from app.services.routing_import_service import import_routings
 from app.services.routing_learning_service import (
     create_generation_session,
     get_learned_routing_context,
@@ -508,6 +513,77 @@ def create_routing_from_generation(
     )
 
     return routing
+
+
+@router.post(
+    "/import/preview", response_model=RoutingImportResponse, summary="Preview a routing import (CSV/XLSX, dry-run)"
+)
+async def import_routings_preview(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Upload a routing CSV/XLSX and preview it WITHOUT writing (dry-run, fully rolled back).
+
+    Columns: part_number, routing_revision (default A), routing_description (optional),
+    sequence (int, unique within a part), operation_name, work_center_code (must resolve to an
+    active work center), setup_hours, run_hours_per_unit (numeric, default 0), description
+    (optional), is_inspection_point, is_outside_operation (Y/N/true/false). Rows are grouped by
+    part_number into one draft routing each; the part must already exist (manufactured/assembly).
+    """
+    content = await file.read()
+    try:
+        table = await run_in_threadpool(
+            parse_import_file,
+            file.filename,
+            content,
+            required_columns={"part_number", "sequence", "operation_name", "work_center_code"},
+        )
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await run_in_threadpool(
+        import_routings,
+        db,
+        table=table,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+        dry_run=True,
+    )
+
+
+@router.post("/import/commit", response_model=RoutingImportResponse, summary="Commit a routing import (CSV/XLSX)")
+async def import_routings_commit(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Commit a routing CSV/XLSX import. Each part becomes one draft routing with its operations,
+    created routing-by-routing (one bad routing never poisons the rest), with one audit_log
+    CREATE per routing. Same columns/validation as /routing/import/preview."""
+    content = await file.read()
+    try:
+        table = await run_in_threadpool(
+            parse_import_file,
+            file.filename,
+            content,
+            required_columns={"part_number", "sequence", "operation_name", "work_center_code"},
+        )
+    except ImportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await run_in_threadpool(
+        import_routings,
+        db,
+        table=table,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+        dry_run=False,
+    )
 
 
 @router.get("/", response_model=List[RoutingListResponse])

@@ -346,6 +346,33 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/` | Create routing | Yes |
 | GET | `/routing/{id}` | Get routing by ID | Yes |
 | PUT | `/routing/{id}` | Update routing | Yes |
+| POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
+| POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
+
+> **Routing import (CSV/XLSX).** Both endpoints are multipart uploads (form field `file`, CSV or
+> XLSX via the shared `parse_import_file`) and return `RoutingImportResponse`
+> (`app/schemas/routing_import.py`): `dry_run`, `total_rows`, `parts_detected`, `routings_created`,
+> `total_operations`, `skipped_count`, `created_ids[]`, `results[]`
+> (`RoutingImportRowResult`: `rows[]`, `part_number`, `routing_revision`, `routing_id` — `null` in
+> dry-run — `operation_count`, `total_setup_hours`, `total_run_hours_per_unit`, `status` — always
+> `"draft"`), and `errors[]` (`RoutingImportError`: `row`, `part_number`, `reason`). Columns (in
+> order): `part_number`, `routing_revision` (default `A`), `routing_description`, `sequence`
+> (int, **unique within a part**), `operation_name`, `work_center_code` (resolves to an **active**
+> work center), `setup_hours`, `run_hours_per_unit` (numeric, default 0), `description`,
+> `is_inspection_point`, `is_outside_operation` (`Y/N`/`true/false`, default false). Required per
+> row: `part_number`, `sequence`, `operation_name`, `work_center_code`.
+>
+> Rows are grouped by `part_number` into **one draft routing each** (first-seen order). The part
+> must **pre-exist** and be a manufactured/assembly part, not soft-deleted — **parts are never
+> created**. A part that **already has a routing at the same revision** is refused ("choose a new
+> revision"); any other revision creates a **new draft revision alongside** the existing ones,
+> which are **never mutated or deactivated** (compliance: prefer new revisions over editing shipped
+> data). A duplicate `sequence` within a part is an error. Commit is **per-routing** (partial
+> success — one bad routing never poisons the rest); each created routing writes one tamper-evident
+> `audit_log` CREATE (`resource_type = "routing"`, `extra_data.source = "import"`).
+> `POST /routing/import/preview` (dry-run) writes nothing — every routing runs inside a SAVEPOINT
+> that is rolled back, with a terminal `db.rollback()` backstop. See
+> [docs/EXCEL_MIGRATION_RUNBOOK.md](EXCEL_MIGRATION_RUNBOOK.md) Step 8 for the migration flow.
 
 #### Routing Operation Schema
 
@@ -1392,11 +1419,11 @@ saved independently, bad rows are skipped and reported in `errors[]`.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/import/templates` | List the 9 downloadable templates (entity, title, columns, download path) | Yes |
+| GET | `/import/templates` | List the 10 downloadable templates (entity, title, columns, download path) | Yes |
 | GET | `/import/templates/{entity}` | Download the styled XLSX template (`werco-import-template-{entity}.xlsx`); 404 lists valid entities | Yes |
 
 Template entities: `users`, `parts`, `materials`, `customers`, `vendors`, `work-centers`,
-`work-orders`, `purchase-orders`, `bom`. Each workbook has an **Import** sheet (styled header + one
+`work-orders`, `purchase-orders`, `bom`, `routings`. Each workbook has an **Import** sheet (styled header + one
 `# `-prefixed guidance row, skipped on import) and an **Examples** sheet (never read by the
 importer).
 
@@ -1418,6 +1445,12 @@ every created row):
 |--------|----------|------------------|---------------|
 | POST | `/work-orders/import` | `part_number`, `quantity` | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/import` | `vendor_code`, `part_number`, `quantity`, `unit_price` | Admin / Manager |
+| POST | `/routing/import/preview`, `/routing/import/commit` | `part_number`, `sequence`, `operation_name`, `work_center_code` | Admin / Manager / Supervisor |
+
+> **Routing import** uses an explicit **preview/commit pair** (not a `dry_run` query param) and lives
+> under the Routing router — see [Routing](#routing) above for the column list, the
+> `RoutingImportResponse` shape, and the same-revision conflict rule. Its `routings` template is in
+> the templates index.
 
 > **`dry_run=true` (all eight import endpoints).** Validates and previews with **zero writes** —
 > the migration imports run every row inside a SAVEPOINT that is rolled back (including audit rows

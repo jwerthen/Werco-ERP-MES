@@ -153,7 +153,7 @@ Click **Refresh** anytime to recheck progress.
 ### Import Center
 Go to **Import Center** (under **Administration**) to load data from spreadsheets — Excel (`.xlsx`) or CSV. Pick a data type from the left list:
 - **Employees / Users**, **Parts**, **Materials & Supplies**, **Customers**, **Vendors**, **Work Centers**, **Open Work Orders**, and **Open Purchase Orders** import directly on this page.
-- **BOMs** and **Inventory** use their own module pages (the Import Center links you there).
+- **Routings**, **BOMs**, and **Inventory** use their own module pages (the Import Center links you there). For **Routings**, open the **Routing** page and click **Import Routings** to dry-run and commit; the Import Center's Routings tab provides the template and column hints.
 
 For each type:
 1. Click **Download template (.xlsx)** for a correctly formatted Excel template. The grey row under the headers is guidance (it's skipped automatically on import), and an **Examples** sheet shows filled-in rows (that sheet is never imported).

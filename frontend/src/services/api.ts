@@ -42,6 +42,7 @@ import {
   UserImportResponse,
   WorkOrderImportResponse,
 } from '../types/importKit';
+import { RoutingImportResponse } from '../types/engineering';
 import {
   AddressValidationRequest,
   AddressValidationResult,
@@ -669,6 +670,25 @@ class ApiService {
 
   async commitBOMImport(data: any) {
     const response = await this.api.post('/bom/import/commit', data);
+    return response.data;
+  }
+
+  // Routing import wizard — multipart upload, dry-run preview then commit.
+  // Both endpoints take the same `file` form field (CSV or XLSX) and return the
+  // identical RoutingImportResponse shape; commit writes routing-by-routing.
+  async previewRoutingImport(formData: FormData): Promise<RoutingImportResponse> {
+    const response = await this.api.post<RoutingImportResponse>('/routing/import/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: importTimeout(true),
+    });
+    return response.data;
+  }
+
+  async commitRoutingImport(formData: FormData): Promise<RoutingImportResponse> {
+    const response = await this.api.post<RoutingImportResponse>('/routing/import/commit', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: importTimeout(false),
+    });
     return response.data;
   }
 

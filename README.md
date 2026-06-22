@@ -45,7 +45,7 @@ Shipped modules, grouped by domain:
 
 ### Administration & Governance
 - **RBAC** (8 roles, server-side `require_role` gating), **multi-tenant** company scoping, **tamper-evident audit log** (SHA-256 hash chain), users/employee provisioning, work centers, custom fields, admin settings (incl. an **AI usage & cost** dashboard — per-task/per-model token, spend, and latency telemetry for the LLM features), setup wizard, and a platform-admin overview for cross-company oversight.
-- **Import Center / Excel migration kit** — XLSX + CSV bulk imports (users, parts, materials, customers, vendors, work centers) plus open-work-order and open-purchase-order loaders for go-live, with server-generated Excel templates and a dry-run-preview-then-commit flow (see [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md)).
+- **Import Center / Excel migration kit** — XLSX + CSV bulk imports (users, parts, materials, customers, vendors, work centers, routings) plus open-work-order and open-purchase-order loaders for go-live, with server-generated Excel templates and a dry-run-preview-then-commit flow (see [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md)).
 
 ## Architecture
 

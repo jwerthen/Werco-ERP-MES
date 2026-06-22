@@ -66,6 +66,17 @@ const importTypes: Record<string, ImportTypeConfig> = {
       'Component parts stay under the assembly tree, not as routing targets.',
     ],
   },
+  routings: {
+    label: 'Routings',
+    entity: 'routings',
+    href: '/routing',
+    mode: 'linked',
+    notes: [
+      'Use the Routing page "Import Routings" wizard to dry-run before committing.',
+      'Operation rows are grouped into one draft routing per part + revision.',
+      'Parts and work centers must already exist; a new revision is created if one is present.',
+    ],
+  },
   customers: {
     label: 'Customers',
     entity: 'customers',

@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { RoutingImportWizard } from '../components/routing/RoutingImportWizard';
+import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
 import { useSearchParams } from 'react-router-dom';
 import {
   PlusIcon,
@@ -8,6 +11,7 @@ import {
   TrashIcon,
   CheckCircleIcon,
   ArrowPathIcon,
+  ArrowUpTrayIcon,
   DocumentArrowUpIcon,
   SparklesIcon,
   ExclamationTriangleIcon,
@@ -123,12 +127,18 @@ const confidenceBadge: Record<string, string> = {
 };
 
 export default function RoutingPage() {
+  const { user } = useAuth();
+  // Importing routings creates draft records — gate it to the same roles the
+  // backend allows (ADMIN / MANAGER / SUPERVISOR all hold routings:create).
+  const canImport = hasPermission(user?.role, 'routings:create');
+
   const [routings, setRoutings] = useState<Routing[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedRouting, setSelectedRouting] = useState<Routing | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [showAddOperationModal, setShowAddOperationModal] = useState(false);
   const [editingOperation, setEditingOperation] = useState<RoutingOperation | null>(null);
 
@@ -578,6 +588,15 @@ export default function RoutingPage() {
             <SparklesIcon className="h-5 w-5 mr-2" />
             Generate from Drawing
           </button>
+          {canImport && (
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="btn-secondary flex items-center"
+            >
+              <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
+              Import Routings
+            </button>
+          )}
           <button
             onClick={() => {
               setNewRouting({ part_id: 0, revision: 'A', description: '' });
@@ -1459,6 +1478,16 @@ export default function RoutingPage() {
               </div>
             </form>
       </Modal>
+
+      {/* Routing Import Wizard */}
+      {canImport && showImportModal && (
+        <RoutingImportWizard
+          onComplete={async () => {
+            await loadData();
+          }}
+          onClose={() => setShowImportModal(false)}
+        />
+      )}
     </div>
   );
 }

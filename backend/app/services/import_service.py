@@ -550,6 +550,51 @@ IMPORT_TEMPLATES: Dict[str, ImportTemplateSpec] = {
                 ),
             ),
         ),
+        ImportTemplateSpec(
+            entity="routings",
+            title="Routings",
+            description=(
+                "Manufacturing routings (operations per part). "
+                "POST /api/v1/routing/import/preview (review the dry-run, then commit)."
+            ),
+            columns=(
+                _col(
+                    "part_number",
+                    "REQUIRED. Part must already exist (manufactured/assembly).",
+                    "1042-100",
+                    "1042-100",
+                    "ASSY-9001",
+                ),
+                _col(
+                    "routing_revision",
+                    "Optional. Defaults to A. Must be a NEW revision if the part already has one.",
+                    "A",
+                    "A",
+                    "A",
+                ),
+                _col(
+                    "routing_description",
+                    "Optional. First non-empty value per part is used.",
+                    "Bracket machining routing",
+                    "",
+                    "Frame assembly routing",
+                ),
+                _col("sequence", "REQUIRED whole number. Unique within a part (10, 20, 30...).", "10", "20", "10"),
+                _col("operation_name", "REQUIRED.", "Saw cut", "CNC mill", "Final assembly"),
+                _col(
+                    "work_center_code",
+                    "REQUIRED. Must match an active work center code.",
+                    "SAW-01",
+                    "MILL-01",
+                    "ASSY-01",
+                ),
+                _col("setup_hours", "Optional number. Defaults to 0.", "0.5", "1.0", "0.25"),
+                _col("run_hours_per_unit", "Optional number. Defaults to 0.", "0.1", "0.75", "0.5"),
+                _col("description", "Optional. Stored as the operation's work instructions.", "Cut to 6.2 in", "", ""),
+                _col("is_inspection_point", "Optional. true/false (default false).", "false", "false", "true"),
+                _col("is_outside_operation", "Optional. true/false (default false).", "false", "false", "false"),
+            ),
+        ),
     )
 }
 

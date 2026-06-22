@@ -142,6 +142,45 @@ export interface ImportPreview {
   source_format?: string;
 }
 
+// ── Routing Import Types ─────────────────────────────────────────────────────
+// Mirrors backend/app/schemas (RoutingImportResponse) for the routing import
+// wizard. Both POST /routing/import/preview (dry-run) and
+// POST /routing/import/commit return this identical shape, so the wizard can
+// reuse a single render path for the preview and the committed result.
+
+/** One creatable routing grouped from the uploaded operation rows. */
+export interface RoutingImportResult {
+  /** Source row numbers (1-based, header-relative) that fed this routing. */
+  rows: number[];
+  part_number: string;
+  routing_revision: string;
+  /** Populated only on a successful commit; null in dry-run. */
+  routing_id: number | null;
+  operation_count: number;
+  total_setup_hours: number;
+  total_run_hours_per_unit: number;
+  status: 'draft';
+}
+
+/** Row-level rejection. The whole routing the row belonged to is skipped. */
+export interface RoutingImportError {
+  row: number;
+  part_number: string | null;
+  reason: string;
+}
+
+export interface RoutingImportResponse {
+  dry_run: boolean;
+  total_rows: number;
+  parts_detected: number;
+  routings_created: number;
+  total_operations: number;
+  skipped_count: number;
+  created_ids: number[];
+  results: RoutingImportResult[];
+  errors: RoutingImportError[];
+}
+
 // ── Display Helpers ────────────────────────────────────────────────────────
 
 export const lineTypeColors: Record<string, string> = {

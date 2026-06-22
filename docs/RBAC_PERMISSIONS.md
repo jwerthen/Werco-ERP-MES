@@ -315,6 +315,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Import users (`POST /users/import-csv`) | ✓ | | | | | | |
 | Import parts / materials | ✓ | ✓ | ✓ | | | | |
 | Import customers / vendors / work centers | ✓ | ✓ | | | | | |
+| Import routings (`POST /routing/import/preview`, `/import/commit`) | ✓ | ✓ | ✓ | | | | |
 | Import open work orders (`POST /work-orders/import`) | ✓ | ✓ | ✓ | | | | |
 | Import open purchase orders (`POST /purchasing/purchase-orders/import`) | ✓ | ✓ | | | | | |
 
@@ -336,6 +337,17 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 >   import"`), and `platform_admin` is excluded from the advertised valid-roles list. The
 >   platform-admin role is the cross-company Werco oversight role and must never be assignable from
 >   a tenant spreadsheet, even by a company Admin.
+> - **Routing import mirrors Routings → Create**:
+>   `require_role([ADMIN, MANAGER, SUPERVISOR])` (`app/api/endpoints/routing.py`) on both the
+>   `/routing/import/preview` (dry-run) and `/routing/import/commit` endpoints — it creates **draft**
+>   routings through the same path as `POST /routing/`, so it carries exactly the Routings Create role
+>   set (Release stays Admin/Manager — imported routings land as draft and must be released
+>   separately). The **frontend** gates the Routing page **Import Routings** button (which opens the
+>   `RoutingImportWizard` dry-run/commit modal) on the `routings:create` permission via
+>   `hasPermission` (`frontend/src/pages/Routing.tsx`), matching this server-side role set —
+>   operator / quality / shipping / viewer never see the button. The Import Center's **Routings** tab
+>   (`mode: 'linked'`) only surfaces the template download + column hints and links to the Routing
+>   page; the upload/preview/commit lives in the wizard, not in the Import Center.
 > - The entity-import role sets (parts/materials → A/M/S; customers/vendors/work centers → A/M) are
 >   unchanged from the pre-existing CSV imports and match each module's Create row above.
 > - **Audit:** every committed import row writes a tamper-evident `audit_log` entry tagged
