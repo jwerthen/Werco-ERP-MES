@@ -34,7 +34,17 @@ Triggered on: Push to `main` or `develop`
 | Build | Docker images | All lint/test jobs |
 | Security Scan | Trivy, npm audit, pip-audit | Build |
 | Deploy Staging | Railway deployment | Security (develop branch) |
-| Deploy Production | Railway deployment | Security (main branch) |
+| Deploy Production | Railway deployment, then post-deploy health verification | Security (main branch) |
+
+> **Production auto-deploys from `main`.** A push to `main` (only reachable through a
+> merged PR — see Branch Protection below) runs full CI and then deploys to production
+> with **no manual approval gate**. The `production` GitHub environment no longer carries
+> a required-reviewer rule; the compensating controls are (a) a deployment-branch policy on
+> the `production` environment that allows **only `main`** to deploy, and (b) post-deploy
+> health checks that **fail the job** on a bad deploy — `Verify Production Deployment`
+> (`ci-cd.yml`) and `Verify deployment serves the Vite frontend bundle`
+> (`deploy-frontend-production.yml`). Rollback is re-adding the reviewer rule (and/or
+> redeploying a known-good commit). _(Governance change 2026-06-22.)_
 
 ## Required Secrets
 
@@ -83,25 +93,30 @@ Save this token as `RAILWAY_TOKEN` in GitHub Secrets.
 1. In the same settings page, click "Variables" tab
 2. Add each of the required variables listed above
 
-### 4. Configure Branch Protection (Recommended)
+### 4. Configure Branch Protection (`main` ruleset)
 
-1. Go to Settings > Branches
-2. Add rule for `main` branch:
-   - [x] Require a pull request before merging
-   - [x] Require status checks to pass before merging
-     - Select: `Backend Checks`, `Frontend Checks`
-   - [x] Require branches to be up to date before merging
-   - [x] Include administrators
+`main` is protected by a repository **ruleset** (Settings > Rules > Rulesets), enforced as
+of 2026-06-22:
 
-### 5. Configure Environments (Optional)
+- [x] Require a pull request before merging — **0 required approvals** (hands-off /
+      merge-when-green; changes still land only via a PR, not a direct push)
+- [x] Require status checks to pass before merging (the CI deploy/build checks)
+- [x] Block force-pushes (non-fast-forward) and branch deletion
+- [x] Repo-admin bypass for emergencies (documented break-glass)
 
-For deployment approvals:
+Net effect: every commit that reaches `main` — and therefore every commit that
+auto-deploys to production — has passed CI in a PR. Direct pushes to `main` are
+PR-gated for non-admins.
+
+### 5. Configure Environments
 
 1. Go to Settings > Environments
 2. Create `staging` and `production` environments
 3. For `production`:
-   - Add required reviewers
-   - Set deployment branch rules (only `main`)
+   - **No required reviewers** — production deploys run automatically on push to `main`
+     (removed 2026-06-22; see "Production auto-deploys from `main`" above). Re-adding a
+     required reviewer here is the documented rollback if a manual gate is needed again.
+   - Set the deployment branch policy to allow **only `main`** to deploy.
 
 ## Workflow Triggers
 

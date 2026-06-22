@@ -248,11 +248,27 @@
 - [x] Docker containerization
 - [x] Infrastructure as code (docker-compose)
 - [x] Version control (Git)
+- [x] Enforced change-control path to production (CM-3 partial). Application/source changes
+  reach the deployed `main` branch **only through a pull request whose CI status checks
+  pass** — enforced by a GitHub repository ruleset on `main` (PR required before merge,
+  required status checks, force-push and branch deletion blocked). Merge-when-green: the
+  ruleset requires **0 human approvals**, so the control is *tested-before-merge* (CI), not
+  *peer-reviewed-before-merge*; do not claim a manual review gate. A merge to `main`
+  **auto-deploys to production** via GitHub Actions with **no manual deployment-approval
+  gate** (the `production` environment's required-reviewer rule was removed 2026-06-22).
+  Compensating deploy-time controls: a deployment-branch policy that permits **only `main`**
+  to deploy, and **post-deploy health checks that fail the job on a bad deploy**
+  (`Verify Production Deployment` in `ci-cd.yml`; `Verify deployment serves the Vite
+  frontend bundle` in `deploy-frontend-production.yml`). Repo admins hold a documented
+  break-glass bypass for emergencies; rollback is redeploying a known-good commit (or
+  re-adding the reviewer rule). See `docs/CI_CD_SETUP.md` and `docs/DEPLOYMENT_RUNBOOK.md`.
 
 **GAPS:**
 - [ ] **CM-3.4.3 - Track Configuration Changes**
-  - Need: Automated tracking of infrastructure changes
-  - Effort: 1-2 weeks
+  - Partially met for application/source changes by the `main` PR-required-with-passing-CI
+    ruleset above (every production change is a CI-passed, PR-tracked commit). Still need:
+    automated tracking of *infrastructure* changes (Railway/env/secret config outside the
+    repo). Effort: 1-2 weeks
 - [ ] **CM-3.4.5 - Restrict Software Installation**
   - Need: Whitelist approved software
   - Effort: Process documentation
@@ -659,6 +675,7 @@ Backend:
 | 2026-06-10 | AC-3.1.2 / IA / AU-3.3.1 (TV wallboard, A0.5, branch `feat/tv-wallboard`): added scoped display tokens for unattended shop TVs — `type="display"` JWTs that authenticate **only** the new zero-write `GET /shop-floor/wallboard` (401 everywhere else via `verify_token`'s type check, so they can never act as a user session); issuance/revocation ADMIN/MANAGER-gated, tenant-scoped, and tamper-evidently audit-logged; the `display_tokens` DB row is the revocation/expiry/tenant authority re-checked per request; raw JWT shown once at issuance, never stored; operator names truncated to "First L." for public screens. Additive mechanism — no existing compliance claim changed. See `docs/WALLBOARD.md` / `docs/API.md` / `docs/RBAC_PERMISSIONS.md` | Droid |
 | 2026-06-18 | SC-3.13.1 (carrier-shipping egress kill switch): catalogued the **per-company, default-off** outbound-egress control `allow_carrier_egress` on `CompanyShippingProfile` (`company_shipping_profiles`, `nullable=False, default=False, server_default="false"`) — requires explicit human opt-in before any customer address/parcel data leaves the boundary for EasyPost; `ShippingService._require_egress` gates every outbound carrier call (validate/rate/buy-label/freight-BOL/pickup/void) and the tracking-poll job re-checks it (no provider call when OFF); flag flips are tamper-evidently audit-logged as a status change. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/SHIPPING_CARRIER_INTEGRATION.md` | Claude |
 | 2026-06-18 | SC-3.13.1 (thermal-label print egress kill switch): catalogued the **per-company, default-off** outbound-egress control `allow_print_egress` on `CompanyPrintProfile` (`company_print_profiles`, `nullable=False, default=False, server_default="false"`) — requires explicit human opt-in before a rendered label (part number, lot/heat/serial, critical-characteristic marker) is transmitted to the pbxz.io ProxyBox cloud relay; both the request path (`PrintService._require_egress`) and the auto-print ARQ job (`app/jobs/label_jobs.py`) gate on it (no outbound call when OFF); flag flips are tamper-evidently audit-logged as a status change. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/THERMAL_LABEL_PRINTING.md` | Claude |
+| 2026-06-22 | CM-3 (deploy governance reframe): the manual production-deployment approval gate was **removed** — the `production` GitHub environment no longer carries a required-reviewer rule, and production **auto-deploys from `main`**. Change control is now enforced by a **`main` repository ruleset** (PR required before merge, required CI status checks must pass, force-push/branch-deletion blocked, **0 human approvals** — merge-when-green, with documented repo-admin break-glass bypass), plus deploy-time compensating controls: a deployment-branch policy permitting only `main` to deploy, and post-deploy health checks that fail the job on a bad deploy (`Verify Production Deployment` / `Verify deployment serves the Vite frontend bundle`). Rollback = redeploy a known-good commit or re-add the reviewer rule. CM-3.4.3 remains a partial gap (covers application/source changes via CI-passed PRs, not out-of-repo infrastructure changes); stated as *tested-before-merge*, not peer-reviewed. Documentation-only — describes the live config, control reframed accurately not overstated. See `docs/CI_CD_SETUP.md` / `docs/DEPLOYMENT_RUNBOOK.md` | Claude |
 
 ---
 

@@ -59,12 +59,45 @@ curl https://werco-api-production.up.railway.app/health/ready
 
 ---
 
+## Change Control & Production Deploy Model
+
+**Production auto-deploys from `main`. There is no manual approval gate.** _(Governance
+change effective 2026-06-22.)_
+
+The change-control path is:
+
+1. **All changes reach `main` through a pull request with passing CI.** `main` is
+   protected by a repository ruleset: a PR is required before merge (hands-off /
+   merge-when-green — **0 required human approvals**), the CI status checks must pass,
+   and force-pushes and branch deletion are blocked. Repo admins retain a documented
+   break-glass bypass for emergencies. Direct pushes to `main` are PR-gated for
+   non-admins.
+2. **A push to `main` triggers the production deploy automatically** via GitHub Actions
+   (`ci-cd.yml` / `deploy-frontend-production.yml`) — no human approval step. The
+   `production` GitHub environment previously carried a required-reviewer rule; that rule
+   has been **removed**. Two compensating controls remain:
+   - a **deployment-branch policy** on the `production` environment that allows **only
+     `main`** to deploy; and
+   - **post-deploy health checks that fail the job on a bad deploy** —
+     `Verify Production Deployment` (`ci-cd.yml`) and `Verify deployment serves the Vite
+     frontend bundle` (`deploy-frontend-production.yml`).
+3. **Rollback:** redeploy a known-good commit (see [Rollback
+   Procedures](#rollback-procedures)); to reinstate a manual gate, re-add the required
+   reviewer on the `production` environment.
+
+The manual `railway up` commands below remain valid for **break-glass / out-of-band**
+deploys (e.g. when a CI deploy job itself is broken). They are not the routine path —
+merging a green PR to `main` is.
+
+---
+
 ## Pre-Deployment Checklist
 
 ### Before Every Deployment
 
 - [ ] All tests passing locally
-- [ ] Code reviewed and approved
+- [ ] Change merged to `main` via a PR with passing CI (the `main` ruleset enforces this;
+      0 human approvals are required — merge-when-green)
 - [ ] Git status clean (no uncommitted changes)
 - [ ] Current branch is `main`
 - [ ] Database backup taken (for DB changes)
@@ -191,15 +224,22 @@ git commit -m "hotfix: description of fix"
 git push origin hotfix/description-of-fix
 ```
 
-### Step 4: Merge to Main
+### Step 4: Merge to Main (via PR)
+Open a PR from the hotfix branch and merge it once CI is green — `main` is PR-gated by the
+ruleset, so a direct `git push origin main` is rejected for non-admins:
 ```powershell
-git checkout main
-git merge hotfix/description-of-fix
-git push origin main
+gh pr create --base main --head hotfix/description-of-fix --fill
+# merge once CI status checks pass (0 approvals required — merge-when-green)
+gh pr merge --squash --auto
 ```
+Repo admins may use the documented break-glass bypass if CI itself is broken and the fix
+cannot wait.
 
 ### Step 5: Deploy
-Follow [Standard Deployment](#standard-deployment) steps.
+Merging to `main` **auto-deploys to production** (see [Change Control & Production Deploy
+Model](#change-control--production-deploy-model)); the GitHub Actions deploy + post-deploy
+health checks run automatically. Use the manual `railway up` steps in [Standard
+Deployment](#standard-deployment) only for an out-of-band / break-glass deploy.
 
 ### Step 6: Cleanup
 ```powershell
