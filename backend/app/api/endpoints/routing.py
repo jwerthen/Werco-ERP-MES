@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -515,11 +516,45 @@ def create_routing_from_generation(
     return routing
 
 
+ROUTING_IMPORT_REQUIRED_COLUMNS = {"part_number", "sequence", "operation_name"}
+
+
+def _parse_routing_assignments(raw: Optional[str]) -> Dict[int, int]:
+    """Parse the optional ``assignments`` multipart field.
+
+    The field is a JSON object mapping a source file row number to a chosen
+    work_center_id, e.g. ``{"2": 5, "3": 5, "4": 7}``. Keys arrive as JSON
+    strings; both keys and values must be coercible to ints. A blank/missing
+    field yields an empty map. Malformed input is a 400.
+    """
+    if raw is None or not raw.strip():
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="assignments must be valid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise HTTPException(status_code=400, detail="assignments must be a JSON object mapping row -> work_center_id")
+    assignments: Dict[int, int] = {}
+    for key, value in decoded.items():
+        try:
+            row_number = int(key)
+            work_center_id = int(value)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="assignments keys (row numbers) and values (work_center_id) must be integers",
+            ) from exc
+        assignments[row_number] = work_center_id
+    return assignments
+
+
 @router.post(
     "/import/preview", response_model=RoutingImportResponse, summary="Preview a routing import (CSV/XLSX, dry-run)"
 )
 async def import_routings_preview(
     file: UploadFile = File(...),
+    assignments: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
@@ -528,18 +563,24 @@ async def import_routings_preview(
     """Upload a routing CSV/XLSX and preview it WITHOUT writing (dry-run, fully rolled back).
 
     Columns: part_number, routing_revision (default A), routing_description (optional),
-    sequence (int, unique within a part), operation_name, work_center_code (must resolve to an
-    active work center), setup_hours, run_hours_per_unit (numeric, default 0), description
-    (optional), is_inspection_point, is_outside_operation (Y/N/true/false). Rows are grouped by
-    part_number into one draft routing each; the part must already exist (manufactured/assembly).
+    sequence (int, unique within a part), operation_name, work_center_code (OPTIONAL — a blank
+    code means "assign in the UI"; a non-blank code must resolve to an active work center),
+    setup_hours, run_hours_per_unit (numeric, default 0), description (optional),
+    is_inspection_point, is_outside_operation (Y/N/true/false). Rows are grouped by part_number
+    into one draft routing each; the part must already exist (manufactured/assembly).
+
+    The optional ``assignments`` form field (JSON: row number -> work_center_id) lets the UI
+    re-validate its chosen work centers before commit; preview works with no assignments too.
+    The response returns per-operation detail so the UI can render a work-center dropdown per op.
     """
+    parsed_assignments = _parse_routing_assignments(assignments)
     content = await file.read()
     try:
         table = await run_in_threadpool(
             parse_import_file,
             file.filename,
             content,
-            required_columns={"part_number", "sequence", "operation_name", "work_center_code"},
+            required_columns=ROUTING_IMPORT_REQUIRED_COLUMNS,
         )
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -551,12 +592,14 @@ async def import_routings_preview(
         company_id=company_id,
         audit=audit,
         dry_run=True,
+        assignments=parsed_assignments,
     )
 
 
 @router.post("/import/commit", response_model=RoutingImportResponse, summary="Commit a routing import (CSV/XLSX)")
 async def import_routings_commit(
     file: UploadFile = File(...),
+    assignments: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
@@ -564,14 +607,19 @@ async def import_routings_commit(
 ):
     """Commit a routing CSV/XLSX import. Each part becomes one draft routing with its operations,
     created routing-by-routing (one bad routing never poisons the rest), with one audit_log
-    CREATE per routing. Same columns/validation as /routing/import/preview."""
+    CREATE per routing. Same columns/validation as /routing/import/preview.
+
+    Each operation's work center is resolved from a valid file ``work_center_code`` or, when blank,
+    the ``assignments`` form field (JSON: row number -> work_center_id). A routing with ANY operation
+    still missing a work center is reported in ``errors`` and is NOT created."""
+    parsed_assignments = _parse_routing_assignments(assignments)
     content = await file.read()
     try:
         table = await run_in_threadpool(
             parse_import_file,
             file.filename,
             content,
-            required_columns={"part_number", "sequence", "operation_name", "work_center_code"},
+            required_columns=ROUTING_IMPORT_REQUIRED_COLUMNS,
         )
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -583,6 +631,7 @@ async def import_routings_commit(
         company_id=company_id,
         audit=audit,
         dry_run=False,
+        assignments=parsed_assignments,
     )
 
 

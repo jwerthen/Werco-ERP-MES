@@ -349,18 +349,44 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
 
-> **Routing import (CSV/XLSX).** Both endpoints are multipart uploads (form field `file`, CSV or
-> XLSX via the shared `parse_import_file`) and return `RoutingImportResponse`
-> (`app/schemas/routing_import.py`): `dry_run`, `total_rows`, `parts_detected`, `routings_created`,
-> `total_operations`, `skipped_count`, `created_ids[]`, `results[]`
-> (`RoutingImportRowResult`: `rows[]`, `part_number`, `routing_revision`, `routing_id` — `null` in
-> dry-run — `operation_count`, `total_setup_hours`, `total_run_hours_per_unit`, `status` — always
-> `"draft"`), and `errors[]` (`RoutingImportError`: `row`, `part_number`, `reason`). Columns (in
-> order): `part_number`, `routing_revision` (default `A`), `routing_description`, `sequence`
-> (int, **unique within a part**), `operation_name`, `work_center_code` (resolves to an **active**
-> work center), `setup_hours`, `run_hours_per_unit` (numeric, default 0), `description`,
+> **Routing import (CSV/XLSX).** Both endpoints are multipart uploads with two form fields:
+> `file` (the CSV or XLSX upload, via the shared `parse_import_file`) and an optional `assignments`
+> field. `assignments` is a **JSON string** mapping a source file **row number → `work_center_id`**
+> (e.g. `{"2": 5, "3": 5, "4": 7}`); keys and values must both be integers. Malformed JSON or
+> non-integer keys/values return **HTTP 400**. It supplies a work center for operations whose file
+> `work_center_code` is blank; preview accepts it too (to re-validate the UI's choices before
+> commit) but works with none.
+>
+> Both endpoints return `RoutingImportResponse` (`app/schemas/routing_import.py`): `dry_run`,
+> `total_rows`, `parts_detected`, `routings_created`, `total_operations`,
+> `operations_needing_work_center` (count of operations with no work center resolved yet),
+> `skipped_count`, `created_ids[]`, `results[]`, and `errors[]` (`RoutingImportError`: `row`,
+> `part_number`, `reason`). Each `results[]` entry (`RoutingImportRowResult`) carries `rows[]`,
+> `part_number`, `routing_revision`, `routing_id` (`null` in dry-run), `operation_count`,
+> `total_setup_hours`, `total_run_hours_per_unit`, `status` (always `"draft"`), and an
+> `operations[]` array of per-operation detail (`RoutingImportOperation`: `row`, `sequence`,
+> `operation_name`, `work_center_code` (`null` if blank), `work_center_id` (`null`),
+> `work_center_name` (`null`), `needs_work_center` (`true` when no valid work center is resolved
+> yet), `setup_hours`, `run_hours_per_unit`, `is_inspection_point`, `is_outside_operation`) — this
+> drives the wizard's per-operation work-center dropdown.
+>
+> Columns (in order): `part_number`, `routing_revision` (default `A`), `routing_description`,
+> `sequence` (int, **unique within a part**), `operation_name`, `work_center_code` (**OPTIONAL** —
+> see below), `setup_hours`, `run_hours_per_unit` (numeric, default 0), `description`,
 > `is_inspection_point`, `is_outside_operation` (`Y/N`/`true/false`, default false). Required per
-> row: `part_number`, `sequence`, `operation_name`, `work_center_code`.
+> row: `part_number`, `sequence`, `operation_name`.
+>
+> **`work_center_code` is optional.** A **blank/missing** code is **not** an error — it means
+> "assign the work center in the wizard after upload" (the operation comes back with
+> `needs_work_center: true`). A **non-blank** code must still resolve to an **active**,
+> tenant-scoped work center, or that row errors (likely a typo). On commit, each operation's work
+> center is resolved by precedence: (a) a valid file `work_center_code` wins, else (b) the
+> `assignments` entry for that operation's row (the assigned `work_center_id` must be an active,
+> tenant-scoped work center — unknown/cross-tenant/inactive errors that row). If **any** operation
+> in a routing still has no work center after assignments, that routing is reported in `errors[]`
+> (naming the unassigned rows) and is **NOT created** — no routing is ever created with an
+> unassigned operation. (Dry-run preview leaves unassigned operations as `needs_work_center` rather
+> than erroring.)
 >
 > Rows are grouped by `part_number` into **one draft routing each** (first-seen order). The part
 > must **pre-exist** and be a manufactured/assembly part, not soft-deleted — **parts are never
@@ -1445,12 +1471,15 @@ every created row):
 |--------|----------|------------------|---------------|
 | POST | `/work-orders/import` | `part_number`, `quantity` | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/import` | `vendor_code`, `part_number`, `quantity`, `unit_price` | Admin / Manager |
-| POST | `/routing/import/preview`, `/routing/import/commit` | `part_number`, `sequence`, `operation_name`, `work_center_code` | Admin / Manager / Supervisor |
+| POST | `/routing/import/preview`, `/routing/import/commit` | `part_number`, `sequence`, `operation_name` | Admin / Manager / Supervisor |
 
 > **Routing import** uses an explicit **preview/commit pair** (not a `dry_run` query param) and lives
-> under the Routing router — see [Routing](#routing) above for the column list, the
-> `RoutingImportResponse` shape, and the same-revision conflict rule. Its `routings` template is in
-> the templates index.
+> under the Routing router — see [Routing](#routing) above for the column list, the optional
+> `assignments` form field, the `RoutingImportResponse` shape (per-operation detail +
+> `operations_needing_work_center`), the optional `work_center_code` rule, and the same-revision
+> conflict rule. `work_center_code` is **optional** (blank = assign the work center in the wizard
+> after upload), so it's no longer in the required-columns set. Its `routings` template is in the
+> templates index.
 
 > **`dry_run=true` (all eight import endpoints).** Validates and previews with **zero writes** —
 > the migration imports run every row inside a SAVEPOINT that is rolled back (including audit rows

@@ -148,6 +148,27 @@ export interface ImportPreview {
 // POST /routing/import/commit return this identical shape, so the wizard can
 // reuse a single render path for the preview and the committed result.
 
+/**
+ * One operation row parsed from the upload, surfaced in the preview so the user
+ * can assign its work center. `work_center_id` is non-null when the file already
+ * carried a resolvable `work_center_code`; `needs_work_center` is true when the
+ * row has no work center yet and the user must pick one before commit.
+ */
+export interface RoutingImportOperation {
+  /** Source row number (1-based, header-relative) — the assignments map key. */
+  row: number;
+  sequence: number;
+  operation_name: string;
+  work_center_code: string | null;
+  work_center_id: number | null;
+  work_center_name: string | null;
+  needs_work_center: boolean;
+  setup_hours: number;
+  run_hours_per_unit: number;
+  is_inspection_point: boolean;
+  is_outside_operation: boolean;
+}
+
 /** One creatable routing grouped from the uploaded operation rows. */
 export interface RoutingImportResult {
   /** Source row numbers (1-based, header-relative) that fed this routing. */
@@ -160,6 +181,8 @@ export interface RoutingImportResult {
   total_setup_hours: number;
   total_run_hours_per_unit: number;
   status: 'draft';
+  /** Per-operation detail for the assignment step. */
+  operations: RoutingImportOperation[];
 }
 
 /** Row-level rejection. The whole routing the row belonged to is skipped. */
@@ -176,6 +199,8 @@ export interface RoutingImportResponse {
   routings_created: number;
   total_operations: number;
   skipped_count: number;
+  /** How many operations across all routings still lack a work center (initial state). */
+  operations_needing_work_center: number;
   created_ids: number[];
   results: RoutingImportResult[];
   errors: RoutingImportError[];
