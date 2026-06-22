@@ -537,6 +537,15 @@ def _parse_routing_assignments(raw: Optional[str]) -> Dict[int, int]:
         raise HTTPException(status_code=400, detail="assignments must be a JSON object mapping row -> work_center_id")
     assignments: Dict[int, int] = {}
     for key, value in decoded.items():
+        # Reject JSON booleans explicitly: ``int(True)`` is 1 and ``int(False)``
+        # is 0, so ``{"2": true}`` would silently become work_center_id=1 without
+        # this guard. (JSON object keys are always strings, but a bool key can
+        # still arrive if the payload was built oddly — reject it too.)
+        if isinstance(key, bool) or isinstance(value, bool):
+            raise HTTPException(
+                status_code=400,
+                detail="assignments keys (row numbers) and values (work_center_id) must be integers",
+            )
         try:
             row_number = int(key)
             work_center_id = int(value)
@@ -569,8 +578,10 @@ async def import_routings_preview(
     is_inspection_point, is_outside_operation (Y/N/true/false). Rows are grouped by part_number
     into one draft routing each; the part must already exist (manufactured/assembly).
 
-    The optional ``assignments`` form field (JSON: row number -> work_center_id) lets the UI
-    re-validate its chosen work centers before commit; preview works with no assignments too.
+    The optional ``assignments`` form field (JSON: row number -> work_center_id) carries the UI's
+    chosen work centers. An assignment is authoritative for its row: it OVERRIDES the file
+    ``work_center_code`` on that row (the file code is only a default that pre-fills the dropdown).
+    Preview works with no assignments too — it then resolves the file code so the UI pre-fills.
     The response returns per-operation detail so the UI can render a work-center dropdown per op.
     """
     parsed_assignments = _parse_routing_assignments(assignments)
@@ -609,9 +620,10 @@ async def import_routings_commit(
     created routing-by-routing (one bad routing never poisons the rest), with one audit_log
     CREATE per routing. Same columns/validation as /routing/import/preview.
 
-    Each operation's work center is resolved from a valid file ``work_center_code`` or, when blank,
-    the ``assignments`` form field (JSON: row number -> work_center_id). A routing with ANY operation
-    still missing a work center is reported in ``errors`` and is NOT created."""
+    Each operation's work center is resolved with the UI choice authoritative: an ``assignments``
+    entry for that row (JSON: row number -> work_center_id) wins and OVERRIDES the file
+    ``work_center_code``; otherwise a non-blank file ``work_center_code`` is used. A routing with ANY
+    operation still missing a work center is reported in ``errors`` and is NOT created."""
     parsed_assignments = _parse_routing_assignments(assignments)
     content = await file.read()
     try:

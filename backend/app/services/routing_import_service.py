@@ -12,11 +12,13 @@ turns it into draft routings. Concretely it:
   a preview is guaranteed to write nothing (including audit rows), while commit
   mode commits routing-by-routing so one bad routing never poisons the rest
   (same partial-success contract as the open-WO / open-PO migration loaders);
-* resolves each operation's work center from EITHER a non-blank file
-  ``work_center_code`` (which must match an active, tenant-scoped
-  :class:`~app.models.work_center.WorkCenter`) OR a user-supplied ``assignments``
-  map (source row number -> work_center_id). ``work_center_code`` is OPTIONAL: a
-  blank code means "assign in the UI after upload" and is NOT an error on preview;
+* resolves each operation's work center, with the user's UI choice authoritative:
+  a user-supplied ``assignments`` entry (source row number -> work_center_id)
+  OVERRIDES the file ``work_center_code`` on that row; otherwise a non-blank file
+  ``work_center_code`` is used (it must match an active, tenant-scoped
+  :class:`~app.models.work_center.WorkCenter`). ``work_center_code`` is OPTIONAL: a
+  blank code with no assignment means "assign in the UI after upload" and is NOT an
+  error on preview;
 * requires the part to PRE-EXIST and be a manufactured/assembly (engineering)
   part, not soft-deleted — it never creates parts;
 * refuses a duplicate part+revision (a routing already at that revision) and
@@ -209,32 +211,40 @@ def _resolve_operations(
 ) -> List[_ResolvedOperation]:
     """Resolve a final work center for each operation row.
 
+    The user's UI selection is authoritative: an explicit ``assignments`` entry
+    for a row always wins over the file ``work_center_code`` (the feature intent
+    is "let me always pick the work center after upload"). The file code is only
+    a default used to pre-fill the UI when the user hasn't chosen.
+
     Precedence per operation:
-      1. a NON-BLANK file ``work_center_code`` -> must resolve to an active,
-         tenant-scoped work center; an unresolvable code raises (likely a typo);
-      2. otherwise an ``assignments`` entry for that row -> the assigned id must
-         be an active, tenant-scoped work center; an unknown/cross-tenant/inactive
-         id raises;
+      1. an ``assignments`` entry for that row -> the assigned id must be an
+         active, tenant-scoped work center; an unknown/cross-tenant/inactive id
+         raises (overrides any file ``work_center_code`` on the same row);
+      2. otherwise a NON-BLANK file ``work_center_code`` -> must resolve to an
+         active, tenant-scoped work center; an unresolvable code raises (typo);
       3. otherwise the operation is left unresolved (``needs_work_center``).
+
+    A preview with no ``assignments`` still resolves the file code, so the UI
+    pre-fills from the file; only an explicit assignment overrides it.
     """
     resolved: List[_ResolvedOperation] = []
     for line in lines:
-        if line.work_center_code:
-            wc = _resolve_work_center_by_code(db, company_id, line.work_center_code)
-            if wc is None:
-                raise ValueError(
-                    f"work center '{line.work_center_code}' not found or inactive "
-                    f"(operation '{line.operation_name}', sequence {line.sequence})"
-                )
-            resolved.append(_ResolvedOperation(line=line, work_center_id=wc.id, work_center_name=wc.name))
-            continue
-
         assigned_id = assignments.get(line.row_number)
         if assigned_id is not None:
             wc = _resolve_work_center_by_id(db, company_id, assigned_id)
             if wc is None:
                 raise ValueError(
                     f"assigned work center id {assigned_id} not found or inactive "
+                    f"(operation '{line.operation_name}', sequence {line.sequence})"
+                )
+            resolved.append(_ResolvedOperation(line=line, work_center_id=wc.id, work_center_name=wc.name))
+            continue
+
+        if line.work_center_code:
+            wc = _resolve_work_center_by_code(db, company_id, line.work_center_code)
+            if wc is None:
+                raise ValueError(
+                    f"work center '{line.work_center_code}' not found or inactive "
                     f"(operation '{line.operation_name}', sequence {line.sequence})"
                 )
             resolved.append(_ResolvedOperation(line=line, work_center_id=wc.id, work_center_name=wc.name))
@@ -257,8 +267,9 @@ def import_routings(
     """Create draft routings (one per part) with their operations from a parsed upload.
 
     ``assignments`` maps a source file row number to a chosen ``work_center_id``;
-    it overlays operations whose file ``work_center_code`` is blank. On preview it
-    is optional (used to re-validate UI choices before commit); on commit any
+    an explicit entry is authoritative and OVERRIDES the file ``work_center_code``
+    on that row (the file code is only a default that pre-fills the UI). On preview
+    it is optional (used to re-validate UI choices before commit); on commit any
     operation still missing a work center makes its routing ERROR (not created).
     """
     # Lazy import: ``calculate_routing_totals`` lives with the routing router

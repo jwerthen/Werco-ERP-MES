@@ -532,7 +532,8 @@ class TestRoutingImportOptionalWorkCenter:
         _make_part(db_session, "RT-MIX", part_type="manufactured")
         db_session.commit()
 
-        # Row 2 resolves from the file code; row 3 is blank -> assigned in the UI.
+        # Row 2 resolves from the file code (no assignment); row 3 is blank ->
+        # assigned in the UI.
         csv_text = CSV_HEADER + ("RT-MIX,A,,10,Mill,FILE-WC,1,0.1,,N,N\n" "RT-MIX,A,,20,Deburr,,1,0.1,,N,N\n")
         response = client.post(
             COMMIT_URL,
@@ -546,6 +547,61 @@ class TestRoutingImportOptionalWorkCenter:
         ops = sorted(routing.operations, key=lambda op: op.sequence)
         assert ops[0].work_center_id == wc_file.id
         assert ops[1].work_center_id == wc_assigned.id
+
+    def test_commit_assignment_overrides_file_work_center_code(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """The user's UI selection is authoritative: an assignment on a row whose
+        file already carries a ``work_center_code`` OVERRIDES the file code."""
+        wc_file = _make_work_center(db_session, "FILE-OVR")
+        wc_assigned = _make_work_center(db_session, "UI-OVR")
+        _make_part(db_session, "RT-OVR", part_type="manufactured")
+        db_session.commit()
+
+        # Row 2 carries a VALID file code (FILE-OVR) AND an assignment to a
+        # different work center (UI-OVR). The assignment must win.
+        csv_text = CSV_HEADER + "RT-OVR,A,,10,Mill,FILE-OVR,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: wc_assigned.id}),
+        )
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        assert body["routings_created"] == 1
+        assert body["operations_needing_work_center"] == 0
+        assert body["errors"] == []
+
+        routing = db_session.query(Routing).filter_by(id=body["results"][0]["routing_id"]).one()
+        op = routing.operations[0]
+        # The committed op uses the ASSIGNED work center, NOT the file code's.
+        assert op.work_center_id == wc_assigned.id
+        assert op.work_center_id != wc_file.id
+
+    def test_assignment_overrides_even_unresolvable_file_code(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """An assignment wins before the file code is ever resolved, so a row with
+        a typo'd file code but an explicit assignment commits cleanly."""
+        wc_assigned = _make_work_center(db_session, "UI-WINS")
+        _make_part(db_session, "RT-TYPO", part_type="manufactured")
+        db_session.commit()
+
+        # Row 2's file code NO-SUCH-WC does not exist, but the user assigned a
+        # real work center -> the assignment wins, no row error.
+        csv_text = CSV_HEADER + "RT-TYPO,A,,10,Mill,NO-SUCH-WC,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            data=_assignments({2: wc_assigned.id}),
+        )
+        body = response.json()
+        assert body["routings_created"] == 1
+        assert body["errors"] == []
+        routing = db_session.query(Routing).filter_by(id=body["results"][0]["routing_id"]).one()
+        assert routing.operations[0].work_center_id == wc_assigned.id
 
     def test_commit_with_unassigned_operation_errors_and_creates_nothing(
         self, client: TestClient, auth_headers: dict, db_session: Session
@@ -626,6 +682,24 @@ class TestRoutingImportOptionalWorkCenter:
             data={"assignments": "{not valid json"},
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_boolean_assignment_value_is_a_400(self, client: TestClient, auth_headers: dict, db_session: Session):
+        """A JSON boolean value must be rejected: ``int(True)`` would silently
+        coerce ``{"2": true}`` to work_center_id=1."""
+        _make_part(db_session, "RT-BOOLASSIGN", part_type="manufactured")
+        db_session.commit()
+
+        csv_text = CSV_HEADER + "RT-BOOLASSIGN,A,,10,Mill,,1,0.1,,N,N\n"
+        response = client.post(
+            COMMIT_URL,
+            headers=auth_headers,
+            files=_csv_file(csv_text),
+            # Raw JSON with a boolean value (the _assignments helper would int-cast).
+            data={"assignments": '{"2": true}'},
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        # Nothing was created from the rejected request.
+        assert db_session.query(Routing).filter_by(company_id=1).count() == 0
 
 
 @pytest.mark.api

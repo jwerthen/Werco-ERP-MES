@@ -353,9 +353,11 @@ uploads go through text extraction + LLM. See
 > `file` (the CSV or XLSX upload, via the shared `parse_import_file`) and an optional `assignments`
 > field. `assignments` is a **JSON string** mapping a source file **row number → `work_center_id`**
 > (e.g. `{"2": 5, "3": 5, "4": 7}`); keys and values must both be integers. Malformed JSON or
-> non-integer keys/values return **HTTP 400**. It supplies a work center for operations whose file
-> `work_center_code` is blank; preview accepts it too (to re-validate the UI's choices before
-> commit) but works with none.
+> non-integer keys/values return **HTTP 400** — JSON booleans are rejected too (`{"2": true}` is a
+> 400, not silently coerced to `work_center_id: 1`). An `assignments` entry is **authoritative for
+> its row**: it supplies the work center for an operation whose file `work_center_code` is blank,
+> **and overrides** the file code on a row that has one. Preview accepts it too (to re-validate the
+> UI's choices before commit) but works with none.
 >
 > Both endpoints return `RoutingImportResponse` (`app/schemas/routing_import.py`): `dry_run`,
 > `total_rows`, `parts_detected`, `routings_created`, `total_operations`,
@@ -379,14 +381,17 @@ uploads go through text extraction + LLM. See
 > **`work_center_code` is optional.** A **blank/missing** code is **not** an error — it means
 > "assign the work center in the wizard after upload" (the operation comes back with
 > `needs_work_center: true`). A **non-blank** code must still resolve to an **active**,
-> tenant-scoped work center, or that row errors (likely a typo). On commit, each operation's work
-> center is resolved by precedence: (a) a valid file `work_center_code` wins, else (b) the
-> `assignments` entry for that operation's row (the assigned `work_center_id` must be an active,
-> tenant-scoped work center — unknown/cross-tenant/inactive errors that row). If **any** operation
-> in a routing still has no work center after assignments, that routing is reported in `errors[]`
-> (naming the unassigned rows) and is **NOT created** — no routing is ever created with an
-> unassigned operation. (Dry-run preview leaves unassigned operations as `needs_work_center` rather
-> than erroring.)
+> tenant-scoped work center, or that row errors (likely a typo). Each operation's work center is
+> resolved by precedence: (a) an `assignments` entry for that operation's row **wins and overrides
+> any file `work_center_code`** on that row (the assigned `work_center_id` must be an active,
+> tenant-scoped work center — unknown/cross-tenant/inactive errors that row); else (b) a non-blank
+> file `work_center_code` is resolved by code; else (c) the operation is left unassigned. The file
+> `work_center_code` is just a **default that pre-fills the wizard dropdown** — an explicit
+> assignment always overrides it. (A preview with no `assignments` still resolves the file code, so
+> the wizard pre-fills from the file.) If **any** operation in a routing still has no work center
+> after assignments, that routing is reported in `errors[]` (naming the unassigned rows) and is
+> **NOT created** — no routing is ever created with an unassigned operation. (Dry-run preview leaves
+> unassigned operations as `needs_work_center` rather than erroring.)
 >
 > Rows are grouped by `part_number` into **one draft routing each** (first-seen order). The part
 > must **pre-exist** and be a manufactured/assembly part, not soft-deleted — **parts are never
