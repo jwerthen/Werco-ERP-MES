@@ -38,6 +38,8 @@ interface RoutingOperation {
   run_hours_per_unit: number;
   move_hours: number;
   queue_hours: number;
+  cycle_time_seconds?: number | null;
+  pieces_per_cycle?: number | null;
   is_inspection_point: boolean;
   is_outside_operation: boolean;
   is_active: boolean;
@@ -131,6 +133,12 @@ export default function RoutingPage() {
   // Importing routings creates draft records — gate it to the same roles the
   // backend allows (ADMIN / MANAGER / SUPERVISOR all hold routings:create).
   const canImport = hasPermission(user?.role, 'routings:create');
+  // Editing a RELEASED routing's time standards is release-adjacent authority:
+  // the backend gates it to Admin/Manager (Supervisor 403'd) plus the
+  // platform_admin / superuser escalation. routings:release is held by exactly
+  // admin / manager / platform_admin, so mirror the server gate with it.
+  const canEditReleasedTimes =
+    hasPermission(user?.role, 'routings:release') || user?.is_superuser === true;
 
   const [routings, setRoutings] = useState<Routing[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
@@ -152,6 +160,8 @@ export default function RoutingPage() {
     run_hours_per_unit: 0,
     move_hours: 0,
     queue_hours: 0,
+    cycle_time_seconds: 0,
+    pieces_per_cycle: 1,
     is_inspection_point: false,
     is_outside_operation: false
   });
@@ -281,9 +291,23 @@ export default function RoutingPage() {
     e.preventDefault();
     if (!selectedRouting) return;
 
+    // A RELEASED routing only accepts time-standard edits. Send just those fields
+    // so an unchanged structural field can never trip the backend's 400 guard.
+    const releasedEdit = isReleasedEdit;
+
     try {
       if (editingOperation) {
-        await api.updateRoutingOperation(selectedRouting.id, editingOperation.id, newOperation);
+        const payload = releasedEdit
+          ? {
+              setup_hours: newOperation.setup_hours,
+              run_hours_per_unit: newOperation.run_hours_per_unit,
+              move_hours: newOperation.move_hours,
+              queue_hours: newOperation.queue_hours,
+              cycle_time_seconds: newOperation.cycle_time_seconds || null,
+              pieces_per_cycle: newOperation.pieces_per_cycle,
+            }
+          : newOperation;
+        await api.updateRoutingOperation(selectedRouting.id, editingOperation.id, payload);
       } else {
         await api.addRoutingOperation(selectedRouting.id, newOperation);
       }
@@ -292,7 +316,13 @@ export default function RoutingPage() {
       setEditingOperation(null);
       resetOperationForm();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save operation');
+      const status = err.response?.status;
+      if (status === 403) {
+        alert("You need the Admin or Manager role to edit a released routing's time standards.");
+      } else {
+        // 400 surfaces the server's "only time standards…" message; other codes fall back.
+        alert(err.response?.data?.detail || 'Failed to save operation');
+      }
     }
   };
 
@@ -348,6 +378,8 @@ export default function RoutingPage() {
       run_hours_per_unit: op.run_hours_per_unit,
       move_hours: op.move_hours,
       queue_hours: op.queue_hours,
+      cycle_time_seconds: op.cycle_time_seconds ?? 0,
+      pieces_per_cycle: op.pieces_per_cycle ?? 1,
       is_inspection_point: op.is_inspection_point,
       is_outside_operation: op.is_outside_operation
     });
@@ -367,6 +399,8 @@ export default function RoutingPage() {
       run_hours_per_unit: 0,
       move_hours: 0,
       queue_hours: 0,
+      cycle_time_seconds: 0,
+      pieces_per_cycle: 1,
       is_inspection_point: false,
       is_outside_operation: false
     });
@@ -568,6 +602,10 @@ export default function RoutingPage() {
     }
   };
 
+  // True when the open Add/Edit modal is editing an operation on a RELEASED
+  // routing — drives the time-standards-only modal variant and the save payload.
+  const isReleasedEdit = !!editingOperation && selectedRouting?.status === 'released';
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -684,6 +722,20 @@ export default function RoutingPage() {
                 </div>
               </div>
 
+              {/* Released routings: hairline policy note. Structural edits are
+                  blocked; only time standards can be adjusted as actuals come in. */}
+              {selectedRouting.status === 'released' && (
+                <div className="mb-4 flex items-start gap-2 border border-werco-primary/40 bg-werco-primary/5 px-3 py-2 text-xs text-slate-300">
+                  <CheckCircleIcon className="h-4 w-4 flex-shrink-0 mt-0.5 text-werco-primary" />
+                  <span>
+                    Released routing — process is locked.
+                    {canEditReleasedTimes
+                      ? ' Time standards (setup, run, move, queue, cycle) can be adjusted from each operation row; to change the process, create a new revision.'
+                      : ' Editing time standards requires the Admin or Manager role.'}
+                  </span>
+                </div>
+              )}
+
               {/* Totals Summary */}
               <div className="grid grid-cols-4 gap-4 mb-4">
                 <div className="bg-slate-800/50 rounded-lg p-3">
@@ -715,7 +767,8 @@ export default function RoutingPage() {
                       <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Setup</th>
                       <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Run/Unit</th>
                       <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Inspect</th>
-                      {selectedRouting.status === 'draft' && (
+                      {(selectedRouting.status === 'draft' ||
+                        (selectedRouting.status === 'released' && canEditReleasedTimes)) && (
                         <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
                       )}
                     </tr>
@@ -743,21 +796,37 @@ export default function RoutingPage() {
                               <CheckCircleIcon className="h-5 w-5 text-blue-500 mx-auto" />
                             )}
                           </td>
-                          {selectedRouting.status === 'draft' && (
+                          {selectedRouting.status === 'draft' ? (
                             <td className="px-4 py-3 text-center">
                               <button
                                 onClick={() => openEditOperation(op)}
                                 className="text-slate-500 hover:text-werco-primary mr-2"
+                                title="Edit operation"
                               >
                                 <PencilIcon className="h-5 w-5" />
                               </button>
                               <button
                                 onClick={() => handleDeleteOperation(op.id)}
                                 className="text-slate-500 hover:text-red-500"
+                                title="Delete operation"
                               >
                                 <TrashIcon className="h-5 w-5" />
                               </button>
                             </td>
+                          ) : (
+                            selectedRouting.status === 'released' && canEditReleasedTimes && (
+                              // Released: time standards only — no delete (structural change blocked).
+                              <td className="px-4 py-3 text-center">
+                                <button
+                                  onClick={() => openEditOperation(op)}
+                                  className="inline-flex items-center gap-1 text-slate-500 hover:text-werco-primary"
+                                  title="Edit time standards"
+                                >
+                                  <PencilIcon className="h-5 w-5" />
+                                  <span className="text-xs">Edit times</span>
+                                </button>
+                              </td>
+                            )
                           )}
                         </tr>
                       ))}
@@ -1289,58 +1358,88 @@ export default function RoutingPage() {
         size="lg"
       >
             <h3 className="text-lg font-semibold mb-4">
-              {editingOperation ? 'Edit Operation' : 'Add Operation'}
+              {isReleasedEdit ? 'Edit Time Standards' : editingOperation ? 'Edit Operation' : 'Add Operation'}
             </h3>
             <form onSubmit={handleAddOperation} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Sequence #</label>
-                  <input
-                    type="number"
-                    value={newOperation.sequence}
-                    onChange={(e) => setNewOperation({ ...newOperation, sequence: parseInt(e.target.value) })}
-                    className="input"
-                    step={10}
-                    required
-                  />
+              {isReleasedEdit && (
+                <div className="flex items-start gap-2 border border-werco-primary/40 bg-werco-primary/5 px-3 py-2 text-xs text-slate-300">
+                  <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0 mt-0.5 text-werco-primary" />
+                  <span>
+                    Released routing — only time standards are editable. To change the process
+                    (sequence, work center, instructions), create a new revision.
+                  </span>
                 </div>
-                <div>
-                  <label className="label">Work Center</label>
-                  <select
-                    value={newOperation.work_center_id}
-                    onChange={(e) => setNewOperation({ ...newOperation, work_center_id: parseInt(e.target.value) })}
-                    className="input"
-                    required
-                  >
-                    <option value={0}>Select...</option>
-                    {workCenters.map(wc => (
-                      <option key={wc.id} value={wc.id}>
-                        {wc.code} - {wc.name}
-                      </option>
-                    ))}
-                  </select>
+              )}
+              {isReleasedEdit && editingOperation && (
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-slate-500">Operation</div>
+                    <div className="font-medium">
+                      {editingOperation.operation_number} — {editingOperation.name}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-slate-500">Work Center</div>
+                    <div className="font-medium">
+                      {editingOperation.work_center?.code}
+                      {editingOperation.work_center?.name ? ` — ${editingOperation.work_center.name}` : ''}
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div>
-                <label className="label">Operation Name</label>
-                <input
-                  type="text"
-                  value={newOperation.name}
-                  onChange={(e) => setNewOperation({ ...newOperation, name: e.target.value })}
-                  className="input"
-                  placeholder="e.g., Cut to size, Weld assembly, Paint"
-                  required
-                />
-              </div>
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={newOperation.description}
-                  onChange={(e) => setNewOperation({ ...newOperation, description: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              )}
+              {!isReleasedEdit && (
+                <>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="label">Sequence #</label>
+                      <input
+                        type="number"
+                        value={newOperation.sequence}
+                        onChange={(e) => setNewOperation({ ...newOperation, sequence: parseInt(e.target.value) })}
+                        className="input"
+                        step={10}
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Work Center</label>
+                      <select
+                        value={newOperation.work_center_id}
+                        onChange={(e) => setNewOperation({ ...newOperation, work_center_id: parseInt(e.target.value) })}
+                        className="input"
+                        required
+                      >
+                        <option value={0}>Select...</option>
+                        {workCenters.map(wc => (
+                          <option key={wc.id} value={wc.id}>
+                            {wc.code} - {wc.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label">Operation Name</label>
+                    <input
+                      type="text"
+                      value={newOperation.name}
+                      onChange={(e) => setNewOperation({ ...newOperation, name: e.target.value })}
+                      className="input"
+                      placeholder="e.g., Cut to size, Weld assembly, Paint"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Description</label>
+                    <textarea
+                      value={newOperation.description}
+                      onChange={(e) => setNewOperation({ ...newOperation, description: e.target.value })}
+                      className="input"
+                      rows={2}
+                    />
+                  </div>
+                </>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="label">Setup Time</label>
@@ -1441,26 +1540,62 @@ export default function RoutingPage() {
                   </div>
                 </div>
               </div>
-              <div className="flex gap-6">
-                <label className="flex items-center">
+              {/* Machine cycle fields — time standards, editable on released routings too. */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Cycle Time</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      value={newOperation.cycle_time_seconds}
+                      onChange={(e) =>
+                        setNewOperation({ ...newOperation, cycle_time_seconds: parseFloat(e.target.value) || 0 })
+                      }
+                      className="input flex-1"
+                      step={1}
+                      min={0}
+                    />
+                    <span className="inline-flex items-center px-3 py-2 w-20 text-sm text-slate-400 border border-slate-700 rounded-lg bg-[#151b28]">
+                      sec
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  <label className="label">Pieces / Cycle</label>
                   <input
-                    type="checkbox"
-                    checked={newOperation.is_inspection_point}
-                    onChange={(e) => setNewOperation({ ...newOperation, is_inspection_point: e.target.checked })}
-                    className="mr-2"
+                    type="number"
+                    value={newOperation.pieces_per_cycle}
+                    onChange={(e) =>
+                      setNewOperation({ ...newOperation, pieces_per_cycle: parseInt(e.target.value) || 1 })
+                    }
+                    className="input"
+                    step={1}
+                    min={1}
                   />
-                  <span className="text-sm">Inspection Point</span>
-                </label>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    checked={newOperation.is_outside_operation}
-                    onChange={(e) => setNewOperation({ ...newOperation, is_outside_operation: e.target.checked })}
-                    className="mr-2"
-                  />
-                  <span className="text-sm">Outside Operation</span>
-                </label>
+                </div>
               </div>
+              {!isReleasedEdit && (
+                <div className="flex gap-6">
+                  <label className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={newOperation.is_inspection_point}
+                      onChange={(e) => setNewOperation({ ...newOperation, is_inspection_point: e.target.checked })}
+                      className="mr-2"
+                    />
+                    <span className="text-sm">Inspection Point</span>
+                  </label>
+                  <label className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={newOperation.is_outside_operation}
+                      onChange={(e) => setNewOperation({ ...newOperation, is_outside_operation: e.target.checked })}
+                      className="mr-2"
+                    />
+                    <span className="text-sm">Outside Operation</span>
+                  </label>
+                </div>
+              )}
               <div className="flex justify-end gap-3 pt-4">
                 <button
                   type="button"
@@ -1473,7 +1608,7 @@ export default function RoutingPage() {
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary">
-                  {editingOperation ? 'Update' : 'Add'} Operation
+                  {isReleasedEdit ? 'Save Time Standards' : `${editingOperation ? 'Update' : 'Add'} Operation`}
                 </button>
               </div>
             </form>
