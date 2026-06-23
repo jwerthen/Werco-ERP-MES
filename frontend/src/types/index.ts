@@ -157,15 +157,55 @@ export type OperationStatus = 'pending' | 'ready' | 'in_progress' | 'complete' |
 export interface LaserNestInfo {
   id: number;
   nest_name: string;
-  cnc_file_name: string;
+  // Nullable: manually-keyed nests have no uploaded CNC file.
+  cnc_file_name?: string | null;
   cnc_file_path?: string | null;
+  // Operator-/machine-facing program number (manual + imported nests).
+  cnc_number?: string | null;
   planned_runs: number;
   completed_runs: number;
   remaining_runs: number;
   material?: string | null;
   thickness?: string | null;
   sheet_size?: string | null;
+  // Optional attached reference PDF (served inline via GET /laser-nests/{id}/document).
+  document_id?: number | null;
+  has_document?: boolean;
+  document_file_name?: string | null;
 }
+
+/**
+ * Compact response for the manual-create / patch / attach-document /
+ * detach-document endpoints. Carries the backing operation id + status so the
+ * UI can immediately render the nest as a clock-in-able operation.
+ */
+export interface LaserNestManualResponse {
+  id: number;
+  nest_name: string;
+  cnc_number?: string | null;
+  planned_runs: number;
+  completed_runs: number;
+  remaining_runs: number;
+  material?: string | null;
+  thickness?: string | null;
+  sheet_size?: string | null;
+  work_order_operation_id?: number | null;
+  operation_status?: OperationStatus | null;
+  document_id?: number | null;
+  has_document?: boolean;
+  document_file_name?: string | null;
+}
+
+export interface LaserNestManualInput {
+  cnc_number: string;
+  planned_runs: number;
+  nest_name?: string;
+  material?: string;
+  thickness?: string;
+  sheet_size?: string;
+}
+
+export type LaserNestUpdateInput = Partial<LaserNestManualInput>;
 
 export interface WorkOrderSummary {
   id: number;

@@ -11,7 +11,14 @@ import {
   CustomerNameOption,
   CustomerStatsResponse,
 } from '../types/api';
-import { User, Part, WorkCenter } from '../types';
+import {
+  User,
+  Part,
+  WorkCenter,
+  LaserNestManualInput,
+  LaserNestManualResponse,
+  LaserNestUpdateInput,
+} from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
   AIInteractionEventInput,
@@ -806,6 +813,54 @@ class ApiService {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
+  }
+
+  // --- Manual laser nests + per-nest reference PDF -------------------------
+  // Manual create is scoped under the parent work order; the per-nest routes
+  // are addressed by nest id under the /laser-nests mount.
+
+  async createManualLaserNest(
+    workOrderId: number,
+    data: LaserNestManualInput
+  ): Promise<LaserNestManualResponse> {
+    const response = await this.api.post<LaserNestManualResponse>(
+      `/work-orders/${workOrderId}/laser-nests/manual`,
+      data
+    );
+    return response.data;
+  }
+
+  async updateLaserNest(laserNestId: number, data: LaserNestUpdateInput): Promise<LaserNestManualResponse> {
+    const response = await this.api.patch<LaserNestManualResponse>(`/laser-nests/${laserNestId}`, data);
+    return response.data;
+  }
+
+  async attachLaserNestDocument(laserNestId: number, documentId: number): Promise<LaserNestManualResponse> {
+    const response = await this.api.post<LaserNestManualResponse>(`/laser-nests/${laserNestId}/attach-document`, {
+      document_id: documentId,
+    });
+    return response.data;
+  }
+
+  async detachLaserNestDocument(laserNestId: number): Promise<LaserNestManualResponse> {
+    const response = await this.api.delete<LaserNestManualResponse>(`/laser-nests/${laserNestId}/document`);
+    return response.data;
+  }
+
+  async deleteLaserNest(laserNestId: number): Promise<{ message: string; id: number }> {
+    const response = await this.api.delete(`/laser-nests/${laserNestId}`);
+    return response.data;
+  }
+
+  /**
+   * Fetch the nest's attached PDF through the authenticated Axios client as a
+   * blob and return a same-origin object URL suitable for an <iframe>/<object>
+   * src. The endpoint requires the JWT, so a bare `src="/api/..."` would NOT
+   * send the auth header — callers must use this and revoke the URL when done.
+   */
+  async fetchLaserNestDocument(laserNestId: number): Promise<string> {
+    const response = await this.api.get(`/laser-nests/${laserNestId}/document`, { responseType: 'blob' });
+    return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
   }
 
   async getWorkOrderBlockers(params?: {

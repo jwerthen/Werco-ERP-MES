@@ -1,6 +1,7 @@
 import React from 'react';
 import { PlusCircleIcon, CheckCircleIcon, PauseCircleIcon } from '@heroicons/react/24/solid';
 import { ActiveJob } from '../../types';
+import LaserNestOperatorPanel from '../laser/LaserNestOperatorPanel';
 
 interface KioskActiveJobBannerProps {
   job: ActiveJob;
@@ -57,6 +58,12 @@ export default function KioskActiveJobBanner({ job, nowMs, busy, onReportProduct
           {formatElapsed(job.clock_in, nowMs)}
         </div>
       </div>
+
+      {job.laser_nest && (
+        <div className="mt-4">
+          <LaserNestOperatorPanel nest={job.laser_nest} size="kiosk" />
+        </div>
+      )}
 
       <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <button

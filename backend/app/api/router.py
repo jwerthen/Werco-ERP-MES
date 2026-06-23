@@ -25,6 +25,7 @@ from app.api.endpoints import (
     integrations,
     inventory,
     job_costing,
+    laser_nests,
     maintenance,
     materials,
     mrp,
@@ -77,6 +78,7 @@ api_router.include_router(mrp.router, prefix="/mrp", tags=["Material Requirement
 api_router.include_router(quality.router, prefix="/quality", tags=["Quality Management"])
 api_router.include_router(custom_fields.router, prefix="/custom-fields", tags=["Custom Fields"])
 api_router.include_router(work_orders.router, prefix="/work-orders", tags=["Work Orders"])
+api_router.include_router(laser_nests.router, prefix="/laser-nests", tags=["Laser Nests"])
 api_router.include_router(work_order_blockers.router, prefix="/work-order-blockers", tags=["Work Order Blockers"])
 api_router.include_router(shop_floor.router, prefix="/shop-floor", tags=["Shop Floor"])
 api_router.include_router(purchasing.router, prefix="/purchasing", tags=["Purchasing"])

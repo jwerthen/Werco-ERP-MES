@@ -22,6 +22,7 @@ import KioskActiveJobBanner from '../components/kiosk/KioskActiveJobBanner';
 import KioskQueueCard from '../components/kiosk/KioskQueueCard';
 import KioskQuantityScreen from '../components/kiosk/KioskQuantityScreen';
 import KioskReasonGrid from '../components/kiosk/KioskReasonGrid';
+import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import { HOLD_REASONS, KIOSK_SOURCE, KioskQueueItem, kioskErrorMessage } from '../components/kiosk/kioskConstants';
 
 const POLL_INTERVAL_MS = 15_000;
@@ -424,6 +425,11 @@ export default function OperatorKiosk() {
               <p className="mt-3 font-mono text-2xl text-fd-body">
                 {Number(view.item.quantity_complete || 0)} / {Number(view.item.quantity_ordered || 0)} pcs
               </p>
+              {view.item.laser_nest && (
+                <div className="mt-4">
+                  <LaserNestOperatorPanel nest={view.item.laser_nest} size="kiosk" />
+                </div>
+              )}
             </div>
             <div className="mt-5 grid grid-cols-2 gap-3">
               <button

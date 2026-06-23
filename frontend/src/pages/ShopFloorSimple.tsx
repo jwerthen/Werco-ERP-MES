@@ -27,6 +27,7 @@ import {
   CubeIcon,
 } from '@heroicons/react/24/solid';
 import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
+import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 import { ScanResolveResult } from '../types/scan';
 
@@ -190,6 +191,7 @@ export default function ShopFloorSimple() {
           requires_inspection: false,
           can_check_in: item.can_check_in,
           blocked_by_previous_operations: item.blocked_by_previous_operations,
+          laser_nest: item.laser_nest,
         }));
       }
 
@@ -1451,20 +1453,8 @@ export default function ShopFloorSimple() {
                     </p>
                   )}
                   {op.laser_nest && (
-                    <div className="mt-2 rounded border border-red-500/20 bg-red-500/10 px-2 py-1.5 text-xs text-red-100">
-                      <div className="font-semibold text-red-200">{op.laser_nest.nest_name}</div>
-                      <div className="mt-1 grid grid-cols-1 gap-1 text-red-100/80">
-                        <span>CNC: {op.laser_nest.cnc_file_name}</span>
-                        <span>
-                          Runs: {op.laser_nest.completed_runs} / {op.laser_nest.planned_runs}
-                          {op.laser_nest.remaining_runs > 0 ? ` (${op.laser_nest.remaining_runs} left)` : ''}
-                        </span>
-                        {(op.laser_nest.material || op.laser_nest.thickness || op.laser_nest.sheet_size) && (
-                          <span>
-                            {[op.laser_nest.material, op.laser_nest.thickness, op.laser_nest.sheet_size].filter(Boolean).join(' • ')}
-                          </span>
-                        )}
-                      </div>
+                    <div className="mt-2">
+                      <LaserNestOperatorPanel nest={op.laser_nest} size="compact" />
                     </div>
                   )}
                 </div>

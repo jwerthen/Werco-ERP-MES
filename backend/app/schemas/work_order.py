@@ -70,17 +70,77 @@ class WorkOrderOperationBase(BaseModel):
 class LaserNestOperationInfo(BaseModel):
     id: int
     nest_name: str
-    cnc_file_name: str
+    # NULLABLE: manual nests have no uploaded CNC file (cnc_file_name IS NULL).
+    cnc_file_name: Optional[str] = None
     cnc_file_path: Optional[str] = None
+    # Operator-/machine-facing program number (manual + imported).
+    cnc_number: Optional[str] = None
     planned_runs: int
     completed_runs: float
     remaining_runs: float = 0.0
     material: Optional[str] = None
     thickness: Optional[str] = None
     sheet_size: Optional[str] = None
+    # Optional reference PDF attached via the Document model. has_document /
+    # document_file_name are NOT ORM columns -- they are injected as in-memory
+    # attrs on the nest in the work-order enrich step before validation.
+    document_id: Optional[int] = None
+    has_document: bool = False
+    document_file_name: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class LaserNestManualCreate(BaseModel):
+    """Request body for manually keying one laser nest onto an assembly WO."""
+
+    cnc_number: str = Field(..., min_length=1, max_length=100, description="CNC program number")
+    planned_runs: int = Field(..., ge=1, description="Planned sheet runs")
+    nest_name: Optional[str] = Field(None, max_length=255)
+    material: Optional[str] = Field(None, max_length=100)
+    thickness: Optional[str] = Field(None, max_length=50)
+    sheet_size: Optional[str] = Field(None, max_length=100)
+
+
+class LaserNestUpdate(BaseModel):
+    """Partial update for a manual laser nest. All fields optional."""
+
+    cnc_number: Optional[str] = Field(None, min_length=1, max_length=100)
+    nest_name: Optional[str] = Field(None, max_length=255)
+    planned_runs: Optional[int] = Field(None, ge=1)
+    material: Optional[str] = Field(None, max_length=100)
+    thickness: Optional[str] = Field(None, max_length=50)
+    sheet_size: Optional[str] = Field(None, max_length=100)
+
+
+class LaserNestAttachDocument(BaseModel):
+    """Attach an already-uploaded PDF Document to a nest by id."""
+
+    document_id: int = Field(..., gt=0)
+
+
+class LaserNestManualResponse(BaseModel):
+    """Compact response for create/patch/attach/detach on a manual nest.
+
+    Carries the created nest id AND its backing operation (id + status) so the
+    frontend can immediately render the nest as a clock-in-able operation.
+    """
+
+    id: int
+    nest_name: str
+    cnc_number: Optional[str] = None
+    planned_runs: int
+    completed_runs: float
+    remaining_runs: float = 0.0
+    material: Optional[str] = None
+    thickness: Optional[str] = None
+    sheet_size: Optional[str] = None
+    work_order_operation_id: Optional[int] = None
+    operation_status: Optional[OperationStatus] = None
+    document_id: Optional[int] = None
+    has_document: bool = False
+    document_file_name: Optional[str] = None
 
 
 class WorkOrderOperationCreate(WorkOrderOperationBase):

@@ -209,6 +209,68 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 }
 ```
 
+### Laser Nests
+
+Laser nests are the per-sheet laser-cutting tasks on the **child laser work order** of an
+assembly WO. Each nest is backed by a clock-in-able `LASER` operation. There are two ways to
+create nests, and per the product decision they are used **one or the other per job — never
+mixed**:
+
+1. **Package import** — upload a zipped Ermaksan/CNC package (or point at a server folder) and
+   the system extracts one nest per CNC file. (Mounted under `/work-orders/{id}/laser-nest-packages/…`.)
+2. **Manual entry** — key one nest at a time, with an optional reference PDF. (The `…/manual`
+   create lives under work orders; per-nest edit/delete/PDF routes live under `/laser-nests/{id}/…`.)
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package or server folder (writes nothing) | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates the child laser WO and one nest operation per CNC file | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to an assembly WO. Creates a clock-in-able `LASER` operation on the child laser WO | Admin / Manager / Supervisor |
+| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional) | Admin / Manager / Supervisor |
+| POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
+| DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact) | Admin / Manager / Supervisor |
+| GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
+| DELETE | `/laser-nests/{id}` | Soft-delete the nest; its operation goes `ON_HOLD` | Admin / Manager / Supervisor |
+
+> **Package import replaces everything (`POST …/laser-nest-packages/import`).** Importing a
+> package **replaces all existing nests on the child laser WO — including any manually-entered
+> ones** — rebuilding the nest operations from the package plan. This is by design (manual *or*
+> import per job, never mixed); an import is authoritative and supersedes prior manual entry.
+>
+> **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
+> (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
+> `material`, `thickness`, `sheet_size`. Resolves (or creates) the child laser WO and an active
+> laser work center — **400** if no active laser work center exists. The first nest on the child
+> is created **READY** (clock-in-able now); subsequent nests are **PENDING**. This is a standalone
+> creation path that **does not change** the package-import behavior. Returns **201** with the new
+> nest plus its backing operation (`work_order_operation_id`, `operation_status`).
+>
+> **Manual nest edit (`PATCH /laser-nests/{id}`).** All-optional body (`cnc_number`, `nest_name`,
+> `planned_runs`, `material`, `thickness`, `sheet_size`). A `planned_runs` change **reverse-syncs**
+> the operation's `component_quantity` and re-derives the child laser WO's `quantity_ordered` over
+> its non-deleted nests. Lowering `planned_runs` below `completed_runs` is allowed (over-run is
+> acceptable); only the schema's `ge=1` floor applies.
+>
+> **Reference PDF (attach / detach / preview).** The attached PDF is a plain **shop-reference
+> drawing** — optional, with **no approval workflow**, and it **never gates clock-in**. Attach
+> references a Document already uploaded via `POST /documents/upload`; non-PDF documents are
+> rejected with **400**. `GET /laser-nests/{id}/document` serves it `Content-Type: application/pdf`,
+> `Content-Disposition: inline` so the kiosk/operator station can preview it; **404** if none is
+> attached. Detach only clears the FK — the Document row and its stored bytes survive.
+>
+> **Soft delete (`DELETE /laser-nests/{id}`).** Soft-deletes the nest (`SoftDeleteMixin`; never a
+> hard delete) and sets its operation to **`ON_HOLD`**, which removes it from the operator/work-center
+> queue and the child WO's quantity rollup. Soft-deleted nests are filtered out of `WorkOrderResponse`
+> operations, the operator queue, and the quantity rollup.
+>
+> **Compliance.** All of these writes are **tenant-scoped** by `company_id` (a cross-tenant or
+> soft-deleted id returns **404**) and recorded in the tamper-evident audit trail (`GET /audit/`)
+> via `AuditService` — create/edit/attach/detach as updates, delete as a soft-delete record.
+>
+> **`LaserNestOperationInfo` (embedded in `WorkOrderResponse` operations) gained fields:**
+> `cnc_number`, `document_id`, `has_document` (bool), and `document_file_name`. `cnc_file_name`
+> is now **nullable** — a manual nest has no uploaded CNC file.
+
 ### Parts
 
 | Method | Endpoint | Description | Auth Required |

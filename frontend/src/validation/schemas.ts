@@ -310,9 +310,47 @@ export const vendorSchema = z.object({
 });
 
 // ============================================================================
+// LASER NEST (manual entry)
+// ============================================================================
+
+// Mirrors backend LaserNestManualCreate / LaserNestUpdate constraints
+// (cnc_number 1..100, planned_runs >= 1 int, optional descriptors). Optional
+// descriptors are coerced to undefined when blank so a cleared field PATCHes
+// as "unset" rather than an empty string.
+const optionalTrimmed = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .optional()
+    .transform((v) => {
+      const trimmed = v?.trim();
+      return trimmed ? trimmed : undefined;
+    });
+
+export const laserNestManualSchema = z.object({
+  cnc_number: z
+    .string()
+    .trim()
+    .min(1, 'CNC number is required')
+    .max(100, 'CNC number must be at most 100 characters'),
+  planned_runs: z.coerce
+    .number({ error: 'Enter a number' })
+    .int('Whole sheets only')
+    .min(1, 'At least 1 run'),
+  nest_name: optionalTrimmed(255),
+  material: optionalTrimmed(100),
+  thickness: optionalTrimmed(50),
+  sheet_size: optionalTrimmed(100),
+});
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
+// Output (post-coercion: planned_runs is a number, optional fields are string|undefined).
+export type LaserNestManualFormData = z.output<typeof laserNestManualSchema>;
+// Input (what the form fields hold before coercion: planned_runs may be a string).
+export type LaserNestManualFormInput = z.input<typeof laserNestManualSchema>;
 export type PartFormData = z.infer<typeof partSchema>;
 export type WorkOrderFormData = z.infer<typeof workOrderSchema>;
 export type WorkOrderOperationFormData = z.infer<typeof workOrderOperationSchema>;
