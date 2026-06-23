@@ -136,6 +136,20 @@ def calculate_routing_totals(routing: Routing, db: Session):
     routing.total_overhead_cost = total_overhead
 
 
+# Time-standard fields editable on a RELEASED routing operation. Structural / process-definition
+# fields (work center, instructions, sequence, inspection flags) remain locked once released --
+# changing them requires a new revision. The frontend contracts against the released-edit error
+# message below, so keep that string stable.
+TIME_STANDARD_FIELDS = {
+    "setup_hours",
+    "run_hours_per_unit",
+    "move_hours",
+    "queue_hours",
+    "cycle_time_seconds",
+    "pieces_per_cycle",
+}
+
+
 ALLOWED_DRAWING_EXTENSIONS = {".pdf", ".dxf", ".step", ".stp"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
@@ -821,6 +835,7 @@ def release_routing(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Release a routing for production use"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -837,6 +852,14 @@ def release_routing(
     routing.effective_date = datetime.utcnow()
     routing.approved_by = current_user.id
     routing.approved_at = datetime.utcnow()
+
+    audit.log_status_change(
+        "routing",
+        routing.id,
+        routing.revision or str(routing.id),
+        old_status="draft",
+        new_status="released",
+    )
 
     db.commit()
 
@@ -879,6 +902,7 @@ def add_operation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Add an operation to a routing"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -924,6 +948,13 @@ def add_operation(
         .first()
     )
 
+    audit.log_create(
+        "routing_operation",
+        operation.id,
+        operation.operation_number or operation.name or str(operation.id),
+        new_values=operation,
+    )
+
     return operation
 
 
@@ -935,14 +966,21 @@ def update_operation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update an operation"""
+    """Update an operation.
+
+    On a DRAFT routing every field is editable (Admin/Manager/Supervisor). On a RELEASED routing
+    only time standards (setup/run/move/queue/cycle time, pieces per cycle) may be edited, and only
+    by Admin/Manager (a Supervisor on the released-edit path gets 403) -- changing the process
+    definition (work center, instructions, sequence, inspection flags) requires a new revision.
+    A successful released time-standard edit re-stamps the routing's approval signature
+    (approved_by/approved_at); draft edits do not. An OBSOLETE routing is fully locked. Every
+    applied change is audit-logged.
+    """
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
     if not routing:
         raise HTTPException(status_code=404, detail="Routing not found")
-
-    if routing.status == "released":
-        raise HTTPException(status_code=400, detail="Cannot modify released routing")
 
     operation = (
         db.query(RoutingOperation)
@@ -955,7 +993,40 @@ def update_operation(
 
     update_data = operation_in.model_dump(exclude_unset=True)
 
-    # Verify work center if changing
+    # Only fields present in the payload AND different from the current value count as changes.
+    changed_fields = {f for f, v in update_data.items() if getattr(operation, f) != v}
+
+    # Status gate -- evaluate BEFORE mutating the operation.
+    if routing.status == "obsolete":
+        raise HTTPException(status_code=400, detail="Cannot modify an obsolete routing")
+    if routing.status == "released":
+        # Editing time standards on a RELEASED routing is release-adjacent authority
+        # (it changes the live production content). Routing Release is Admin/Manager only
+        # (Supervisor excluded) per docs/RBAC_PERMISSIONS.md, so gate the released-edit path to
+        # the same set even though the decorator-level require_role admits SUPERVISOR for drafts.
+        # Platform-admin / superuser bypass mirrors require_role's own escalation behavior so the
+        # released-edit path is no stricter than the /release endpoint it shadows.
+        privileged = current_user.is_superuser or current_user.role == UserRole.PLATFORM_ADMIN
+        if not privileged and current_user.role not in (UserRole.ADMIN, UserRole.MANAGER):
+            raise HTTPException(
+                status_code=403,
+                detail="Editing a released routing's time standards requires the Admin or Manager role.",
+            )
+        non_time = changed_fields - TIME_STANDARD_FIELDS
+        if non_time:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Released routing: only time standards (setup, run/unit, move, queue, cycle) "
+                    "can be edited — create a new revision to change the process."
+                ),
+            )
+    # draft routings proceed with all fields applied.
+
+    # Snapshot old values for the changed fields before mutating, for the audit trail.
+    old_values = {f: getattr(operation, f) for f in changed_fields}
+
+    # Verify work center if changing (only reachable on draft -- released would have 400'd above).
     if "work_center_id" in update_data:
         work_center = (
             db.query(WorkCenter)
@@ -973,6 +1044,23 @@ def update_operation(
 
     # Recalculate totals
     calculate_routing_totals(routing, db)
+
+    if changed_fields:
+        audit.log_update(
+            "routing_operation",
+            operation.id,
+            operation.operation_number or operation.name or str(operation.id),
+            old_values=old_values,
+            new_values={f: update_data[f] for f in changed_fields},
+        )
+
+        # Re-stamp the routing's approval signature when live (released) content is edited in
+        # place, so it reflects who last changed the production time standards. The original
+        # release date (effective_date) and the revision letter stay put -- this is an in-place
+        # edit, not a new revision. Draft edits do NOT re-stamp (the routing is not yet approved).
+        if routing.status == "released":
+            routing.approved_by = current_user.id
+            routing.approved_at = datetime.utcnow()
 
     db.commit()
 
@@ -993,6 +1081,7 @@ def delete_operation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Delete an operation from a routing"""
     routing = db.query(Routing).filter(Routing.id == routing_id, Routing.company_id == company_id).first()
@@ -1010,6 +1099,12 @@ def delete_operation(
 
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
+
+    # Audit the hard delete (RoutingOperation has no SoftDeleteMixin) before removing the row.
+    # log_delete serializes the model immediately, so passing the live instance captures its
+    # full old state while it is still attached.
+    op_identifier = operation.operation_number or operation.name or str(operation.id)
+    audit.log_delete("routing_operation", operation.id, op_identifier, old_values=operation, soft_delete=False)
 
     db.delete(operation)
 

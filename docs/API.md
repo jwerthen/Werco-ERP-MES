@@ -346,8 +346,30 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/` | Create routing | Yes |
 | GET | `/routing/{id}` | Get routing by ID | Yes |
 | PUT | `/routing/{id}` | Update routing | Yes |
+| POST | `/routing/{id}/release` | Release a draft routing for production (status → `released`, stamps `approved_by`/`approved_at`/`effective_date`) | Admin / Manager |
+| POST | `/routing/{id}/operations` | Add an operation (**400** on a released routing) | Admin / Manager / Supervisor |
+| PUT | `/routing/{id}/operations/{operation_id}` | Update an operation — draft: all fields; released: **time standards only** (see note) | Admin / Manager / Supervisor (released-routing edits: Admin / Manager) |
+| DELETE | `/routing/{id}/operations/{operation_id}` | Delete an operation (**400** on a released routing) | Admin / Manager / Supervisor |
+| POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing) | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
+
+> **Editing a RELEASED routing's operations — time standards only (`feat/routing-editable-time-standards`).**
+> A released routing's manufacturing **process** is frozen on release: `PUT /routing/{id}/operations/{operation_id}`
+> (`update_operation`) accepts in-place edits only to the **time-standard** fields — `setup_hours`,
+> `run_hours_per_unit`, `move_hours`, `queue_hours`, `cycle_time_seconds`, `pieces_per_cycle`. Any
+> other changed field on a released routing returns **400** (*"Released routing: only time standards
+> (setup, run/unit, move, queue, cycle) can be edited — create a new revision to change the
+> process."*) — change the work center, instructions, sequence, inspection points, or the set of
+> operations by creating a **new revision** instead. Adding / deleting / reordering operations on a
+> released routing also returns **400**; an **obsolete** routing is fully locked (**400**). The
+> released-edit path is gated **in code** to **Admin / Manager** — a **Supervisor** receives **403**
+> (*"Editing a released routing's time standards requires the Admin or Manager role."*), matching the
+> `/release` role set (superuser / Platform Admin bypass). On a **draft** routing every field is
+> editable by Admin / Manager / Supervisor. Every applied change writes a tamper-evident `audit_log`
+> UPDATE (old→new values); a successful **released** time-standard edit also re-stamps
+> `routing.approved_by` / `approved_at` (the editor / now), leaving `effective_date` and the revision
+> letter unchanged. See [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Routings.
 
 > **Routing import (CSV/XLSX).** Both endpoints are multipart uploads with two form fields:
 > `file` (the CSV or XLSX upload, via the shared `parse_import_file`) and an optional `assignments`

@@ -98,9 +98,27 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
-| Edit | ✓ | ✓ | ✓ | | | | |
+| Edit (draft routing) | ✓ | ✓ | ✓ | | | | |
+| Edit time standards (released routing) | ✓ | ✓ | | | | | |
 | Delete | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | | | | | |
+
+> **Edit row splits by routing status — endpoint mapping (`feat/routing-editable-time-standards`).**
+> `PUT /api/v1/routing/{routing_id}/operations/{operation_id}` (`update_operation`,
+> `app/api/endpoints/routing.py`) carries the decorator-level
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` — the **Edit (draft routing)** row, where every
+> operation field is editable. On a **released** routing the same endpoint allows in-place edits to
+> **time standards only** (`setup_hours`, `run_hours_per_unit`, `move_hours`, `queue_hours`,
+> `cycle_time_seconds`, `pieces_per_cycle`) and gates that path **in code** to **Admin / Manager**
+> only — a **Supervisor** hitting the released-edit path receives **403**
+> (*"Editing a released routing's time standards requires the Admin or Manager role."*). This mirrors
+> **Release** (also Admin/Manager-only): editing live released content is release-adjacent authority,
+> so it is held to the release role set rather than the broader draft-edit set. Changing any
+> non-time-standard (process) field on a released routing returns **400** (create a new revision
+> instead); an **obsolete** routing is fully locked (**400**). Adding/deleting/reordering operations
+> on a released routing also returns **400** (process is frozen on release). Superuser / Platform
+> Admin bypass role checks, as elsewhere. Every applied change is tamper-evidently audit-logged; see
+> [docs/CMMC_LEVEL_2_COMPLIANCE.md](CMMC_LEVEL_2_COMPLIANCE.md) → CONFIGURATION MANAGEMENT (CM).
 
 ### Inventory
 

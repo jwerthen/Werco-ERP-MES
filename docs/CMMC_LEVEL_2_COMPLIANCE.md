@@ -262,6 +262,42 @@
   frontend bundle` in `deploy-frontend-production.yml`). Repo admins hold a documented
   break-glass bypass for emergencies; rollback is redeploying a known-good commit (or
   re-adding the reviewer rule). See `docs/CI_CD_SETUP.md` and `docs/DEPLOYMENT_RUNBOOK.md`.
+- [x] Change control over **released manufacturing routings** — "Proportionate (audit-trail)"
+  posture (CM-3.4.1 / CM-3.4.2 baseline + change restriction, AS9100D 8.5.1 control of production,
+  `feat/routing-editable-time-standards`). A routing is a controlled production baseline: once
+  **released**, its manufacturing **process** — operation sequence, work center, work/inspection
+  instructions, inspection points, and the set of operations (add/delete/reorder) — is **frozen** and
+  can only change by creating a **new revision**, preserving the historical baseline (see the
+  traceability/revision invariant in `CLAUDE.md`). The one sanctioned in-place change is to
+  **time standards** (the editable set `TIME_STANDARD_FIELDS`: `setup_hours`, `run_hours_per_unit`,
+  `move_hours`, `queue_hours`, `cycle_time_seconds`, `pieces_per_cycle`), which are estimating/cost
+  inputs, not the process definition. `PUT /api/v1/routing/{routing_id}/operations/{operation_id}`
+  (`update_operation`, `app/api/endpoints/routing.py`) enforces this:
+  - **Change restriction.** On a released routing, any changed field outside `TIME_STANDARD_FIELDS`
+    returns **400** (*"Released routing: only time standards (setup, run/unit, move, queue, cycle)
+    can be edited — create a new revision to change the process."*). Adding, deleting, or reordering
+    operations on a released routing likewise returns **400**. An **obsolete** routing is fully
+    locked (all edits **400**).
+  - **Least-privilege on released edits (AC-3.1.5).** Draft-routing edits are
+    **Admin / Manager / Supervisor**; released time-standard edits are gated **in code** to
+    **Admin / Manager only** (Supervisor → **403**), because editing live released content is
+    release-adjacent authority and routing **Release** is itself Admin/Manager-only. Superuser /
+    Platform Admin bypass mirrors the rest of the system. See `docs/RBAC_PERMISSIONS.md` → Routings.
+  - **Tamper-evident change record (AU-3.3.1).** Every applied change is recorded on the
+    `audit_log` hash chain — who / when / old→new values — via `AuditService.log_update` for
+    operation edits, with `log_create` / `log_delete` on add/delete operation and
+    `log_status_change` on release. The audit trail is the system of record for who-changed-what-when
+    on time standards.
+  - **Approval re-stamp.** A successful released time-standard edit re-stamps the routing's approval
+    signature (`approved_by` = the editor, `approved_at` = now) so the live baseline reflects who
+    last changed the production time standards; the original release date (`effective_date`) and the
+    revision letter are **left unchanged** (an in-place edit, not a new revision). Draft edits do
+    **not** re-stamp approval (the routing is not yet approved).
+  - **Accepted residual.** Under the Proportionate posture there is **no per-operation history table**
+    and **no optimistic-lock / version column** on routing operations — the tamper-evident `audit_log`
+    is the sole history of record for time-standard changes, and concurrent released edits are
+    last-write-wins rather than 409-guarded. This is an accepted limitation for this control, not an
+    open gap.
 
 **GAPS:**
 - [ ] **CM-3.4.3 - Track Configuration Changes**
@@ -676,6 +712,7 @@ Backend:
 | 2026-06-18 | SC-3.13.1 (carrier-shipping egress kill switch): catalogued the **per-company, default-off** outbound-egress control `allow_carrier_egress` on `CompanyShippingProfile` (`company_shipping_profiles`, `nullable=False, default=False, server_default="false"`) — requires explicit human opt-in before any customer address/parcel data leaves the boundary for EasyPost; `ShippingService._require_egress` gates every outbound carrier call (validate/rate/buy-label/freight-BOL/pickup/void) and the tracking-poll job re-checks it (no provider call when OFF); flag flips are tamper-evidently audit-logged as a status change. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/SHIPPING_CARRIER_INTEGRATION.md` | Claude |
 | 2026-06-18 | SC-3.13.1 (thermal-label print egress kill switch): catalogued the **per-company, default-off** outbound-egress control `allow_print_egress` on `CompanyPrintProfile` (`company_print_profiles`, `nullable=False, default=False, server_default="false"`) — requires explicit human opt-in before a rendered label (part number, lot/heat/serial, critical-characteristic marker) is transmitted to the pbxz.io ProxyBox cloud relay; both the request path (`PrintService._require_egress`) and the auto-print ARQ job (`app/jobs/label_jobs.py`) gate on it (no outbound call when OFF); flag flips are tamper-evidently audit-logged as a status change. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/THERMAL_LABEL_PRINTING.md` | Claude |
 | 2026-06-22 | CM-3 (deploy governance reframe): the manual production-deployment approval gate was **removed** — the `production` GitHub environment no longer carries a required-reviewer rule, and production **auto-deploys from `main`**. Change control is now enforced by a **`main` repository ruleset** (PR required before merge, required CI status checks must pass, force-push/branch-deletion blocked, **0 human approvals** — merge-when-green, with documented repo-admin break-glass bypass), plus deploy-time compensating controls: a deployment-branch policy permitting only `main` to deploy, and post-deploy health checks that fail the job on a bad deploy (`Verify Production Deployment` / `Verify deployment serves the Vite frontend bundle`). Rollback = redeploy a known-good commit or re-add the reviewer rule. CM-3.4.3 remains a partial gap (covers application/source changes via CI-passed PRs, not out-of-repo infrastructure changes); stated as *tested-before-merge*, not peer-reviewed. Documentation-only — describes the live config, control reframed accurately not overstated. See `docs/CI_CD_SETUP.md` / `docs/DEPLOYMENT_RUNBOOK.md` | Claude |
+| 2026-06-22 | CM-3.4.1/3.4.2 / AC-3.1.5 / AU-3.3.1 (released-routing change control, "Proportionate (audit-trail)" posture, `feat/routing-editable-time-standards`): catalogued the editable-time-standards policy on `PUT /routing/{id}/operations/{operation_id}`. A released routing's **process** (sequence, work center, instructions, inspection points, op add/delete/reorder) is **frozen** — those changes require a new revision (400 otherwise); only **time standards** (`setup_hours`, `run_hours_per_unit`, `move_hours`, `queue_hours`, `cycle_time_seconds`, `pieces_per_cycle`) are editable in place. Released time-standard edits are least-privilege gated **in code** to **ADMIN/MANAGER** (Supervisor → 403, matching Release); draft edits stay ADMIN/MANAGER/SUPERVISOR. Every applied change is tamper-evidently audit-logged (`log_update` on op edit; `log_create`/`log_delete`/`log_status_change` elsewhere); a successful released edit re-stamps `approved_by`/`approved_at` but leaves `effective_date` and the revision letter unchanged. **Accepted residual:** no per-operation history table and no optimistic-lock/version column on routing operations — `audit_log` is the sole history of record; concurrent released edits are last-write-wins. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/RBAC_PERMISSIONS.md` → Routings | Claude |
 
 ---
 
