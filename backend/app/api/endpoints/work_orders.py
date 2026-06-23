@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
@@ -25,6 +26,7 @@ from app.core.websocket import (
 from app.db.database import atomic_transaction, get_db
 from app.db.locks import acquire_generator_lock
 from app.models.bom import BOM, BOMItem
+from app.models.laser_nest import LaserNest
 from app.models.part import Part, PartType
 from app.models.routing import Routing, RoutingOperation
 from app.models.user import User, UserRole
@@ -32,6 +34,8 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.schemas.import_kit import WorkOrderImportResponse
 from app.schemas.work_order import (
+    LaserNestManualCreate,
+    LaserNestManualResponse,
     WorkOrderCreate,
     WorkOrderOperationCreate,
     WorkOrderOperationResponse,
@@ -60,9 +64,12 @@ from app.services.completion_signal_service import (
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.laser_nest_service import (
+    active_laser_nest,
     build_laser_nest_child_work_order,
     copy_laser_nest_folder,
+    create_manual_laser_nest,
     extract_laser_nest_zip,
+    manual_nest_response_dict,
     parse_laser_nest_folder,
     parse_laser_nest_zip,
     sync_laser_nest_from_operation,
@@ -593,6 +600,25 @@ def _enrich_work_order_operations(work_order: WorkOrder) -> None:
         op.work_center_name = op.work_center.name if op.work_center else None
         sync_laser_nest_from_operation(op)
 
+        # Soft-delete guard + computed-field injection for the laser nest. A
+        # soft-deleted nest must NEVER surface on a WorkOrderResponse, so hide
+        # the relationship-backed attribute the schema validates off. We use
+        # ``set_committed_value`` (NOT ``op.laser_nest = None``) on purpose: a
+        # plain assignment dirties the ``uselist=False`` relationship and
+        # back-populates ``nest.operation = None``, so any flush/commit that ran
+        # after enrich in the same request would NULL the soft-deleted nest's
+        # ``work_order_operation_id`` FK and corrupt traceability.
+        # ``set_committed_value`` overrides the loaded value as if it came from
+        # the DB -- it marks nothing dirty -- so the guard is safe regardless of
+        # call order. For a live nest, inject has_document / document_file_name
+        # as in-memory attrs (not ORM columns), like work_center_name above.
+        nest = active_laser_nest(op)
+        if nest is None:
+            set_committed_value(op, "laser_nest", None)
+        else:
+            nest.has_document = bool(nest.document_id)
+            nest.document_file_name = nest.document.file_name if nest.document else None
+
         if op.component_part_id:
             component = op.component_part
             if component:
@@ -1066,7 +1092,9 @@ def create_work_order(
             joinedload(WorkOrder.part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
+            selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.laser_nest)
+            .selectinload(LaserNest.document),
         )
         .filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id)
         .first()
@@ -1095,7 +1123,9 @@ def create_work_order(
                 joinedload(WorkOrder.part),
                 selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
                 selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-                selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
+                selectinload(WorkOrder.operations)
+                .selectinload(WorkOrderOperation.laser_nest)
+                .selectinload(LaserNest.document),
             )
             .filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id)
             .first()
@@ -1468,7 +1498,9 @@ async def import_laser_nest_package(
         .options(
             joinedload(WorkOrder.part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
+            selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.laser_nest)
+            .selectinload(LaserNest.document),
         )
         .filter(
             WorkOrder.company_id == company_id,
@@ -1504,6 +1536,74 @@ async def import_laser_nest_package(
     }
 
 
+@router.post(
+    "/{work_order_id}/laser-nests/manual",
+    response_model=LaserNestManualResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Manually add one laser nest to an assembly work order",
+)
+def create_manual_laser_nest_endpoint(
+    work_order_id: int,
+    payload: LaserNestManualCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Manually key one laser nest onto an assembly WO (standalone creation path).
+
+    Resolves (or creates) the child laser WO and an active laser work center via
+    the existing endpoint helpers, then delegates the state change to
+    ``create_manual_laser_nest``. Untouched by, and does not touch, the import flow.
+    """
+    parent_work_order = _load_parent_work_order(db, work_order_id, company_id)
+
+    with atomic_transaction(db):
+        child_work_order = _ensure_laser_child_work_order(
+            db,
+            parent_work_order=parent_work_order,
+            company_id=company_id,
+        )
+        child_work_order.status = WorkOrderStatus.RELEASED
+        # _find_laser_work_center raises 400 when no active laser work center exists.
+        laser_work_center = _find_laser_work_center(db, company_id)
+
+        nest = create_manual_laser_nest(
+            db,
+            parent_work_order=parent_work_order,
+            child_work_order=child_work_order,
+            laser_work_center=laser_work_center,
+            data=payload,
+            company_id=company_id,
+            user_id=current_user.id,
+        )
+        # Audit BEFORE the atomic_transaction commit so the audit row commits
+        # atomically with the nest (AuditService.log only flushes).
+        audit.log_create(
+            resource_type="laser_nest",
+            resource_id=nest.id,
+            resource_identifier=nest.cnc_number or nest.nest_name,
+            new_values={
+                "nest_name": nest.nest_name,
+                "cnc_number": nest.cnc_number,
+                "planned_runs": nest.planned_runs,
+                "material": nest.material,
+                "thickness": nest.thickness,
+                "sheet_size": nest.sheet_size,
+                "work_order_operation_id": nest.work_order_operation_id,
+                "package_id": nest.package_id,
+            },
+            extra_data={
+                "parent_work_order_id": parent_work_order.id,
+                "child_work_order_id": child_work_order.id,
+                "source": "manual",
+            },
+        )
+
+    db.refresh(nest)
+    return LaserNestManualResponse(**manual_nest_response_dict(nest))
+
+
 @router.get("/{work_order_id}", response_model=WorkOrderResponse)
 def get_work_order(
     work_order_id: int,
@@ -1521,7 +1621,9 @@ def get_work_order(
             joinedload(WorkOrder.part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
+            selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.laser_nest)
+            .selectinload(LaserNest.document),
         )
         .filter(
             WorkOrder.id == work_order_id,
@@ -1574,7 +1676,9 @@ def get_work_order_by_number(
         db.query(WorkOrder)
         .options(
             selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
+            selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.laser_nest)
+            .selectinload(LaserNest.document),
         )
         .filter(WorkOrder.work_order_number == wo_number, WorkOrder.company_id == company_id)
         .first()

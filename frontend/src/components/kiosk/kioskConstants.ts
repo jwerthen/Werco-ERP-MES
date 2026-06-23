@@ -17,6 +17,8 @@
  *   kiosk hold files a blocker.
  */
 
+import { LaserNestInfo } from '../../types';
+
 export const KIOSK_SOURCE = 'kiosk';
 
 export interface KioskReason {
@@ -63,6 +65,9 @@ export interface KioskQueueItem {
   quantity_complete: number | null;
   priority: number | null;
   due_date: string | null;
+  // Laser cutting: the active nest for this operation (CNC#, runs, optional PDF)
+  // so operators can confirm the right nest before cutting.
+  laser_nest?: LaserNestInfo | null;
 }
 
 /**

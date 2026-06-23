@@ -25,6 +25,16 @@ Object.defineProperty(window, 'matchMedia', {
   }),
 });
 
+// jsdom does not implement URL.createObjectURL / revokeObjectURL — components
+// that build object URLs for blob previews (e.g. LaserNestPdfPreview) need them.
+// Individual tests can still spyOn these to assert specific values.
+if (typeof window.URL.createObjectURL !== 'function') {
+  window.URL.createObjectURL = (() => 'blob:mock') as typeof window.URL.createObjectURL;
+}
+if (typeof window.URL.revokeObjectURL !== 'function') {
+  window.URL.revokeObjectURL = (() => undefined) as typeof window.URL.revokeObjectURL;
+}
+
 // Mock IntersectionObserver
 global.IntersectionObserver = class IntersectionObserver {
   disconnect() {}

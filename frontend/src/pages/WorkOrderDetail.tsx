@@ -1,11 +1,14 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { User, WorkOrder, WorkOrderOperation } from '../types';
+import { User, WorkOrder, WorkOrderOperation, LaserNestInfo } from '../types';
 import { WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerSeverity } from '../types/aiForward';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
+import LaserNestManualModal from '../components/laser/LaserNestManualModal';
+import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ArrowLeftIcon,
@@ -21,6 +24,8 @@ import {
   DocumentTextIcon,
   EyeIcon,
   PaperClipIcon,
+  PlusIcon,
+  PencilSquareIcon,
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
@@ -233,6 +238,10 @@ export default function WorkOrderDetail() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const isAdminView = user?.role === 'admin' || !!user?.is_superuser;
+  // Manual laser-nest manage actions are limited to admin/manager/supervisor —
+  // the same trio the backend RBAC allows (routings:create maps to exactly that
+  // set plus platform_admin).
+  const canManageNests = hasPermission(user?.role, 'routings:create');
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -261,6 +270,14 @@ export default function WorkOrderDetail() {
   const [laserNestPreview, setLaserNestPreview] = useState<LaserNestPreview | null>(null);
   const [laserNestLoading, setLaserNestLoading] = useState(false);
   const [laserNestError, setLaserNestError] = useState('');
+  // Manual nest entry + per-nest PDF management.
+  const [nestModalOpen, setNestModalOpen] = useState(false);
+  const [nestModalTarget, setNestModalTarget] = useState<LaserNestInfo | null>(null);
+  const [previewNestId, setPreviewNestId] = useState<number | null>(null);
+  const [nestActionId, setNestActionId] = useState<number | null>(null);
+  const [nestActionError, setNestActionError] = useState('');
+  const nestAttachInputRef = useRef<HTMLInputElement | null>(null);
+  const [nestAttachTargetId, setNestAttachTargetId] = useState<number | null>(null);
   const [workOrderDocuments, setWorkOrderDocuments] = useState<WorkOrderDocument[]>([]);
   const [availablePdfDocuments, setAvailablePdfDocuments] = useState<WorkOrderDocument[]>([]);
   const [documentUploadFile, setDocumentUploadFile] = useState<File | null>(null);
@@ -804,6 +821,99 @@ export default function WorkOrderDetail() {
     }
   };
 
+  // --- Manual laser nest handlers -----------------------------------------
+  const openAddNestModal = () => {
+    setNestModalTarget(null);
+    setNestActionError('');
+    setNestModalOpen(true);
+  };
+
+  const openEditNestModal = (nest: LaserNestInfo) => {
+    setNestModalTarget(nest);
+    setNestActionError('');
+    setNestModalOpen(true);
+  };
+
+  // The modal calls this on every successful save. On a partial create (nest
+  // persisted but its PDF failed to attach) it passes a non-fatal warning we
+  // surface in the nest-action banner so the operator knows to retry via the
+  // per-nest "Attach PDF" action.
+  const handleNestSaved = async (warning?: string) => {
+    setNestActionError(warning || '');
+    await loadWorkOrder();
+  };
+
+  const handleDeleteNest = async (nest: LaserNestInfo) => {
+    if (!window.confirm(`Delete laser nest ${nest.cnc_number || nest.nest_name}? This puts its operation on hold.`)) {
+      return;
+    }
+    setNestActionId(nest.id);
+    setNestActionError('');
+    try {
+      await api.deleteLaserNest(nest.id);
+      if (previewNestId === nest.id) setPreviewNestId(null);
+      await loadWorkOrder();
+    } catch (err: any) {
+      setNestActionError(err?.response?.data?.detail || 'Failed to delete laser nest');
+    } finally {
+      setNestActionId(null);
+    }
+  };
+
+  const handleDetachNestPdf = async (nest: LaserNestInfo) => {
+    setNestActionId(nest.id);
+    setNestActionError('');
+    try {
+      await api.detachLaserNestDocument(nest.id);
+      if (previewNestId === nest.id) setPreviewNestId(null);
+      await loadWorkOrder();
+    } catch (err: any) {
+      setNestActionError(err?.response?.data?.detail || 'Failed to detach PDF');
+    } finally {
+      setNestActionId(null);
+    }
+  };
+
+  // Trigger the hidden file input for the nest whose "Attach PDF" was clicked.
+  const promptAttachNestPdf = (nestId: number) => {
+    setNestAttachTargetId(nestId);
+    setNestActionError('');
+    nestAttachInputRef.current?.click();
+  };
+
+  const handleNestAttachFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] || null;
+    const targetId = nestAttachTargetId;
+    // Reset the input so re-selecting the same file fires onChange again.
+    event.target.value = '';
+    if (!file || !targetId || !workOrder) return;
+
+    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    if (!isPdf) {
+      setNestActionError('Only PDF files can be attached to a laser nest.');
+      return;
+    }
+
+    setNestActionId(targetId);
+    setNestActionError('');
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('title', file.name.replace(/\.pdf$/i, ''));
+      formData.append('document_type', 'drawing');
+      formData.append('revision', 'A');
+      formData.append('work_order_id', String(workOrder.id));
+      const uploaded = await api.uploadDocument(formData);
+      await api.attachLaserNestDocument(targetId, uploaded.id);
+      await loadWorkOrder();
+    } catch (err: any) {
+      setNestActionError(err?.response?.data?.detail || 'Failed to attach PDF');
+    } finally {
+      setNestActionId(null);
+      setNestAttachTargetId(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -822,6 +932,11 @@ export default function WorkOrderDetail() {
 
   const operationProgress = getDetailWorkOrderProgress(workOrder);
   const selectedDocument = workOrderDocuments.find((document) => document.id === selectedDocumentId) || null;
+  // Laser nests surface per-operation on the WorkOrderResponse; collect them
+  // (with their operation context) for the Laser Nest card's nest list.
+  const laserNests = (workOrder.operations || [])
+    .filter((op): op is WorkOrderOperation & { laser_nest: LaserNestInfo } => Boolean(op.laser_nest))
+    .map((op) => ({ operation: op, nest: op.laser_nest }));
 
   return (
     <div className="space-y-6">
@@ -1134,11 +1249,23 @@ export default function WorkOrderDetail() {
                 </p>
               </div>
             </div>
-            {laserNestPreview && (
-              <span className="text-xs font-semibold px-2 py-1 rounded bg-fd-red/15 text-fd-red w-fit">
-                {laserNestPreview.nest_count} nests • {laserNestPreview.total_planned_runs} runs
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {laserNestPreview && (
+                <span className="text-xs font-semibold px-2 py-1 rounded bg-fd-red/15 text-fd-red w-fit">
+                  {laserNestPreview.nest_count} nests • {laserNestPreview.total_planned_runs} runs
+                </span>
+              )}
+              {canManageNests && (
+                <button
+                  type="button"
+                  onClick={openAddNestModal}
+                  className="btn-secondary btn-sm flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <PlusIcon className="h-4 w-4" />
+                  Add nest manually
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_auto] gap-3">
@@ -1221,6 +1348,134 @@ export default function WorkOrderDetail() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* Hidden file input shared by all per-nest "Attach PDF" actions. */}
+          <input
+            ref={nestAttachInputRef}
+            type="file"
+            accept="application/pdf"
+            onChange={handleNestAttachFileChange}
+            className="hidden"
+          />
+
+          {nestActionError && (
+            <div className="mt-3 rounded border border-fd-red/40 bg-fd-red/10 px-3 py-2 text-sm text-fd-red">
+              {nestActionError}
+            </div>
+          )}
+
+          {laserNests.length > 0 && (
+            <div className="mt-5">
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-fd-mute">
+                Nests on this work order
+              </h3>
+              <div className="space-y-2">
+                {laserNests.map(({ operation, nest }) => {
+                  const acting = nestActionId === nest.id;
+                  const showPreview = previewNestId === nest.id;
+                  return (
+                    <div key={nest.id} className="rounded border border-fd-line bg-fd-sunken p-3">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-lg font-bold text-fd-ink">
+                              {nest.cnc_number || nest.nest_name}
+                            </span>
+                            {nest.cnc_number && nest.nest_name !== nest.cnc_number && (
+                              <span className="text-sm text-fd-mute">{nest.nest_name}</span>
+                            )}
+                            {nest.has_document && (
+                              <span className="inline-flex items-center gap-1 rounded bg-fd-blue/15 px-2 py-0.5 text-xs font-semibold text-fd-blue">
+                                <PaperClipIcon className="h-3.5 w-3.5" />
+                                PDF
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fd-mute">
+                            <span>
+                              Runs:{' '}
+                              <span className="font-semibold tabular-nums text-fd-body">
+                                {nest.completed_runs}/{nest.planned_runs}
+                              </span>
+                            </span>
+                            {(nest.material || nest.thickness) && (
+                              <span>{[nest.material, nest.thickness].filter(Boolean).join(' • ')}</span>
+                            )}
+                            {nest.sheet_size && <span>Sheet: {nest.sheet_size}</span>}
+                            <span>Op {operation.sequence}</span>
+                          </div>
+                        </div>
+
+                        {canManageNests && (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {nest.has_document ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewNestId(showPreview ? null : nest.id)}
+                                  className="btn-secondary btn-sm flex items-center gap-1"
+                                >
+                                  <EyeIcon className="h-4 w-4" />
+                                  {showPreview ? 'Hide PDF' : 'View PDF'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDetachNestPdf(nest)}
+                                  disabled={acting}
+                                  className="btn-secondary btn-sm"
+                                  title="Detach PDF"
+                                >
+                                  Detach
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => promptAttachNestPdf(nest.id)}
+                                disabled={acting}
+                                className="btn-secondary btn-sm flex items-center gap-1"
+                              >
+                                <PaperClipIcon className="h-4 w-4" />
+                                Attach PDF
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => openEditNestModal(nest)}
+                              className="btn-secondary btn-sm flex items-center gap-1"
+                              title="Edit nest"
+                            >
+                              <PencilSquareIcon className="h-4 w-4" />
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteNest(nest)}
+                              disabled={acting}
+                              className="btn-secondary btn-sm flex items-center gap-1 text-fd-red hover:text-fd-red/80"
+                              title="Delete nest"
+                            >
+                              <TrashIcon className="h-4 w-4" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {showPreview && nest.has_document && (
+                        <div className="mt-3">
+                          <LaserNestPdfPreview
+                            laserNestId={nest.id}
+                            fileName={nest.document_file_name}
+                            heightClassName="h-[460px]"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
@@ -1471,12 +1726,19 @@ export default function WorkOrderDetail() {
                             )}
                             {op.laser_nest && (
                               <div className="mt-2 rounded border border-fd-line bg-slate-900/50 px-2 py-1.5 text-xs text-slate-300">
-                                <div className="flex items-center gap-1.5 font-medium text-fd-red">
+                                <div className="flex flex-wrap items-center gap-1.5 font-medium text-fd-red">
                                   <DocumentTextIcon className="h-4 w-4" />
-                                  {op.laser_nest.nest_name}
+                                  {op.laser_nest.cnc_number ? (
+                                    <span className="font-mono">CNC# {op.laser_nest.cnc_number}</span>
+                                  ) : (
+                                    op.laser_nest.nest_name
+                                  )}
+                                  {op.laser_nest.has_document && (
+                                    <PaperClipIcon className="h-3.5 w-3.5 text-fd-blue" title="Reference PDF attached" />
+                                  )}
                                 </div>
                                 <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
-                                  <span>CNC: {op.laser_nest.cnc_file_name}</span>
+                                  {op.laser_nest.cnc_file_name && <span>File: {op.laser_nest.cnc_file_name}</span>}
                                   <span>Runs: {op.laser_nest.completed_runs}/{op.laser_nest.planned_runs}</span>
                                   {(op.laser_nest.material || op.laser_nest.thickness) && (
                                     <span>{[op.laser_nest.material, op.laser_nest.thickness].filter(Boolean).join(' • ')}</span>
@@ -1633,6 +1895,16 @@ export default function WorkOrderDetail() {
             <span>No BOM defined for this part</span>
           </div>
         </div>
+      )}
+
+      {canManageNests && (
+        <LaserNestManualModal
+          open={nestModalOpen}
+          onClose={() => setNestModalOpen(false)}
+          workOrderId={workOrder.id}
+          nest={nestModalTarget}
+          onSaved={handleNestSaved}
+        />
       )}
     </div>
   );

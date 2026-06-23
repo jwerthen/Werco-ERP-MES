@@ -1,4 +1,5 @@
 import React from 'react';
+import { FireIcon, PaperClipIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
 import { KioskQueueItem } from './kioskConstants';
 
@@ -49,6 +50,28 @@ export default function KioskQueueCard({ item, onSelect, disabled = false }: Kio
         <div className="mt-1 truncate text-lg text-fd-mute">
           Op {item.operation_number ?? '—'} · {item.operation_name || 'Operation'}
         </div>
+        {item.laser_nest && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-fd-red/40 bg-fd-red/5 px-3 py-2">
+            <span className="flex items-center gap-1.5 font-mono text-xl font-bold text-fd-ink">
+              <FireIcon className="h-5 w-5 text-fd-red" />
+              {item.laser_nest.cnc_number ? `CNC# ${item.laser_nest.cnc_number}` : item.laser_nest.nest_name}
+            </span>
+            <span className="font-mono text-base text-fd-body">
+              {Number(item.laser_nest.completed_runs)} / {Number(item.laser_nest.planned_runs)} runs
+            </span>
+            {(item.laser_nest.material || item.laser_nest.thickness) && (
+              <span className="text-base text-fd-mute">
+                {[item.laser_nest.material, item.laser_nest.thickness].filter(Boolean).join(' • ')}
+              </span>
+            )}
+            {item.laser_nest.has_document && (
+              <span className="inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-fd-blue">
+                <PaperClipIcon className="h-4 w-4" />
+                PDF
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="text-right">

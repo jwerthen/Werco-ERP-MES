@@ -8,13 +8,17 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderType
+
+if TYPE_CHECKING:
+    from app.schemas.work_order import LaserNestManualCreate
 
 CNC_EXTENSIONS = {
     ".cnc",
@@ -109,6 +113,12 @@ def build_laser_nest_child_work_order(
 ) -> LaserNestPackage:
     """Replace a child laser WO's nest tasks with the supplied package plan."""
 
+    # IMPORT REPLACES EVERYTHING (by design). Importing a laser package wipes ALL
+    # existing packages, LASER operations, and nests on this child WO and rebuilds
+    # them from the package plan -- including any MANUALLY-entered nests. This is
+    # intentional: the product decision is "manual OR import per job", the two
+    # paths are never mixed, so an import is the authoritative source of truth and
+    # cleanly supersedes prior manual entry. Do not soften this into coexistence.
     existing_packages = (
         db.query(LaserNestPackage)
         .filter(
@@ -192,6 +202,265 @@ def build_laser_nest_child_work_order(
 def sync_laser_nest_from_operation(operation: WorkOrderOperation) -> None:
     if operation.laser_nest:
         operation.laser_nest.completed_runs = float(operation.quantity_complete or 0)
+
+
+def active_laser_nest(operation: WorkOrderOperation) -> Optional[LaserNest]:
+    """Return the operation's laser nest only if it is not soft-deleted.
+
+    ``WorkOrderOperation.laser_nest`` is a ``uselist=False`` relationship that
+    eagerly loads whatever row points at the operation -- including a
+    soft-deleted one. Serialization paths that surface a nest to a
+    WorkOrderResponse or to the operator queue MUST route through this accessor
+    so a soft-deleted manual nest never leaks back into the UI, the operator
+    queue, or quantity rollups.
+    """
+    nest = operation.laser_nest
+    if nest is None or getattr(nest, "is_deleted", False):
+        return None
+    return nest
+
+
+def _recompute_child_quantity_ordered(db: Session, child_work_order: WorkOrder, company_id: int) -> float:
+    """Set the child laser WO's ``quantity_ordered`` to the sum of planned runs.
+
+    Sums ``planned_runs`` over the child's NON-deleted nests only (soft-deleted
+    nests must not contribute to the rollup). Floors at 1 so a child WO never
+    drops to a zero ordered quantity. Returns the new value.
+    """
+    # Flush pending in-memory nest changes (planned_runs edit / soft-delete flag)
+    # so the aggregate SELECT below reflects them even when autoflush is off.
+    db.flush()
+    total = (
+        db.query(func.coalesce(func.sum(LaserNest.planned_runs), 0))
+        .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+        .filter(
+            LaserNest.company_id == company_id,
+            LaserNest.is_deleted == False,  # noqa: E712
+            WorkOrderOperation.work_order_id == child_work_order.id,
+        )
+        .scalar()
+    )
+    child_work_order.quantity_ordered = float(total or 0) or 1.0
+    return child_work_order.quantity_ordered
+
+
+def _manual_operation_description(
+    *,
+    cnc_number: Optional[str],
+    planned_runs: int,
+    material: Optional[str],
+    thickness: Optional[str],
+    sheet_size: Optional[str],
+) -> str:
+    """Mirror ``_laser_operation_description`` for a manually-keyed nest."""
+    parts = []
+    if cnc_number:
+        parts.append(f"CNC#: {cnc_number}")
+    parts.append(f"Planned runs: {planned_runs}")
+    if material:
+        parts.append(f"Material: {material}")
+    if thickness:
+        parts.append(f"Thickness: {thickness}")
+    if sheet_size:
+        parts.append(f"Sheet: {sheet_size}")
+    return " | ".join(parts)
+
+
+def create_manual_laser_nest(
+    db: Session,
+    *,
+    parent_work_order: WorkOrder,
+    child_work_order: WorkOrder,
+    laser_work_center: WorkCenter,
+    data: "LaserNestManualCreate | dict",
+    company_id: int,
+    user_id: Optional[int],
+) -> LaserNest:
+    """Append one manually-keyed laser nest (and its shop-floor operation).
+
+    Standalone creation path -- it does NOT touch existing import behavior. The
+    caller (a thin endpoint) has already resolved the child laser WO and the
+    laser work center via the endpoint-local helpers and hands them in here.
+
+    All manual nests for a parent live under ONE reusable "Manual entry"
+    package (``source_path IS NULL``); each call appends one operation + one
+    nest to the child laser WO and re-derives the child's ordered quantity.
+    """
+    payload = data if isinstance(data, dict) else data.model_dump()
+    cnc_number = (payload.get("cnc_number") or "").strip()
+    planned_runs = int(payload.get("planned_runs") or 1)
+    nest_name = (payload.get("nest_name") or "").strip() or cnc_number
+    material = payload.get("material")
+    thickness = payload.get("thickness")
+    sheet_size = payload.get("sheet_size")
+
+    # Find or create the single reusable "Manual entry" package on this parent/child.
+    package = (
+        db.query(LaserNestPackage)
+        .filter(
+            LaserNestPackage.company_id == company_id,
+            LaserNestPackage.parent_work_order_id == parent_work_order.id,
+            LaserNestPackage.child_work_order_id == child_work_order.id,
+            LaserNestPackage.package_name == "Manual entry",
+            LaserNestPackage.source_path.is_(None),
+        )
+        .first()
+    )
+    if package is None:
+        package = LaserNestPackage(
+            company_id=company_id,
+            parent_work_order_id=parent_work_order.id,
+            child_work_order_id=child_work_order.id,
+            package_name="Manual entry",
+            source_path=None,
+            import_status="imported",
+            created_by=user_id,
+        )
+        db.add(package)
+        db.flush()
+
+    # Next LASER sequence on the child = current max LASER sequence + 10 (default 10).
+    max_sequence = (
+        db.query(func.max(WorkOrderOperation.sequence))
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_order_id == child_work_order.id,
+            WorkOrderOperation.operation_group == "LASER",
+        )
+        .scalar()
+    )
+    sequence = int(max_sequence or 0) + 10
+
+    # First-op-READY intent, mirroring the import factory: this nest is READY iff
+    # there is not already a non-deleted manual/imported LASER nest on the child
+    # (i.e. it is the first ready-able laser task), else PENDING.
+    existing_active_nests = (
+        db.query(func.count(LaserNest.id))
+        .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+        .filter(
+            LaserNest.company_id == company_id,
+            LaserNest.is_deleted == False,  # noqa: E712
+            WorkOrderOperation.work_order_id == child_work_order.id,
+        )
+        .scalar()
+    )
+    op_status = OperationStatus.READY if not existing_active_nests else OperationStatus.PENDING
+
+    operation = WorkOrderOperation(
+        company_id=company_id,
+        work_order_id=child_work_order.id,
+        work_center_id=laser_work_center.id,
+        sequence=sequence,
+        operation_number=f"Nest {sequence // 10}",
+        name=f"Laser Cut - {nest_name}",
+        description=_manual_operation_description(
+            cnc_number=cnc_number,
+            planned_runs=planned_runs,
+            material=material,
+            thickness=thickness,
+            sheet_size=sheet_size,
+        ),
+        component_quantity=float(planned_runs),
+        setup_time_hours=0.0,
+        run_time_hours=0.0,
+        run_time_per_piece=0.0,
+        status=op_status,
+        operation_group="LASER",
+    )
+    db.add(operation)
+    db.flush()
+
+    nest = LaserNest(
+        company_id=company_id,
+        package_id=package.id,
+        work_order_operation_id=operation.id,
+        nest_name=nest_name,
+        cnc_number=cnc_number or None,
+        cnc_file_name=None,
+        cnc_file_path=None,
+        document_id=None,
+        planned_runs=planned_runs,
+        completed_runs=0,
+        material=material,
+        thickness=thickness,
+        sheet_size=sheet_size,
+    )
+    db.add(nest)
+    db.flush()
+
+    _recompute_child_quantity_ordered(db, child_work_order, company_id)
+    return nest
+
+
+def sync_laser_nest_to_operation(db: Session, nest: LaserNest) -> None:
+    """Reverse of ``sync_laser_nest_from_operation``: push planned_runs forward.
+
+    On a planned_runs edit, set the backing operation's ``component_quantity`` to
+    the new planned run count and re-derive the child laser WO's ordered quantity
+    over its non-deleted nests.
+    """
+    operation = nest.operation
+    if operation is None:
+        return
+    operation.component_quantity = float(nest.planned_runs or 0)
+
+    child_work_order = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.id == operation.work_order_id, WorkOrder.company_id == nest.company_id)
+        .first()
+    )
+    if child_work_order is not None:
+        _recompute_child_quantity_ordered(db, child_work_order, nest.company_id)
+
+
+def manual_nest_response_dict(nest: LaserNest) -> dict:
+    """Serialize a nest into the LaserNestManualResponse shape.
+
+    Returns the nest id + its backing operation (id + status) so the client can
+    render the nest as a clock-in-able operation, plus document attachment state.
+    """
+    operation = nest.operation
+    return {
+        "id": nest.id,
+        "nest_name": nest.nest_name,
+        "cnc_number": nest.cnc_number,
+        "planned_runs": nest.planned_runs,
+        "completed_runs": float(nest.completed_runs or 0),
+        "remaining_runs": nest.remaining_runs,
+        "material": nest.material,
+        "thickness": nest.thickness,
+        "sheet_size": nest.sheet_size,
+        "work_order_operation_id": nest.work_order_operation_id,
+        "operation_status": operation.status if operation is not None else None,
+        "document_id": nest.document_id,
+        "has_document": bool(nest.document_id),
+        "document_file_name": nest.document.file_name if nest.document else None,
+    }
+
+
+def soft_delete_laser_nest(db: Session, nest: LaserNest, user_id: Optional[int]) -> None:
+    """Soft-delete a manual nest and deactivate its operation.
+
+    Sets the backing operation to ON_HOLD: ``OperationStatus`` has no op-level
+    CANCELLED, and ON_HOLD is the closest inactive/terminal state. ON_HOLD
+    removes the op from the work-center queue, which filters
+    ``status.in_([READY, IN_PROGRESS])``. Never hard-deletes -- traceability and
+    the package's run history must survive.
+    """
+    nest.soft_delete(user_id)
+    operation = nest.operation
+    if operation is not None:
+        operation.status = OperationStatus.ON_HOLD
+
+    child_work_order = None
+    if operation is not None:
+        child_work_order = (
+            db.query(WorkOrder)
+            .filter(WorkOrder.id == operation.work_order_id, WorkOrder.company_id == nest.company_id)
+            .first()
+        )
+    if child_work_order is not None:
+        _recompute_child_quantity_ordered(db, child_work_order, nest.company_id)
 
 
 def _iter_cnc_files(root: Path) -> Iterable[tuple[Path, str]]:

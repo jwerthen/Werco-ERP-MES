@@ -59,6 +59,18 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > array on the response; it does **not** gate the operator's role or block the clock-in / start. The
 > gate's lookups are tenant-scoped (every skill/cert/work-center query filters the active company).
 
+> **Laser-nest manual entry + reference PDF — endpoint mapping.** Manually keying a laser nest and
+> all per-nest mutations follow the Work Orders **Create / Edit / Delete** rows above —
+> `require_role([ADMIN, MANAGER, SUPERVISOR])`: `POST /api/v1/work-orders/{id}/laser-nests/manual`
+> (create), `PATCH /api/v1/laser-nests/{id}` (edit), `POST /api/v1/laser-nests/{id}/attach-document`
+> and `DELETE /api/v1/laser-nests/{id}/document` (attach/detach the reference PDF), and
+> `DELETE /api/v1/laser-nests/{id}` (soft-delete; the operation goes `ON_HOLD`). This matches the
+> existing laser-nest **package import** trio (`…/laser-nest-packages/preview` and `…/import`). The
+> **exception** is the operator-readable inline PDF preview `GET /api/v1/laser-nests/{id}/document`,
+> which is open to **any authenticated user** (`get_current_user`) so operators can view the shop
+> drawing — read-only and still tenant-scoped (a cross-tenant or soft-deleted nest → **404**). All
+> writes are audited; nests are soft-deleted, never hard-deleted. See `docs/API.md` → Laser Nests.
+
 > **Scanner resolve-action is read-only and open to any authenticated user (A0.4).**
 > `POST /api/v1/scanner/resolve-action` (the QR traveler / badge scan resolver,
 > `app/api/endpoints/scanner.py`) carries no role gate (`get_current_user` only) — it mirrors the

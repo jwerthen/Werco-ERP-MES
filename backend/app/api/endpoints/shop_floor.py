@@ -33,6 +33,7 @@ from app.core.websocket import (
 )
 from app.db.database import get_db
 from app.models.audit_log import AuditLog
+from app.models.laser_nest import LaserNest
 from app.models.time_entry import TimeEntry, TimeEntrySource, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
@@ -64,7 +65,7 @@ from app.services.completion_signal_service import (
     record_parent_children_complete,
 )
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
-from app.services.laser_nest_service import sync_laser_nest_from_operation
+from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
 from app.services.operation_action_gates import (
     CLOCK_IN_ALLOWED_STATUSES,
     MSG_WRONG_WORK_CENTER,
@@ -526,7 +527,9 @@ def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dic
 
 def _laser_nest_payload(operation: WorkOrderOperation) -> Optional[dict]:
     sync_laser_nest_from_operation(operation)
-    nest = operation.laser_nest
+    # Soft-delete guard: a soft-deleted manual nest must never surface in the
+    # operator queue / kiosk payloads (active_laser_nest returns None for it).
+    nest = active_laser_nest(operation)
     if not nest:
         return None
     return {
@@ -540,6 +543,12 @@ def _laser_nest_payload(operation: WorkOrderOperation) -> Optional[dict]:
         "material": nest.material,
         "thickness": nest.thickness,
         "sheet_size": nest.sheet_size,
+        # Manual-entry + per-nest PDF fields (mirrors manual_nest_response_dict's
+        # document access pattern; .document is the same lazy-load on LaserNest).
+        "cnc_number": nest.cnc_number,
+        "document_id": nest.document_id,
+        "has_document": bool(nest.document_id),
+        "document_file_name": nest.document.file_name if nest.document else None,
     }
 
 
@@ -1354,7 +1363,12 @@ def get_work_center_queue(
     """Get operations queued at a work center"""
     operations = (
         db.query(WorkOrderOperation)
-        .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
+        .options(
+            joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+            # Eager-load the nest + its reference PDF so _laser_nest_payload below
+            # doesn't issue per-row SELECTs (N+1) for each queued laser operation.
+            joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
+        )
         .join(WorkOrder)
         .filter(
             and_(
@@ -1391,6 +1405,7 @@ def get_work_center_queue(
                 "due_date": wo.due_date,
                 "setup_time_hours": op.setup_time_hours,
                 "run_time_hours": op.run_time_hours,
+                "laser_nest": _laser_nest_payload(op),
             }
         )
 
@@ -1936,6 +1951,7 @@ def get_all_operations(
         .options(
             joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
             joinedload(WorkOrderOperation.work_center),
+            selectinload(WorkOrderOperation.laser_nest).selectinload(LaserNest.document),
         )
         .join(WorkOrder)
     )
@@ -2818,6 +2834,7 @@ def get_operation_details(
         .options(
             joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
             joinedload(WorkOrderOperation.work_center),
+            selectinload(WorkOrderOperation.laser_nest).selectinload(LaserNest.document),
         )
         .filter(
             WorkOrderOperation.id == operation_id,
@@ -2835,6 +2852,7 @@ def get_operation_details(
     # Get all operations for this work order
     all_ops = (
         db.query(WorkOrderOperation)
+        .options(selectinload(WorkOrderOperation.laser_nest).selectinload(LaserNest.document))
         .filter(
             WorkOrderOperation.work_order_id == wo.id,
             WorkOrderOperation.company_id == company_id,

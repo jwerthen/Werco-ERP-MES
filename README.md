@@ -51,7 +51,7 @@ Shipped modules, grouped by domain:
 
 Monorepo with a layered FastAPI backend and a React SPA frontend.
 
-- **`backend/`** — FastAPI app under `app/`: thin routers in `api/endpoints/` (~53 routers under `/api/v1/`), business logic in `services/`, SQLAlchemy 2.0 `models/`, Pydantic 2 `schemas/`, and the auth/tenancy/RBAC dependency seam in `api/deps.py`.
+- **`backend/`** — FastAPI app under `app/`: thin routers in `api/endpoints/` (~59 routers under `/api/v1/`), business logic in `services/`, SQLAlchemy 2.0 `models/`, Pydantic 2 `schemas/`, and the auth/tenancy/RBAC dependency seam in `api/deps.py`.
 - **`frontend/`** — React 19 + TypeScript + Vite SPA; typed Axios client with ETag conditional caching and a refresh-token interceptor; React Context for auth and active-company switching.
 - **`landing/`** — separate marketing site (React + Vite), deployed independently.
 - **`docs/`** — operational runbooks and compliance documents.
@@ -198,7 +198,7 @@ Werco-ERP-MES/
 ├── backend/                  # Python 3.11 / FastAPI
 │   ├── app/
 │   │   ├── api/
-│   │   │   ├── endpoints/     # ~53 REST routers under /api/v1/
+│   │   │   ├── endpoints/     # ~59 REST routers under /api/v1/
 │   │   │   └── deps.py        # auth / tenancy / RBAC dependency seam
 │   │   ├── core/             # config, security, cache, pagination, realtime
 │   │   ├── db/               # database, mixins, tenant_filter helpers
