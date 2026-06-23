@@ -77,6 +77,17 @@ predecessor not complete, on-hold, optimistic-lock 409s, qualification warnings)
 surfaced **verbatim** in the error toast and never suppressed or retried around. There is
 no resume-from-hold, inspection, or labor-approval verb on the kiosk.
 
+**Laser nests at clock-in.** For laser-cutting operations the kiosk surfaces the active nest at
+all three touch points so the operator can confirm the right sheet before cutting: the queue card
+(`KioskQueueCard` — CNC#/nest name, `completed`/`planned` runs, material•thickness, and a "PDF" chip
+when a reference PDF is attached), the clock-in confirm card, and the active-job banner (both
+rendering `LaserNestOperatorPanel`, which previews the PDF inline). The data is the `laser_nest` object that
+`GET /shop-floor/work-center-queue/{id}` puts on each queue row and `GET /shop-floor/my-active-job`
+puts on the active job — `null` for non-laser operations, and a soft-deleted manual nest never
+appears (see `docs/API.md` → Shop Floor → "Laser-nest payload on operator reads" for the full
+shape). The optional reference PDF is fetched **inline** from `GET /laser-nests/{id}/document`
+when the operator opens it (no approval workflow, and it never gates clock-in).
+
 ## Scanning (QR travelers & badges — A0.4)
 
 **What's printed.** Work-order travelers (`/print/traveler/{id}`) carry **URL QR codes** — phone

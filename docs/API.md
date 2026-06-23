@@ -270,6 +270,11 @@ mixed**:
 > **`LaserNestOperationInfo` (embedded in `WorkOrderResponse` operations) gained fields:**
 > `cnc_number`, `document_id`, `has_document` (bool), and `document_file_name`. `cnc_file_name`
 > is now **nullable** — a manual nest has no uploaded CNC file.
+>
+> **Operator-facing nest payload.** The operator reads `GET /shop-floor/work-center-queue/{id}` and
+> `GET /shop-floor/my-active-job` embed the same nest as a `laser_nest` object (carrying these new
+> fields) so the active nest shows at clock-in — see Shop Floor → "Laser-nest payload on operator
+> reads".
 
 ### Parts
 
@@ -540,6 +545,20 @@ uploads go through text extraction + LLM. See
 > qty_target}`), `late_wos[]`, `blocked_wos[]` (tickers capped at 25), `generated_at`. Token
 > issuance/revocation: see Authentication → Display tokens. Operating a TV: see
 > [docs/WALLBOARD.md](WALLBOARD.md).
+
+> **Laser-nest payload on operator reads (`/work-center-queue/{id}`, `/my-active-job`).** So the
+> kiosk/operator station can surface the laser nest at clock-in, **every `/work-center-queue/{id}` row
+> now carries a `laser_nest` object** (it returned none before), and the `laser_nest` that
+> `/my-active-job` has always returned **gained four fields** (`cnc_number`, `document_id`,
+> `has_document`, `document_file_name`). Both build it from the same `_laser_nest_payload`, so the
+> shape is identical and is **`null` for any non-laser operation**. A soft-deleted manual nest never
+> appears — the payload routes through `active_laser_nest`. Shape: `{ id, nest_name, cnc_file_name`
+> (**nullable** — manual nests have no uploaded CNC file)`, cnc_file_path, cnc_number` (nullable)`,
+> planned_runs, completed_runs, remaining_runs, material, thickness, sheet_size, document_id`
+> (nullable)`, has_document` (bool — true when a reference PDF is attached)`, document_file_name`
+> (nullable) `}`. The attached PDF is served **inline** by `GET /laser-nests/{id}/document` (see Laser
+> Nests above), so `has_document` / `document_file_name` let the kiosk flag that a reference PDF is
+> attached and label it without a second round-trip.
 
 > **Tenant isolation on clock/operation endpoints.** Clock-in, clock-out, and the shop-floor
 > operation start/complete endpoints scope every operation, work-order, and `TimeEntry` lookup to
