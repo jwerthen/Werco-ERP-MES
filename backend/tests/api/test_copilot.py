@@ -206,6 +206,23 @@ class TestNonStreaming:
         assert response.status_code == 502
         assert "secret details" not in response.text
 
+    def test_egress_disabled_returns_403(self, client, auth_headers, monkeypatch):
+        """AI egress OFF for the company maps to 403 (a policy decision, not a
+        server error) on the non-streaming path."""
+
+        def raise_egress_off(ctx, **kwargs):
+            raise llm_client.LLMEgressDisabledError(company_id=1)
+
+        monkeypatch.setattr(copilot_service, "run_llm_task", raise_egress_off)
+        response = client.post(
+            CHAT_URL,
+            headers=auth_headers,
+            params={"stream": "false"},
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code == 403
+        assert "disabled" in response.json()["detail"].lower()
+
 
 # ---------------------------------------------------------------------------
 # SSE streaming path (default)
@@ -252,6 +269,20 @@ class TestStreaming:
         frames = _sse_frames(response.text)
         assert frames[-1]["type"] == "error"
         assert "boom" not in frames[-1]["message"]
+
+    def test_egress_disabled_emits_error_frame(self, client, auth_headers, monkeypatch):
+        """On the streaming path, AI egress OFF travels in-band as a terminal SSE
+        error frame (200, not 403 -- the stream has already started)."""
+
+        def raise_egress_off(ctx, **kwargs):
+            raise llm_client.LLMEgressDisabledError(company_id=1)
+
+        monkeypatch.setattr(copilot_service, "run_llm_task", raise_egress_off)
+        response = client.post(CHAT_URL, headers=auth_headers, json={"messages": [{"role": "user", "content": "hi"}]})
+        assert response.status_code == 200
+        frames = _sse_frames(response.text)
+        assert frames[-1]["type"] == "error"
+        assert "disabled" in frames[-1]["message"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +335,21 @@ class TestNaturalLanguageSearchLLM:
 
         monkeypatch.setattr(llm_client, "run_llm_task", raise_api_error)
         response = client.post(NL_URL, headers=auth_headers, json={"query": "anything late?"})
+        assert response.status_code == 200
+        data = response.json()
+        assert set(data.keys()) == NL_RESPONSE_KEYS
+        assert data["interpreted_filters"]["parser"] == "rules"
+
+    def test_egress_disabled_falls_back_to_rules_silently(self, client, auth_headers, monkeypatch):
+        """AI egress OFF for the company is a policy state, not a failure: the NL
+        intent parse returns None and the rule parser covers the query silently
+        (parser='rules', a normal 200 response -- no error surfaced)."""
+
+        def raise_egress_off(ctx, **kwargs):
+            raise llm_client.LLMEgressDisabledError(company_id=1)
+
+        monkeypatch.setattr(llm_client, "run_llm_task", raise_egress_off)
+        response = client.post(NL_URL, headers=auth_headers, json={"query": "anything slipping?"})
         assert response.status_code == 200
         data = response.json()
         assert set(data.keys()) == NL_RESPONSE_KEYS

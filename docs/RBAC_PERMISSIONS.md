@@ -65,7 +65,9 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > (create), `PATCH /api/v1/laser-nests/{id}` (edit), `POST /api/v1/laser-nests/{id}/attach-document`
 > and `DELETE /api/v1/laser-nests/{id}/document` (attach/detach the reference PDF), and
 > `DELETE /api/v1/laser-nests/{id}` (soft-delete; the operation goes `ON_HOLD`). This matches the
-> existing laser-nest **package import** trio (`…/laser-nest-packages/preview` and `…/import`). The
+> existing laser-nest **package import** trio (`…/laser-nest-packages/preview` and `…/import`) and the
+> stateless PDF field-extraction endpoint `POST /api/v1/laser-nests/extract` (same ADMIN/MANAGER/
+> SUPERVISOR gate; no DB write, no audit). The
 > **exception** is the operator-readable inline PDF preview `GET /api/v1/laser-nests/{id}/document`,
 > which is open to **any authenticated user** (`get_current_user`) so operators can view the shop
 > drawing — read-only and still tenant-scoped (a cross-tenant or soft-deleted nest → **404**). All
@@ -445,6 +447,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 | Integrations (`admin:integrations`) | ✓ | | | | | | |
 | Audit Logs | ✓ | ✓ | | | | | |
 | AI usage & cost summary (`/ai-usage/summary`) | ✓ | ✓ | | | | | |
+| AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
 
@@ -499,6 +502,18 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 > in the UI**: the only consuming surface is the Admin Settings → AI Usage & Cost tab, and
 > `/admin/settings` is AdminRoute-gated (admin role / superuser), so Managers can exercise this
 > permission only via direct API calls today.
+
+> **AI egress kill switch (`PUT /api/v1/companies/me/ai-egress`).** Enforced **in code** via
+> `require_role([ADMIN])` — **Admin-only**, matching the sibling CUI egress kill switches
+> (`allow_carrier_egress` / `allow_print_egress`, also Admin-only): flipping the CUI boundary is a
+> decision reserved to Admins. It only ever mutates the caller's **own active company**
+> (`get_current_company_id`; the company is never taken from the request body). Flipping the
+> `Company.allow_ai_egress` CUI control writes tamper-evident `audit_log` rows (a field update **and**
+> an `ai_egress_enabled` / `ai_egress_disabled` status change). The toggle is surfaced in the UI at
+> **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`); within that tab the control is
+> interactive for ADMIN (enabling egress requires explicit confirmation) and read-only for
+> other roles. See [docs/API.md](API.md) →
+> Company (self-service) and [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
 
 > **Wallboard display tokens (`/auth/display-token`, A0.5).** Issue / list / revoke are enforced
 > **in code** via `require_role([ADMIN, MANAGER])` and tenant-scoped to the active company;

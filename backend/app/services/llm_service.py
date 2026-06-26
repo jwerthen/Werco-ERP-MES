@@ -12,7 +12,12 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from app.services.llm_client import LLMNotConfiguredError, is_anthropic_api_error, run_llm_task
+from app.services.llm_client import (
+    LLMEgressDisabledError,
+    LLMNotConfiguredError,
+    is_anthropic_api_error,
+    run_llm_task,
+)
 from app.services.llm_model_router import LLMTaskContext
 from app.services.prompts import (
     BOM_EXTRACTION_PROMPT,
@@ -33,6 +38,10 @@ EXTRACTION_SCHEMA = PO_EXTRACTION_SCHEMA
 
 def _not_configured_message(exc: LLMNotConfiguredError) -> str:
     return "LLM library not available" if exc.reason == "library" else "API key not configured"
+
+
+# User-facing degrade message when the company's AI egress kill switch is off.
+_EGRESS_DISABLED_MESSAGE = "AI extraction is disabled for your company (allow_ai_egress is off)"
 
 
 def extract_bom_data_with_llm(pdf_text: str, is_ocr: bool = False, company_id: Optional[int] = None) -> Dict[str, Any]:
@@ -104,6 +113,9 @@ Return ONLY the JSON object, no other text."""
     except LLMNotConfiguredError as e:
         logger.error(str(e))
         return _create_empty_bom_result(_not_configured_message(e))
+    except LLMEgressDisabledError as e:
+        logger.warning(str(e))
+        return _create_empty_bom_result(_EGRESS_DISABLED_MESSAGE)
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response as JSON: {e}")
         return _create_empty_bom_result(f"Invalid JSON response: {str(e)}")
@@ -219,6 +231,9 @@ Return ONLY the JSON object, no other text."""
     except LLMNotConfiguredError as e:
         logger.error(str(e))
         return _create_empty_result(_not_configured_message(e))
+    except LLMEgressDisabledError as e:
+        logger.warning(str(e))
+        return _create_empty_result(_EGRESS_DISABLED_MESSAGE)
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM response as JSON: {e}")
         return _create_empty_result(f"Invalid JSON response: {str(e)}")

@@ -9,6 +9,7 @@ import pytest
 
 import app.services.llm_client as llm_client
 from app.services.llm_client import (
+    LLMEgressDisabledError,
     LLMNotConfiguredError,
     estimate_cost_usd,
     reset_anthropic_client,
@@ -17,6 +18,12 @@ from app.services.llm_client import (
 from app.services.llm_model_router import LLMTaskContext
 
 pytestmark = pytest.mark.unit
+
+# Capture the REAL ``_ai_egress_allowed`` at import time -- before the autouse
+# ``_allow_ai_egress_by_default`` conftest fixture monkeypatches the module
+# attribute to ``True``. The kill-switch unit tests below drive this captured
+# function directly so they exercise the genuine fail-closed logic.
+_REAL_AI_EGRESS_ALLOWED = llm_client._ai_egress_allowed
 
 
 # ---------------------------------------------------------------------------
@@ -277,3 +284,120 @@ class TestFailurePath:
             llm_client.get_anthropic_client()
         assert exc_info.value.reason == "api_key"
         reset_anthropic_client()
+
+
+# ---------------------------------------------------------------------------
+# AI egress kill switch — _ai_egress_allowed (the resolver, fail-closed)
+# ---------------------------------------------------------------------------
+class _EgressSession:
+    """Minimal session whose ``execute(...).scalar_one_or_none()`` is scripted.
+
+    Mirrors the single call ``_ai_egress_allowed`` makes:
+    ``db.execute(select(...)).scalar_one_or_none()``. ``close()`` is recorded so
+    every path can be proven to release the session.
+    """
+
+    def __init__(self, scalar=None, raise_on_execute: BaseException = None):
+        self._scalar = scalar
+        self._raise = raise_on_execute
+        self.closed = False
+
+    def execute(self, *args, **kwargs):
+        if self._raise is not None:
+            raise self._raise
+        return SimpleNamespace(scalar_one_or_none=lambda: self._scalar)
+
+    def close(self):
+        self.closed = True
+
+
+class TestAIEgressAllowed:
+    """The genuine fail-closed resolver — driven via the import-time capture so the
+    autouse ``_allow_ai_egress_by_default`` fixture (which patches the module attr
+    to ``True``) never masks the real logic."""
+
+    def test_no_company_context_allows_with_warning(self, monkeypatch, caplog):
+        # company_id is None: there is no tenant to scope, so the resolver short-
+        # circuits to True (the test/internal edge) and must NOT open a session.
+        def _must_not_open():
+            raise AssertionError("_usage_session_factory must not run when company_id is None")
+
+        monkeypatch.setattr(llm_client, "_usage_session_factory", _must_not_open)
+        with caplog.at_level(logging.WARNING):
+            assert _REAL_AI_EGRESS_ALLOWED(None) is True
+        assert any("no company context" in record.message for record in caplog.records)
+
+    def test_flag_true_row_allows_and_closes_session(self, monkeypatch):
+        session = _EgressSession(scalar=True)
+        monkeypatch.setattr(llm_client, "_usage_session_factory", lambda: session)
+        assert _REAL_AI_EGRESS_ALLOWED(1) is True
+        assert session.closed
+
+    def test_flag_false_row_denies_and_closes_session(self, monkeypatch):
+        session = _EgressSession(scalar=False)
+        monkeypatch.setattr(llm_client, "_usage_session_factory", lambda: session)
+        assert _REAL_AI_EGRESS_ALLOWED(1) is False
+        assert session.closed
+
+    def test_company_not_found_denies_and_closes_session(self, monkeypatch, caplog):
+        # scalar_one_or_none() -> None: unknown tenant, fail closed.
+        session = _EgressSession(scalar=None)
+        monkeypatch.setattr(llm_client, "_usage_session_factory", lambda: session)
+        with caplog.at_level(logging.WARNING):
+            assert _REAL_AI_EGRESS_ALLOWED(999) is False
+        assert session.closed
+        assert any("not found" in record.message for record in caplog.records)
+
+    def test_session_factory_raising_denies(self, monkeypatch, caplog):
+        # The factory itself blows up (DB unreachable). No session to close;
+        # the resolver must still deny (fail-closed) without propagating.
+        def _explode():
+            raise RuntimeError("database is down")
+
+        monkeypatch.setattr(llm_client, "_usage_session_factory", _explode)
+        with caplog.at_level(logging.ERROR):
+            assert _REAL_AI_EGRESS_ALLOWED(1) is False
+        assert any("fail-closed" in record.message for record in caplog.records)
+
+    def test_execute_raising_denies_and_still_closes_session(self, monkeypatch):
+        # The session opened but the query raised (e.g. missing column on stale
+        # schema). Deny AND release the session in the finally block.
+        session = _EgressSession(raise_on_execute=RuntimeError("no such column"))
+        monkeypatch.setattr(llm_client, "_usage_session_factory", lambda: session)
+        assert _REAL_AI_EGRESS_ALLOWED(1) is False
+        assert session.closed
+
+
+# ---------------------------------------------------------------------------
+# AI egress kill switch — the run_llm_task gate (no API call, no telemetry)
+# ---------------------------------------------------------------------------
+class TestRunLLMTaskEgressGate:
+    def test_egress_disabled_raises_before_api_call_and_telemetry(
+        self, ctx, fake_client, recording_session, monkeypatch
+    ):
+        """When egress is denied, run_llm_task raises LLMEgressDisabledError and
+        the request never leaves the boundary: client.messages.create is NOT
+        called and NO telemetry row is recorded."""
+        monkeypatch.setattr(llm_client, "_ai_egress_allowed", lambda company_id=None: False)
+
+        with pytest.raises(LLMEgressDisabledError) as exc_info:
+            run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=5)
+
+        assert exc_info.value.company_id == 5
+        # No Anthropic call.
+        assert fake_client.messages.calls == []
+        # No usage row — not even a failure row.
+        assert recording_session.added == []
+        assert recording_session.committed is False
+
+    def test_egress_allowed_proceeds(self, ctx, fake_client, recording_session, monkeypatch):
+        """The positive control: when egress is allowed the call goes through and
+        records exactly one usage row."""
+        monkeypatch.setattr(llm_client, "_ai_egress_allowed", lambda company_id=None: True)
+
+        result = run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=5)
+
+        assert result.text == '{"ok": true}'
+        assert len(fake_client.messages.calls) == 1
+        assert len(recording_session.added) == 1
+        assert recording_session.added[0].success is True

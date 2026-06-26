@@ -31,7 +31,7 @@ from app.services.auto_evidence_service import (
     compute_overall_compliance,
     discover_evidence_for_clause,
 )
-from app.services.llm_client import LLMNotConfiguredError, run_llm_task
+from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError, run_llm_task
 from app.services.llm_model_router import LLMTaskContext
 from app.services.prompts import QMS_CLAUSE_EXTRACTION_PROMPT
 
@@ -232,6 +232,13 @@ Return ONLY a valid JSON array. No markdown, no explanations."""
             else "AI extraction not configured (ANTHROPIC_API_KEY missing)"
         )
         raise HTTPException(status_code=500, detail=detail)
+    except LLMEgressDisabledError:
+        # CUI kill switch is off for this company — a policy decision, not a
+        # server error. Surface as 403 with a clear, actionable message.
+        raise HTTPException(
+            status_code=403,
+            detail="AI extraction is disabled for your company (allow_ai_egress is off).",
+        )
     except json.JSONDecodeError as e:
         logger.error(f"AI returned invalid JSON: {e}")
         raise HTTPException(

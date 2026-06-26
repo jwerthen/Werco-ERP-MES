@@ -10,7 +10,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from app.services.llm_client import LLMNotConfiguredError, run_llm_task
+from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError, run_llm_task
 from app.services.llm_model_router import LLMTaskContext
 from app.services.prompts import ROUTING_GENERATION_PROMPT
 
@@ -281,6 +281,11 @@ Return ONLY the JSON object, no other text."""
         logger.error(str(e))
         message = "LLM library not available" if e.reason == "library" else "API key not configured"
         return _create_empty_routing_result(message)
+    except LLMEgressDisabledError as e:
+        logger.warning(str(e))
+        return _create_empty_routing_result(
+            "AI routing generation is disabled for your company (allow_ai_egress is off)"
+        )
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse LLM routing response as JSON: {e}")
         return _create_empty_routing_result(f"Invalid JSON response: {str(e)}")
