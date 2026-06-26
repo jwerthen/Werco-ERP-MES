@@ -13,6 +13,7 @@ from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+import app.api.endpoints.work_orders as work_orders_endpoint
 from app.core.security import create_access_token
 from app.models.company import Company
 from app.models.laser_nest import LaserNest
@@ -205,6 +206,77 @@ class TestManualCreate:
         nest = db_session.query(LaserNest).filter(LaserNest.id == second.json()["id"]).first()
         child = db_session.query(WorkOrder).filter(WorkOrder.id == nest.operation.work_order_id).first()
         assert float(child.quantity_ordered) == 7.0  # 3 + 4
+
+
+# --------------------------------------------------------------------------- #
+# Concurrency: the laser-child-WO advisory lock is taken on the manual path
+# --------------------------------------------------------------------------- #
+class TestLaserChildWorkOrderLock:
+    """``_ensure_laser_child_work_order`` takes a per-parent advisory lock to
+    serialize creation of the LASER_CUTTING child WO so two concurrent manual
+    adds (or a manual-add racing an import) can't double-create the child.
+
+    The lock is a no-op on SQLite (the test DB), so real serialization can't be
+    asserted here -- instead we spy on ``acquire_generator_lock`` (still letting
+    the real, harmless function run) and prove it was invoked with the correct
+    per-parent namespace + company id on the manual-create path.
+    """
+
+    def test_manual_create_acquires_per_parent_lock(self, client, db_session, laser_setup, monkeypatch):
+        parent_id = laser_setup["parent"].id
+        company_id = laser_setup["admin"].company_id
+        calls = []
+
+        real_lock = work_orders_endpoint.acquire_generator_lock
+
+        def _spy(db, namespace, company=None):
+            calls.append((namespace, company))
+            return real_lock(db, namespace, company)
+
+        monkeypatch.setattr(work_orders_endpoint, "acquire_generator_lock", _spy)
+
+        headers = headers_for(laser_setup["admin"])
+        resp = _create_manual_nest(client, headers, parent_id, {"cnc_number": "LOCK-1", "planned_runs": 2})
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+
+        # The same generator-lock helper is used for other namespaces too (e.g.
+        # "work_order_number"), so filter for the laser-child namespace rather
+        # than asserting a total call count.
+        laser_calls = [c for c in calls if c[0].startswith("laser_child_work_order:")]
+        assert laser_calls, f"expected a laser_child_work_order lock acquisition, got {calls}"
+        assert (f"laser_child_work_order:{parent_id}", company_id) in laser_calls
+
+    def test_second_manual_create_reuses_existing_child(self, client, db_session, laser_setup):
+        """A second manual add onto the SAME parent re-uses the existing child laser
+        WO (find-or-create) -- exactly one LASER_CUTTING child exists afterward.
+
+        This guards the behavior the advisory lock protects: the second call's
+        SELECT must find the committed child rather than INSERT a duplicate.
+        """
+        headers = headers_for(laser_setup["admin"])
+        parent_id = laser_setup["parent"].id
+
+        first = _create_manual_nest(client, headers, parent_id, {"cnc_number": "REUSE-1", "planned_runs": 2})
+        assert first.status_code == status.HTTP_201_CREATED, first.text
+        second = _create_manual_nest(client, headers, parent_id, {"cnc_number": "REUSE-2", "planned_runs": 3})
+        assert second.status_code == status.HTTP_201_CREATED, second.text
+
+        children = (
+            db_session.query(WorkOrder)
+            .filter(
+                WorkOrder.parent_work_order_id == parent_id,
+                WorkOrder.work_order_type == "laser_cutting",
+                WorkOrder.is_deleted.is_(False),
+            )
+            .all()
+        )
+        assert len(children) == 1, f"expected exactly one laser child WO, got {len(children)}"
+
+        # Both nests' operations live on that single child WO.
+        first_nest = db_session.query(LaserNest).filter(LaserNest.id == first.json()["id"]).first()
+        second_nest = db_session.query(LaserNest).filter(LaserNest.id == second.json()["id"]).first()
+        assert first_nest.operation.work_order_id == children[0].id
+        assert second_nest.operation.work_order_id == children[0].id
 
 
 # --------------------------------------------------------------------------- #

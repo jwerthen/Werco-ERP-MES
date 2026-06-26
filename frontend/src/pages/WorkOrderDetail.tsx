@@ -8,6 +8,7 @@ import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
 import LaserNestManualModal from '../components/laser/LaserNestManualModal';
+import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
@@ -78,20 +79,6 @@ interface ActiveShopUser {
   work_center?: string;
   clock_in?: string;
   entry_type?: string;
-}
-
-interface LaserNestPreview {
-  package_name: string;
-  nest_count: number;
-  total_planned_runs: number;
-  nests: {
-    nest_name: string;
-    cnc_file_name: string;
-    planned_runs: number;
-    material?: string | null;
-    thickness?: string | null;
-    sheet_size?: string | null;
-  }[];
 }
 
 interface WorkOrderDocument {
@@ -265,11 +252,8 @@ export default function WorkOrderDetail() {
   const [resolvingBlockerId, setResolvingBlockerId] = useState<number | null>(null);
   const [userNameById, setUserNameById] = useState<Record<number, string>>({});
   const [activeUsersOnWorkOrder, setActiveUsersOnWorkOrder] = useState<ActiveShopUser[]>([]);
-  const [laserNestFile, setLaserNestFile] = useState<File | null>(null);
-  const [laserNestSourcePath, setLaserNestSourcePath] = useState('');
-  const [laserNestPreview, setLaserNestPreview] = useState<LaserNestPreview | null>(null);
-  const [laserNestLoading, setLaserNestLoading] = useState(false);
-  const [laserNestError, setLaserNestError] = useState('');
+  // Batch ZIP import runs through the LaserNestImportWizard modal.
+  const [nestImportWizardOpen, setNestImportWizardOpen] = useState(false);
   // Manual nest entry + per-nest PDF management.
   const [nestModalOpen, setNestModalOpen] = useState(false);
   const [nestModalTarget, setNestModalTarget] = useState<LaserNestInfo | null>(null);
@@ -396,10 +380,7 @@ export default function WorkOrderDetail() {
     setWorkOrder(null);
     setMaterialReqs(null);
     setBlockers([]);
-    setLaserNestFile(null);
-    setLaserNestSourcePath('');
-    setLaserNestPreview(null);
-    setLaserNestError('');
+    setNestImportWizardOpen(false);
     setWorkOrderDocuments([]);
     setAvailablePdfDocuments([]);
     setDocumentUploadFile(null);
@@ -667,53 +648,15 @@ export default function WorkOrderDetail() {
     }
   };
 
-  const handlePreviewLaserNestPackage = async () => {
-    if (!workOrder) return;
-    if (!laserNestFile && !laserNestSourcePath.trim()) {
-      setLaserNestError('Choose a zip package or enter a folder path.');
-      return;
-    }
-
-    setLaserNestLoading(true);
-    setLaserNestError('');
-    try {
-      const preview = await api.previewLaserNestPackage(workOrder.id, {
-        file: laserNestFile,
-        source_path: laserNestSourcePath.trim() || undefined,
-      });
-      setLaserNestPreview(preview);
-    } catch (err: any) {
-      setLaserNestError(err.response?.data?.detail || 'Failed to preview laser nest package');
-      setLaserNestPreview(null);
-    } finally {
-      setLaserNestLoading(false);
-    }
-  };
-
-  const handleImportLaserNestPackage = async () => {
-    if (!workOrder) return;
-    if (!laserNestPreview) {
-      await handlePreviewLaserNestPackage();
-      return;
-    }
-
-    setLaserNestLoading(true);
-    setLaserNestError('');
-    try {
-      const result = await api.importLaserNestPackage(workOrder.id, {
-        file: laserNestFile,
-        source_path: laserNestSourcePath.trim() || undefined,
-      });
-      const childId = result?.child_work_order?.id;
-      if (childId) {
-        navigate(`/work-orders/${childId}`);
-      } else {
-        await loadWorkOrder();
-      }
-    } catch (err: any) {
-      setLaserNestError(err.response?.data?.detail || 'Failed to import laser nest package');
-    } finally {
-      setLaserNestLoading(false);
+  // Called by the import wizard after a successful import. The wizard owns the
+  // pick → preview → review → import flow; here we just close it and route to
+  // the freshly-created child laser WO (or refresh in place if none came back).
+  const handleNestPackageImported = (childWorkOrderId?: number) => {
+    setNestImportWizardOpen(false);
+    if (childWorkOrderId) {
+      navigate(`/work-orders/${childWorkOrderId}`);
+    } else {
+      loadWorkOrder();
     }
   };
 
@@ -1250,106 +1193,28 @@ export default function WorkOrderDetail() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {laserNestPreview && (
-                <span className="text-xs font-semibold px-2 py-1 rounded bg-fd-red/15 text-fd-red w-fit">
-                  {laserNestPreview.nest_count} nests • {laserNestPreview.total_planned_runs} runs
-                </span>
-              )}
               {canManageNests && (
-                <button
-                  type="button"
-                  onClick={openAddNestModal}
-                  className="btn-secondary btn-sm flex items-center gap-1.5 whitespace-nowrap"
-                >
-                  <PlusIcon className="h-4 w-4" />
-                  Add nest manually
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setNestImportWizardOpen(true)}
+                    className="btn-primary btn-sm flex items-center gap-1.5 whitespace-nowrap"
+                  >
+                    <ArrowUpTrayIcon className="h-4 w-4" />
+                    Import nest package
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openAddNestModal}
+                    className="btn-secondary btn-sm flex items-center gap-1.5 whitespace-nowrap"
+                  >
+                    <PlusIcon className="h-4 w-4" />
+                    Add nest manually
+                  </button>
+                </>
               )}
             </div>
           </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_auto] gap-3">
-            <label className="block">
-              <span className="text-xs font-medium text-slate-400">Zip Package</span>
-              <input
-                type="file"
-                accept=".zip"
-                onChange={(event) => {
-                  setLaserNestFile(event.target.files?.[0] || null);
-                  setLaserNestPreview(null);
-                  setLaserNestError('');
-                }}
-                className="mt-1 block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
-              />
-            </label>
-            <label className="block">
-              <span className="text-xs font-medium text-slate-400">Folder Path</span>
-              <input
-                type="text"
-                value={laserNestSourcePath}
-                onChange={(event) => {
-                  setLaserNestSourcePath(event.target.value);
-                  setLaserNestPreview(null);
-                  setLaserNestError('');
-                }}
-                placeholder="/path/to/ermaksan/nest-folder"
-                className="input mt-1 w-full"
-              />
-            </label>
-            <div className="flex items-end gap-2">
-              <button
-                type="button"
-                onClick={handlePreviewLaserNestPackage}
-                disabled={laserNestLoading || (!laserNestFile && !laserNestSourcePath.trim())}
-                className="btn-secondary"
-              >
-                Preview
-              </button>
-              <button
-                type="button"
-                onClick={handleImportLaserNestPackage}
-                disabled={laserNestLoading || !laserNestPreview}
-                className="btn-primary"
-              >
-                {laserNestLoading ? 'Working...' : 'Import'}
-              </button>
-            </div>
-          </div>
-
-          {laserNestError && (
-            <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-              {laserNestError}
-            </div>
-          )}
-
-          {laserNestPreview && (
-            <div className="mt-4 overflow-x-auto rounded-lg border border-fd-line">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800/50">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Nest</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">CNC File</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Runs</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Material</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Sheet</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-700 bg-fd-panel">
-                  {laserNestPreview.nests.map((nest, index) => (
-                    <tr key={`${nest.cnc_file_name}-${index}`} className="hover:bg-slate-800/50">
-                      <td className="px-4 py-3 text-sm font-medium text-white">{nest.nest_name}</td>
-                      <td className="px-4 py-3 text-sm text-slate-300">{nest.cnc_file_name}</td>
-                      <td className="px-4 py-3 text-sm text-right font-semibold tabular-nums">{nest.planned_runs}</td>
-                      <td className="px-4 py-3 text-sm text-slate-300">
-                        {[nest.material, nest.thickness].filter(Boolean).join(' • ') || '-'}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-slate-300">{nest.sheet_size || '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
 
           {/* Hidden file input shared by all per-nest "Attach PDF" actions. */}
           <input
@@ -1898,13 +1763,21 @@ export default function WorkOrderDetail() {
       )}
 
       {canManageNests && (
-        <LaserNestManualModal
-          open={nestModalOpen}
-          onClose={() => setNestModalOpen(false)}
-          workOrderId={workOrder.id}
-          nest={nestModalTarget}
-          onSaved={handleNestSaved}
-        />
+        <>
+          <LaserNestManualModal
+            open={nestModalOpen}
+            onClose={() => setNestModalOpen(false)}
+            workOrderId={workOrder.id}
+            nest={nestModalTarget}
+            onSaved={handleNestSaved}
+          />
+          <LaserNestImportWizard
+            open={nestImportWizardOpen}
+            onClose={() => setNestImportWizardOpen(false)}
+            workOrderId={workOrder.id}
+            onImported={handleNestPackageImported}
+          />
+        </>
       )}
     </div>
   );

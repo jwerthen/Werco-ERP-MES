@@ -8,8 +8,10 @@ mount (see ``app/api/router.py``).
 """
 
 import os
+import tempfile
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 
@@ -18,8 +20,14 @@ from app.db.database import get_db
 from app.models.document import Document
 from app.models.laser_nest import LaserNest
 from app.models.user import User, UserRole
-from app.schemas.work_order import LaserNestAttachDocument, LaserNestManualResponse, LaserNestUpdate
+from app.schemas.work_order import (
+    LaserNestAttachDocument,
+    LaserNestManualResponse,
+    LaserNestPdfExtractionResponse,
+    LaserNestUpdate,
+)
 from app.services.audit_service import AuditService
+from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
 from app.services.laser_nest_service import (
     manual_nest_response_dict,
     soft_delete_laser_nest,
@@ -33,6 +41,53 @@ router = APIRouter()
 # them. The inline PDF preview (GET .../document) is intentionally readable by
 # any authenticated user -- operators need to view the shop drawing.
 _NEST_WRITE_ROLES = require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
+
+
+@router.post("/extract", response_model=LaserNestPdfExtractionResponse)
+async def extract_laser_nest_from_pdf(
+    file: UploadFile = File(...),
+    current_user: User = Depends(_NEST_WRITE_ROLES),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Auto-extract nest fields (CNC #, material, size) from a single nest PDF.
+
+    Stateless: no DB write, no audit. Feeds the manual-modal auto-fill -- the
+    planner still verifies and saves. ``company_id`` is passed through for
+    tenant-scoped AI-usage telemetry on the underlying ``run_llm_task`` call.
+
+    Declared as a static literal ``/extract`` POST so it is matched ahead of the
+    dynamic ``/{laser_nest_id}`` routes.
+    """
+    file_name = file.filename or "nest.pdf"
+    is_pdf = file.content_type == "application/pdf" or file_name.lower().endswith(".pdf")
+    if not is_pdf:
+        raise HTTPException(status_code=400, detail="Only PDF files are supported for nest extraction")
+
+    # extract_nest_fields_from_pdf is sync + blocking (native-PDF document block,
+    # or flattened-text fallback, + LLM call); run it off the event loop. It NEVER
+    # raises -- a bad PDF degrades to a filename-only result with a warning.
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp:
+            # Capture the path BEFORE the body read, so a failed read still hits
+            # the finally cleanup and never leaks the temp file.
+            temp_path = temp.name
+            temp.write(await file.read())
+        result = await run_in_threadpool(extract_nest_fields_from_pdf, temp_path, file_name, company_id)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    return LaserNestPdfExtractionResponse(
+        cnc_number=result.get("cnc_number"),
+        material=result.get("material"),
+        thickness=result.get("thickness"),
+        sheet_size=result.get("sheet_size"),
+        planned_runs=result.get("planned_runs"),
+        confidence=result.get("extraction_confidence"),
+        source=result.get("source", "none"),
+        warning=result.get("warning"),
+    )
 
 
 def _load_nest(db: Session, laser_nest_id: int, company_id: int) -> LaserNest:

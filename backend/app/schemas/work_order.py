@@ -143,6 +143,75 @@ class LaserNestManualResponse(BaseModel):
     document_file_name: Optional[str] = None
 
 
+class LaserNestPdfExtractionResponse(BaseModel):
+    """Result of auto-extracting nest fields from a single laser-nest report PDF.
+
+    Stateless single-PDF extract endpoint contract. ``confidence`` is the overall
+    extraction confidence ("high" | "medium" | "low"), mapped from the extraction
+    service's ``extraction_confidence`` key. ``source`` is "ai" or "filename"
+    (the latter when the model could not pin the CNC number and the filename stem
+    was used as the fallback). ``warning`` is None on success.
+    """
+
+    cnc_number: Optional[str] = None
+    material: Optional[str] = None
+    thickness: Optional[str] = None
+    sheet_size: Optional[str] = None
+    planned_runs: Optional[int] = None
+    confidence: Optional[str] = None
+    source: str
+    warning: Optional[str] = None
+
+
+class LaserNestPreviewRow(BaseModel):
+    """One detected nest in a package-preview response.
+
+    Backward-compatible with the existing CNC-program-file preview: every field
+    except a sensible name has a default, so a CNC-file row (which carries only
+    ``nest_name`` / ``cnc_file_name`` / ``planned_runs`` and the filename-inferred
+    ``material`` / ``thickness`` / ``sheet_size``) still validates. The PDF path
+    additionally populates ``cnc_number``, ``confidence`` (overall) and
+    ``source_file`` (the PDF's relative path within the package, echoed back on
+    import as the row key).
+    """
+
+    nest_name: str
+    cnc_file_name: Optional[str] = None
+    cnc_number: Optional[str] = None
+    planned_runs: int = 1
+    material: Optional[str] = None
+    thickness: Optional[str] = None
+    sheet_size: Optional[str] = None
+    confidence: Optional[str] = None
+    # Always populated: every ``ParsedLaserNest.as_dict()`` sets ``source_file``
+    # to the nest's relative path (PDF rel path for PDF nests, CNC file rel path
+    # for CNC-file nests). It is the frontend's row-matching / React key, so it is
+    # a required ``str`` to match the frontend's non-optional typing.
+    source_file: str
+
+
+class LaserNestImportRow(BaseModel):
+    """One planner-confirmed nest row in the PDF confirm-and-commit import body.
+
+    Validates the raw ``rows`` JSON before anything is persisted, so a negative /
+    huge / non-numeric ``planned_runs`` or an over-long string is rejected with a
+    clean 400 rather than reaching the DB as a 500 or poisoned data. Field
+    constraints mirror ``LaserNestManualCreate`` (the manual single-nest path).
+
+    ``source_file`` is the row key the wizard echoes back from the preview; it is
+    resolved (with a path-traversal guard) to the PDF inside the re-sent package.
+    """
+
+    source_file: str = Field(..., min_length=1, max_length=1000)
+    cnc_number: Optional[str] = Field(None, max_length=100)
+    nest_name: Optional[str] = Field(None, max_length=255)
+    planned_runs: int = Field(..., ge=1, description="Planned sheet runs")
+    material: Optional[str] = Field(None, max_length=100)
+    thickness: Optional[str] = Field(None, max_length=50)
+    sheet_size: Optional[str] = Field(None, max_length=100)
+    confidence: Optional[str] = Field(None, max_length=50)
+
+
 class WorkOrderOperationCreate(WorkOrderOperationBase):
     pass
 

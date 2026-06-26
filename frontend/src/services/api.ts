@@ -13,11 +13,15 @@ import {
 } from '../types/api';
 import {
   User,
+  Company,
   Part,
   WorkCenter,
   LaserNestManualInput,
   LaserNestManualResponse,
   LaserNestUpdateInput,
+  LaserNestPdfExtraction,
+  LaserNestPackagePreview,
+  LaserNestImportRow,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -791,24 +795,53 @@ class ApiService {
     return response.data;
   }
 
-  async previewLaserNestPackage(workOrderId: number, data: { file?: File | null; source_path?: string }) {
+  /**
+   * AI-extract CNC #, material, thickness, sheet size (and optional runs) from a
+   * single laser-nest report PDF. Stateless — no DB write. The modal calls this
+   * on PDF select to pre-fill the manual-nest form; fields stay editable.
+   */
+  async extractLaserNestFromPdf(file: File): Promise<LaserNestPdfExtraction> {
     const formData = new FormData();
-    if (data.file) formData.append('file', data.file);
-    if (data.source_path) formData.append('source_path', data.source_path);
-    const response = await this.api.post(`/work-orders/${workOrderId}/laser-nest-packages/preview`, formData, {
+    formData.append('file', file);
+    const response = await this.api.post<LaserNestPdfExtraction>('/laser-nests/extract', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
   }
 
+  async previewLaserNestPackage(
+    workOrderId: number,
+    data: { file?: File | null; source_path?: string }
+  ): Promise<LaserNestPackagePreview> {
+    const formData = new FormData();
+    if (data.file) formData.append('file', data.file);
+    if (data.source_path) formData.append('source_path', data.source_path);
+    const response = await this.api.post<LaserNestPackagePreview>(
+      `/work-orders/${workOrderId}/laser-nest-packages/preview`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
+    return response.data;
+  }
+
   async importLaserNestPackage(
     workOrderId: number,
-    data: { file?: File | null; source_path?: string; work_center_id?: number | null }
+    data: {
+      file?: File | null;
+      source_path?: string;
+      work_center_id?: number | null;
+      // Confirmed/edited rows from the wizard grid. When present they carry the
+      // values to persist (matched to PDFs by `source_file`); the re-sent ZIP
+      // only supplies PDF bytes for storage, so no second AI call runs. Omit to
+      // keep the legacy CNC-program import (server parses the ZIP itself).
+      rows?: LaserNestImportRow[];
+    }
   ) {
     const formData = new FormData();
     if (data.file) formData.append('file', data.file);
     if (data.source_path) formData.append('source_path', data.source_path);
     if (data.work_center_id) formData.append('work_center_id', String(data.work_center_id));
+    if (data.rows) formData.append('rows', JSON.stringify(data.rows));
     const response = await this.api.post(`/work-orders/${workOrderId}/laser-nest-packages/import`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
@@ -3464,6 +3497,16 @@ class ApiService {
 
   async updateCurrentCompany(data: any): Promise<any> {
     const response = await this.api.put('/companies/me', data);
+    return response.data;
+  }
+
+  // Per-company AI egress kill switch (CUI / data-egress control). ADMIN-only
+  // server-side (mirrors the sibling carrier / print egress switches); flipping
+  // it is recorded on the tamper-evident audit trail. When OFF, no document
+  // content leaves the system boundary to the Anthropic AI provider and
+  // AI-backed features degrade gracefully. Returns the updated CompanyResponse.
+  async updateCompanyAiEgress(allow: boolean): Promise<Company> {
+    const response = await this.api.put('/companies/me/ai-egress', { allow_ai_egress: allow });
     return response.data;
   }
 

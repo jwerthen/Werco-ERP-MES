@@ -1,16 +1,20 @@
+import asyncio
+import json
 import logging
 import os
 import shutil
 import tempfile
 import uuid
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from sqlalchemy import or_
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
@@ -34,8 +38,10 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.schemas.import_kit import WorkOrderImportResponse
 from app.schemas.work_order import (
+    LaserNestImportRow,
     LaserNestManualCreate,
     LaserNestManualResponse,
+    LaserNestPreviewRow,
     WorkOrderCreate,
     WorkOrderOperationCreate,
     WorkOrderOperationResponse,
@@ -63,15 +69,19 @@ from app.services.completion_signal_service import (
 )
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
+from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
 from app.services.laser_nest_service import (
+    LASER_PDF_PACKAGE_MAX,
+    ParsedLaserNest,
     active_laser_nest,
     build_laser_nest_child_work_order,
+    build_parsed_nest_from_extraction,
     copy_laser_nest_folder,
     create_manual_laser_nest,
     extract_laser_nest_zip,
     manual_nest_response_dict,
+    package_has_pdfs,
     parse_laser_nest_folder,
-    parse_laser_nest_zip,
     sync_laser_nest_from_operation,
 )
 from app.services.migration_import_service import import_open_work_orders
@@ -85,6 +95,7 @@ from app.services.quality_gate_service import (
     record_reconcile_inspection_exception,
 )
 from app.services.scheduling_service import SchedulingService
+from app.services.storage_service import delete_ref
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     StatusTransition,
@@ -424,7 +435,11 @@ class LaserNestPreviewResponse(BaseModel):
     package_name: str
     nest_count: int
     total_planned_runs: int
-    nests: list[dict]
+    # Typed rows so the PDF extras (cnc_number / confidence / source_file) are
+    # part of the contract while staying backward-compatible with CNC-file rows
+    # (every extra field defaults). Rows arrive as dicts from ParsedLaserNest
+    # .as_dict(); Pydantic validates/coerces them on construction.
+    nests: list[LaserNestPreviewRow]
 
 
 def _emit_work_order_event(
@@ -716,6 +731,21 @@ def _ensure_laser_child_work_order(
     parent_work_order: WorkOrder,
     company_id: int,
 ) -> WorkOrder:
+    # Serialize child-laser-WO creation per parent. Without this, two simultaneous
+    # laser-nest imports -- or a manual-add racing an import -- could both miss the
+    # SELECT below and each create a duplicate LASER_CUTTING child under one
+    # assembly. A transaction-scoped Postgres advisory lock keyed on the (globally
+    # unique) parent WO id forces the race-loser to block until the winner's
+    # surrounding atomic_transaction commits; the loser's SELECT then finds the
+    # committed child and returns it, so the INSERT never double-fires. Released
+    # automatically on commit/rollback; no-op on SQLite (tests). This is the sole
+    # creation point for laser child WOs, so locking here covers both the import
+    # and manual-entry paths. (A partial unique index on
+    # (company_id, parent_work_order_id) WHERE work_order_type='laser_cutting' would
+    # be a DB-level backstop, but is deferred -- it needs a pre-flight de-dup audit
+    # before it can be safely added to live multi-tenant data.)
+    acquire_generator_lock(db, f"laser_child_work_order:{parent_work_order.id}", company_id)
+
     child = (
         db.query(WorkOrder)
         .filter(
@@ -766,6 +796,136 @@ def _build_laser_preview_response(package_name: str, nests: list[dict]) -> Laser
         total_planned_runs=sum(int(nest.get("planned_runs") or 0) for nest in nests),
         nests=nests,
     )
+
+
+# Bounded fan-out for the per-PDF AI extraction. extract_nest_fields_from_pdf is
+# sync/blocking, so each call is dispatched to the threadpool; the semaphore caps
+# concurrent in-flight LLM calls (latency vs. provider pressure tradeoff).
+_LASER_PDF_EXTRACT_CONCURRENCY = 5
+
+
+async def _parse_laser_nest_pdf_package_async(folder: str, company_id: int) -> list[ParsedLaserNest]:
+    """Parallelized counterpart to ``parse_laser_nest_pdf_package``.
+
+    Globs the PDFs here (enforcing the same cap), then runs the per-file AI
+    extraction concurrently via ``run_in_threadpool`` under a semaphore. Returns
+    rows in stable (sorted-path) order. The sync helper is kept for the offline
+    path and tests; this one is what the async endpoint uses for latency.
+    """
+    root = Path(folder).expanduser().resolve()
+    pdf_paths = sorted(p for p in root.rglob("*.pdf") if p.is_file())
+    if not pdf_paths:
+        raise ValueError("No PDF files found in package")
+    if len(pdf_paths) > LASER_PDF_PACKAGE_MAX:
+        raise ValueError(
+            f"Package has {len(pdf_paths)} PDFs; the limit is {LASER_PDF_PACKAGE_MAX}. "
+            "Split the package into smaller batches."
+        )
+
+    semaphore = asyncio.Semaphore(_LASER_PDF_EXTRACT_CONCURRENCY)
+
+    async def _extract(path: Path) -> ParsedLaserNest:
+        rel_path = str(path.relative_to(root))
+        async with semaphore:
+            result = await run_in_threadpool(extract_nest_fields_from_pdf, str(path), path.name, company_id)
+        return build_parsed_nest_from_extraction(result, abs_path=str(path), rel_path=rel_path)
+
+    # return_exceptions=True so one bad PDF can't sink the whole preview batch
+    # (the documented anti-goal). extract_nest_fields_from_pdf is itself
+    # never-raise, so this is belt-and-suspenders for an unexpected raise in the
+    # threadpool dispatch / row assembly: a failed task degrades to a
+    # filename-only ParsedLaserNest with a low confidence, in stable path order.
+    results = await asyncio.gather(*(_extract(path) for path in pdf_paths), return_exceptions=True)
+    nests: list[ParsedLaserNest] = []
+    for path, result in zip(pdf_paths, results):
+        if isinstance(result, Exception):
+            logger.warning("Laser-nest preview extraction failed for %s: %s", path.name, result)
+            rel_path = str(path.relative_to(root))
+            nests.append(
+                build_parsed_nest_from_extraction(
+                    {"cnc_number": None, "extraction_confidence": "low"},
+                    abs_path=str(path),
+                    rel_path=rel_path,
+                )
+            )
+        else:
+            nests.append(result)
+    return nests
+
+
+async def _preview_nests_from_folder(folder: str, company_id: int) -> list[dict]:
+    """Detect package shape and return preview rows as dicts.
+
+    PDF package -> parallel AI extraction; otherwise the legacy CNC-file parser
+    (sync; run off the event loop). Raises ``ValueError`` (empty/over-cap) for
+    the caller to translate into a 400.
+    """
+    if package_has_pdfs(folder):
+        nests = await _parse_laser_nest_pdf_package_async(folder, company_id)
+    else:
+        nests = await run_in_threadpool(parse_laser_nest_folder, folder)
+    return [nest.as_dict() for nest in nests]
+
+
+def _resolve_package_pdf(package_dir: str, source_file: str) -> str:
+    """Resolve a confirmed row's ``source_file`` to an absolute PDF path inside
+    ``package_dir``, rejecting path traversal (mirrors ``_safe_extract_zip``).
+
+    Raises ``ValueError`` if the path escapes the package or the file is missing.
+    """
+    root = Path(package_dir).resolve()
+    target = (root / source_file).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Invalid nest source path: {source_file}") from exc
+    if not target.is_file():
+        raise ValueError(f"Nest source file not found in package: {source_file}")
+    return str(target)
+
+
+def _build_confirmed_pdf_nests(package_dir: str, rows: list[LaserNestImportRow]) -> list[ParsedLaserNest]:
+    """Build ParsedLaserNest objects from confirmed wizard rows (no AI re-call).
+
+    Rows are already-validated ``LaserNestImportRow`` models (the raw JSON was
+    parsed through Pydantic at the endpoint, so ``planned_runs`` is a positive
+    int and all strings are length-bounded). The re-sent ZIP only supplies the
+    PDF bytes; the persisted field values are the planner-confirmed ones.
+
+    Duplicate ``source_file`` values are rejected: two rows pointing at the same
+    PDF would double-create nests/Documents and trip ``uq_laser_nests_package_file``
+    as an uncaught 500. Raises ``ValueError`` (-> 400) on a repeat.
+    """
+    if not rows:
+        raise ValueError("No nest rows were provided for import")
+
+    nests: list[ParsedLaserNest] = []
+    seen_source_files: set[str] = set()
+    for row in rows:
+        source_file = row.source_file.strip()
+        if not source_file:
+            raise ValueError("Each nest row must include a source_file")
+        if source_file in seen_source_files:
+            raise ValueError(f"Duplicate nest source file in import rows: {source_file}")
+        seen_source_files.add(source_file)
+        abs_path = _resolve_package_pdf(package_dir, source_file)
+        cnc_number = (row.cnc_number or "").strip() or None
+        nest_name = (row.nest_name or "").strip() or cnc_number or Path(source_file).stem
+        nests.append(
+            ParsedLaserNest(
+                nest_name=nest_name,
+                cnc_file_name=Path(source_file).name,
+                cnc_file_path=source_file,
+                planned_runs=row.planned_runs,
+                material=row.material,
+                thickness=row.thickness,
+                sheet_size=row.sheet_size,
+                cnc_number=cnc_number,
+                pdf_source_path=abs_path,
+                confidence=row.confidence,
+            )
+        )
+    return nests
 
 
 @router.get("/", response_model=List[WorkOrderSummary])
@@ -1402,16 +1562,27 @@ async def preview_laser_nest_package_import(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Preview nest operations detected from a zipped Ermaksan package or server folder."""
+    """Preview nest operations detected from a zipped Ermaksan package or server folder.
+
+    Two package shapes, auto-detected: a ZIP/folder of nest-report **PDFs** (the
+    new path -- fields extracted by AI, one LLM call per PDF, parallelized with
+    bounded concurrency) or the legacy ZIP/folder of CNC **program files** (fields
+    inferred from filenames). PDFs and CNC extensions are disjoint, so a package
+    is treated as a PDF package iff it contains any ``*.pdf``.
+    """
     _load_parent_work_order(db, work_order_id, company_id)
     package_name = _laser_package_name(file, source_path)
     temp_path = None
     try:
         if file:
             temp_path = await _save_upload_to_temp(file)
-            nests = [nest.as_dict() for nest in parse_laser_nest_zip(temp_path)]
+            # Extract once into a temp dir so we can inspect contents (PDF vs CNC)
+            # and run the AI extraction over the materialized files.
+            with TemporaryDirectory() as scan_dir:
+                extract_laser_nest_zip(temp_path, scan_dir)
+                nests = await _preview_nests_from_folder(scan_dir, company_id)
         elif source_path:
-            nests = [nest.as_dict() for nest in parse_laser_nest_folder(source_path)]
+            nests = await _preview_nests_from_folder(source_path, company_id)
         else:
             raise HTTPException(status_code=400, detail="Upload a zipped package or provide source_path")
     except ValueError as exc:
@@ -1429,15 +1600,64 @@ async def import_laser_nest_package(
     file: Optional[UploadFile] = File(None),
     source_path: Optional[str] = Form(None),
     work_center_id: Optional[int] = Form(None),
+    rows: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create or update a child laser work order from one nest package."""
+    """Create or update a child laser work order from one nest package.
+
+    Two paths, both honoring IMPORT-REPLACES-EVERYTHING:
+    - ``rows`` provided (PDF confirm-and-commit): the re-sent ZIP supplies PDF
+      bytes; the persisted field values are the planner-CONFIRMED ones from the
+      JSON ``rows`` (no second AI call). Each nest's PDF is stored as a DRAWING
+      Document and attached.
+    - ``rows`` absent (legacy CNC-program import): unchanged -- fields inferred
+      from filenames, no Documents.
+
+    Both paths audit (DELETE per superseded nest, CREATE per new nest): the
+    import wipes ALL prior nests/operations for this child WO, so each wipe is
+    recorded before the rebuild and each created nest is recorded after.
+    """
     parent_work_order = _load_parent_work_order(db, work_order_id, company_id)
     package_name = _laser_package_name(file, source_path)
     temp_path = None
     package_dir = os.path.join(_resolve_laser_upload_root(), str(uuid.uuid4()))
+
+    is_pdf_import = rows is not None
+    confirmed_rows: list[LaserNestImportRow] = []
+    if is_pdf_import:
+        try:
+            parsed = json.loads(rows)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="rows must be valid JSON") from exc
+        if not isinstance(parsed, list):
+            raise HTTPException(status_code=400, detail="rows must be a JSON array of nest rows")
+        if len(parsed) > LASER_PDF_PACKAGE_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many nest rows ({len(parsed)}); the limit is {LASER_PDF_PACKAGE_MAX}.",
+            )
+        # Validate the raw rows through Pydantic BEFORE anything is persisted, so
+        # a negative/huge/non-numeric planned_runs or an over-long string is a
+        # clean 400 rather than a 500 or poisoned data.
+        try:
+            confirmed_rows = TypeAdapter(List[LaserNestImportRow]).validate_python(parsed)
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid nest rows: {exc.errors()}") from exc
+
+    # Storage blobs for nest-PDF Documents are written by storage.save() INSIDE
+    # the atomic_transaction, BEFORE it commits. On rollback they must be reaped
+    # (they live outside package_dir, so shutil.rmtree(package_dir) misses them).
+    saved_storage_keys: list[str] = []
+
+    def _reap_saved_blobs() -> None:
+        for key in saved_storage_keys:
+            try:
+                delete_ref(key)
+            except Exception:  # noqa: BLE001 - cleanup must not mask the original error
+                logger.warning("Failed to reap orphaned laser-nest blob on rollback: %s", key)
 
     try:
         if file:
@@ -1448,44 +1668,148 @@ async def import_laser_nest_package(
         else:
             raise HTTPException(status_code=400, detail="Upload a zipped package or provide source_path")
 
-        nests = parse_laser_nest_folder(package_dir)
+        if is_pdf_import:
+            # PDF path: persist the CONFIRMED values; do NOT re-run the AI.
+            nests = _build_confirmed_pdf_nests(package_dir, confirmed_rows)
+        else:
+            # Legacy CNC-program import path, unchanged.
+            nests = parse_laser_nest_folder(package_dir)
         laser_work_center = _find_laser_work_center(db, company_id, work_center_id)
 
-        with atomic_transaction(db):
-            child_work_order = _ensure_laser_child_work_order(
-                db,
-                parent_work_order=parent_work_order,
-                company_id=company_id,
-            )
-            child_work_order.status = WorkOrderStatus.RELEASED
-            child_work_order.quantity_complete = 0
-            child_work_order.quantity_scrapped = 0
+        import_source = "pdf_import" if is_pdf_import else "cnc_file_import"
 
-            package = build_laser_nest_child_work_order(
-                db,
-                parent_work_order=parent_work_order,
-                child_work_order=child_work_order,
-                package_name=package_name,
-                package_source_path=package_dir,
-                nests=nests,
-                laser_work_center=laser_work_center,
-                company_id=company_id,
-                created_by=current_user.id,
-            )
-            _emit_work_order_event(
-                db,
-                company_id=company_id,
-                current_user=current_user,
-                work_order=child_work_order,
-                event_type="laser_nest_package_imported",
-                payload={
-                    "parent_work_order_id": parent_work_order.id,
-                    "package_id": package.id,
-                    "nest_count": len(nests),
-                    "total_planned_runs": sum(nest.planned_runs for nest in nests),
-                },
-            )
+        try:
+            with atomic_transaction(db):
+                child_work_order = _ensure_laser_child_work_order(
+                    db,
+                    parent_work_order=parent_work_order,
+                    company_id=company_id,
+                )
+                child_work_order.status = WorkOrderStatus.RELEASED
+                child_work_order.quantity_complete = 0
+                child_work_order.quantity_scrapped = 0
+
+                # IMPORT-REPLACES-EVERYTHING wipes ALL prior non-deleted nests on
+                # this child WO (cascade hard-delete via build_..._child_work_order).
+                # Audit each superseded nest as a DELETE BEFORE the rebuild so the
+                # wipe is traceable; the audit rows only flush, so they commit
+                # atomically with the rebuild (mirrors the manual endpoint's
+                # audit-before-commit ordering). Runs for BOTH import shapes.
+                superseded_nests = (
+                    db.query(LaserNest)
+                    .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+                    .options(joinedload(LaserNest.operation))
+                    .filter(
+                        LaserNest.company_id == company_id,
+                        WorkOrderOperation.work_order_id == child_work_order.id,
+                        LaserNest.is_deleted == False,  # noqa: E712
+                    )
+                    .all()
+                )
+                for nest in superseded_nests:
+                    audit.log_delete(
+                        resource_type="laser_nest",
+                        resource_id=nest.id,
+                        resource_identifier=nest.cnc_number or nest.nest_name,
+                        old_values={
+                            "nest_name": nest.nest_name,
+                            "cnc_number": nest.cnc_number,
+                            "planned_runs": nest.planned_runs,
+                            "completed_runs": nest.completed_runs,
+                            "material": nest.material,
+                            "thickness": nest.thickness,
+                            "sheet_size": nest.sheet_size,
+                            "document_id": nest.document_id,
+                            "work_order_operation_id": nest.work_order_operation_id,
+                        },
+                        soft_delete=False,
+                        extra_data={
+                            "reason": "superseded_by_reimport",
+                            "parent_work_order_id": parent_work_order.id,
+                            "child_work_order_id": child_work_order.id,
+                        },
+                    )
+
+                package = build_laser_nest_child_work_order(
+                    db,
+                    parent_work_order=parent_work_order,
+                    child_work_order=child_work_order,
+                    package_name=package_name,
+                    package_source_path=package_dir,
+                    nests=nests,
+                    laser_work_center=laser_work_center,
+                    company_id=company_id,
+                    created_by=current_user.id,
+                    saved_storage_keys=saved_storage_keys,
+                )
+
+                # Audit each CREATED nest BEFORE commit, for BOTH import shapes
+                # (the legacy CNC path previously created nests with only a WO
+                # event). The SELECT filters company_id + package.id, so it works
+                # regardless of source. AuditService.log only flushes, so these
+                # commit atomically with the nests.
+                created_nests = (
+                    db.query(LaserNest)
+                    .filter(
+                        LaserNest.company_id == company_id,
+                        LaserNest.package_id == package.id,
+                    )
+                    .order_by(LaserNest.id)
+                    .all()
+                )
+                for nest in created_nests:
+                    audit.log_create(
+                        resource_type="laser_nest",
+                        resource_id=nest.id,
+                        resource_identifier=nest.cnc_number or nest.nest_name,
+                        new_values={
+                            "nest_name": nest.nest_name,
+                            "cnc_number": nest.cnc_number,
+                            "planned_runs": nest.planned_runs,
+                            "material": nest.material,
+                            "thickness": nest.thickness,
+                            "sheet_size": nest.sheet_size,
+                            "document_id": nest.document_id,
+                            "work_order_operation_id": nest.work_order_operation_id,
+                            "package_id": nest.package_id,
+                        },
+                        extra_data={
+                            "parent_work_order_id": parent_work_order.id,
+                            "child_work_order_id": child_work_order.id,
+                            "source": import_source,
+                        },
+                    )
+
+                _emit_work_order_event(
+                    db,
+                    company_id=company_id,
+                    current_user=current_user,
+                    work_order=child_work_order,
+                    event_type="laser_nest_package_imported",
+                    payload={
+                        "parent_work_order_id": parent_work_order.id,
+                        "package_id": package.id,
+                        "nest_count": len(nests),
+                        "total_planned_runs": sum(nest.planned_runs for nest in nests),
+                        "source": "pdf_import" if is_pdf_import else "cnc_files",
+                    },
+                )
+        except (IntegrityError, SQLAlchemyError) as exc:
+            # The transaction rolled back, so the just-written nest-PDF blobs are
+            # now orphaned -- reap them. Translate the DB/constraint fault to a
+            # clean 400 (a poisoned session must not surface as a 500).
+            _reap_saved_blobs()
+            logger.warning("Laser-nest import failed on a database/constraint error: %s", exc)
+            raise HTTPException(
+                status_code=400,
+                detail="Could not import the nest package; a nest conflicts with an existing record "
+                "or a value is invalid. Review the rows and try again.",
+            ) from exc
     except ValueError as exc:
+        # A pre-commit validation failure (e.g. duplicate source_file, empty
+        # package): no transaction committed. Reap any blobs written before the
+        # raise, then clean the temp package dir.
+        _reap_saved_blobs()
         if os.path.isdir(package_dir):
             shutil.rmtree(package_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
