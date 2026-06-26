@@ -217,14 +217,19 @@ create nests, and per the product decision they are used **one or the other per 
 mixed**:
 
 1. **Package import** — upload a zipped Ermaksan/CNC package (or point at a server folder) and
-   the system extracts one nest per CNC file. (Mounted under `/work-orders/{id}/laser-nest-packages/…`.)
-2. **Manual entry** — key one nest at a time, with an optional reference PDF. (The `…/manual`
-   create lives under work orders; per-nest edit/delete/PDF routes live under `/laser-nests/{id}/…`.)
+   the system extracts one nest per CNC file. The package may be either CNC **program files**
+   (fields inferred from filenames, as before) or nest-report **PDFs** (fields auto-extracted by
+   AI — see "PDF auto-extraction" below). (Mounted under `/work-orders/{id}/laser-nest-packages/…`.)
+2. **Manual entry** — key one nest at a time, with an optional reference PDF. Dropping a nest-report
+   PDF into the create modal auto-fills the fields via `POST /laser-nests/extract` (see below).
+   (The `…/manual` create lives under work orders; per-nest edit/delete/PDF routes live under
+   `/laser-nests/{id}/…`.)
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package or server folder (writes nothing) | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates the child laser WO and one nest operation per CNC file | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package or server folder (writes nothing). PDF packages run AI extraction per sheet | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates the child laser WO and one nest operation per CNC file (or per confirmed PDF row) | Admin / Manager / Supervisor |
+| POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to an assembly WO. Creates a clock-in-able `LASER` operation on the child laser WO | Admin / Manager / Supervisor |
 | PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
@@ -236,6 +241,57 @@ mixed**:
 > package **replaces all existing nests on the child laser WO — including any manually-entered
 > ones** — rebuilding the nest operations from the package plan. This is by design (manual *or*
 > import per job, never mixed); an import is authoritative and supersedes prior manual entry.
+> The wipe is now **fully audited**: each superseded nest is written as a `log_delete`
+> (`reason="superseded_by_reimport"`) **before** the rebuild, and each rebuilt nest as a
+> `log_create` — for **both** import shapes (the legacy CNC-program path now also writes the per-nest
+> `log_create` with `source="cnc_file_import"`; the PDF path uses `source="pdf_import"`). The audit
+> rows commit atomically with the rebuild.
+>
+> **PDF auto-extraction (CNC #, material, material size).** Nest-report PDFs (SigmaNEST / Ermaksan
+> style) are read automatically; the planner verifies before saving. Extraction is **layout-aware
+> (vision)**: the PDF bytes are sent to Claude as a base64 `document` content block so the model
+> reads the rendered sheet with its 2-D layout (PDFs over a ~20 MB native cap, or whose bytes can't
+> be read, fall back to flattened-text extraction). Two entry points, both gated to
+> **Admin / Manager / Supervisor** and both **AI-always** via the shared `run_llm_task` pipeline
+> (prompt `laser_nest_extraction` 1.1.0, `feature="laser_nest_extraction"`, one tenant-scoped
+> `ai_usage_events` row per call — telemetry, not audit):
+>
+> - **Single-PDF (`POST /laser-nests/extract`).** Multipart `file` (PDF; non-PDF → **400**).
+>   **Stateless — no DB write, no audit**; `company_id` flows through only for usage telemetry.
+>   Used by the manual-create modal to auto-fill fields from a dropped PDF. Returns
+>   `{ cnc_number, material, thickness, sheet_size, planned_runs, confidence, source, warning }`
+>   where `source` ∈ `{ai, filename}` and `confidence` ∈ `{high, medium, low}` (overall).
+>   Declared as a static `/extract` route so it matches ahead of the dynamic `/{laser_nest_id}` routes.
+>
+> - **Batch ZIP (`…/laser-nest-packages/preview` → `…/import`).** A package is treated as a **PDF
+>   package** iff it contains any `*.pdf` (PDFs and CNC extensions are disjoint); otherwise the
+>   legacy CNC-program path runs unchanged. **Review-before-commit:** `preview` runs AI once per
+>   sheet (parallelized, bounded concurrency) and returns editable rows — beyond the existing
+>   `nest_name` / `cnc_file_name` / `planned_runs` / `material` / `thickness` / `sheet_size`, PDF
+>   rows also carry **`source_file`** (the PDF's path within the package), **`cnc_number`**, and
+>   **`confidence`**. The planner edits/confirms in the wizard, then `import` re-sends the same ZIP
+>   **plus an optional `rows` form field** — a JSON array of confirmed rows
+>   `{source_file, cnc_number, nest_name, planned_runs, material, thickness, sheet_size}`. When
+>   `rows` is present, the backend matches each row to its PDF by `source_file`, stores each PDF as
+>   a `DRAWING` `Document` (attached via `document_id`), sets `cnc_number`, writes one `log_create`
+>   audit row per nest, and builds the child laser WO — **no second AI call** (the re-sent ZIP only
+>   supplies PDF bytes). When `rows` is absent, the legacy CNC-file import is unchanged.
+>
+>   `rows` is **strictly validated** before anything is persisted (`LaserNestImportRow`):
+>   `source_file` required (1–1000 chars), `planned_runs` required and **≥ 1**, and
+>   `cnc_number` / `nest_name` / `material` / `thickness` / `sheet_size` length-bounded as on the
+>   manual path. Import-specific **400** cases: `rows` not valid JSON / not a JSON array; any row
+>   failing validation; a **duplicate `source_file`** across rows; and a DB constraint/length fault
+>   (`IntegrityError`/`SQLAlchemyError` — e.g. tripping `uq_laser_nests_package_file` — now returns a
+>   clean **400** rather than a 500). A `source_file` that escapes the package or is missing from the
+>   re-sent ZIP → **400**.
+>
+> - **50-PDF cap.** A package (or `rows` array) with more than **50** PDFs is rejected with **400**.
+> - **Graceful degrade.** A PDF the model can't read falls back to the **filename stem** as the
+>   `cnc_number` (`05749.pdf` → `05749`) with a `warning` and `source="filename"` at low confidence —
+>   one bad sheet never hard-fails a batch. The native-PDF (vision) path reads scanned/image-only
+>   sheets directly; only when it can't (>20 MB cap or unreadable bytes) does the flattened-text
+>   fallback run (with its OCR step in `pdf_service`).
 >
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
 > (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
@@ -1353,6 +1409,31 @@ records, targets) require **Admin / Manager / Supervisor**.
 > platform admin's changes attribute to the company they have switched into — matching the
 > `/audit/*` (`AuditLog`) attribution. This is a separate trail from `/audit/*` and is **not** part
 > of the tamper-evident hash chain.
+
+### Company (self-service)
+
+The active company's own profile and self-managed settings. Mounted under `/companies`.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/companies/me` | Get the active company (includes `allow_ai_egress` and `user_count`) | Any authenticated user |
+| PUT | `/companies/me` | Update the active company's settings | Admin |
+| PUT | `/companies/me/ai-egress` | Toggle the company's **AI document-extraction egress kill switch** (`allow_ai_egress`) | Admin |
+
+> **`allow_ai_egress` is the AI-egress CUI kill switch (default OFF).** It gates **all** outbound
+> AI document-extraction egress to the Anthropic API (the AI analogue of `allow_carrier_egress` /
+> `allow_print_egress`), enforced fail-closed at the shared LLM client. `PUT /companies/me/ai-egress`
+> takes `{ "allow_ai_egress": boolean }` and returns the updated `CompanyResponse`; the flip is
+> recorded on the tamper-evident audit trail as both a field update and an
+> `ai_egress_enabled` / `ai_egress_disabled` **status change**. While OFF, AI features (PO/quote,
+> BOM, QMS, routing, laser-nest PDF extraction, Copilot, NL search) **degrade gracefully** — no
+> request leaves the boundary (laser-nest extraction falls back to filename-only). New companies are
+> created **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
+> (`require_role([ADMIN])`), matching the sibling `allow_carrier_egress` / `allow_print_egress`
+> controls. It is exposed in the UI at
+> **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`) — interactive for Admin
+> (enabling egress requires explicit confirmation), read-only for other roles. See
+> [docs/AI_QUOTING_AGENT_RUNBOOK.md](AI_QUOTING_AGENT_RUNBOOK.md).
 
 ### Carrier Integrations (Admin)
 

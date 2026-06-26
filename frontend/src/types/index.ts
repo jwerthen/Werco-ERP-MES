@@ -30,6 +30,13 @@ export interface Company {
   website?: string;
   user_count?: number;
   active_work_orders?: number;
+  /**
+   * Per-company AI egress kill switch. When false, no document content leaves
+   * the system boundary to the Anthropic AI provider and AI-backed extraction /
+   * copilot / NL-search features degrade gracefully. CUI/compliance control;
+   * defaults OFF for new companies (existing companies grandfathered ON).
+   */
+  allow_ai_egress: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -206,6 +213,67 @@ export interface LaserNestManualInput {
 }
 
 export type LaserNestUpdateInput = Partial<LaserNestManualInput>;
+
+/** Per-field confidence the extraction pipeline reports for a nest PDF. */
+export type LaserNestExtractionConfidence = 'high' | 'medium' | 'low';
+
+/**
+ * Result of `POST /laser-nests/extract` — AI (or filename-fallback) read of a
+ * single nest report PDF. Every value is nullable: the model returns what it
+ * could read and leaves the rest null. `source` distinguishes a full AI read
+ * from the filename-only fallback (which only recovers the CNC number).
+ */
+export interface LaserNestPdfExtraction {
+  cnc_number: string | null;
+  material: string | null;
+  thickness: string | null;
+  sheet_size: string | null;
+  planned_runs: number | null;
+  confidence: LaserNestExtractionConfidence | null;
+  source: 'ai' | 'filename';
+  warning: string | null;
+}
+
+/**
+ * One row of a batch `laser-nest-packages/preview`. Carries the existing
+ * CNC-program fields plus the new AI-extraction fields: `source_file` (the
+ * PDF/CNC file's relative path within the ZIP — the key the import step matches
+ * rows back to PDFs by), `cnc_number`, and `confidence`. PDF rows populate
+ * `cnc_number`; CNC-program rows populate `cnc_file_name`.
+ */
+export interface LaserNestPreviewRow {
+  source_file: string;
+  nest_name: string;
+  cnc_file_name?: string | null;
+  cnc_number?: string | null;
+  planned_runs: number;
+  material?: string | null;
+  thickness?: string | null;
+  sheet_size?: string | null;
+  confidence?: LaserNestExtractionConfidence | null;
+}
+
+export interface LaserNestPackagePreview {
+  package_name: string;
+  nest_count: number;
+  total_planned_runs: number;
+  nests: LaserNestPreviewRow[];
+}
+
+/**
+ * One confirmed row sent back to `laser-nest-packages/import`. `source_file`
+ * lets the backend match the row to its PDF bytes in the re-sent ZIP without a
+ * second AI call. `planned_runs` stays an integer >= 1.
+ */
+export interface LaserNestImportRow {
+  source_file: string;
+  cnc_number: string;
+  nest_name: string;
+  planned_runs: number;
+  material: string | null;
+  thickness: string | null;
+  sheet_size: string | null;
+}
 
 export interface WorkOrderSummary {
   id: number;

@@ -120,12 +120,16 @@ Customer PDF excludes:
 
 These notes cover the shared LLM plumbing used by **every** Anthropic call in the platform —
 PO/quote document extraction (`po-upload`), BOM import, AI routing generation, QMS clause
-extraction, Werco Copilot chat (`POST /copilot/chat`), and the natural-language search intent
-parse (`POST /search/nl`). (The RFQ package parsing documented above is deterministic and makes
-no LLM calls.)
+extraction, laser-nest report PDF extraction (`POST /laser-nests/extract` + the PDF
+laser-nest-package preview/import), Werco Copilot chat (`POST /copilot/chat`), and the
+natural-language search intent parse (`POST /search/nl`). (The RFQ package parsing documented above
+is deterministic and makes no LLM calls.)
 
 ### Shared client and model routing
 - Every Anthropic call flows through `backend/app/services/llm_client.py` (`run_llm_task`).
+  `run_llm_task` is also the **single enforcement point for the per-company AI egress kill switch**
+  (`Company.allow_ai_egress`) — see "Per-company AI egress kill switch" below; a call for a company
+  with egress OFF never leaves the boundary.
   `run_llm_task` also carries the platform's tool-use support (`tools` / `tool_choice`,
   forwarded verbatim) — the copilot's multi-round tool loop calls it once per iteration, and
   each iteration records its own usage row.
@@ -140,6 +144,17 @@ no LLM calls.)
 | `qms_clause_extraction` | Default; Reasoning for large documents | `ANTHROPIC_QMS_MODEL` |
 | `copilot_chat` | Default (Sonnet); escalates to Reasoning for long multi-tool conversations | `ANTHROPIC_COPILOT_MODEL` |
 | `nl_search` | Pinned Fast (Haiku) — cheap intent classification | `ANTHROPIC_NL_SEARCH_MODEL` |
+| `laser_nest_extraction` | Default (Sonnet) — the native-PDF path sets `has_pdf_document`, lifting it off the Fast tier; the text fallback escalates for OCR'd/large sheets | `ANTHROPIC_LASER_NEST_MODEL` |
+- **Laser-nest extraction now sends the PDF natively (vision).** As of prompt
+  `laser_nest_extraction` 1.1.0, the primary path hands the rendered nest report to the model as a
+  base64 `document` content block (layout-aware vision) instead of flattened extracted text — this
+  fixes the glued-digits and material-grade-on-the-wrong-line errors that came from a 1-D text
+  flatten. Because a native-PDF call sets `has_pdf_document` on `LLMTaskContext`, it routes to the
+  **Default (Sonnet) tier** rather than Fast (Haiku), so **per-call token cost is higher than the
+  old text-only path** (the rendered-page tokens are billed as input; tracked per call in
+  `ai_usage_events`). PDFs over the **~20 MB** native cap (or whose bytes can't be read) fall back
+  to the flattened-text path, which routes by complexity as before. `_extraction_metadata.input_mode`
+  records which path produced each result (`native_pdf` | `text`).
 - Routing generation sends its stable prefix (system prompt + schema/allowed work-center types +
   learned-examples context) as `cache_control: ephemeral` system blocks, so repeat generations
   hit the prompt cache and only the drawing content is reprocessed at full input price.
@@ -164,6 +179,29 @@ no LLM calls.)
   that data flow. Verify the cache engages via `cache_read_tokens` on
   `copilot_chat` rows in `ai_usage_events`.
 
+### Per-company AI egress kill switch (`allow_ai_egress`, CUI control)
+- `Company.allow_ai_egress` (`companies.allow_ai_egress`, default **OFF**) is a per-company kill
+  switch that gates **all** outbound AI document-extraction egress to Anthropic — the AI analogue of
+  the carrier (`allow_carrier_egress`) and print (`allow_print_egress`) controls. It is enforced at
+  a **single fail-closed point** in `run_llm_task`: before any Anthropic call, `_ai_egress_allowed`
+  resolves the flag for the call's `company_id` and a disabled company raises
+  `LLMEgressDisabledError`. Because it lives in the shared client, **every** AI feature listed above
+  is covered by this one seam — PO/quote, BOM, routing generation, QMS clause, laser-nest PDF
+  extraction, Werco Copilot, and NL search.
+- **When egress is OFF:** no request leaves the boundary and **no `ai_usage_events` row is written**
+  (the call never reaches telemetry). Callers catch `LLMEgressDisabledError` and **degrade
+  gracefully** rather than 500 — e.g. laser-nest extraction falls back to **filename-only** parsing;
+  PO/BOM/QMS/routing endpoints return a "disabled for your company" message; the copilot and NL
+  search degrade. The check **fails closed**: an unknown tenant or any DB error denies egress.
+- **Flipping the flag:** only via `PUT /api/v1/companies/me/ai-egress` (gated **ADMIN-only**,
+  matching the sibling `allow_carrier_egress` / `allow_print_egress` controls — a CUI-boundary
+  decision reserved to Admins), which records the change on the tamper-evident `audit_log` as both a
+  field update and an `ai_egress_enabled` / `ai_egress_disabled` status change. The toggle is exposed
+  in the UI at **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`); the control is
+  interactive for ADMIN (turning egress **on** requires an explicit confirmation; turning **off** is
+  immediate) and read-only for other roles. New companies default **OFF**; existing companies were
+  grandfathered **ON**.
+
 ### AI usage telemetry (cost / latency ledger)
 Each call writes one tenant-scoped row to `ai_usage_events`: task, exact model id, tier, feature,
 prompt version, input/output/cache-write/cache-read token counts, estimated USD cost (from the
@@ -178,7 +216,8 @@ and success/error type.
 
 ### Versioned prompt registry
 - Prompt text lives in `backend/app/services/prompts/` (PO/quote extraction, BOM extraction,
-  routing generation, `copilot_chat` 1.0.0 — the Werco Copilot system prompt — and
+  routing generation, `laser_nest_extraction` 1.1.0 — laser-nest report PDF field extraction,
+  `copilot_chat` 1.0.0 — the Werco Copilot system prompt — and
   `nl_search_intent` 1.0.0 — the `/search/nl` fast-tier intent parser; QMS clause extraction is
   version-registered with its text still at the call site).
 - Bump the prompt's semver `version` and add an entry to `CHANGELOG.md` in that package whenever

@@ -31,7 +31,7 @@ from app.db.database import get_db
 from app.models.user import User
 from app.schemas.copilot import CopilotChatRequest, CopilotChatResponse
 from app.services.copilot_service import CopilotService
-from app.services.llm_client import LLMNotConfiguredError
+from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,8 @@ def copilot_chat(
             final = service.run_chat(messages=plain_messages, context_hint=request.context_hint)
         except LLMNotConfiguredError:
             raise HTTPException(status_code=503, detail="AI assistant is not configured on this server.")
+        except LLMEgressDisabledError:
+            raise HTTPException(status_code=403, detail="AI features are disabled for your company.")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         except Exception as exc:
@@ -117,6 +119,8 @@ def copilot_chat(
             db.commit()
         except LLMNotConfiguredError:
             yield _sse_frame({"type": "error", "message": "AI assistant is not configured on this server."})
+        except LLMEgressDisabledError:
+            yield _sse_frame({"type": "error", "message": "AI features are disabled for your company."})
         except ValueError as exc:
             yield _sse_frame({"type": "error", "message": str(exc)})
         except Exception as exc:

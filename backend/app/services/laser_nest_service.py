@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +15,12 @@ from typing import TYPE_CHECKING, Iterable, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.models.document import Document, DocumentType
 from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderType
+from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
+from app.services.storage_service import get_storage, resolve_upload_dir, sanitize_ext
 
 if TYPE_CHECKING:
     from app.schemas.work_order import LaserNestManualCreate
@@ -33,6 +38,11 @@ CNC_EXTENSIONS = {
     ".tap",
 }
 
+# Per-package cap on PDF nest sheets. AI-always extraction means each PDF costs
+# one LLM call, so a runaway ZIP is both a latency and a cost concern -- the
+# preview/import endpoints reject anything over this with a 400.
+LASER_PDF_PACKAGE_MAX = 50
+
 
 @dataclass(frozen=True)
 class ParsedLaserNest:
@@ -43,6 +53,13 @@ class ParsedLaserNest:
     material: Optional[str] = None
     thickness: Optional[str] = None
     sheet_size: Optional[str] = None
+    # PDF-package extras. cnc_number / confidence come from the AI extraction;
+    # pdf_source_path is the absolute server path to the PDF bytes (used to
+    # create + attach a Document on import) and is INTERNAL ONLY -- it is
+    # deliberately kept out of as_dict() so it never leaks to the client.
+    cnc_number: Optional[str] = None
+    pdf_source_path: Optional[str] = None
+    confidence: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
@@ -53,6 +70,11 @@ class ParsedLaserNest:
             "material": self.material,
             "thickness": self.thickness,
             "sheet_size": self.sheet_size,
+            "cnc_number": self.cnc_number,
+            "confidence": self.confidence,
+            # For PDFs this is the relative path within the package (the import
+            # row key); for CNC-file nests it is the CNC file's relative path.
+            "source_file": self.cnc_file_path,
         }
 
 
@@ -68,6 +90,93 @@ def parse_laser_nest_zip(zip_path: str) -> list[ParsedLaserNest]:
         with zipfile.ZipFile(zip_path) as archive:
             _safe_extract_zip(archive, Path(temp_dir))
         return parse_laser_nest_folder(temp_dir)
+
+
+def package_has_pdfs(folder: str) -> bool:
+    """True if the folder contains at least one PDF (recursively).
+
+    Detection switch for the import/preview endpoints: PDFs and ``CNC_EXTENSIONS``
+    are disjoint, so a package is treated as a PDF nest-report package iff it
+    contains any ``*.pdf``; otherwise it falls back to the CNC-program path.
+    """
+    root = Path(folder).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        return False
+    return any(p.is_file() for p in root.rglob("*.pdf"))
+
+
+def parse_laser_nest_pdf_package(folder: str, company_id: int) -> list[ParsedLaserNest]:
+    """Parse a folder of laser-nest report PDFs via AI extraction.
+
+    Globs ``*.pdf`` (recursively, sorted) and runs ``extract_nest_fields_from_pdf``
+    on each, building one ``ParsedLaserNest`` per file keyed by relative path.
+
+    The AI calls here run SEQUENTIALLY -- the extraction function is sync and
+    blocking. The async preview endpoint parallelizes the per-PDF extraction with
+    bounded concurrency; this sync helper is the simple/offline path and is also
+    handy in tests. Enforces ``LASER_PDF_PACKAGE_MAX``.
+
+    Raises ``ValueError`` on an empty package or one over the cap (the endpoints
+    translate that to a 400).
+    """
+    root = Path(folder).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError("Source path must be an existing folder")
+
+    pdf_paths = sorted(p for p in root.rglob("*.pdf") if p.is_file())
+    if not pdf_paths:
+        raise ValueError("No PDF files found in package")
+    if len(pdf_paths) > LASER_PDF_PACKAGE_MAX:
+        raise ValueError(
+            f"Package has {len(pdf_paths)} PDFs; the limit is {LASER_PDF_PACKAGE_MAX}. "
+            "Split the package into smaller batches."
+        )
+
+    nests: list[ParsedLaserNest] = []
+    for path in pdf_paths:
+        rel_path = str(path.relative_to(root))
+        result = extract_nest_fields_from_pdf(str(path), path.name, company_id)
+        nests.append(build_parsed_nest_from_extraction(result, abs_path=str(path), rel_path=rel_path))
+    return nests
+
+
+def _coerce_planned_runs(value: object) -> int:
+    """Coerce a model-supplied ``planned_runs`` to a sane int, flooring at 1.
+
+    Defensive: the extraction result is AI output, so ``planned_runs`` may be a
+    non-numeric string, a float-ish string, or junk. Only an int or a digit
+    string is honored (floored at 1); anything else falls back to 1 so a bad
+    model value can never ``ValueError`` -> 400 the whole preview batch.
+    """
+    if isinstance(value, bool):
+        return 1
+    if isinstance(value, int):
+        return max(1, value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return max(1, int(value.strip()))
+    return 1
+
+
+def build_parsed_nest_from_extraction(result: dict, *, abs_path: str, rel_path: str) -> ParsedLaserNest:
+    """Map an ``extract_nest_fields_from_pdf`` result dict to a ``ParsedLaserNest``.
+
+    Shared by the sync package parser and the async (parallelized) preview path
+    so both assemble rows identically. ``planned_runs`` floors at 1.
+    """
+    cnc_number = result.get("cnc_number")
+    file_name = Path(abs_path).name
+    return ParsedLaserNest(
+        nest_name=cnc_number or Path(file_name).stem,
+        cnc_file_name=file_name,
+        cnc_file_path=rel_path,
+        planned_runs=_coerce_planned_runs(result.get("planned_runs")),
+        material=result.get("material"),
+        thickness=result.get("thickness"),
+        sheet_size=result.get("sheet_size"),
+        cnc_number=cnc_number,
+        pdf_source_path=abs_path,
+        confidence=result.get("extraction_confidence"),
+    )
 
 
 def preview_laser_nest_package(source_path: Optional[str] = None, zip_path: Optional[str] = None) -> list[dict]:
@@ -99,6 +208,68 @@ def extract_laser_nest_zip(zip_path: str, destination: str) -> None:
         _safe_extract_zip(archive, dest)
 
 
+def _create_nest_document(
+    db: Session,
+    *,
+    nest: ParsedLaserNest,
+    parent_work_order: WorkOrder,
+    company_id: int,
+    created_by: Optional[int],
+    saved_storage_keys: Optional[list[str]] = None,
+) -> Optional[Document]:
+    """Persist a nest's source PDF as a DRAWING Document and return it.
+
+    Mirrors ``documents.upload_document`` storage handling: tenant-prefixed
+    object key on remote storage, legacy ``UPLOAD_DIR/{uuid}{ext}`` layout
+    locally. The drawing is scoped to the PARENT assembly work order (matching
+    the manual-modal attach path). Returns None when the nest has no PDF source.
+
+    ``storage.save`` writes a REAL blob (disk/S3) BEFORE the surrounding
+    transaction commits. Every reference it returns is appended to
+    ``saved_storage_keys`` (when supplied) so the caller can reap orphaned blobs
+    if the transaction later rolls back -- these blobs live outside the temp
+    package dir, so they are not reaped by the package-dir cleanup.
+    """
+    if not nest.pdf_source_path:
+        return None
+
+    with open(nest.pdf_source_path, "rb") as handle:
+        content = handle.read()
+
+    storage = get_storage()
+    if storage.is_remote:
+        key = f"{company_id}/documents/{uuid.uuid4()}{sanitize_ext(nest.cnc_file_name)}"
+    else:
+        file_ext = os.path.splitext(nest.cnc_file_name or "")[1] or ".pdf"
+        key = os.path.join(resolve_upload_dir(), f"{uuid.uuid4()}{file_ext}")
+    file_path = storage.save(content, key=key)
+    if saved_storage_keys is not None:
+        # Record the STORED reference (what delete()/delete_ref() expects back):
+        # an ``s3://...`` ref on remote, the filesystem path locally.
+        saved_storage_keys.append(file_path)
+
+    # Local import avoids importing the documents endpoint module at service load.
+    from app.api.endpoints.documents import generate_document_number
+
+    document = Document(
+        document_number=generate_document_number(db, "drawing"),
+        revision="A",
+        title=nest.cnc_number or nest.nest_name,
+        document_type=DocumentType.DRAWING,
+        work_order_id=parent_work_order.id,
+        file_name=nest.cnc_file_name,
+        file_path=file_path,
+        file_size=len(content),
+        mime_type="application/pdf",
+        status="released",
+        created_by=created_by,
+        company_id=company_id,
+    )
+    db.add(document)
+    db.flush()
+    return document
+
+
 def build_laser_nest_child_work_order(
     db: Session,
     *,
@@ -110,8 +281,16 @@ def build_laser_nest_child_work_order(
     laser_work_center: WorkCenter,
     company_id: int,
     created_by: Optional[int],
+    saved_storage_keys: Optional[list[str]] = None,
 ) -> LaserNestPackage:
-    """Replace a child laser WO's nest tasks with the supplied package plan."""
+    """Replace a child laser WO's nest tasks with the supplied package plan.
+
+    ``saved_storage_keys`` (when supplied) collects every storage reference this
+    build writes for nest-PDF Documents. ``storage.save`` writes the blob BEFORE
+    the surrounding ``atomic_transaction`` commits, so on rollback the caller must
+    reap these refs (they live outside the temp package dir). On commit they are
+    durable Documents and must NOT be deleted.
+    """
 
     # IMPORT REPLACES EVERYTHING (by design). Importing a laser package wipes ALL
     # existing packages, LASER operations, and nests on this child WO and rebuilds
@@ -176,14 +355,28 @@ def build_laser_nest_child_work_order(
         db.add(operation)
         db.flush()
 
+        # PDF nests carry their source bytes: store them as a DRAWING Document
+        # (scoped to the parent WO) and attach it via document_id. CNC-file nests
+        # have no pdf_source_path, so this is a no-op for the legacy import path.
+        document = _create_nest_document(
+            db,
+            nest=nest,
+            parent_work_order=parent_work_order,
+            company_id=company_id,
+            created_by=created_by,
+            saved_storage_keys=saved_storage_keys,
+        )
+
         db.add(
             LaserNest(
                 company_id=company_id,
                 package_id=package.id,
                 work_order_operation_id=operation.id,
                 nest_name=nest.nest_name,
+                cnc_number=nest.cnc_number,
                 cnc_file_name=nest.cnc_file_name,
                 cnc_file_path=nest.cnc_file_path,
+                document_id=document.id if document is not None else None,
                 planned_runs=nest.planned_runs,
                 completed_runs=0,
                 material=nest.material,
@@ -191,6 +384,12 @@ def build_laser_nest_child_work_order(
                 sheet_size=nest.sheet_size,
             )
         )
+
+    # Flush so EVERY just-added nest is persisted before the caller queries them
+    # back (the PDF-import path SELECTs the package's nests to write one audit
+    # CREATE row each). The session uses autoflush=False, so without this the
+    # SELECT would miss the last nest -- silently dropping its audit row.
+    db.flush()
 
     total_runs = sum(nest.planned_runs for nest in nests)
     child_work_order.quantity_ordered = float(total_runs or 1)

@@ -309,3 +309,31 @@ def test_learning_records_approved_edits_for_future_generation(db_session):
     assert any(item["alias"] == "crease" for item in learned_context["aliases"])
     assert learned_context["preferred_work_center_ids"]["press_brake"] == [brake.id]
     assert learned_context["patterns"][0]["operations"][0]["work_center_type"] == "press_brake"
+
+
+def test_extract_routing_data_egress_off_returns_empty_routing(monkeypatch):
+    """AI egress OFF (``LLMEgressDisabledError`` from run_llm_task) degrades to the
+    well-formed empty routing result with an egress-disabled marker -- it must
+    NOT raise, and must not be confused with the "Extraction failed" catch-all."""
+    import app.services.routing_generation_service as routing_svc
+    from app.services.llm_client import LLMEgressDisabledError
+
+    def _raise(*args, **kwargs):
+        raise LLMEgressDisabledError(company_id=kwargs.get("company_id"))
+
+    monkeypatch.setattr(routing_svc, "run_llm_task", _raise)
+
+    result = routing_svc.extract_routing_data_with_llm(
+        drawing_text="0.25 steel bracket, two bends, four holes.",
+        work_center_types=["laser", "press_brake", "deburr"],
+        company_id=1,
+    )
+
+    # Empty-routing shape (from _create_empty_routing_result), never raised.
+    assert result["operations"] == []
+    assert result["extraction_confidence"] == "low"
+    assert result["part_info"]["material"] is None
+    # The egress-disabled marker is surfaced on _error.
+    assert "disabled" in result["_error"].lower()
+    assert "allow_ai_egress" in result["_error"]
+    assert "Extraction failed" not in result["_error"]

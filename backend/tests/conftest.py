@@ -52,6 +52,32 @@ TEST_PASSWORD = "TestPassword123!"
 TEST_PASSWORD_HASH = get_password_hash(TEST_PASSWORD)
 
 
+@pytest.fixture(autouse=True)
+def _allow_ai_egress_by_default(monkeypatch):
+    """Neutralize the per-company AI-egress kill switch for the whole suite.
+
+    ``run_llm_task`` now consults ``llm_client._ai_egress_allowed(company_id)``
+    before any Anthropic call. That helper opens its own short-lived session via
+    ``_usage_session_factory`` and fails CLOSED (returns False) whenever it can't
+    affirmatively read ``Company.allow_ai_egress`` -- which is exactly what
+    happens in tests that stub ``get_anthropic_client`` / ``_usage_session_factory``
+    but exercise a real ``run_llm_task`` path: there is no readable company row,
+    so the call would raise ``LLMEgressDisabledError`` and break.
+
+    This mirrors how telemetry's ``_usage_session_factory`` is already neutralized
+    per-test: we patch the single egress seam to allow by default. Tests that need
+    the OFF path simply ``monkeypatch.setattr(llm_client, "_ai_egress_allowed",
+    lambda company_id=None: False)`` (or pass a callable) -- because they share
+    this fixture's ``monkeypatch`` instance, that later setattr wins and is undone
+    at teardown. Tests that stub ``run_llm_task`` itself never reach the gate and
+    are unaffected.
+    """
+    import app.services.llm_client as llm_client
+
+    monkeypatch.setattr(llm_client, "_ai_egress_allowed", lambda company_id=None: True)
+    yield
+
+
 @pytest.fixture(scope="function")
 def db_session() -> Generator[Session, None, None]:
     """Create a fresh database session for each test."""

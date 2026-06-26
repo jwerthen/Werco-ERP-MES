@@ -10,6 +10,7 @@ jest.mock('../../services/api', () => ({
     updateLaserNest: jest.fn(),
     uploadDocument: jest.fn(),
     attachLaserNestDocument: jest.fn(),
+    extractLaserNestFromPdf: jest.fn(),
   },
 }));
 
@@ -19,9 +20,40 @@ function fillField(label: RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
 
+/** A minimal valid nest report PDF File for the file input. */
+function pdfFile(name = 'nest.pdf') {
+  return new File(['%PDF-1.4'], name, { type: 'application/pdf' });
+}
+
+/**
+ * Drop a PDF on the reference-PDF input and wait for auto-extraction to fully
+ * settle. Selecting a PDF puts the modal into an "Extracting…" state that
+ * disables submit; we wait for that to clear so callers can then submit.
+ */
+async function selectPdf(file = pdfFile()) {
+  fireEvent.change(screen.getByLabelText(/reference pdf/i), { target: { files: [file] } });
+  // The handler awaits api.extractLaserNestFromPdf; let the microtasks drain so
+  // the form is populated / hint rendered and the submit button re-enables.
+  await waitFor(() => expect(mockApi.extractLaserNestFromPdf).toHaveBeenCalled());
+  await waitFor(() => expect(screen.queryByText(/extracting fields from the pdf/i)).not.toBeInTheDocument());
+}
+
 describe('LaserNestManualModal', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Default: a clean AI read. Individual tests override as needed. The
+    // PDF-chain/attach-failure tests don't assert on extraction, but the modal
+    // still calls it on select, so give it something resolvable by default.
+    mockApi.extractLaserNestFromPdf.mockResolvedValue({
+      cnc_number: null,
+      material: null,
+      thickness: null,
+      sheet_size: null,
+      planned_runs: null,
+      confidence: 'high',
+      source: 'ai',
+      warning: null,
+    });
   });
 
   it('submits the manual-create body with cnc_number and planned_runs', async () => {
@@ -86,8 +118,7 @@ describe('LaserNestManualModal', () => {
     fillField(/cnc number/i, '9002');
     fillField(/qty to cut/i, '2');
 
-    const pdf = new File(['%PDF-1.4'], 'nest.pdf', { type: 'application/pdf' });
-    fireEvent.change(screen.getByLabelText(/reference pdf/i), { target: { files: [pdf] } });
+    await selectPdf(pdfFile('nest.pdf'));
 
     fireEvent.click(screen.getByRole('button', { name: /add nest/i }));
 
@@ -120,8 +151,7 @@ describe('LaserNestManualModal', () => {
     fillField(/cnc number/i, '7700');
     fillField(/qty to cut/i, '3');
 
-    const pdf = new File(['%PDF-1.4'], 'nest.pdf', { type: 'application/pdf' });
-    fireEvent.change(screen.getByLabelText(/reference pdf/i), { target: { files: [pdf] } });
+    await selectPdf(pdfFile('nest.pdf'));
 
     fireEvent.click(screen.getByRole('button', { name: /add nest/i }));
 
@@ -184,5 +214,169 @@ describe('LaserNestManualModal', () => {
 
     expect(await screen.findByText(/cnc number is required/i)).toBeInTheDocument();
     expect(mockApi.createManualLaserNest).not.toHaveBeenCalled();
+  });
+
+  // --- Auto-extraction (create path) -------------------------------------
+
+  it('the reference-PDF file input does not collide with the CNC/material/size field labels', () => {
+    // Regression guard for the a11y bug that broke the suite: the helper text
+    // mentioning "CNC number, material, and size" must live OUTSIDE the file
+    // input's <label>, so getByLabelText resolves each field to a single input.
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+
+    expect(screen.getByLabelText(/cnc number/i)).toHaveAttribute('name', 'cnc_number');
+    expect(screen.getByLabelText(/material/i)).toHaveAttribute('name', 'material');
+    expect(screen.getByLabelText(/reference pdf/i)).toHaveAttribute('type', 'file');
+  });
+
+  it('selecting a PDF calls extractLaserNestFromPdf and fills the empty fields', async () => {
+    mockApi.extractLaserNestFromPdf.mockResolvedValue({
+      cnc_number: '8123',
+      material: '304 SS',
+      thickness: '0.125"',
+      sheet_size: '48" x 96"',
+      planned_runs: 4,
+      confidence: 'high',
+      source: 'ai',
+      warning: null,
+    });
+
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+
+    const file = pdfFile('nest-8123.pdf');
+    await selectPdf(file);
+    expect(mockApi.extractLaserNestFromPdf).toHaveBeenCalledWith(file);
+
+    await waitFor(() => expect(screen.getByLabelText(/cnc number/i)).toHaveValue('8123'));
+    expect(screen.getByLabelText(/material/i)).toHaveValue('304 SS');
+    expect(screen.getByLabelText(/thickness/i)).toHaveValue('0.125"');
+    expect(screen.getByLabelText(/sheet size/i)).toHaveValue('48" x 96"');
+    expect(screen.getByLabelText(/qty to cut/i)).toHaveValue(4);
+  });
+
+  it('does not clobber a field the user already typed', async () => {
+    mockApi.extractLaserNestFromPdf.mockResolvedValue({
+      cnc_number: '9999', // model read a different number...
+      material: '304 SS',
+      thickness: null,
+      sheet_size: null,
+      planned_runs: null,
+      confidence: 'high',
+      source: 'ai',
+      warning: null,
+    });
+
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+
+    // ...but the planner already typed the CNC number by hand.
+    fillField(/cnc number/i, '7001');
+    await selectPdf();
+
+    // The user-entered CNC number is preserved; the empty material field fills.
+    await waitFor(() => expect(screen.getByLabelText(/material/i)).toHaveValue('304 SS'));
+    expect(screen.getByLabelText(/cnc number/i)).toHaveValue('7001');
+  });
+
+  it('renders the "AI-filled — verify" hint after a clean read', async () => {
+    mockApi.extractLaserNestFromPdf.mockResolvedValue({
+      cnc_number: '8123',
+      material: '304 SS',
+      thickness: null,
+      sheet_size: null,
+      planned_runs: null,
+      confidence: 'high',
+      source: 'ai',
+      warning: null,
+    });
+
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+    await selectPdf();
+
+    expect(await screen.findByText(/ai-filled from the pdf — verify before saving/i)).toBeInTheDocument();
+    expect(screen.getByText(/high confidence/i)).toBeInTheDocument();
+  });
+
+  it('escalates the wording for a filename-only fallback', async () => {
+    mockApi.extractLaserNestFromPdf.mockResolvedValue({
+      cnc_number: '8123', // recovered from the filename stem
+      material: null,
+      thickness: null,
+      sheet_size: null,
+      planned_runs: null,
+      confidence: null,
+      source: 'filename',
+      warning: 'PDF text was empty; used the filename.',
+    });
+
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+    await selectPdf();
+
+    expect(
+      await screen.findByText(/only the cnc number could be read from the filename/i)
+    ).toBeInTheDocument();
+    // The model-supplied warning is surfaced too.
+    expect(screen.getByText(/pdf text was empty/i)).toBeInTheDocument();
+  });
+
+  it('escalates the wording for a low-confidence AI read', async () => {
+    mockApi.extractLaserNestFromPdf.mockResolvedValue({
+      cnc_number: '8123',
+      material: '304 SS',
+      thickness: null,
+      sheet_size: null,
+      planned_runs: null,
+      confidence: 'low',
+      source: 'ai',
+      warning: null,
+    });
+
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={jest.fn()} />);
+    await selectPdf();
+
+    expect(
+      await screen.findByText(/low-confidence ai read — double-check every field/i)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/low confidence/i)).toBeInTheDocument();
+  });
+
+  it('swallows an extraction failure: no hint, manual entry still works', async () => {
+    mockApi.extractLaserNestFromPdf.mockRejectedValue(new Error('extract boom'));
+    mockApi.createManualLaserNest.mockResolvedValue({
+      id: 31,
+      nest_name: '6005',
+      cnc_number: '6005',
+      planned_runs: 1,
+      completed_runs: 0,
+      remaining_runs: 1,
+    });
+    const onSaved = jest.fn();
+
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={onSaved} />);
+
+    await selectPdf();
+
+    // No hint banner from a failed read; fields remain empty for manual entry.
+    expect(screen.queryByText(/ai-filled/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/low-confidence ai read/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/cnc number/i)).toHaveValue('');
+
+    // The planner types the fields by hand and the create still goes through —
+    // the chosen PDF is still uploaded + attached.
+    mockApi.uploadDocument.mockResolvedValue({ id: 777 });
+    mockApi.attachLaserNestDocument.mockResolvedValue({
+      id: 31,
+      nest_name: '6005',
+      planned_runs: 1,
+      completed_runs: 0,
+      remaining_runs: 1,
+      has_document: true,
+    });
+    fillField(/cnc number/i, '6005');
+    fillField(/qty to cut/i, '1');
+    fireEvent.click(screen.getByRole('button', { name: /add nest/i }));
+
+    await waitFor(() => expect(mockApi.createManualLaserNest).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockApi.attachLaserNestDocument).toHaveBeenCalledWith(31, 777));
+    expect(onSaved).toHaveBeenCalled();
   });
 });

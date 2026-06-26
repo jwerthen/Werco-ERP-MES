@@ -12,6 +12,12 @@ All LLM call sites route through :func:`run_llm_task`, which:
   short-lived dedicated session so telemetry can never entangle or break the
   caller's transaction.
 
+This wrapper is also the single enforcement point for the per-company AI egress
+kill switch (``Company.allow_ai_egress``, a CUI control): before any Anthropic
+call, :func:`_ai_egress_allowed` resolves the flag and a disabled company raises
+:class:`LLMEgressDisabledError` — no request leaves the boundary, no telemetry
+row is written. The check fails closed (deny on unknown tenant or DB error).
+
 Telemetry is strictly fire-and-forget: any failure (DB down, missing company
 context, unknown model pricing) logs a warning and the AI result is still
 returned to the caller.
@@ -84,6 +90,17 @@ class LLMNotConfiguredError(RuntimeError):
         self.reason = reason
         message = "anthropic package not installed" if reason == "library" else "ANTHROPIC_API_KEY not set"
         super().__init__(message)
+
+
+class LLMEgressDisabledError(RuntimeError):
+    """Raised when a company has AI egress disabled (allow_ai_egress=False).
+
+    The Anthropic call is NOT made — no CUI leaves the boundary.
+    """
+
+    def __init__(self, company_id: Optional[int]):
+        self.company_id = company_id
+        super().__init__("AI egress is disabled for this company")
 
 
 @dataclass
@@ -190,6 +207,54 @@ def _usage_session_factory() -> Any:
     return SessionLocal()
 
 
+# ---------------------------------------------------------------------------
+# AI egress kill switch (per-company CUI control)
+# ---------------------------------------------------------------------------
+def _ai_egress_allowed(company_id: Optional[int]) -> bool:
+    """Resolve the ``Company.allow_ai_egress`` CUI kill switch — fail-closed.
+
+    Uses the same short-lived dedicated-session pattern as telemetry
+    (:func:`_usage_session_factory`) so importing this module still needs no DB
+    and tests can monkeypatch a single seam.
+
+    Returns:
+        ``True`` only when egress is affirmatively allowed. This is a CUI
+        control, so every uncertain path denies:
+
+        - ``company_id is None`` → log a warning and return ``True``. There is
+          no tenant to scope; real callers always pass ``company_id`` and this
+          is the test/internal edge.
+        - company row found → return ``bool(allow_ai_egress)``.
+        - company not found → return ``False`` (don't egress for an unknown
+          tenant).
+        - any exception (DB down, etc.) → log an error and return ``False`` (a
+          control that cannot verify "allowed" must deny).
+    """
+    if company_id is None:
+        logger.warning("AI egress check skipped: no company context")
+        return True
+
+    db = None
+    try:
+        from sqlalchemy import select
+
+        from app.models.company import Company
+
+        db = _usage_session_factory()
+        allowed = db.execute(select(Company.allow_ai_egress).where(Company.id == company_id)).scalar_one_or_none()
+        if allowed is None:
+            # Unknown tenant — fail closed.
+            logger.warning("AI egress denied: company %s not found", company_id)
+            return False
+        return bool(allowed)
+    except Exception as exc:
+        logger.error("AI egress check failed for company %s; denying (fail-closed): %s", company_id, exc)
+        return False
+    finally:
+        if db is not None:
+            db.close()
+
+
 def _record_usage_event(
     *,
     company_id: Optional[int],
@@ -287,7 +352,9 @@ def run_llm_task(
         ctx: Task context fed to ``select_anthropic_model`` (model routing is
             NOT duplicated here).
         messages: Messages array, forwarded verbatim (``cache_control`` blocks
-            pass through untouched).
+            pass through untouched). Content blocks may include ``document`` /
+            ``image`` blocks (vision / native-PDF input) — these are forwarded
+            as-is to ``client.messages.create``; the caller builds the block.
         system: Optional system prompt — a plain string or a list of content
             blocks. Use block form with ``cache_control: {"type": "ephemeral"}``
             to enable prompt caching on the stable prefix.
@@ -313,6 +380,9 @@ def run_llm_task(
 
     Raises:
         LLMNotConfiguredError: SDK missing or API key unset (no telemetry row).
+        LLMEgressDisabledError: the company has ``allow_ai_egress=False`` (CUI
+            kill switch). No Anthropic call is made and no telemetry row is
+            written — the request never leaves the boundary.
         Exception: API errors are re-raised after a failure telemetry row is
             recorded.
     """
@@ -326,6 +396,13 @@ def run_llm_task(
         client = client.with_options(**client_options)
 
     decision: LLMModelDecision = select_anthropic_model(ctx)
+
+    # Per-company AI egress kill switch (CUI control). Checked AFTER model
+    # selection but BEFORE any API call or telemetry write, so a blocked call
+    # sends nothing to Anthropic and records no usage row. Raised cleanly like
+    # LLMNotConfiguredError for callers to degrade on.
+    if not _ai_egress_allowed(company_id):
+        raise LLMEgressDisabledError(company_id)
 
     create_kwargs: Dict[str, Any] = {
         "model": decision.model,

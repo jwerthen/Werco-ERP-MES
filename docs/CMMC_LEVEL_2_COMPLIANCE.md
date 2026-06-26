@@ -158,6 +158,20 @@
   more operations that recorded **zero** labor writes a tamper-evident `COMPLETED_WITH_QUALITY_EXCEPTION`
   row (code `no_labor_recorded`) plus a `quality_exception_on_completion` warning event, so a
   potentially understated cost/hour record is attributable rather than silent.
+  AU-3.3.1 coverage also now records **laser-nest package (re-)import** symmetrically (2026-06-23).
+  Importing a nest package onto a child laser WO replaces all prior nests — the
+  IMPORT-REPLACES-EVERYTHING product decision. The destructive wipe is now audited: each superseded
+  nest is written as a `log_delete` (`reason="superseded_by_reimport"`) **before** the rebuild, and
+  each rebuilt nest as a `log_create`, for **both** import shapes — the legacy CNC-program path now
+  also writes the per-nest `log_create` (`source="cnc_file_import"`), matching the PDF path
+  (`source="pdf_import"`); previously the legacy path emitted only a websocket event and the wipe was
+  unrecorded. All rows are flushed atomically with the rebuild. This closes a prior asymmetry where
+  the destructive supersession wipe and the legacy create path left no `audit_log` trail.
+  *Known gap (tracked, architectural follow-up):* the supersession wipe is still a **hard
+  cascade-delete of soft-deletable `LaserNest` rows** (not a `soft_delete`), so the soft-delete
+  invariant is not yet fully satisfied for this path — the improvement here is that the deletion is
+  now *audited*, not that the rows are preserved. Re-modeling the import wipe as a soft-delete is a
+  separately-tracked follow-up.
   *Known gap (tracked):* the root `audit_log.sequence_number` (`max()+1`) allocation is still not
   serialized under concurrent writes — see follow-up A1 in `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`
   (amplified in Batch 6 by the additional read-path inventory audit rows).
@@ -504,6 +518,74 @@
   captured on the tamper-evident `audit_log` at profile creation (via `log_create`); every later
   toggle is recorded as an `egress_enabled` / `egress_disabled` status change. See
   `docs/THERMAL_LABEL_PRINTING.md`.
+- [x] AI document-extraction outbound egress is a **per-company kill switch** (SC-3.13.1 boundary /
+  CUI-egress control) — the AI analogue of the carrier and print switches above, completing the set
+  of three egress kill switches (`allow_carrier_egress` / `allow_print_egress` / `allow_ai_egress`).
+  `allow_ai_egress` on `Company` (`companies`) is `nullable=False, default=False,
+  server_default="false"`; it gates **all** outbound AI document-extraction egress to the Anthropic
+  API. Enforcement is a **single fail-closed point** in the shared LLM client
+  (`app/services/llm_client.py` → `_ai_egress_allowed` → `run_llm_task` raises
+  `LLMEgressDisabledError` before any Anthropic call), so it covers **every** AI feature on one seam
+  (PO/quote, BOM, QMS-clause, routing-generation, laser-nest PDF extraction, Werco Copilot, NL
+  search); when OFF, **no request leaves the boundary and no `ai_usage_events` row is written**, and
+  callers degrade gracefully (e.g. laser-nest extraction → filename-only). The flag flips only via
+  `PUT /api/v1/companies/me/ai-egress` (**ADMIN-only**, for symmetry with the carrier/print egress
+  controls — a CUI-boundary decision reserved to Admins) and the flip is recorded on the tamper-evident
+  `audit_log` as both a `log_update` and an `ai_egress_enabled` / `ai_egress_disabled` status change.
+  **Default posture differs from carrier/print:** new tenants default **OFF** at the column level,
+  but pre-existing tenants were grandfathered **ON** by a data backfill in migration
+  `054_company_allow_ai_egress` (not an audited user action — see the data-flow note below for the
+  auditor sign-off item on the grandfathered-ON default). See the **Data-flow note (AI extraction
+  egress)** below and `docs/AI_QUOTING_AGENT_RUNBOOK.md`.
+
+**Data-flow note (AI extraction egress — SC-3.13.1 boundary):**
+- During AI document extraction, the **extracted text** of an uploaded document egresses to the
+  Anthropic API. This applies to PO/quote, BOM, QMS-clause, and routing-generation extraction. As
+  of 2026-06-23 it also applied to **laser-nest report PDFs** (prompt `laser_nest_extraction`,
+  `feature="laser_nest_extraction"`; see `docs/AI_QUOTING_AGENT_RUNBOOK.md`) — both the single-PDF
+  `POST /laser-nests/extract` and the PDF laser-nest-package preview/import.
+- **Updated 2026-06-24 (laser-nest path):** the laser-nest path now sends the **full PDF (the
+  rendered page image content), not just extracted text**, to Anthropic — the bytes ride in a
+  base64 `document` content block (layout-aware vision). This is **strictly more data crossing the
+  same boundary** (the whole rendered sheet rather than only its flattened text), to the same
+  provider under the same ToS. The flattened-text path remains only as a fallback for PDFs that
+  can't be read natively or exceed the ~20 MB native cap (`_MAX_NATIVE_PDF_BYTES`) — note this means
+  the **common (<20 MB) case egresses the richer image content** and only oversized files fall back
+  to text; the cap is a provider-size limit, **not** a data-minimization control. Laser-nest sheets
+  describe defense parts, so this content is CUI-relevant.
+- **AI egress is now a per-company kill switch (`allow_ai_egress`, default OFF) — ⚠️ posture
+  change, auditor sign-off needed.** The prior open item above ("no `allow_ai_egress` kill switch")
+  has been **closed in code**: `Company.allow_ai_egress` (`companies.allow_ai_egress`, `Boolean
+  nullable=False, default=False, server_default="false"`) now gates **all** outbound AI
+  document-extraction egress to the Anthropic API, mirroring `allow_carrier_egress` /
+  `allow_print_egress`. Enforcement is a **single fail-closed point** in the shared LLM client
+  (`app/services/llm_client.py` → `_ai_egress_allowed` → `run_llm_task` raises
+  `LLMEgressDisabledError` before any Anthropic call), so it covers **every** AI feature on one
+  seam: PO/quote, BOM, QMS-clause, routing-generation, laser-nest PDF extraction, Werco Copilot,
+  and natural-language search. When the flag is OFF, **no request leaves the boundary and no
+  `ai_usage_events` telemetry row is written**; callers degrade gracefully (e.g. laser-nest
+  extraction falls back to filename-only). The check fails **closed**: unknown tenant or any DB
+  error → deny. The flag flips **only** via `PUT /api/v1/companies/me/ai-egress`
+  (`app/api/endpoints/companies.py`), gated to **ADMIN-only** (for symmetry with the carrier/print
+  egress controls — a CUI-boundary decision reserved to Admins), and the flip is recorded on the
+  tamper-evident `audit_log` as **both** a `log_update` and an `ai_egress_enabled` /
+  `ai_egress_disabled` `log_status_change`. New companies are created **OFF** (the column's
+  `server_default "false"` governs future INSERTs); pre-existing companies were grandfathered **ON**
+  by a **data backfill in migration `054_company_allow_ai_egress`** (`UPDATE companies SET
+  allow_ai_egress = true`), preserving the prior AI-always-on behavior for tenants that already
+  relied on it.
+  - **Auditor note (default-vs-grandfather):** because pre-existing tenants were grandfathered ON,
+    the control being *present and default-OFF* does **not** mean egress is currently OFF for
+    established companies — the live per-tenant state is the source of truth. Their initial AI-ON
+    posture was set by the migration backfill, **not** by an audited user action, so there is **no
+    `audit_log` row** for that initial flip (migration `054` deliberately backfills no audit rows;
+    only later operator toggles via `PUT /companies/me/ai-egress` land on the tamper-evident trail).
+    Whether the grandfathered-ON default is acceptable for CUI documents is a compliance decision
+    flagged here for sign-off; the SC-3.13.1 boundary statements above (full rendered PDF crossing
+    the boundary for laser-nest sheets, AI-always when the switch is ON) are unchanged when egress
+    is enabled.
+- When egress is ON, extraction is otherwise unconditional per call: each call is tenant-scoped and
+  recorded in `ai_usage_events` (telemetry, not the tamper-evident `audit_log`).
 
 **GAPS:**
 - [ ] **SC-3.13.8 - Data at Rest Encryption** 🔴 CRITICAL
@@ -713,6 +795,11 @@ Backend:
 | 2026-06-18 | SC-3.13.1 (thermal-label print egress kill switch): catalogued the **per-company, default-off** outbound-egress control `allow_print_egress` on `CompanyPrintProfile` (`company_print_profiles`, `nullable=False, default=False, server_default="false"`) — requires explicit human opt-in before a rendered label (part number, lot/heat/serial, critical-characteristic marker) is transmitted to the pbxz.io ProxyBox cloud relay; both the request path (`PrintService._require_egress`) and the auto-print ARQ job (`app/jobs/label_jobs.py`) gate on it (no outbound call when OFF); flag flips are tamper-evidently audit-logged as a status change. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/THERMAL_LABEL_PRINTING.md` | Claude |
 | 2026-06-22 | CM-3 (deploy governance reframe): the manual production-deployment approval gate was **removed** — the `production` GitHub environment no longer carries a required-reviewer rule, and production **auto-deploys from `main`**. Change control is now enforced by a **`main` repository ruleset** (PR required before merge, required CI status checks must pass, force-push/branch-deletion blocked, **0 human approvals** — merge-when-green, with documented repo-admin break-glass bypass), plus deploy-time compensating controls: a deployment-branch policy permitting only `main` to deploy, and post-deploy health checks that fail the job on a bad deploy (`Verify Production Deployment` / `Verify deployment serves the Vite frontend bundle`). Rollback = redeploy a known-good commit or re-add the reviewer rule. CM-3.4.3 remains a partial gap (covers application/source changes via CI-passed PRs, not out-of-repo infrastructure changes); stated as *tested-before-merge*, not peer-reviewed. Documentation-only — describes the live config, control reframed accurately not overstated. See `docs/CI_CD_SETUP.md` / `docs/DEPLOYMENT_RUNBOOK.md` | Claude |
 | 2026-06-22 | CM-3.4.1/3.4.2 / AC-3.1.5 / AU-3.3.1 (released-routing change control, "Proportionate (audit-trail)" posture, `feat/routing-editable-time-standards`): catalogued the editable-time-standards policy on `PUT /routing/{id}/operations/{operation_id}`. A released routing's **process** (sequence, work center, instructions, inspection points, op add/delete/reorder) is **frozen** — those changes require a new revision (400 otherwise); only **time standards** (`setup_hours`, `run_hours_per_unit`, `move_hours`, `queue_hours`, `cycle_time_seconds`, `pieces_per_cycle`) are editable in place. Released time-standard edits are least-privilege gated **in code** to **ADMIN/MANAGER** (Supervisor → 403, matching Release); draft edits stay ADMIN/MANAGER/SUPERVISOR. Every applied change is tamper-evidently audit-logged (`log_update` on op edit; `log_create`/`log_delete`/`log_status_change` elsewhere); a successful released edit re-stamps `approved_by`/`approved_at` but leaves `effective_date` and the revision letter unchanged. **Accepted residual:** no per-operation history table and no optimistic-lock/version column on routing operations — `audit_log` is the sole history of record; concurrent released edits are last-write-wins. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/RBAC_PERMISSIONS.md` → Routings | Claude |
+| 2026-06-23 | SC-3.13.1 (laser-nest PDF AI-extraction egress, data-flow note): catalogued that laser-nest report **PDF text now egresses to the Anthropic API** during AI extraction — both `POST /laser-nests/extract` (single PDF, stateless) and the PDF laser-nest-package preview/import (prompt `laser_nest_extraction` 1.0.0, `feature="laser_nest_extraction"`, one tenant-scoped `ai_usage_events` row per call). Same precedent and per-request trust boundary as the existing PO/BOM/QMS/routing extraction. Extraction is **AI-always with no `allow_ai_egress` kill switch** (unlike `allow_carrier_egress` / `allow_print_egress`); nest sheets describe defense parts, so the text is CUI-relevant. **Open item for auditor sign-off:** whether an AI-egress kill switch for CUI documents is warranted — flagged, not asserted as a control. Batch import writes one `log_create` per nest to the tamper-evident `audit_log`; the single-PDF extract is stateless (no audit). Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/API.md` → Laser Nests / `docs/AI_QUOTING_AGENT_RUNBOOK.md` | Claude |
+| 2026-06-24 | SC-3.13.1 (laser-nest AI extraction — egress widened to native PDF): the laser-nest extractor (`app/services/laser_nest_extraction_service.py`) now sends the **raw PDF as a base64 `document` content block** (full rendered page image content — drawing views, title block, inspection/CUI stamps, handwritten annotations — not only the flattened text layer) for PDFs ≤ 20 MB (`_MAX_NATIVE_PDF_BYTES`), with a text-flatten fallback only above the cap; both `POST /laser-nests/extract` and the PDF laser-nest-package preview/import are affected, and native-PDF calls now route to the Sonnet/default tier (`has_pdf_document` flag), prompt `laser_nest_extraction` bumped 1.0.0 → 1.1.0. This is **strictly more CUI crossing the same boundary** than the prior text-only flow; the size cap is a provider limit, **not** a data-minimization control (the common <20 MB case egresses the richer image content). Still **AI-always with no `allow_ai_egress` kill switch** — the widening **raises the priority** of that open item (flagged for auditor sign-off, not asserted as a control). Per-call `ai_usage_events` telemetry only; `/extract` persists nothing. Documentation-only — describes shipped behavior, no compliance claim changed. See `docs/API.md` → Laser Nests / `docs/AI_QUOTING_AGENT_RUNBOOK.md` | Claude |
+| 2026-06-23 | AU-3.3.1 (laser-nest (re-)import audit symmetry, hardening pass): `POST /work-orders/{id}/laser-nest-packages/import` now audits the IMPORT-REPLACES-EVERYTHING wipe symmetrically — each superseded nest writes a tamper-evident `log_delete` (`reason="superseded_by_reimport"`) **before** the rebuild, and the **legacy CNC-program path** now also writes one `log_create` per nest (`source="cnc_file_import"`), matching the PDF path (`source="pdf_import"`); previously the destructive wipe and the legacy create path left no `audit_log` trail (legacy emitted only a websocket event). Same pass also hardened input validation (new `LaserNestImportRow` schema validates the `rows` JSON before persistence; invalid rows, duplicate `source_file`, and DB `IntegrityError`/`SQLAlchemyError` now return **400** instead of 500). **Accepted residual (tracked follow-up):** the supersession wipe is still a **hard cascade-delete of soft-deletable `LaserNest` rows**, so the soft-delete invariant is not yet fully satisfied for this path — the improvement is that the deletion is now *audited*, not that rows are preserved; re-modeling the wipe as a soft-delete is a separate follow-up. Documentation-only — describes shipped behavior; closes a prior audit-completeness asymmetry, no compliance claim weakened. See `docs/API.md` → Laser Nests | Claude |
+| 2026-06-24 | SC-3.13.1 (AI-extraction egress kill switch — ⚠️ **closes the prior open item, posture change**): the previously-flagged "no `allow_ai_egress` kill switch" open item is now **implemented in code**. `Company.allow_ai_egress` (`companies.allow_ai_egress`, `Boolean nullable=False, default=False, server_default="false"`) gates **all** outbound AI document-extraction egress to the Anthropic API (mirrors `allow_carrier_egress` / `allow_print_egress`). Enforcement is a **single fail-closed seam** in `app/services/llm_client.py` (`_ai_egress_allowed` → `run_llm_task` raises `LLMEgressDisabledError` before any Anthropic call), so it covers **every** AI feature: PO/quote, BOM, QMS-clause, routing-generation, laser-nest PDF extraction, Werco Copilot, and NL search. When OFF: **no request leaves the boundary, no `ai_usage_events` row**; callers degrade gracefully (laser-nest extraction → filename-only). Unknown tenant / DB error → **deny**. The flag flips **only** via `PUT /api/v1/companies/me/ai-egress` (**ADMIN-only**, for symmetry with the carrier/print egress controls — a CUI-boundary decision reserved to Admins; tightened from the initial ADMIN/MANAGER on 2026-06-25, see row below), recorded on the tamper-evident `audit_log` as both a `log_update` and an `ai_egress_enabled`/`ai_egress_disabled` status change; the same toggle is now exposed in the UI at **Admin Settings → AI Privacy** (`/admin/settings?tab=aiprivacy`, control enabled for ADMIN, read-only otherwise). **Initial state:** new companies are created **OFF** (the column `server_default 'false'` governs future INSERTs); pre-existing companies were **grandfathered ON by a data backfill in migration `054_company_allow_ai_egress`** (`UPDATE companies SET allow_ai_egress = true`), **not** by an audited user toggle — so established tenants' initial AI-ON posture has **no `audit_log` row** (the migration deliberately writes none; only subsequent operator flips are audited). **Open item for auditor sign-off:** whether the grandfathered-ON default is acceptable for CUI documents (the control is present and default-OFF, but live per-tenant state — not the default — is the source of truth). Describes shipped working-tree behavior. See `docs/API.md` → Company (self-service) / `docs/AI_QUOTING_AGENT_RUNBOOK.md` / `docs/RBAC_PERMISSIONS.md` | Claude |
+| 2026-06-25 | AC-3.1.1 / SC-3.13.1 (AI-egress toggle — authorization tightened to ADMIN-only): `PUT /api/v1/companies/me/ai-egress` (`app/api/endpoints/companies.py`) was narrowed from `require_role([ADMIN, MANAGER])` to `require_role([ADMIN])`, so flipping the `allow_ai_egress` CUI kill switch is now **ADMIN-only**. This brings it into symmetry with the two sibling CUI egress kill switches (`allow_carrier_egress` / `allow_print_egress`), which are already ADMIN-only — opening or closing the CUI boundary is a decision reserved to Admins. Managers can no longer flip the flag via any path (the prior allowance had been UI-dormant — `/admin/settings` is AdminRoute-gated — so this removes the latent direct-API path). Authorization-scope change only: the fail-closed enforcement seam, audit behavior, default-OFF/grandfathered-ON posture, and the auditor sign-off open item on the grandfathered-ON default are all unchanged. Docs reconciled in `docs/RBAC_PERMISSIONS.md` / `docs/API.md` / `docs/AI_QUOTING_AGENT_RUNBOOK.md` and the prior row above. Describes shipped working-tree behavior. | Claude |
 
 ---
 

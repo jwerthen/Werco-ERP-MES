@@ -143,7 +143,7 @@ def _llm_interpret_nl_search(query: str, *, company_id: int) -> Optional[dict]:
     JSON) so the caller can fall back to the rule parser. Telemetry is recorded
     per call under task="nl_search".
     """
-    from app.services.llm_client import LLMNotConfiguredError, run_llm_task
+    from app.services.llm_client import LLMEgressDisabledError, LLMNotConfiguredError, run_llm_task
     from app.services.llm_model_router import LLMTaskContext
     from app.services.prompts import NL_SEARCH_INTENT_PROMPT
 
@@ -165,7 +165,9 @@ def _llm_interpret_nl_search(query: str, *, company_id: int) -> Optional[dict]:
             timeout=_NL_LLM_TIMEOUT_SECONDS,
             max_retries=0,  # the 3s budget is wall-clock honest: no SDK retries hiding behind the timeout
         )
-    except LLMNotConfiguredError:
+    except (LLMNotConfiguredError, LLMEgressDisabledError):
+        # Not configured, or AI egress disabled for this company — the rule
+        # parser covers us silently (egress-off is a policy state, not a failure).
         return None
     except Exception as exc:  # API error / timeout — rule parser covers us
         logger.warning("NL search LLM intent parse failed; using rule parser: %s", exc)

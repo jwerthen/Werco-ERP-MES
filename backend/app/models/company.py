@@ -20,6 +20,10 @@ class Company(Base):
     logo_url = Column(String(500), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
 
+    # Per-company kill switch for outbound AI document-extraction egress to the
+    # Anthropic API -- defaults OFF (mirrors allow_carrier_egress / allow_print_egress).
+    allow_ai_egress = Column(Boolean, nullable=False, default=False, server_default="false")
+
     # Hierarchy: parent company (e.g., Werco) -> subsidiaries
     parent_company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
 

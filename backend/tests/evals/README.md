@@ -1,7 +1,8 @@
 # AI Eval Harness
 
-Golden-fixture evals for the LLM extraction pipelines (PO/quote and BOM).
-Excluded from the default pytest run via the `evals` marker.
+Golden-fixture evals for the LLM extraction pipelines (PO/quote and BOM), plus a
+synthetic-fixture eval for the laser-nest native-PDF extraction path. Excluded
+from the default pytest run via the `evals` marker.
 
 ## Running
 
@@ -21,7 +22,15 @@ RUN_LIVE_EVALS=1 ANTHROPIC_API_KEY=sk-ant-... pytest -m evals tests/evals
   - `expected` — ground truth the scorer compares against
   - `thresholds` — minimum scores the case must reach
 - `scoring.py` — deterministic scorers (field accuracy, line-item recall/precision)
-- `test_extraction_evals.py` — offline + live-gated tests
+- `test_extraction_evals.py` — offline + live-gated PO/BOM tests
+- `nest_fixtures.py` + `test_laser_nest_evals.py` — the laser-nest native-PDF
+  eval. Instead of golden JSON it SYNTHESIZES nest-report PDFs with reportlab
+  (a digital text-layer sheet and an image-only "scanned" variant) with known
+  field values, then scores `cnc_number`/`material`/`thickness`/`sheet_size`.
+  Offline it builds the fixtures and exercises the scorer; live
+  (`RUN_LIVE_EVALS=1` + `ANTHROPIC_API_KEY`) runs the real native-PDF extraction.
+  This measures the layout-aware native-PDF path vs. the text-flatten baseline —
+  the fixtures put the material grade on a separate machine line on purpose.
 
 ## Adding a case
 
