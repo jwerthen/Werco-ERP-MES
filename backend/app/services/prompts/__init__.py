@@ -21,6 +21,10 @@ from app.services.prompts.extraction import (
     PO_EXTRACTION_PROMPT,
     PO_EXTRACTION_SCHEMA,
 )
+from app.services.prompts.laser_nest import (
+    LASER_NEST_EXTRACTION_PROMPT,
+    LASER_NEST_EXTRACTION_SCHEMA,
+)
 from app.services.prompts.qms import QMS_CLAUSE_EXTRACTION_PROMPT
 from app.services.prompts.routing import ROUTING_GENERATION_PROMPT
 
@@ -29,6 +33,7 @@ PROMPT_REGISTRY: Dict[str, Prompt] = {
     for prompt in (
         PO_EXTRACTION_PROMPT,
         BOM_EXTRACTION_PROMPT,
+        LASER_NEST_EXTRACTION_PROMPT,
         ROUTING_GENERATION_PROMPT,
         QMS_CLAUSE_EXTRACTION_PROMPT,
         COPILOT_CHAT_PROMPT,
@@ -43,6 +48,8 @@ __all__ = [
     "PO_EXTRACTION_SCHEMA",
     "BOM_EXTRACTION_PROMPT",
     "BOM_EXTRACTION_SCHEMA",
+    "LASER_NEST_EXTRACTION_PROMPT",
+    "LASER_NEST_EXTRACTION_SCHEMA",
     "ROUTING_GENERATION_PROMPT",
     "QMS_CLAUSE_EXTRACTION_PROMPT",
     "COPILOT_CHAT_PROMPT",

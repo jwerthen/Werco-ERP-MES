@@ -29,6 +29,7 @@ class LLMTaskContext:
     task: str
     input_chars: int
     is_ocr: bool = False
+    has_pdf_document: bool = False
     max_output_tokens: int = 4096
     document_type: Optional[str] = None
     geometry: Optional[Dict[str, Any]] = None
@@ -49,6 +50,7 @@ TASK_MODEL_ENV = {
     "po_extraction": "ANTHROPIC_PO_MODEL",
     "routing_generation": "ANTHROPIC_ROUTING_MODEL",
     "qms_clause_extraction": "ANTHROPIC_QMS_MODEL",
+    "laser_nest_extraction": "ANTHROPIC_LASER_NEST_MODEL",
     "copilot_chat": "ANTHROPIC_COPILOT_MODEL",
     "nl_search": "ANTHROPIC_NL_SEARCH_MODEL",
 }
@@ -150,6 +152,12 @@ def _complexity_score(context: LLMTaskContext) -> int:
         score += 1
 
     if context.is_ocr:
+        score += 2
+    if context.has_pdf_document:
+        # A native-PDF call carries input_chars~=0 (the bytes ride in a document
+        # block, not the prompt text), so without this bump it would score 0 ->
+        # FAST/Haiku. +2 lifts it to "standard"/DEFAULT (Sonnet): layout-aware
+        # extraction over a rendered 2-D nest sheet warrants the stronger tier.
         score += 2
     if context.max_output_tokens > 8_000:
         score += 2

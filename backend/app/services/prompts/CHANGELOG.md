@@ -4,6 +4,38 @@ Bump a prompt's semver `version` and add an entry here whenever its text or
 request layout changes. The version string is recorded on `AIUsageEvent`
 (every API call) and on `AIInteractionEvent`/`AIRecommendation` learning rows.
 
+## 2026-06-24
+
+- `laser_nest_extraction` 1.0.0 → 1.1.0 — request layout changed: the primary
+  path now sends the nest report as a base64 PDF `document` content block
+  (layout-aware vision) instead of a flattened-text user message, so the model
+  reads the rendered sheet with its 2-D layout. The system prompt was reworded
+  to describe reading the rendered sheet (each labeled field / table cell /
+  title-block entry as a distinct value at its own position), keeping a softened
+  glued-digits/OCR warning for the flattened-text fallback (PDFs that can't be
+  read natively or exceed the 20 MB native cap). Rationale: fixes the
+  glued-digits and material-grade-on-the-wrong-line extraction errors that came
+  from flattening a 2-D nest sheet into a 1-D string. Native-PDF calls carry
+  `input_chars~=0` and set the new `has_pdf_document` flag on `LLMTaskContext`,
+  which lifts model selection off the FAST (Haiku) tier onto DEFAULT (Sonnet);
+  `_extraction_metadata` now records `input_mode` (`native_pdf` | `text`).
+
+## 2026-06-23
+
+- `laser_nest_extraction` 1.0.0 — new prompt for extracting fields (CNC number,
+  material grade, thickness, sheet size, optional planned runs) from CAM
+  laser-nest report PDFs (SigmaNEST / Ermaksan style). Sent as the `system`
+  argument to `run_llm_task` (the deterministic cacheable prefix); the variable
+  document text + filename hint travel in the user message. The prompt warns
+  that the extracted text glues the numeric fields together without delimiters
+  and that the material grade sits on a different visual line than the CNC
+  number/thickness. The task is unrouted in `llm_model_router`, so short clean
+  nest text resolves to the FAST (Haiku) tier — appropriate for this cheap
+  extraction workload. Confirm caching engages via `cache_read_tokens` on
+  `laser_nest_extraction` rows in `ai_usage_events` once Haiku's minimum
+  cacheable prefix (4096 tokens) is met; below that the system prefix is a
+  harmless no-op and the call is uncached.
+
 ## 2026-06-10
 
 - `copilot_chat` 1.0.0 — new system prompt for Werco Copilot v1 (read-only

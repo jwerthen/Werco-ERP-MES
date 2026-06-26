@@ -116,6 +116,20 @@ def score_bom_extraction(expected: Dict[str, Any], actual: Dict[str, Any]) -> Di
     return scores
 
 
+def score_laser_nest_extraction(expected: Dict[str, Any], actual: Dict[str, Any]) -> Dict[str, float]:
+    """Per-field accuracy for the laser-nest extraction (the metadata fields callers
+    depend on). Each field scores 1.0/0.0 independently and ``field_accuracy`` is
+    the mean over the four primary fields, so a single missed field is visible.
+    """
+    fields = ["cnc_number", "material", "thickness", "sheet_size"]
+    scores: Dict[str, float] = {
+        f"{field}_match": (1.0 if _field_matches(expected.get(field), (actual or {}).get(field)) else 0.0)
+        for field in fields
+    }
+    scores["field_accuracy"] = score_scalar_fields(expected, actual, fields)
+    return scores
+
+
 def assert_thresholds(scores: Dict[str, float], thresholds: Dict[str, float], case_id: Optional[str] = None) -> None:
     """Raise AssertionError listing every score below its threshold."""
     failures = [

@@ -61,6 +61,26 @@ def test_task_override_wins(monkeypatch):
     assert decision.reason == "routing_generation override"
 
 
+def test_short_clean_laser_nest_uses_fast_tier(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_MODEL_SELECTION", raising=False)
+    monkeypatch.delenv("ANTHROPIC_LASER_NEST_MODEL", raising=False)
+
+    decision = select_anthropic_model(LLMTaskContext(task="laser_nest_extraction", input_chars=900, is_ocr=False))
+
+    assert decision.tier == LLMModelTier.FAST
+    assert decision.model == "claude-haiku-4-5-20251001"
+
+
+def test_laser_nest_task_override_wins(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_MODEL_SELECTION", raising=False)
+    monkeypatch.setenv("ANTHROPIC_LASER_NEST_MODEL", "claude-sonnet-4-6")
+
+    decision = select_anthropic_model(LLMTaskContext(task="laser_nest_extraction", input_chars=900, is_ocr=False))
+
+    assert decision.model == "claude-sonnet-4-6"
+    assert decision.reason == "laser_nest_extraction override"
+
+
 def test_global_tier_override_wins(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_MODEL_SELECTION", "reasoning")
 
@@ -68,3 +88,33 @@ def test_global_tier_override_wins(monkeypatch):
 
     assert decision.tier == LLMModelTier.REASONING
     assert decision.model == "claude-opus-4-8"
+
+
+def test_native_pdf_laser_nest_uses_default_tier(monkeypatch):
+    """A native-PDF laser-nest call carries input_chars=0 (the bytes ride in a
+    document block, not the prompt). Without the has_pdf_document bump it would
+    score 0 -> FAST. The +2 complexity bump must lift it to DEFAULT (Sonnet) so
+    layout-aware extraction over the rendered 2-D sheet gets the stronger tier."""
+    monkeypatch.delenv("ANTHROPIC_MODEL_SELECTION", raising=False)
+    monkeypatch.delenv("ANTHROPIC_LASER_NEST_MODEL", raising=False)
+
+    decision = select_anthropic_model(
+        LLMTaskContext(task="laser_nest_extraction", input_chars=0, has_pdf_document=True)
+    )
+
+    assert decision.tier == LLMModelTier.DEFAULT
+    assert decision.model == "claude-sonnet-4-6"
+
+
+def test_text_path_laser_nest_without_pdf_document_uses_fast_tier(monkeypatch):
+    """The same task/size WITHOUT has_pdf_document scores 0 -> FAST. Pairing this
+    with the native-PDF case above proves the +2 bump is what moves the tier."""
+    monkeypatch.delenv("ANTHROPIC_MODEL_SELECTION", raising=False)
+    monkeypatch.delenv("ANTHROPIC_LASER_NEST_MODEL", raising=False)
+
+    decision = select_anthropic_model(
+        LLMTaskContext(task="laser_nest_extraction", input_chars=0, has_pdf_document=False)
+    )
+
+    assert decision.tier == LLMModelTier.FAST
+    assert decision.model == "claude-haiku-4-5-20251001"
