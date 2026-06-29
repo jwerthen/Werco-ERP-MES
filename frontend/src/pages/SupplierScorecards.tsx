@@ -262,7 +262,7 @@ const SupplierScorecards = () => {
         <>
           {/* Scorecards Tab */}
           {activeTab === 'Scorecards' && (
-            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-hidden">
+            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-700">
                 <thead className="bg-slate-800">
                   <tr>
@@ -349,7 +349,7 @@ const SupplierScorecards = () => {
 
           {/* Approved Supplier List Tab */}
           {activeTab === 'Approved Supplier List' && (
-            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-hidden">
+            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-700">
                 <thead className="bg-slate-800">
                   <tr>
@@ -383,7 +383,7 @@ const SupplierScorecards = () => {
 
           {/* Audits Tab */}
           {activeTab === 'Audits' && (
-            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-hidden">
+            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-700">
                 <thead className="bg-slate-800">
                   <tr>

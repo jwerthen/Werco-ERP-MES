@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { LoadingButton } from '../components/ui/LoadingButton';
 import { Part, PartType } from '../types';
 import { isMaterialSupplyPartType } from '../utils/catalogGroups';
 import { useNavigate } from 'react-router-dom';
@@ -138,6 +139,8 @@ export default function BOMPage() {
   const [explodedView, setExplodedView] = useState<BOMItem[]>([]);
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set());
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [creatingBOM, setCreatingBOM] = useState(false);
+  const [creatingPart, setCreatingPart] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -288,6 +291,8 @@ export default function BOMPage() {
 
   const handleCreateBOM = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creatingBOM) return;
+    setCreatingBOM(true);
     try {
       const created = await api.createBOM(newBOM);
       setBoms([...boms, created]);
@@ -296,6 +301,8 @@ export default function BOMPage() {
       setNewBOM({ part_id: 0, revision: 'A', description: '', bom_type: 'standard' });
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to create BOM');
+    } finally {
+      setCreatingBOM(false);
     }
   };
 
@@ -459,6 +466,8 @@ export default function BOMPage() {
 
   const handleCreateNewPart = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creatingPart) return;
+    setCreatingPart(true);
     try {
       const createdPart = isMaterialSupplyPartType(newPart.part_type)
         ? await api.createMaterial(newPart)
@@ -476,6 +485,8 @@ export default function BOMPage() {
       });
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to create part');
+    } finally {
+      setCreatingPart(false);
     }
   };
 
@@ -854,10 +865,10 @@ export default function BOMPage() {
                 />
               </div>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">
+                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary" disabled={creatingBOM}>
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary">Create</button>
+                <LoadingButton type="submit" loading={creatingBOM} loadingText="Creating...">Create</LoadingButton>
               </div>
             </form>
       </Modal>
@@ -1529,10 +1540,10 @@ export default function BOMPage() {
                 />
               </div>
               <div className="flex justify-end gap-3 pt-2 border-t">
-                <button type="button" onClick={() => setShowNewPartModal(false)} className="btn-secondary">
+                <button type="button" onClick={() => setShowNewPartModal(false)} className="btn-secondary" disabled={creatingPart}>
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary">Create & Select</button>
+                <LoadingButton type="submit" loading={creatingPart} loadingText="Creating...">Create &amp; Select</LoadingButton>
               </div>
             </form>
       </Modal>

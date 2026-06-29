@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { Modal } from './Modal';
 
 describe('Modal', () => {
@@ -171,6 +171,141 @@ describe('Modal', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onCloseChild).toHaveBeenCalledTimes(1);
     expect(onCloseParent).not.toHaveBeenCalled();
+  });
+
+  describe('focus management', () => {
+    // jsdom does no layout, so HTMLElement.offsetParent is always null — which
+    // makes the panel's visibility filter (getFocusable: el.offsetParent !== null)
+    // treat every button as hidden and skip it. Shim offsetParent so attached
+    // elements report as visible, matching a real browser, then restore it.
+    let offsetParentDescriptor: PropertyDescriptor | undefined;
+    beforeEach(() => {
+      offsetParentDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetParent');
+      Object.defineProperty(HTMLElement.prototype, 'offsetParent', {
+        configurable: true,
+        get(this: HTMLElement) {
+          return this.isConnected ? document.body : null;
+        },
+      });
+    });
+    afterEach(() => {
+      if (offsetParentDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, 'offsetParent', offsetParentDescriptor);
+      } else {
+        delete (HTMLElement.prototype as unknown as Record<string, unknown>).offsetParent;
+      }
+    });
+
+    // The initial-focus move is deferred a tick via setTimeout(…, 0); fake
+    // timers let us flush it deterministically rather than racing it.
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => {
+      act(() => jest.runOnlyPendingTimers());
+      jest.useRealTimers();
+    });
+
+    function flushFocusTimer() {
+      act(() => {
+        jest.advanceTimersByTime(0);
+      });
+    }
+
+    it('moves focus to the first focusable child when it opens', () => {
+      render(
+        <Modal open onClose={jest.fn()}>
+          <button type="button">First</button>
+          <button type="button">Second</button>
+        </Modal>,
+      );
+      flushFocusTimer();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'First' }));
+    });
+
+    it('falls back to focusing the panel itself when there is nothing tabbable inside', () => {
+      render(
+        <Modal open onClose={jest.fn()}>
+          <p>Just text, nothing focusable</p>
+        </Modal>,
+      );
+      flushFocusTimer();
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveAttribute('tabindex', '-1');
+      expect(document.activeElement).toBe(dialog);
+    });
+
+    it('wraps Tab from the last focusable back to the first, and Shift+Tab the other way', () => {
+      render(
+        <Modal open onClose={jest.fn()}>
+          <button type="button">First</button>
+          <button type="button">Last</button>
+        </Modal>,
+      );
+      flushFocusTimer();
+      const first = screen.getByRole('button', { name: 'First' });
+      const last = screen.getByRole('button', { name: 'Last' });
+
+      // Tab from the last element wraps forward to the first.
+      last.focus();
+      fireEvent.keyDown(document, { key: 'Tab' });
+      expect(document.activeElement).toBe(first);
+
+      // Shift+Tab from the first element wraps backward to the last.
+      first.focus();
+      fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+      expect(document.activeElement).toBe(last);
+    });
+
+    it('restores focus to the previously-focused trigger when it closes', () => {
+      // A real trigger button outside the modal that "owns" focus before open.
+      const trigger = document.createElement('button');
+      trigger.textContent = 'Open';
+      document.body.appendChild(trigger);
+      trigger.focus();
+      expect(document.activeElement).toBe(trigger);
+
+      const { rerender } = render(
+        <Modal open onClose={jest.fn()}>
+          <button type="button">Inside</button>
+        </Modal>,
+      );
+      flushFocusTimer();
+      // Focus moved into the modal.
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Inside' }));
+
+      // Closing the modal restores focus to the trigger.
+      rerender(
+        <Modal open={false} onClose={jest.fn()}>
+          <button type="button">Inside</button>
+        </Modal>,
+      );
+      expect(document.activeElement).toBe(trigger);
+
+      document.body.removeChild(trigger);
+    });
+
+    it('only the topmost modal traps Tab — the parent does not steal focus', () => {
+      render(
+        <>
+          <Modal open onClose={jest.fn()}>
+            <button type="button">Parent only</button>
+          </Modal>
+          <Modal open onClose={jest.fn()}>
+            <button type="button">Child first</button>
+            <button type="button">Child last</button>
+          </Modal>
+        </>,
+      );
+      flushFocusTimer();
+      const childFirst = screen.getByRole('button', { name: 'Child first' });
+      const childLast = screen.getByRole('button', { name: 'Child last' });
+
+      // Tab wrap is governed by the CHILD's focusables (topmost), not the parent.
+      childLast.focus();
+      fireEvent.keyDown(document, { key: 'Tab' });
+      expect(document.activeElement).toBe(childFirst);
+      // Parent's button is never the wrap target while the child is on top.
+      expect(document.activeElement).not.toBe(screen.getByRole('button', { name: 'Parent only' }));
+    });
   });
 
   it('Escape pops back to the parent after the child closes (regression)', () => {

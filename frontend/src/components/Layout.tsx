@@ -427,6 +427,7 @@ export default function Layout({ children }: LayoutProps) {
     [location.pathname, location.search, user?.role]
   );
 
+  const isMac = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().indexOf('MAC') >= 0;
   const isOperator = user?.role === 'operator';
   const isAdminUser = user?.role === 'admin' || user?.role === 'platform_admin' || user?.is_superuser === true;
   const isPlatformAdmin = user?.role === 'platform_admin' || user?.is_superuser === true;
@@ -688,7 +689,7 @@ export default function Layout({ children }: LayoutProps) {
                   <MagnifyingGlassIcon className="h-4 w-4" />
                   <span className="hidden md:inline font-mono text-xs">search</span>
                   <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-faint rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
-                    /
+                    {isMac ? '⌘K' : 'Ctrl K'}
                   </kbd>
                 </button>
 

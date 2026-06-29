@@ -33,9 +33,27 @@ const MAX_WIDTH: Record<ModalSize, string> = {
 };
 
 // Module-level stack of currently-open modals. Only the top entry handles
-// Escape, so stacked/nested modals (e.g. "New Part" opened from "Add Item")
-// close one layer at a time rather than all at once.
+// Escape and focus-trapping, so stacked/nested modals (e.g. "New Part" opened
+// from "Add Item") close one layer at a time and only the frontmost layer keeps
+// focus rather than all at once.
 const modalStack: symbol[] = [];
+
+// Selector for tabbable elements inside the panel. Used both to seed initial
+// focus and to wrap Tab/Shift+Tab at the panel edges.
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'textarea:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+function getFocusable(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (el) => el.offsetParent !== null || el === document.activeElement
+  );
+}
 
 export function Modal({
   open,
@@ -55,6 +73,9 @@ export function Modal({
   // not let it re-capture a child's token and close both layers on one Escape.
   const tokenRef = useRef<symbol | null>(null);
   if (tokenRef.current === null) tokenRef.current = Symbol('modal');
+
+  // The dialog panel element, used to seed and trap focus.
+  const panelRef = useRef<HTMLDivElement | null>(null);
 
   // Register this instance on the open-modal stack while it is open. Push on
   // open, pop on close/unmount via the effect cleanup. Identity comes from the
@@ -83,6 +104,63 @@ export function Modal({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [open, closeOnEscape, onClose]);
 
+  // Focus management: on open, capture the previously-focused element and move
+  // focus into the panel. While open, trap Tab/Shift+Tab inside the panel — but
+  // only for the topmost modal, so nested modals don't fight over focus. On
+  // close/unmount, restore focus to the element that was focused before opening.
+  useEffect(() => {
+    if (!open) return;
+    const token = tokenRef.current;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+
+    // Move initial focus into the panel: first focusable child, else the panel
+    // itself (it carries tabIndex={-1}). Deferred a tick so the portal content
+    // is mounted before we query it.
+    const focusTimer = window.setTimeout(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusable = getFocusable(panel);
+      (focusable[0] ?? panel).focus();
+    }, 0);
+
+    const handleFocusTrap = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return;
+      // Only the topmost modal traps focus, so nested modals keep working.
+      if (modalStack[modalStack.length - 1] !== token) return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusable = getFocusable(panel);
+      if (focusable.length === 0) {
+        // Nothing tabbable — keep focus pinned to the panel.
+        e.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (e.shiftKey) {
+        if (activeEl === first || !panel.contains(activeEl)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (activeEl === last || !panel.contains(activeEl)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleFocusTrap);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener('keydown', handleFocusTrap);
+      // Restore focus to the trigger if it is still in the document.
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function' && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      }
+    };
+  }, [open]);
+
   if (!open || typeof document === 'undefined') return null;
 
   const panelClasses = [
@@ -104,10 +182,12 @@ export function Modal({
       }}
     >
       <div
+        ref={panelRef}
         className={panelClasses}
         role="dialog"
         aria-modal="true"
         aria-labelledby={ariaLabelledBy}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         {children}

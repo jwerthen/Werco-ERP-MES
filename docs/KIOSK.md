@@ -147,8 +147,14 @@ backfill writes on the adoption dashboard.
 ## Offline behavior
 
 - The kiosk polls queue + active job every **15 s**. When a poll or mutation fails, an
-  **OFFLINE** banner appears; last-known data and any typed values (quantities, selected
+  **OFFLINE** banner appears (*"OFFLINE — actions are disabled until the connection is
+  restored. Reconnecting…"*); last-known data and any typed values (quantities, selected
   reasons) are kept on screen — nothing the operator has entered is discarded.
-- There is **no offline write queue**: a mutation that fails was not saved, and the
-  operator retries it once the banner clears. Error toasts linger 12 s so they are readable
+- **Mutations are blocked while offline**, not just flagged. Every mutation control —
+  clock-in/out confirm, report production, complete, hold, and scrap-reason selection — is
+  hard-disabled until the connection is restored, so a tap against a dead connection cannot
+  silently drop the record. The offline banner is the accessible explanation for the disabled
+  buttons (referenced via `aria-describedby`); disabled action buttons read **Offline**.
+- There is **no offline write queue**: because mutations are disabled rather than queued, the
+  operator retries them once the banner clears. Error toasts linger 12 s so they are readable
   from arm's length.

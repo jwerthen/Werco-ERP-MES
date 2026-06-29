@@ -113,7 +113,7 @@ React 19 SPA under `frontend/src/`:
 - `context/` — React Context for cross-cutting state: auth, active-company switching, keyboard shortcuts, tours. No Redux; server data is fetched per-page and cached at the client.
 - Forms: React Hook Form + Zod (`validation/`). State that should survive reload (pagination, filters) goes in URL params.
 - Styling: Tailwind CSS 4 + DaisyUI, with the Werco brand palette (werco-navy `#1B4D9C`, accent red `#C8352B`, steel grays) and an "instrument-panel" aesthetic — sharp corners, hairline borders, minimal shadows. Match it.
-- Modals/dialogs: build with the shared `<Modal>` primitive (`components/ui/Modal.tsx`), not hand-rolled `fixed inset-0` overlays — it portals to `document.body` at `z-[60]` (clearing the fixed `z-50` sidebar) and normalizes the instrument-panel panel chrome, backdrop/Escape close, and modal stacking. A few non-dialog overlays (mobile sidebar backdrop, Tour spotlight, GlobalSearch's Headless UI palette, CopilotPanel side panel, LoadingOverlay) are intentionally not Modals.
+- Modals/dialogs: build with the shared `<Modal>` primitive (`components/ui/Modal.tsx`), not hand-rolled `fixed inset-0` overlays — it portals to `document.body` at `z-[60]` (clearing the fixed `z-50` sidebar) and normalizes the instrument-panel panel chrome, backdrop/Escape close, modal stacking, and focus management (focus-into-panel on open, Tab/Shift+Tab focus trap with wrap, focus-restore on close — topmost-only in a nested stack). A few non-dialog overlays (mobile sidebar backdrop, Tour spotlight, GlobalSearch's Headless UI palette, CopilotPanel side panel, LoadingOverlay) are intentionally not Modals.
 
 ## Compliance-critical invariants
 

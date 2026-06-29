@@ -3,6 +3,7 @@ import api from '../services/api';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
+import { LoadingButton } from '../components/ui/LoadingButton';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
 interface Customer {
@@ -92,6 +93,7 @@ export default function Customers() {
   const [showInactive, setShowInactive] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+  const [saving, setSaving] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customerStats, setCustomerStats] = useState<CustomerStats | null>(null);
   const [loadingStats, setLoadingStats] = useState(false);
@@ -178,6 +180,8 @@ export default function Customers() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
+    setSaving(true);
     try {
       if (editingCustomer) {
         await api.updateCustomer(editingCustomer.id, formData);
@@ -189,6 +193,8 @@ export default function Customers() {
       loadCustomers();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Failed to save customer');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -525,12 +531,12 @@ export default function Customers() {
               </div>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <button type="button" onClick={() => { setShowModal(false); resetForm(); }} className="btn-secondary">
+                <button type="button" onClick={() => { setShowModal(false); resetForm(); }} className="btn-secondary" disabled={saving}>
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary">
+                <LoadingButton type="submit" loading={saving} loadingText="Saving...">
                   {editingCustomer ? 'Update' : 'Create'}
-                </button>
+                </LoadingButton>
               </div>
             </form>
       </Modal>
