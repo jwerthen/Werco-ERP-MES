@@ -2131,7 +2131,7 @@ class ApiService {
   }
 
   // Audit Logs
-  async getAuditLogs(params?: { action?: string; resource_type?: string; user_id?: number; search?: string; limit?: number }) {
+  async getAuditLogs(params?: { action?: string; resource_type?: string; user_id?: number; search?: string; limit?: number; offset?: number }) {
     const response = await this.api.get('/audit/', { params });
     return response.data;
   }
