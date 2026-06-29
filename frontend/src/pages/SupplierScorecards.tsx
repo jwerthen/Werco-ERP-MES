@@ -16,6 +16,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface DashboardStats {
@@ -84,6 +85,7 @@ const statusBadge = (status: string) => {
 };
 
 const SupplierScorecards = () => {
+  const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<Tab>('Scorecards');
   const [search, setSearch] = useState('');
   const [stats, setStats] = useState<DashboardStats>({ total_rated: 0, average_score: 0, at_risk_count: 0, audits_due_soon: 0 });
@@ -92,6 +94,7 @@ const SupplierScorecards = () => {
   const [audits, setAudits] = useState<Audit[]>([]);
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showScorecardModal, setShowScorecardModal] = useState(false);
   const [showAuditModal, setShowAuditModal] = useState(false);
 
@@ -104,6 +107,7 @@ const SupplierScorecards = () => {
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const [dashRes, scRes, aslRes, audRes] = await Promise.all([
         api.getSupplierScorecardsDashboard(),
@@ -117,6 +121,7 @@ const SupplierScorecards = () => {
       setAudits(audRes.data?.results ?? audRes.data ?? audRes);
     } catch (e) {
       console.error('Failed to fetch supplier scorecard data', e);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -153,11 +158,13 @@ const SupplierScorecards = () => {
       });
       setShowScorecardModal(false);
       setScorecardForm({ vendor_id: '', period: '', quality_score: '', delivery_score: '', cost_score: '', responsiveness_score: '' });
+      showToast('success', 'Scorecard created');
       fetchData();
     } catch (e) {
       console.error('Failed to create scorecard', e);
+      showToast('error', 'Failed to create scorecard');
     }
-  }, [scorecardForm, fetchData]);
+  }, [scorecardForm, fetchData, showToast]);
 
   const handleCreateAudit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
@@ -172,11 +179,13 @@ const SupplierScorecards = () => {
       });
       setShowAuditModal(false);
       setAuditForm({ vendor_id: '', audit_date: '', audit_type: 'on-site', score: '', findings: '', next_audit_due: '' });
+      showToast('success', 'Audit created');
       fetchData();
     } catch (e) {
       console.error('Failed to create audit', e);
+      showToast('error', 'Failed to create audit');
     }
-  }, [auditForm, fetchData]);
+  }, [auditForm, fetchData, showToast]);
 
   const radarData = useCallback((sc: Scorecard) => [
     { dimension: 'Quality', score: sc.quality_score },
@@ -258,6 +267,11 @@ const SupplierScorecards = () => {
         <div className="flex justify-center py-12">
           <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600" />
         </div>
+      ) : loadError ? (
+        <ErrorState
+          message="Could not load supplier scorecard data."
+          onRetry={fetchData}
+        />
       ) : (
         <>
           {/* Scorecards Tab */}
@@ -278,7 +292,16 @@ const SupplierScorecards = () => {
                 </thead>
                 <tbody className="divide-y divide-slate-700">
                   {filteredScorecards.length === 0 ? (
-                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-400">No scorecards found.</td></tr>
+                    <tr>
+                      <td colSpan={8} className="px-4 py-8">
+                        <EmptyState
+                          icon={ChartBarIcon}
+                          title="No scorecards found"
+                          description={search ? 'No scorecards match your search.' : 'Rated suppliers will appear here once you create a scorecard.'}
+                          action={search ? undefined : { label: 'New Scorecard', onClick: () => setShowScorecardModal(true) }}
+                        />
+                      </td>
+                    </tr>
                   ) : filteredScorecards.map(sc => (
                     <React.Fragment key={sc.id}>
                       <tr className="hover:bg-slate-800 cursor-pointer" onClick={() => toggleExpand(sc.id)}>
@@ -362,7 +385,15 @@ const SupplierScorecards = () => {
                 </thead>
                 <tbody className="divide-y divide-slate-700">
                   {filteredASL.length === 0 ? (
-                    <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400">No approved suppliers found.</td></tr>
+                    <tr>
+                      <td colSpan={5} className="px-4 py-8">
+                        <EmptyState
+                          icon={ShieldCheckIcon}
+                          title="No approved suppliers found"
+                          description={search ? 'No approved suppliers match your search.' : 'Approved suppliers will appear here.'}
+                        />
+                      </td>
+                    </tr>
                   ) : filteredASL.map(s => (
                     <tr key={s.id} className="hover:bg-slate-800">
                       <td className="px-4 py-3 text-sm font-medium text-white">{s.vendor_name}</td>
@@ -398,7 +429,16 @@ const SupplierScorecards = () => {
                 </thead>
                 <tbody className="divide-y divide-slate-700">
                   {filteredAudits.length === 0 ? (
-                    <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400">No audits found.</td></tr>
+                    <tr>
+                      <td colSpan={7} className="px-4 py-8">
+                        <EmptyState
+                          icon={CalendarDaysIcon}
+                          title="No audits found"
+                          description={search ? 'No audits match your search.' : 'Supplier audits will appear here once you log one.'}
+                          action={search ? undefined : { label: 'New Audit', onClick: () => setShowAuditModal(true) }}
+                        />
+                      </td>
+                    </tr>
                   ) : filteredAudits.map(a => (
                     <tr key={a.id} className="hover:bg-slate-800">
                       <td className="px-4 py-3 text-sm font-medium text-white">{a.vendor_name}</td>

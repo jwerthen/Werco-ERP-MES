@@ -11,6 +11,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -139,6 +140,8 @@ const defaultTrainingForm: TrainingCreateForm = { user_id: '', training_name: ''
 
 // ── Component ────────────────────────────────────────────────────
 export default function OperatorCertifications() {
+  const { showToast } = useToast();
+
   // Data
   const [certifications, setCertifications] = useState<Certification[]>([]);
   const [trainingRecords, setTrainingRecords] = useState<TrainingRecord[]>([]);
@@ -146,6 +149,8 @@ export default function OperatorCertifications() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [trainingError, setTrainingError] = useState<string | null>(null);
+  const [skillMatrixError, setSkillMatrixError] = useState<string | null>(null);
 
   // UI
   const [activeTab, setActiveTab] = useState<TabKey>('certifications');
@@ -190,19 +195,23 @@ export default function OperatorCertifications() {
 
   const loadTrainingRecords = useCallback(async () => {
     try {
+      setTrainingError(null);
       const data = await api.getTrainingRecords();
       setTrainingRecords(Array.isArray(data) ? data : data.items || []);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load training records:', err);
+      setTrainingError(err?.response?.data?.detail || 'Failed to load training records');
     }
   }, []);
 
   const loadSkillMatrix = useCallback(async () => {
     try {
+      setSkillMatrixError(null);
       const data = await api.getSkillMatrix();
       setSkillMatrix(Array.isArray(data) ? data : data.items || []);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load skill matrix:', err);
+      setSkillMatrixError(err?.response?.data?.detail || 'Failed to load skill matrix');
     }
   }, []);
 
@@ -253,7 +262,7 @@ export default function OperatorCertifications() {
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!certForm.user_id || !certForm.certification_name.trim()) {
-        alert('User ID and certification name are required');
+        showToast('error', 'User ID and certification name are required');
         return;
       }
       try {
@@ -274,15 +283,16 @@ export default function OperatorCertifications() {
 
         await api.createCertification(payload);
         setShowCertModal(false);
+        showToast('success', 'Certification created');
         loadCertifications();
         loadDashboard();
       } catch (err: any) {
-        alert(err?.response?.data?.detail || 'Failed to create certification');
+        showToast('error', err?.response?.data?.detail || 'Failed to create certification');
       } finally {
         setCertCreateLoading(false);
       }
     },
-    [certForm, loadCertifications, loadDashboard]
+    [certForm, loadCertifications, loadDashboard, showToast]
   );
 
   // ── Create training record ─────────────────────────────────────
@@ -296,7 +306,7 @@ export default function OperatorCertifications() {
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!trainingForm.user_id || !trainingForm.training_name.trim()) {
-        alert('User ID and training name are required');
+        showToast('error', 'User ID and training name are required');
         return;
       }
       try {
@@ -318,15 +328,16 @@ export default function OperatorCertifications() {
 
         await api.createTrainingRecord(payload);
         setShowTrainingModal(false);
+        showToast('success', 'Training record created');
         loadTrainingRecords();
         loadDashboard();
       } catch (err: any) {
-        alert(err?.response?.data?.detail || 'Failed to create training record');
+        showToast('error', err?.response?.data?.detail || 'Failed to create training record');
       } finally {
         setTrainingCreateLoading(false);
       }
     },
-    [trainingForm, loadTrainingRecords, loadDashboard]
+    [trainingForm, loadTrainingRecords, loadDashboard, showToast]
   );
 
   // ── Skill matrix grid computation ──────────────────────────────
@@ -464,15 +475,12 @@ export default function OperatorCertifications() {
         </div>
       )}
 
-      {/* Error */}
-      {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400">{error}</div>
-      )}
-
       {/* Certifications Tab */}
       {activeTab === 'certifications' && (
         loading ? (
           <SkeletonTable rows={6} columns={7} />
+        ) : error ? (
+          <ErrorState message={error} onRetry={loadCertifications} />
         ) : (
           <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
             <table className="min-w-full divide-y divide-slate-700 text-sm">
@@ -490,8 +498,21 @@ export default function OperatorCertifications() {
               <tbody className="divide-y divide-gray-100">
                 {filteredCerts.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-slate-400">
-                      {searchTerm ? 'No certifications match your search' : 'No certifications found'}
+                    <td colSpan={7} className="px-4 py-10">
+                      {searchTerm ? (
+                        <EmptyState
+                          icon={MagnifyingGlassIcon}
+                          title="No matching certifications"
+                          description="No certifications match your search."
+                        />
+                      ) : (
+                        <EmptyState
+                          icon={CheckCircleIcon}
+                          title="No certifications"
+                          description="Operator certifications will appear here once added."
+                          action={{ label: 'New Certification', onClick: openCertModal }}
+                        />
+                      )}
                     </td>
                   </tr>
                 ) : (
@@ -518,7 +539,10 @@ export default function OperatorCertifications() {
       )}
 
       {/* Training Records Tab */}
-      {activeTab === 'training' && (
+      {activeTab === 'training' && trainingError && (
+        <ErrorState message={trainingError} onRetry={loadTrainingRecords} />
+      )}
+      {activeTab === 'training' && !trainingError && (
         <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
           <table className="min-w-full divide-y divide-slate-700 text-sm">
             <thead className="bg-slate-800">
@@ -536,8 +560,21 @@ export default function OperatorCertifications() {
             <tbody className="divide-y divide-gray-100">
               {filteredTraining.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-slate-400">
-                    {searchTerm ? 'No training records match your search' : 'No training records found'}
+                  <td colSpan={8} className="px-4 py-10">
+                    {searchTerm ? (
+                      <EmptyState
+                        icon={MagnifyingGlassIcon}
+                        title="No matching training records"
+                        description="No training records match your search."
+                      />
+                    ) : (
+                      <EmptyState
+                        icon={CalendarDaysIcon}
+                        title="No training records"
+                        description="Completed and scheduled training will appear here."
+                        action={{ label: 'New Training Record', onClick: openTrainingModal }}
+                      />
+                    )}
                   </td>
                 </tr>
               ) : (
@@ -573,10 +610,14 @@ export default function OperatorCertifications() {
             <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-red-500/100" /> Beginner / Untrained</span>
           </div>
 
-          {operators.length === 0 ? (
-            <div className="rounded-xl border border-slate-700 bg-[#151b28] p-10 text-center text-slate-400 shadow-sm">
-              No skill matrix data available
-            </div>
+          {skillMatrixError ? (
+            <ErrorState message={skillMatrixError} onRetry={loadSkillMatrix} />
+          ) : operators.length === 0 ? (
+            <EmptyState
+              icon={ExclamationTriangleIcon}
+              title="No skill matrix data"
+              description="Skill assessments by operator and work center will appear here."
+            />
           ) : (
             <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
               <table className="min-w-full divide-y divide-slate-700 text-sm">

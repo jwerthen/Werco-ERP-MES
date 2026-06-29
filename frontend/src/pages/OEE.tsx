@@ -23,6 +23,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 // ============== Types ==============
 
@@ -126,11 +127,13 @@ function defaultDateRange(): { from: string; to: string } {
 // ============== Component ==============
 
 export default function OEE() {
+  const { showToast } = useToast();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [dashboard, setDashboard] = useState<OEEDashboard | null>(null);
   const [trends, setTrends] = useState<OEETrend[]>([]);
   const [records, setRecords] = useState<OEERecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   const [selectedWorkCenter, setSelectedWorkCenter] = useState<string>('');
   const defaultDates = defaultDateRange();
@@ -152,6 +155,7 @@ export default function OEE() {
   });
 
   const loadData = useCallback(async () => {
+    setLoadError(false);
     try {
       const params: Record<string, any> = {};
       if (selectedWorkCenter) params.work_center_id = parseInt(selectedWorkCenter);
@@ -171,6 +175,7 @@ export default function OEE() {
       setRecords(Array.isArray(recordsRes.data) ? recordsRes.data : recordsRes.data?.items || []);
     } catch (err) {
       console.error('Failed to load OEE data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -183,7 +188,7 @@ export default function OEE() {
   const handleAddRecord = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!addForm.work_center_id) {
-      alert('Please select a work center');
+      showToast('error', 'Please select a work center');
       return;
     }
     try {
@@ -212,9 +217,10 @@ export default function OEE() {
         rejected_pieces: 0,
         notes: '',
       });
+      showToast('success', 'OEE record added');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message || 'Failed to add OEE record');
+      showToast('error', err.response?.data?.detail || err.message || 'Failed to add OEE record');
     }
   };
 
@@ -226,6 +232,18 @@ export default function OEE() {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="loading loading-spinner loading-lg text-primary"></div>
+      </div>
+    );
+  }
+
+  if (loadError && !dashboard) {
+    return (
+      <div className="p-3">
+        <ErrorState
+          title="Failed to load OEE data"
+          message="Could not load the OEE dashboard. Check your connection and try again."
+          onRetry={loadData}
+        />
       </div>
     );
   }
@@ -399,8 +417,12 @@ export default function OEE() {
               </button>
             ))}
             {(dashboard?.work_centers || []).length === 0 && (
-              <div className="col-span-full text-center text-fd-mute py-8 text-sm">
-                No OEE data available for the selected period
+              <div className="col-span-full">
+                <EmptyState
+                  icon={ChartBarIcon}
+                  title="No OEE data"
+                  description="No OEE data available for the selected period. Add a record or adjust the filters."
+                />
               </div>
             )}
           </div>
@@ -514,8 +536,13 @@ export default function OEE() {
             <tbody>
               {records.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="text-center text-fd-mute py-8">
-                    No OEE records found for the selected period
+                  <td colSpan={11} className="p-0">
+                    <EmptyState
+                      icon={ClockIcon}
+                      title="No OEE records"
+                      description="No OEE records found for the selected period."
+                      action={{ label: 'Add Record', onClick: () => setShowAddModal(true) }}
+                    />
                   </td>
                 </tr>
               ) : (

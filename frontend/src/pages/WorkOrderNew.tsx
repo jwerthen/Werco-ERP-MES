@@ -11,7 +11,7 @@ import {
   MagnifyingGlassIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
-import { SelectField, SelectOption } from '../components/ui';
+import { SelectField, SelectOption, ErrorState, useToast } from '../components/ui';
 
 interface Part {
   id: number;
@@ -125,10 +125,12 @@ interface PartReadiness {
 
 export default function WorkOrderNew() {
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const [parts, setParts] = useState<Part[]>([]);
   const [activeBOMs, setActiveBOMs] = useState<BOMSummary[]>([]);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loadingRouting, setLoadingRouting] = useState(false);
   const [routing, setRouting] = useState<Routing | null>(null);
@@ -159,6 +161,8 @@ export default function WorkOrderNew() {
   }, []);
 
   const loadInitialData = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [partsRes, bomRes, wcRes] = await Promise.all([
         api.getParts({ active_only: true, include_bom_components: true, limit: 500 }),
@@ -176,6 +180,7 @@ export default function WorkOrderNew() {
       }
     } catch (err) {
       console.error('Failed to load data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -414,7 +419,7 @@ export default function WorkOrderNew() {
       );
       return createdOption;
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create customer');
+      showToast('error', err.response?.data?.detail || 'Failed to create customer');
       return null;
     } finally {
       setCreatingCustomer(false);
@@ -650,15 +655,15 @@ export default function WorkOrderNew() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.part_id) {
-      alert('Please select a part');
+      showToast('error', 'Please select a part');
       return;
     }
     if (blockingReadinessMessages.length) {
-      alert(`This part is not ready for a work order:\n\n${blockingReadinessMessages.join('\n')}`);
+      showToast('error', `This part is not ready for a work order: ${blockingReadinessMessages.join(' ')}`);
       return;
     }
     if (hasManualOperations && !manualOperationsAreValid) {
-      alert('Please complete every manual operation with an operation name and work center.');
+      showToast('error', 'Please complete every manual operation with an operation name and work center.');
       return;
     }
 
@@ -710,7 +715,7 @@ export default function WorkOrderNew() {
       const result = await api.createWorkOrder(payload);
       navigate(`/work-orders/${result.id}`);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create work order');
+      showToast('error', err.response?.data?.detail || 'Failed to create work order');
     } finally {
       setSubmitting(false);
     }
@@ -720,6 +725,18 @@ export default function WorkOrderNew() {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="spinner h-12 w-12"></div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="max-w-4xl mx-auto">
+        <h1 className="text-2xl font-bold text-white mb-6">New Work Order</h1>
+        <ErrorState
+          message="Could not load parts, BOMs, and work centers needed to create a work order."
+          onRetry={loadInitialData}
+        />
       </div>
     );
   }

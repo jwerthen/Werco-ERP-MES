@@ -29,6 +29,7 @@ import {
   Squares2X2Icon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface WorkCenter {
@@ -151,10 +152,12 @@ const priorityColors: Record<number, string> = {
 
 export default function Scheduling() {
   const { can } = usePermissions();
+  const { showToast } = useToast();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [capacityHeatmap, setCapacityHeatmap] = useState<CapacityHeatmapResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [weekStart, setWeekStart] = useState(startOfWeek(getCentralTodayDate(), { weekStartsOn: 1 }));
   const [daysToShow] = useState(7);
   const [selectedJob, setSelectedJob] = useState<ScheduledJob | null>(null);
@@ -301,6 +304,7 @@ export default function Scheduling() {
   }, [capacityHeatmap]);
 
   const loadData = useCallback(async () => {
+    setLoadError(false);
     try {
       const startDate = getCentralDateStamp(visibleStart);
       const endDate = getCentralDateStamp(visibleEnd);
@@ -317,6 +321,7 @@ export default function Scheduling() {
       setCapacityHeatmap(heatmapRes);
     } catch (err) {
       console.error('Failed to load scheduling data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -486,7 +491,7 @@ export default function Scheduling() {
       });
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to schedule work order');
+      showToast('error', err.response?.data?.detail || 'Failed to schedule work order');
     }
 
     setDragState({ job: null, isDragging: false });
@@ -507,7 +512,7 @@ export default function Scheduling() {
       await api.updateOperationWorkCenter(job.current_operation_id, targetWcId);
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to move work order');
+      showToast('error', err.response?.data?.detail || 'Failed to move work order');
     }
 
     setDragState({ job: null, isDragging: false });
@@ -527,7 +532,7 @@ export default function Scheduling() {
       setCapacityPreview(null);
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to schedule');
+      showToast('error', err.response?.data?.detail || 'Failed to schedule');
     }
   };
 
@@ -538,7 +543,7 @@ export default function Scheduling() {
       setCapacityPreview(null);
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to unschedule');
+      showToast('error', err.response?.data?.detail || 'Failed to unschedule');
     }
   };
 
@@ -584,7 +589,7 @@ export default function Scheduling() {
       setInlineEditDate('');
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to reschedule');
+      showToast('error', err.response?.data?.detail || 'Failed to reschedule');
     }
   };
 
@@ -594,7 +599,7 @@ export default function Scheduling() {
       .map((job) => job.work_order_id);
 
     if (unscheduledIds.length === 0) {
-      alert('No unscheduled work orders to schedule.');
+      showToast('info', 'No unscheduled work orders to schedule.');
       return;
     }
 
@@ -602,9 +607,12 @@ export default function Scheduling() {
     try {
       const result = await api.bulkScheduleEarliest(unscheduledIds, { forward_schedule: true });
       await loadData();
-      alert(`Auto-scheduled ${result.scheduled_count} work orders. ${result.error_count} errors.`);
+      showToast(
+        result.scheduled_count > 0 ? (result.error_count > 0 ? 'info' : 'success') : 'error',
+        `Auto-scheduled ${result.scheduled_count} work orders. ${result.error_count} errors.`,
+      );
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Auto-schedule failed');
+      showToast('error', err.response?.data?.detail || 'Auto-schedule failed');
     } finally {
       setRunningAutoSchedule(false);
     }
@@ -619,7 +627,7 @@ export default function Scheduling() {
       });
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to schedule earliest');
+      showToast('error', err.response?.data?.detail || 'Failed to schedule earliest');
     } finally {
       setSchedulingEarliestWorkOrderId(null);
     }
@@ -645,7 +653,7 @@ export default function Scheduling() {
         setPriorityReason('');
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to update priority');
+      showToast('error', err.response?.data?.detail || 'Failed to update priority');
     } finally {
       setUpdatingPriorityWorkOrderId(null);
     }
@@ -656,7 +664,7 @@ export default function Scheduling() {
     actionRunner: (job: DispatchQueueJob) => Promise<'success' | 'skipped'>
   ) => {
     if (selectedQueueJobs.length === 0) {
-      alert('Select at least one work order first.');
+      showToast('info', 'Select at least one work order first.');
       return;
     }
 
@@ -681,7 +689,10 @@ export default function Scheduling() {
 
     setBulkActionRunning(null);
     await loadData();
-    alert(`Bulk action complete. Updated: ${success}, skipped: ${skipped}, failed: ${failed}.`);
+    showToast(
+      failed > 0 ? 'error' : 'success',
+      `Bulk action complete. Updated: ${success}, skipped: ${skipped}, failed: ${failed}.`
+    );
   };
 
   const handleBulkSetPriority = async () => {
@@ -697,7 +708,7 @@ export default function Scheduling() {
 
   const handleBulkMoveWorkCenter = async () => {
     if (!bulkWorkCenterId) {
-      alert('Select a target work center first.');
+      showToast('info', 'Select a target work center first.');
       return;
     }
     await runBulkAction('work-center', async (job) => {
@@ -708,7 +719,7 @@ export default function Scheduling() {
 
   const handleBulkShiftDates = async () => {
     if (bulkShiftDays === 0) {
-      alert('Shift days cannot be zero.');
+      showToast('error', 'Shift days cannot be zero.');
       return;
     }
     await runBulkAction('shift', async (job) => {
@@ -731,7 +742,7 @@ export default function Scheduling() {
   const handleBulkScheduleEarliest = async () => {
     const unscheduledSelected = selectedQueueJobs.filter((job) => !job.scheduled_start);
     if (unscheduledSelected.length === 0) {
-      alert('No unscheduled work orders selected.');
+      showToast('info', 'No unscheduled work orders selected.');
       return;
     }
     setBulkActionRunning('earliest');
@@ -739,9 +750,12 @@ export default function Scheduling() {
       const ids = unscheduledSelected.map((job) => job.work_order_id);
       const result = await api.bulkScheduleEarliest(ids, { forward_schedule: true });
       await loadData();
-      alert(`Scheduled ${result.scheduled_count} work orders. ${result.error_count} errors.`);
+      showToast(
+        result.scheduled_count > 0 ? (result.error_count > 0 ? 'info' : 'success') : 'error',
+        `Scheduled ${result.scheduled_count} work orders. ${result.error_count} errors.`,
+      );
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Bulk schedule failed');
+      showToast('error', err.response?.data?.detail || 'Bulk schedule failed');
     } finally {
       setBulkActionRunning(null);
     }
@@ -859,6 +873,14 @@ export default function Scheduling() {
           </div>
         </div>
       </div>
+
+      {/* Load error */}
+      {loadError && (
+        <ErrorState
+          message="Could not load scheduling data."
+          onRetry={loadData}
+        />
+      )}
 
       {/* Stats Strip */}
       <MiniStatStrip>
@@ -1477,9 +1499,19 @@ export default function Scheduling() {
             </tbody>
           </table>
           {filteredQueueRows.length === 0 && (
-            <p className="text-center text-slate-400 py-6 text-sm">
-              {searchQuery || filterWorkCenter ? 'No work orders match your search or filter' : 'No work orders to display'}
-            </p>
+            searchQuery || filterWorkCenter ? (
+              <EmptyState
+                icon={MagnifyingGlassIcon}
+                title="No matching work orders"
+                description="No work orders match your search or filter. Try clearing them."
+              />
+            ) : (
+              <EmptyState
+                icon={CalendarIcon}
+                title="No work orders to display"
+                description="Schedulable work orders will appear here as they are released to the floor."
+              />
+            )
           )}
         </div>
       </div>

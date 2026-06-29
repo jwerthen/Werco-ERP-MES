@@ -14,8 +14,10 @@ import {
   CheckCircleIcon,
   ClockIcon,
   IdentificationIcon,
+  UsersIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { importTimeoutMessage } from '../utils/apiError';
 
 interface UserData {
@@ -99,12 +101,14 @@ export default function Users() {
   // Badge printing is admin/manager-only: /print/badges loads GET /users, which is
   // server-enforced to ADMIN/MANAGER, so the button mirrors canManageUsers.
   const { canManageUsers } = usePermissions();
+  const { showToast } = useToast();
   const approvalMode = searchParams.get('approvals') === 'pending';
   const canApproveUsers =
     currentUser?.role === 'admin' || currentUser?.role === 'platform_admin' || currentUser?.is_superuser === true;
   const [users, setUsers] = useState<UserData[]>([]);
   const [pendingUsers, setPendingUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -134,6 +138,7 @@ export default function Users() {
   const [newPassword, setNewPassword] = useState('');
 
   const loadUsers = useCallback(async () => {
+    setLoadError(false);
     try {
       const [userList, pendingApprovals] = await Promise.all([
         api.getUsers(showInactive || approvalMode),
@@ -147,6 +152,7 @@ export default function Users() {
       setSelectedUserIds((current) => current.filter((id) => userList.some((u: UserData) => u.id === id)));
     } catch (err) {
       console.error('Failed to load users:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -191,7 +197,7 @@ export default function Users() {
       resetForm();
       loadUsers();
     } catch (err: any) {
-      alert(getApiErrorMessage(err, 'Failed to save user'));
+      showToast('error', getApiErrorMessage(err, 'Failed to save user'));
     }
   };
 
@@ -200,12 +206,12 @@ export default function Users() {
     if (!selectedUserId) return;
     try {
       await api.resetUserPassword(selectedUserId, newPassword);
-      alert('Password reset successfully');
+      showToast('success', 'Password reset successfully');
       setShowPasswordModal(false);
       setNewPassword('');
       setSelectedUserId(null);
     } catch (err: any) {
-      alert(getApiErrorMessage(err, 'Failed to reset password'));
+      showToast('error', getApiErrorMessage(err, 'Failed to reset password'));
     }
   };
 
@@ -218,7 +224,7 @@ export default function Users() {
       }
       loadUsers();
     } catch (err: any) {
-      alert(getApiErrorMessage(err, 'Failed to update user status'));
+      showToast('error', getApiErrorMessage(err, 'Failed to update user status'));
     }
   };
 
@@ -231,7 +237,7 @@ export default function Users() {
       });
       await loadUsers();
     } catch (err: any) {
-      alert(getApiErrorMessage(err, 'Failed to approve user'));
+      showToast('error', getApiErrorMessage(err, 'Failed to approve user'));
     } finally {
       setApprovingUserIds((current) => {
         const next = { ...current };
@@ -291,7 +297,7 @@ export default function Users() {
   const handleImportCsv = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!importFile) {
-      alert('Please choose a CSV file');
+      showToast('error', 'Please choose a CSV file');
       return;
     }
 
@@ -308,7 +314,7 @@ export default function Users() {
     } catch (err: any) {
       // This modal commits directly (no dry run), so an Axios timeout means the server
       // may still be importing — translate it before falling back to the generic handler.
-      alert(importTimeoutMessage(err, 'commit') ?? getApiErrorMessage(err, 'Failed to import CSV'));
+      showToast('error', importTimeoutMessage(err, 'commit') ?? getApiErrorMessage(err, 'Failed to import CSV'));
     } finally {
       setImporting(false);
     }
@@ -578,7 +584,28 @@ export default function Users() {
           </table>
         </div>
         {users.length === 0 && (
-          <div className="text-center py-8 text-slate-400">No users found</div>
+          loadError ? (
+            <ErrorState
+              message="Could not load users."
+              onRetry={loadUsers}
+              className="py-8"
+            />
+          ) : (
+            <EmptyState
+              icon={UsersIcon}
+              title="No users found"
+              description={
+                showInactive
+                  ? 'No users match the current filter.'
+                  : 'Add a user or import a CSV to get started.'
+              }
+              action={
+                canManageUsers
+                  ? { label: 'Add User', onClick: () => { resetForm(); setShowModal(true); } }
+                  : undefined
+              }
+            />
+          )
         )}
       </div>
 

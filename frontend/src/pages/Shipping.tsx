@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
+import { EmptyState, ErrorState } from '../components/ui';
 import { Modal } from '../components/ui/Modal';
 import usePermissions from '../hooks/usePermissions';
 import ScheduleShipmentModal, { ScheduleShipmentTarget } from '../components/shipping/ScheduleShipmentModal';
@@ -67,6 +68,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [readyToShip, setReadyToShip] = useState<ReadyToShip[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [selectedWO, setSelectedWO] = useState<ReadyToShip | null>(null);
 
@@ -91,6 +93,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
   }, []);
 
   const loadData = async () => {
+    setLoadError(false);
     try {
       const [shipmentsRes, readyRes] = await Promise.all([
         api.getShipments(),
@@ -100,6 +103,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       setReadyToShip(readyRes);
     } catch (err) {
       console.error('Failed to load shipping data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -204,7 +208,15 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
         </div>
       )}
 
+      {loadError && (
+        <ErrorState
+          message="Could not load shipping data."
+          onRetry={loadData}
+        />
+      )}
+
       {/* Ready to Ship */}
+      {!loadError && (
       <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
         <h2 className="text-lg font-semibold mb-4">Ready to Ship ({readyToShip.length})</h2>
         <div className="overflow-x-auto">
@@ -256,12 +268,18 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
             </tbody>
           </table>
           {readyToShip.length === 0 && (
-            <p className="text-center text-slate-400 py-8">No work orders ready to ship</p>
+            <EmptyState
+              icon={TruckIcon}
+              title="No work orders ready to ship"
+              description="Completed work orders awaiting shipment will appear here."
+            />
           )}
         </div>
       </div>
+      )}
 
       {/* Recent Shipments */}
+      {!loadError && (
       <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
         <h2 className="text-lg font-semibold mb-4">Recent Shipments</h2>
         <div className="overflow-x-auto">
@@ -367,10 +385,15 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
             </tbody>
           </table>
           {shipments.length === 0 && (
-            <p className="text-center text-slate-400 py-8">No shipments yet</p>
+            <EmptyState
+              icon={PaperAirplaneIcon}
+              title="No shipments yet"
+              description="Shipments you create will appear here."
+            />
           )}
         </div>
       </div>
+      )}
 
       {/* Carrier Schedule-Shipment wizard */}
       {scheduleTarget && (

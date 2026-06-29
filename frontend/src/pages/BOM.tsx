@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { LoadingButton } from '../components/ui/LoadingButton';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { Part, PartType } from '../types';
 import { isMaterialSupplyPartType } from '../utils/catalogGroups';
 import { useNavigate } from 'react-router-dom';
@@ -132,9 +133,12 @@ const partTypeBadge: Record<string, string> = {
 
 export default function BOMPage() {
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const [boms, setBoms] = useState<BOM[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [explodeError, setExplodeError] = useState(false);
   const [selectedBOM, setSelectedBOM] = useState<BOM | null>(null);
   const [explodedView, setExplodedView] = useState<BOMItem[]>([]);
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set());
@@ -189,6 +193,8 @@ export default function BOMPage() {
   }, [selectedBOM, viewMode]);
 
   const loadData = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const requestedBOMId = Number(new URLSearchParams(window.location.search).get('id') || 0);
 
@@ -197,7 +203,7 @@ export default function BOMPage() {
         api.getBOMs({ active_only: true }),
         api.getParts({ active_only: true, item_group: 'all' })
       ]);
-      
+
       if (bomsResult.status === 'fulfilled') {
         const loadedBOMs = bomsResult.value;
         setBoms(loadedBOMs);
@@ -220,8 +226,9 @@ export default function BOMPage() {
         }
       } else {
         console.error('Failed to load BOMs:', bomsResult.reason);
+        setLoadError(true);
       }
-      
+
       if (partsResult.status === 'fulfilled') {
         setParts(partsResult.value);
       } else {
@@ -229,6 +236,7 @@ export default function BOMPage() {
       }
     } catch (err) {
       console.error('Failed to load data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -281,11 +289,13 @@ export default function BOMPage() {
   };
 
   const loadExplodedBOM = async (bomId: number) => {
+    setExplodeError(false);
     try {
       const response = await api.explodeBOM(bomId);
       setExplodedView(response.items);
     } catch (err) {
       console.error('Failed to explode BOM:', err);
+      setExplodeError(true);
     }
   };
 
@@ -300,7 +310,7 @@ export default function BOMPage() {
       setShowCreateModal(false);
       setNewBOM({ part_id: 0, revision: 'A', description: '', bom_type: 'standard' });
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create BOM');
+      showToast('error', err.response?.data?.detail || 'Failed to create BOM');
     } finally {
       setCreatingBOM(false);
     }
@@ -309,7 +319,7 @@ export default function BOMPage() {
   const handleImport = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!importFile) {
-      alert('Please select a file to import.');
+      showToast('error', 'Please select a file to import.');
       return;
     }
     setImportLoading(true);
@@ -338,7 +348,7 @@ export default function BOMPage() {
       setShowImportModal(false);
       setShowPreviewModal(true);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to import BOM');
+      showToast('error', err.response?.data?.detail || 'Failed to import BOM');
     } finally {
       setImportLoading(false);
     }
@@ -363,16 +373,16 @@ export default function BOMPage() {
         setSelectedBOM(createdBOM);
         setViewMode('single');
       } else {
-        alert(`Part created: ${result.assembly_part_number}`);
+        showToast('success', `Part created: ${result.assembly_part_number}`);
       }
       if (result.warnings?.length) {
-        alert(`Import completed with warnings:\n- ${result.warnings.join('\n- ')}`);
+        showToast('info', `Import completed with warnings:\n- ${result.warnings.join('\n- ')}`);
       }
       setShowPreviewModal(false);
       setImportPreview(null);
       setImportFile(null);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create from preview');
+      showToast('error', err.response?.data?.detail || 'Failed to create from preview');
     } finally {
       setImportLoading(false);
     }
@@ -433,7 +443,7 @@ export default function BOMPage() {
     e.preventDefault();
     if (!selectedBOM) return;
     if (newItem.component_part_id <= 0) {
-      alert('Select a component part before adding.');
+      showToast('error', 'Select a component part before adding.');
       return;
     }
 
@@ -460,7 +470,7 @@ export default function BOMPage() {
       });
     } catch (err: any) {
       console.error('Failed to add BOM item:', err.response?.data || err);
-      alert(err.response?.data?.detail || 'Failed to add item');
+      showToast('error', err.response?.data?.detail || 'Failed to add item');
     }
   };
 
@@ -484,7 +494,7 @@ export default function BOMPage() {
         description: ''
       });
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create part');
+      showToast('error', err.response?.data?.detail || 'Failed to create part');
     } finally {
       setCreatingPart(false);
     }
@@ -501,7 +511,7 @@ export default function BOMPage() {
         setBoms(boms.map(b => b.id === updated.id ? updated : b));
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete item');
+      showToast('error', err.response?.data?.detail || 'Failed to delete item');
     }
   };
 
@@ -515,7 +525,7 @@ export default function BOMPage() {
         setSelectedBOM(null);
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete BOM');
+      showToast('error', err.response?.data?.detail || 'Failed to delete BOM');
     }
   };
 
@@ -527,7 +537,7 @@ export default function BOMPage() {
       setSelectedBOM(updated);
       setBoms(boms.map(b => b.id === updated.id ? updated : b));
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to release BOM');
+      showToast('error', err.response?.data?.detail || 'Failed to release BOM');
     }
   };
 
@@ -540,7 +550,7 @@ export default function BOMPage() {
       setSelectedBOM(updated);
       setBoms(boms.map(b => b.id === updated.id ? updated : b));
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to unrelease BOM');
+      showToast('error', err.response?.data?.detail || 'Failed to unrelease BOM');
     }
   };
 
@@ -606,6 +616,18 @@ export default function BOMPage() {
     );
   }
 
+  if (loadError) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">Bill of Materials</h1>
+        <ErrorState
+          message="Could not load bills of materials."
+          onRetry={loadData}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -656,7 +678,11 @@ export default function BOMPage() {
               </div>
             ))}
             {boms.length === 0 && (
-              <p className="text-slate-400 text-center py-4">No BOMs created yet</p>
+              <EmptyState
+                title="No BOMs created yet"
+                description="Create a bill of materials to define an assembly's components."
+                action={{ label: 'Create your first BOM', onClick: () => setShowCreateModal(true) }}
+              />
             )}
           </div>
         </div>
@@ -713,6 +739,12 @@ export default function BOMPage() {
               </div>
 
               {/* BOM Items Table */}
+              {viewMode === 'exploded' && explodeError ? (
+                <ErrorState
+                  message="Could not load the multi-level explosion for this BOM."
+                  onRetry={() => loadExplodedBOM(selectedBOM.id)}
+                />
+              ) : (
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-700">
                   <thead className="bg-slate-800/50">
@@ -790,16 +822,31 @@ export default function BOMPage() {
                   </tbody>
                 </table>
               </div>
+              )}
 
-              {selectedBOM.items.length === 0 && (
-                <p className="text-slate-400 text-center py-8">No items in this BOM</p>
+              {viewMode === 'single' && selectedBOM.items.length === 0 && (
+                <EmptyState
+                  icon={DocumentDuplicateIcon}
+                  title="No items in this BOM"
+                  description={
+                    selectedBOM.status === 'draft'
+                      ? 'Add components, hardware, or consumables to build out this assembly.'
+                      : 'This BOM has no line items.'
+                  }
+                  action={
+                    selectedBOM.status === 'draft'
+                      ? { label: 'Add Item', onClick: () => setShowAddItemModal(true) }
+                      : undefined
+                  }
+                />
               )}
             </>
           ) : (
-            <div className="text-center py-12 text-slate-400">
-              <DocumentDuplicateIcon className="h-12 w-12 mx-auto mb-4 text-slate-400" />
-              <p>Select a BOM to view details</p>
-            </div>
+            <EmptyState
+              icon={DocumentDuplicateIcon}
+              title="Select a BOM to view details"
+              description="Choose a bill of materials from the list to see its components."
+            />
           )}
         </div>
       </div>

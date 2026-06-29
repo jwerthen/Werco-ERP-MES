@@ -10,6 +10,7 @@ import {
   ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 interface Vendor {
   id: number;
@@ -83,12 +84,15 @@ const statusColors: Record<string, string> = {
 };
 
 export default function Purchasing() {
+  const { showToast } = useToast();
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [vendorDocsError, setVendorDocsError] = useState(false);
   const [poSearch, setPoSearch] = useState('');
 
   const [showPOModal, setShowPOModal] = useState(false);
@@ -180,6 +184,8 @@ export default function Purchasing() {
   }, [searchParams, vendors, purchaseOrders, selectedVendor?.id]);
 
   const loadData = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [vendorsRes, posRes, partsRes] = await Promise.all([
         api.getVendors(),
@@ -191,6 +197,7 @@ export default function Purchasing() {
       setParts(partsRes);
     } catch (err) {
       console.error('Failed to load purchasing data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -198,6 +205,7 @@ export default function Purchasing() {
 
   const loadVendorDocuments = async (vendorId: number) => {
     setVendorDocsLoading(true);
+    setVendorDocsError(false);
     try {
       const [docsRes, typesRes] = await Promise.all([
         api.getDocuments({ vendor_id: vendorId }),
@@ -207,6 +215,7 @@ export default function Purchasing() {
       setDocumentTypes(typesRes);
     } catch (err) {
       console.error('Failed to load vendor documents:', err);
+      setVendorDocsError(true);
     } finally {
       setVendorDocsLoading(false);
     }
@@ -267,16 +276,17 @@ export default function Purchasing() {
       });
       setShowEditVendorModal(false);
       setSelectedVendor(null);
+      showToast('success', 'Vendor updated');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to update vendor');
+      showToast('error', err.response?.data?.detail || 'Failed to update vendor');
     }
   };
 
   const handleVendorDocUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedVendor || !vendorDocForm.file) {
-      alert('Please select a file');
+      showToast('error', 'Please select a file');
       return;
     }
     const formData = new FormData();
@@ -296,9 +306,10 @@ export default function Purchasing() {
         revision: 'A',
         file: null
       });
+      showToast('success', 'Document uploaded');
       loadVendorDocuments(selectedVendor.id);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to upload document');
+      showToast('error', err.response?.data?.detail || 'Failed to upload document');
     }
   };
 
@@ -313,7 +324,7 @@ export default function Purchasing() {
       link.click();
       link.remove();
     } catch {
-      alert('Failed to download document');
+      showToast('error', 'Failed to download document');
     }
   };
 
@@ -321,11 +332,12 @@ export default function Purchasing() {
     if (!window.confirm('Delete this document?')) return;
     try {
       await api.deleteDocument(docId);
+      showToast('success', 'Document deleted');
       if (selectedVendor) {
         loadVendorDocuments(selectedVendor.id);
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete document');
+      showToast('error', err.response?.data?.detail || 'Failed to delete document');
     }
   };
 
@@ -339,16 +351,17 @@ export default function Purchasing() {
   const handleCreatePO = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newPO.lines.length === 0) {
-      alert('Please add at least one line item');
+      showToast('error', 'Please add at least one line item');
       return;
     }
     try {
       await api.createPurchaseOrder(newPO);
       setShowPOModal(false);
       setNewPO({ vendor_id: 0, required_date: '', notes: '', lines: [] });
+      showToast('success', 'Purchase order created');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create PO');
+      showToast('error', err.response?.data?.detail || 'Failed to create PO');
     }
   };
 
@@ -356,9 +369,10 @@ export default function Purchasing() {
     if (!window.confirm('Send this PO to vendor?')) return;
     try {
       await api.sendPurchaseOrder(poId);
+      showToast('success', 'Purchase order sent');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to send PO');
+      showToast('error', err.response?.data?.detail || 'Failed to send PO');
     }
   };
 
@@ -372,9 +386,10 @@ export default function Purchasing() {
       await api.createVendor(newVendor);
       setShowVendorModal(false);
       setNewVendor({ code: '', name: '', contact_name: '', email: '', phone: '', is_approved: false, payment_terms: '' });
+      showToast('success', 'Vendor created');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create vendor');
+      showToast('error', err.response?.data?.detail || 'Failed to create vendor');
     }
   };
 
@@ -408,8 +423,9 @@ export default function Purchasing() {
         setNewPO({ ...newPO, lines });
       }
       setShowAddPartModal(false);
+      showToast('success', 'Part created');
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create part');
+      showToast('error', err.response?.data?.detail || 'Failed to create part');
     }
   };
 
@@ -434,6 +450,20 @@ export default function Purchasing() {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">Purchasing &amp; Receiving</h1>
+        <div className="card">
+          <ErrorState
+            message="Could not load purchasing data."
+            onRetry={loadData}
+          />
+        </div>
       </div>
     );
   }
@@ -581,7 +611,12 @@ export default function Purchasing() {
               </tbody>
             </table>
             {purchaseOrders.length === 0 && (
-              <p className="text-center text-slate-400 py-8">No purchase orders</p>
+              <EmptyState
+                icon={ClipboardDocumentListIcon}
+                title="No purchase orders"
+                description="Purchase orders you create will appear here."
+                action={{ label: 'New PO', onClick: () => setShowPOModal(true) }}
+              />
             )}
           </div>
         </div>
@@ -1096,6 +1131,11 @@ export default function Purchasing() {
 
               {vendorDocsLoading ? (
                 <div className="text-sm text-slate-400">Loading documents...</div>
+              ) : vendorDocsError ? (
+                <ErrorState
+                  message="Could not load vendor documents."
+                  onRetry={() => selectedVendor && loadVendorDocuments(selectedVendor.id)}
+                />
               ) : (
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-slate-700">
@@ -1144,7 +1184,10 @@ export default function Purchasing() {
                     </tbody>
                   </table>
                   {vendorDocuments.length === 0 && (
-                    <p className="text-sm text-slate-400 py-3">No documents for this vendor.</p>
+                    <EmptyState
+                      title="No documents"
+                      description="Upload a certificate or document for this vendor above."
+                    />
                   )}
                 </div>
               )}

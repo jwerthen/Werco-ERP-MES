@@ -7,8 +7,10 @@ import {
   PaperAirplaneIcon,
   ArrowRightIcon,
   SparklesIcon,
+  DocumentTextIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 interface QuoteLine {
   id: number;
@@ -58,10 +60,12 @@ const statusColors: Record<string, string> = {
 
 export default function Quotes() {
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [selectedQuote, setSelectedQuote] = useState<Quote | null>(null);
 
@@ -92,6 +96,8 @@ export default function Quotes() {
   }, [quotes, searchParams]);
 
   const loadData = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [quotesRes, partsRes] = await Promise.all([
         api.getQuotes(),
@@ -101,6 +107,7 @@ export default function Quotes() {
       setParts(partsRes);
     } catch (err) {
       console.error('Failed to load quotes:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -109,7 +116,7 @@ export default function Quotes() {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newQuote.lines.length === 0) {
-      alert('Please add at least one line item');
+      showToast('error', 'Please add at least one line item');
       return;
     }
     try {
@@ -119,18 +126,20 @@ export default function Quotes() {
         customer_name: '', customer_contact: '', customer_email: '', customer_phone: '',
         valid_days: 30, lead_time_days: 14, payment_terms: 'Net 30', notes: '', lines: []
       });
+      showToast('success', 'Quote created');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create quote');
+      showToast('error', err.response?.data?.detail || 'Failed to create quote');
     }
   };
 
   const handleSend = async (quoteId: number) => {
     try {
       await api.sendQuote(quoteId);
+      showToast('success', 'Quote sent to customer');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to send quote');
+      showToast('error', err.response?.data?.detail || 'Failed to send quote');
     }
   };
 
@@ -138,10 +147,10 @@ export default function Quotes() {
     if (!window.confirm('Convert this quote to a work order?')) return;
     try {
       const result = await api.convertQuote(quoteId);
-      alert(`Work Order ${result.work_order_number} created!`);
+      showToast('success', `Work Order ${result.work_order_number} created!`);
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to convert quote');
+      showToast('error', err.response?.data?.detail || 'Failed to convert quote');
     }
   };
 
@@ -209,6 +218,13 @@ export default function Quotes() {
 
       {/* Quotes Table */}
       <div className="card">
+        {loadError && (
+          <ErrorState
+            message="Could not load quotes."
+            onRetry={loadData}
+            className="my-4"
+          />
+        )}
         {selectedQuote && (
           <div className="mb-4 rounded-xl border border-werco-500/30 bg-werco-500/10 p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -230,6 +246,7 @@ export default function Quotes() {
             </div>
           </div>
         )}
+        {!loadError && (
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-700">
             <thead className="bg-slate-800/50">
@@ -302,9 +319,15 @@ export default function Quotes() {
             </tbody>
           </table>
           {quotes.length === 0 && (
-            <p className="text-center text-slate-400 py-8">No quotes yet</p>
+            <EmptyState
+              icon={DocumentTextIcon}
+              title="No quotes yet"
+              description="Create a quote or generate one from an RFQ to get started."
+              action={{ label: 'New Quote', onClick: () => setShowCreateModal(true) }}
+            />
           )}
         </div>
+        )}
       </div>
 
       {/* Create Quote Modal */}

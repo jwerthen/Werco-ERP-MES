@@ -16,6 +16,7 @@ import {
   PrinterIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface POLine {
@@ -88,15 +89,20 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     return (tab === 'queue' || tab === 'history') ? tab : 'receive';
   });
   
+  const { showToast } = useToast();
+
   const [openPOs, setOpenPOs] = useState<PurchaseOrder[]>([]);
   const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
   const [selectedLine, setSelectedLine] = useState<POLine | null>(null);
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [stats, setStats] = useState<any>(null);
-  
+
   const [inspectionQueue, setInspectionQueue] = useState<any[]>([]);
+  const [queueError, setQueueError] = useState(false);
   const [history, setHistory] = useState<any[]>([]);
+  const [historyError, setHistoryError] = useState(false);
   
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showInspectModal, setShowInspectModal] = useState(false);
@@ -187,6 +193,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   }, [activeTab]);
 
   const loadData = async () => {
+    setLoadError(false);
     try {
       const [posRes, locsRes, statsRes] = await Promise.all([
         api.getOpenPOsForReceiving(),
@@ -198,26 +205,31 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       setStats(statsRes);
     } catch (err) {
       console.error('Failed to load receiving data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
   };
 
   const loadInspectionQueue = async () => {
+    setQueueError(false);
     try {
       const data = await api.getInspectionQueue(30);
       setInspectionQueue(data);
     } catch (err) {
       console.error('Failed to load inspection queue:', err);
+      setQueueError(true);
     }
   };
 
   const loadHistory = async () => {
+    setHistoryError(false);
     try {
       const data = await api.getReceivingHistory(30);
       setHistory(data);
     } catch (err) {
       console.error('Failed to load history:', err);
+      setHistoryError(true);
     }
   };
 
@@ -227,6 +239,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       setSelectedPO(fullPO);
     } catch (err) {
       console.error('Failed to load PO details:', err);
+      showToast('error', 'Failed to load PO details');
     }
   };
 
@@ -330,6 +343,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       setShowInspectModal(true);
     } catch (err) {
       console.error('Failed to load receipt details:', err);
+      showToast('error', 'Failed to load receipt details');
     }
   };
 
@@ -527,8 +541,17 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               <div className="col-span-1 flex flex-col">
                 <h2 className="text-lg font-semibold mb-3">Open Purchase Orders</h2>
                 <div className="space-y-2 flex-1 overflow-y-auto pr-2">
-                  {openPOs.length === 0 ? (
-                    <p className="text-slate-400 text-center py-8">No open POs awaiting receipt</p>
+                  {loadError ? (
+                    <ErrorState
+                      message="Could not load open purchase orders."
+                      onRetry={loadData}
+                    />
+                  ) : openPOs.length === 0 ? (
+                    <EmptyState
+                      icon={InboxArrowDownIcon}
+                      title="No open POs"
+                      description="Open purchase orders awaiting receipt will appear here."
+                    />
                   ) : (
                     openPOs.map((po) => (
                       <div
@@ -835,9 +858,18 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   ))}
                 </tbody>
               </table>
-              {inspectionQueue.length === 0 && (
-                <p className="text-center text-slate-400 py-8">No items pending inspection</p>
-              )}
+              {queueError ? (
+                <ErrorState
+                  message="Could not load the inspection queue."
+                  onRetry={loadInspectionQueue}
+                />
+              ) : inspectionQueue.length === 0 ? (
+                <EmptyState
+                  icon={ClipboardDocumentCheckIcon}
+                  title="No items pending inspection"
+                  description="Received material requiring inspection will appear here."
+                />
+              ) : null}
             </div>
           </div>
         )}
@@ -890,9 +922,18 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   ))}
                 </tbody>
               </table>
-              {history.length === 0 && (
-                <p className="text-center text-slate-400 py-8">No receiving history</p>
-              )}
+              {historyError ? (
+                <ErrorState
+                  message="Could not load receiving history."
+                  onRetry={loadHistory}
+                />
+              ) : history.length === 0 ? (
+                <EmptyState
+                  icon={ClockIcon}
+                  title="No receiving history"
+                  description="Receipts from the last 30 days will appear here."
+                />
+              ) : null}
             </div>
           </div>
         )}

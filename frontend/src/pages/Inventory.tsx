@@ -11,6 +11,7 @@ import {
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface InventoryItem {
@@ -45,6 +46,7 @@ const MATERIAL_TYPES = new Set(['raw_material', 'purchased', 'hardware', 'consum
 const PART_TYPES = new Set(['manufactured', 'assembly']);
 
 export default function InventoryPage({ embedded }: { embedded?: boolean }) {
+  const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('summary');
   const [groupFilter, setGroupFilter] = useState<InventoryGroup>(() => {
@@ -55,6 +57,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const [summary, setSummary] = useState<InventorySummary[]>([]);
   const [lowStockItems, setLowStockItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [parts, setParts] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [showLowStockOnly, setShowLowStockOnly] = useState(() => searchParams.get('filter') === 'low_stock');
@@ -146,6 +149,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
   const loadData = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const [invRes, summaryRes, partsRes, locsRes, lowStockRes] = await Promise.all([
         api.getInventory(),
@@ -161,6 +165,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       setLowStockItems(lowStockRes);
     } catch (err) {
       console.error('Failed to load inventory:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -174,7 +179,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       setReceiveForm({ part_id: 0, quantity: 0, location_code: '', lot_number: '', serial_number: '', po_number: '', unit_cost: 0 });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to receive inventory');
+      showToast('error', err.response?.data?.detail || 'Failed to receive inventory');
     }
   };
 
@@ -186,7 +191,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       setTransferForm({ inventory_item_id: 0, quantity: 0, to_location_code: '', notes: '' });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to transfer inventory');
+      showToast('error', err.response?.data?.detail || 'Failed to transfer inventory');
     }
   };
 
@@ -225,6 +230,16 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
       </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <ErrorState
+        message="Could not load inventory data."
+        onRetry={loadData}
+        className="my-8"
+      />
     );
   }
 
@@ -455,7 +470,14 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 })}
               </tbody>
             </table>
-            {summary.length === 0 && <p className="text-center text-slate-400 py-8">No inventory on hand</p>}
+            {summary.length === 0 && (
+              <EmptyState
+                icon={CubeIcon}
+                title="No inventory on hand"
+                description="Received parts and materials will appear here once you receive stock."
+                action={{ label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) }}
+              />
+            )}
           </div>
         )}
 
@@ -511,7 +533,14 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 ))}
               </tbody>
             </table>
-            {inventory.length === 0 && <p className="text-center text-slate-400 py-8">No inventory on hand</p>}
+            {inventory.length === 0 && (
+              <EmptyState
+                icon={CubeIcon}
+                title="No inventory on hand"
+                description="Received parts and materials will appear here once you receive stock."
+                action={{ label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) }}
+              />
+            )}
           </div>
         )}
       </div>

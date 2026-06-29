@@ -3,7 +3,6 @@ import api from '../services/api';
 import {
   ClockIcon,
   CheckCircleIcon,
-  ExclamationTriangleIcon,
   PlusIcon,
   XMarkIcon,
   ChevronDownIcon,
@@ -16,6 +15,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -151,6 +151,8 @@ const userName = (u: UserSummary | null) =>
 // ── Component ────────────────────────────────────────────────────
 
 export default function EngineeringChanges() {
+  const { showToast } = useToast();
+
   // Data
   const [ecos, setEcos] = useState<ECO[]>([]);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -251,7 +253,7 @@ export default function EngineeringChanges() {
       loadEcos();
       loadDashboard();
     } catch (err: any) {
-      alert(err?.response?.data?.detail || 'Failed to submit ECO');
+      showToast('error', err?.response?.data?.detail || 'Failed to submit ECO');
     } finally {
       setActionLoading(null);
     }
@@ -264,7 +266,7 @@ export default function EngineeringChanges() {
       loadEcos();
       loadDashboard();
     } catch (err: any) {
-      alert(err?.response?.data?.detail || 'Failed to approve ECO');
+      showToast('error', err?.response?.data?.detail || 'Failed to approve ECO');
     } finally {
       setActionLoading(null);
     }
@@ -285,7 +287,7 @@ export default function EngineeringChanges() {
       loadEcos();
       loadDashboard();
     } catch (err: any) {
-      alert(err?.response?.data?.detail || 'Failed to reject ECO');
+      showToast('error', err?.response?.data?.detail || 'Failed to reject ECO');
     } finally {
       setActionLoading(null);
     }
@@ -298,7 +300,7 @@ export default function EngineeringChanges() {
       loadEcos();
       loadDashboard();
     } catch (err: any) {
-      alert(err?.response?.data?.detail || 'Failed to start implementation');
+      showToast('error', err?.response?.data?.detail || 'Failed to start implementation');
     } finally {
       setActionLoading(null);
     }
@@ -311,7 +313,7 @@ export default function EngineeringChanges() {
       loadEcos();
       loadDashboard();
     } catch (err: any) {
-      alert(err?.response?.data?.detail || 'Failed to complete ECO');
+      showToast('error', err?.response?.data?.detail || 'Failed to complete ECO');
     } finally {
       setActionLoading(null);
     }
@@ -337,15 +339,15 @@ export default function EngineeringChanges() {
   const handleCreate = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!createForm.title.trim() || createForm.title.trim().length < 3) {
-      alert('Title must be at least 3 characters');
+      showToast('error', 'Title must be at least 3 characters');
       return;
     }
     if (!createForm.description.trim() || createForm.description.trim().length < 5) {
-      alert('Description must be at least 5 characters');
+      showToast('error', 'Description must be at least 5 characters');
       return;
     }
     if (!createForm.reason_for_change.trim() || createForm.reason_for_change.trim().length < 5) {
-      alert('Reason for change must be at least 5 characters');
+      showToast('error', 'Reason for change must be at least 5 characters');
       return;
     }
     try {
@@ -366,10 +368,11 @@ export default function EngineeringChanges() {
       }
       await api.createECO(payload);
       setShowCreateModal(false);
+      showToast('success', 'Engineering change order created');
       loadEcos();
       loadDashboard();
     } catch (err: any) {
-      alert(err?.response?.data?.detail || 'Failed to create ECO');
+      showToast('error', err?.response?.data?.detail || 'Failed to create ECO');
     } finally {
       setCreateLoading(false);
     }
@@ -480,19 +483,15 @@ export default function EngineeringChanges() {
         </div>
       </div>
 
-      {/* Error */}
-      {error && (
-        <div className="rounded-md bg-red-500/10 border border-red-500/30 p-4">
-          <div className="flex items-center gap-2">
-            <ExclamationTriangleIcon className="h-5 w-5 text-red-500" />
-            <p className="text-sm text-red-400">{error}</p>
-          </div>
-        </div>
-      )}
-
       {/* Table */}
       {loading ? (
         <SkeletonTable rows={6} columns={7} />
+      ) : error ? (
+        <ErrorState
+          title="Failed to load engineering changes"
+          message={error}
+          onRetry={loadEcos}
+        />
       ) : (
         <div className="overflow-x-auto rounded-lg border bg-[#151b28] shadow-sm">
           <table className="min-w-full divide-y divide-slate-700">
@@ -512,8 +511,21 @@ export default function EngineeringChanges() {
             <tbody className="divide-y divide-slate-700">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-8 text-center text-sm text-slate-400">
-                    No engineering change orders found.
+                  <td colSpan={9} className="px-4 py-8">
+                    {searchTerm || statusFilter || typeFilter || priorityFilter ? (
+                      <EmptyState
+                        icon={DocumentTextIcon}
+                        title="No matching ECOs"
+                        description="No engineering change orders match the current search or filters."
+                      />
+                    ) : (
+                      <EmptyState
+                        icon={DocumentTextIcon}
+                        title="No engineering change orders"
+                        description="Engineering change orders you create will appear here."
+                        action={{ label: 'New ECO', onClick: openCreateModal }}
+                      />
+                    )}
                   </td>
                 </tr>
               ) : (
@@ -694,7 +706,7 @@ export default function EngineeringChanges() {
       )}
 
       {/* Results count */}
-      {!loading && (
+      {!loading && !error && (
         <p className="text-xs text-slate-500">
           Showing {filtered.length} of {ecos.length} record{ecos.length !== 1 ? 's' : ''}
         </p>

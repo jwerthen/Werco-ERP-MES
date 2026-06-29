@@ -5,6 +5,7 @@ import { Part, WorkOrder } from '../types';
 import QRCode from 'qrcode';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 import { useAuth } from '../context/AuthContext';
+import { ErrorState } from '../components/ui';
 
 interface MaterialRequirement {
   bom_item_id: number;
@@ -143,9 +144,14 @@ export default function PrintTraveler() {
   if (!workOrder || error) {
     return (
       <div className="p-8 max-w-3xl mx-auto">
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
-          {error || 'Work order not found.'}
-        </div>
+        <ErrorState
+          title="Couldn't load traveler"
+          message={error || 'Work order not found.'}
+          onRetry={() => {
+            setLoading(true);
+            loadWorkOrder();
+          }}
+        />
         <div className="mt-6">
           <button onClick={() => window.close()} className="btn-secondary">
             Close

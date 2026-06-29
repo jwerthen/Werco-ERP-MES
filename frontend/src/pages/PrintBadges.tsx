@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import QRCode from 'qrcode';
 import api from '../services/api';
 import { UserRole } from '../types';
+import { ErrorState } from '../components/ui';
 
 /**
  * A0.4 badge print sheet — /print/badges?user_ids=1,2,3
@@ -45,6 +46,9 @@ export default function PrintBadges() {
   const [qrDataUrls, setQrDataUrls] = useState<Record<number, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // True only for an actual fetch failure (retryable); validation messages
+  // like "no users selected" are not retryable, so no Retry button there.
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const requestedIds = useMemo(() => {
     const params = new URLSearchParams(location.search);
@@ -54,32 +58,37 @@ export default function PrintBadges() {
       .filter((value) => Number.isInteger(value) && value > 0);
   }, [location.search]);
 
-  useEffect(() => {
-    const load = async () => {
-      if (requestedIds.length === 0) {
-        setError('No users selected. Open this page from the Users screen via "Print badges".');
-        setLoading(false);
-        return;
+  const loadUsers = useCallback(async () => {
+    setLoadFailed(false);
+    setError('');
+    setLoading(true);
+    if (requestedIds.length === 0) {
+      setError('No users selected. Open this page from the Users screen via "Print badges".');
+      setLoading(false);
+      return;
+    }
+    try {
+      const allUsers: BadgeUser[] = await api.getUsers(true);
+      const wanted = new Set(requestedIds);
+      const selected = allUsers.filter((u) => wanted.has(u.id));
+      // Preserve the requested order.
+      selected.sort((a, b) => requestedIds.indexOf(a.id) - requestedIds.indexOf(b.id));
+      setUsers(selected);
+      if (selected.length === 0) {
+        setError('None of the requested users were found.');
       }
-      try {
-        const allUsers: BadgeUser[] = await api.getUsers(true);
-        const wanted = new Set(requestedIds);
-        const selected = allUsers.filter((u) => wanted.has(u.id));
-        // Preserve the requested order.
-        selected.sort((a, b) => requestedIds.indexOf(a.id) - requestedIds.indexOf(b.id));
-        setUsers(selected);
-        if (selected.length === 0) {
-          setError('None of the requested users were found.');
-        }
-      } catch (err) {
-        console.error('Failed to load users for badges:', err);
-        setError('Unable to load users. Verify your access and try again.');
-      } finally {
-        setLoading(false);
-      }
-    };
-    load();
+    } catch (err) {
+      console.error('Failed to load users for badges:', err);
+      setError('Unable to load users. Verify your access and try again.');
+      setLoadFailed(true);
+    } finally {
+      setLoading(false);
+    }
   }, [requestedIds]);
+
+  useEffect(() => {
+    loadUsers();
+  }, [loadUsers]);
 
   useEffect(() => {
     const generate = async () => {
@@ -107,7 +116,11 @@ export default function PrintBadges() {
   if (error) {
     return (
       <div className="p-8 max-w-3xl mx-auto">
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">{error}</div>
+        <ErrorState
+          title={loadFailed ? "Couldn't load badges" : 'No badges to print'}
+          message={error}
+          onRetry={loadFailed ? loadUsers : undefined}
+        />
         <div className="mt-6">
           <button onClick={() => window.close()} className="btn-secondary">
             Close

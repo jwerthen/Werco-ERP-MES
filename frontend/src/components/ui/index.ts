@@ -3,6 +3,9 @@ export * from './Skeleton';
 export * from './LoadingButton';
 export * from './SelectField';
 export * from './Modal';
+export { EmptyState } from './EmptyState';
+export { ErrorState } from './ErrorState';
+export { useToast, ToastProvider } from './Toast';
 
 // Previously deep-import-only primitives — surfaced here so callers can import
 // them from '@/components/ui' alongside the rest of the kit.

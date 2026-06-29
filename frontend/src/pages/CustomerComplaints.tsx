@@ -17,6 +17,7 @@ import {
 import { SkeletonTable } from '../components/ui/Skeleton';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -189,6 +190,8 @@ const fmt = (n: number) =>
 // ── Component ────────────────────────────────────────────────────
 
 export default function CustomerComplaints() {
+  const { showToast } = useToast();
+
   // Data
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -316,15 +319,15 @@ export default function CustomerComplaints() {
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!createForm.customer_name.trim()) {
-        alert('Customer name is required');
+        showToast('error', 'Customer name is required');
         return;
       }
       if (!createForm.title.trim() || createForm.title.trim().length < 3) {
-        alert('Title must be at least 3 characters');
+        showToast('error', 'Title must be at least 3 characters');
         return;
       }
       if (!createForm.description.trim() || createForm.description.trim().length < 5) {
-        alert('Description must be at least 5 characters');
+        showToast('error', 'Description must be at least 5 characters');
         return;
       }
       try {
@@ -346,15 +349,16 @@ export default function CustomerComplaints() {
 
         await api.createComplaint(payload);
         setShowCreateModal(false);
+        showToast('success', 'Complaint created');
         loadComplaints();
         loadDashboard();
       } catch (err: any) {
-        alert(err?.response?.data?.detail || 'Failed to create complaint');
+        showToast('error', err?.response?.data?.detail || 'Failed to create complaint');
       } finally {
         setCreateLoading(false);
       }
     },
-    [createForm, loadComplaints, loadDashboard]
+    [createForm, loadComplaints, loadDashboard, showToast]
   );
 
   // ── Create RMA from complaint ─────────────────────────────────
@@ -376,7 +380,7 @@ export default function CustomerComplaints() {
       e.preventDefault();
       if (!rmaComplaint) return;
       if (!rmaForm.reason.trim() || rmaForm.reason.trim().length < 5) {
-        alert('Reason must be at least 5 characters');
+        showToast('error', 'Reason must be at least 5 characters');
         return;
       }
       try {
@@ -394,15 +398,16 @@ export default function CustomerComplaints() {
 
         await api.createRMA(payload);
         setShowRMAModal(false);
+        showToast('success', 'RMA created');
         loadComplaints();
         loadDashboard();
       } catch (err: any) {
-        alert(err?.response?.data?.detail || 'Failed to create RMA');
+        showToast('error', err?.response?.data?.detail || 'Failed to create RMA');
       } finally {
         setRmaLoading(false);
       }
     },
-    [rmaComplaint, rmaForm, loadComplaints, loadDashboard]
+    [rmaComplaint, rmaForm, loadComplaints, loadDashboard, showToast]
   );
 
   // ── Render ─────────────────────────────────────────────────────
@@ -525,13 +530,10 @@ export default function CustomerComplaints() {
 
       {/* Error */}
       {error && (
-        <div className="du-alert du-alert-error shadow-sm">
-          <ExclamationTriangleIcon className="h-5 w-5" />
-          <span>{error}</span>
-          <button onClick={loadComplaints} className="du-btn du-btn-sm du-btn-ghost">
-            Retry
-          </button>
-        </div>
+        <ErrorState
+          message={error}
+          onRetry={loadComplaints}
+        />
       )}
 
       {/* Table */}
@@ -559,10 +561,32 @@ export default function CustomerComplaints() {
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={9} className="text-center py-8 text-slate-400">
-                  {error
-                    ? 'Failed to load complaints.'
-                    : 'No complaints found. Click "New Complaint" to create one.'}
+                <td colSpan={9} className="p-0">
+                  {error ? (
+                    <ErrorState
+                      message="Could not load complaints."
+                      onRetry={loadComplaints}
+                    />
+                  ) : (
+                    <EmptyState
+                      icon={ExclamationTriangleIcon}
+                      title={
+                        searchTerm || statusFilter || severityFilter
+                          ? 'No matching complaints'
+                          : 'No complaints found'
+                      }
+                      description={
+                        searchTerm || statusFilter || severityFilter
+                          ? 'Try adjusting your search or filters.'
+                          : 'Logged customer complaints will appear here.'
+                      }
+                      action={
+                        searchTerm || statusFilter || severityFilter
+                          ? undefined
+                          : { label: 'New Complaint', onClick: openCreateModal }
+                      }
+                    />
+                  )}
                 </td>
               </tr>
             ) : (

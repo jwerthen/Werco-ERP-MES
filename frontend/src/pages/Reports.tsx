@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { EmptyState, ErrorState } from '../components/ui';
 import {
   ClockIcon,
   CurrencyDollarIcon,
@@ -9,6 +10,8 @@ import {
   CheckCircleIcon,
   InboxArrowDownIcon,
   ScaleIcon,
+  BuildingStorefrontIcon,
+  TableCellsIcon,
 } from '@heroicons/react/24/outline';
 
 interface ProductionSummary {
@@ -117,9 +120,11 @@ export default function Reports() {
   const [costing, setCosting] = useState<WorkOrderCost[]>([]);
   const [timesheets, setTimesheets] = useState<EmployeeTime[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [period, setPeriod] = useState(30);
 
   const loadData = useCallback(async () => {
+    setLoadError(false);
     try {
       const [prodRes, qualRes, invRes, vendRes, utilRes, dailyRes, costRes, timeRes] = await Promise.all([
         api.getProductionSummary(period),
@@ -141,6 +146,7 @@ export default function Reports() {
       setTimesheets(timeRes);
     } catch (err) {
       console.error('Failed to load reports:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -196,7 +202,14 @@ export default function Reports() {
         </nav>
       </div>
 
-      {activeTab === 'dashboard' && (
+      {loadError && (
+        <ErrorState
+          message="Could not load reports & analytics data."
+          onRetry={loadData}
+        />
+      )}
+
+      {!loadError && activeTab === 'dashboard' && (
       <>
       {/* KPI strip — production + quality + inventory headline metrics.
           Scrap is shown here as the aggregate rate; the per-day scrapped
@@ -372,7 +385,11 @@ export default function Reports() {
               </tbody>
             </table>
             {vendors.length === 0 && (
-              <p className="text-center text-slate-400 py-4">No vendor data available</p>
+              <EmptyState
+                icon={BuildingStorefrontIcon}
+                title="No vendor data"
+                description="Vendor performance appears once purchase orders are received in this period."
+              />
             )}
           </div>
         </CockpitPanel>
@@ -414,7 +431,7 @@ export default function Reports() {
       )}
 
       {/* Costing Tab */}
-      {activeTab === 'costing' && (
+      {!loadError && activeTab === 'costing' && (
         <div className="space-y-4">
           {/* Cost Summary — collapsed into a MiniStat row above the table. */}
           {costing.length > 0 && (() => {
@@ -504,7 +521,11 @@ export default function Reports() {
                 </tbody>
               </table>
               {costing.length === 0 && (
-                <p className="text-center text-slate-400 py-8">No work order costing data available</p>
+                <EmptyState
+                  icon={CurrencyDollarIcon}
+                  title="No costing data"
+                  description="Work order cost analysis appears once work orders accrue time in this period."
+                />
               )}
             </div>
           </CockpitPanel>
@@ -512,7 +533,7 @@ export default function Reports() {
       )}
 
       {/* Timesheets Tab */}
-      {activeTab === 'timesheets' && (
+      {!loadError && activeTab === 'timesheets' && (
         <div className="space-y-6">
           <div className="card">
             <h2 className="text-lg font-semibold mb-4">Employee Time Report (Last 7 Days)</h2>
@@ -561,7 +582,11 @@ export default function Reports() {
             ))}
             
             {timesheets.length === 0 && (
-              <p className="text-center text-slate-400 py-8">No time entries found</p>
+              <EmptyState
+                icon={TableCellsIcon}
+                title="No time entries"
+                description="Employee time entries from the last 7 days will appear here."
+              />
             )}
           </div>
         </div>

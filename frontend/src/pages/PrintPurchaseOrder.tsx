@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import api from '../services/api';
+import { ErrorState } from '../components/ui';
 
 interface POLinePrintData {
   line_number: number;
@@ -52,6 +53,7 @@ export default function PrintPurchaseOrder() {
 
   const loadPO = useCallback(async () => {
     try {
+      setLoading(true);
       setError('');
       const response = await api.getPurchaseOrderPrintData(parseInt(id || '0', 10));
       setPo(response);
@@ -82,9 +84,11 @@ export default function PrintPurchaseOrder() {
   if (!po || error) {
     return (
       <div className="p-8 max-w-3xl mx-auto">
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
-          {error || 'Purchase order not found.'}
-        </div>
+        <ErrorState
+          title="Couldn't load purchase order"
+          message={error || 'Purchase order not found.'}
+          onRetry={loadPO}
+        />
         <div className="mt-6">
           <button onClick={() => window.close()} className="btn-secondary">
             Close

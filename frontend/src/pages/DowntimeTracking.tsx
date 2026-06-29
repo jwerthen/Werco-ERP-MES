@@ -24,6 +24,7 @@ import {
   Cell,
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 // ============== Types ==============
 
@@ -124,6 +125,7 @@ function getElapsedMinutes(startTime: string): number {
 // ============== Component ==============
 
 export default function DowntimeTracking() {
+  const { showToast } = useToast();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [activeEvents, setActiveEvents] = useState<DowntimeEvent[]>([]);
   const [allEvents, setAllEvents] = useState<DowntimeEvent[]>([]);
@@ -132,6 +134,7 @@ export default function DowntimeTracking() {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [wcDowntime, setWcDowntime] = useState<WorkCenterDowntime[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [tick, setTick] = useState(0);
 
@@ -167,6 +170,8 @@ export default function DowntimeTracking() {
 
   const loadData = useCallback(async () => {
     try {
+      setLoading(true);
+      setLoadError(false);
       const params: Record<string, any> = {};
       if (filterWorkCenter) params.work_center_id = parseInt(filterWorkCenter);
       if (filterCategory) params.category = filterCategory;
@@ -200,6 +205,7 @@ export default function DowntimeTracking() {
       setWcDowntime(wcDtRes as WorkCenterDowntime[]);
     } catch (err) {
       console.error('Failed to load downtime data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -212,7 +218,7 @@ export default function DowntimeTracking() {
   const handleCreateDowntime = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newForm.work_center_id) {
-      alert('Please select a work center');
+      showToast('error', 'Please select a work center');
       return;
     }
     try {
@@ -227,7 +233,7 @@ export default function DowntimeTracking() {
       setNewForm({ work_center_id: 0, category: 'other', planned_type: 'unplanned', reason_code: '', description: '' });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message || 'Failed to create downtime event');
+      showToast('error', err.response?.data?.detail || err.message || 'Failed to create downtime event');
     }
   };
 
@@ -243,7 +249,7 @@ export default function DowntimeTracking() {
       setResolveForm({ resolution: '' });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message || 'Failed to resolve downtime event');
+      showToast('error', err.response?.data?.detail || err.message || 'Failed to resolve downtime event');
     }
   };
 
@@ -278,6 +284,21 @@ export default function DowntimeTracking() {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="loading loading-spinner loading-lg text-primary"></div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="p-4 space-y-4">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Downtime Tracking</h1>
+          <p className="text-sm text-slate-400 mt-1">Monitor and manage machine downtime events</p>
+        </div>
+        <ErrorState
+          message="Could not load downtime data."
+          onRetry={loadData}
+        />
       </div>
     );
   }
@@ -412,7 +433,11 @@ export default function DowntimeTracking() {
           }
         >
           {activeEvents.length === 0 ? (
-            <div className="py-8 text-center text-xs text-slate-500">No active downtime</div>
+            <EmptyState
+              icon={CheckCircleIcon}
+              title="No active downtime"
+              description="All work centers are running. Open events will appear here."
+            />
           ) : (
             <div className="divide-y divide-fd-line">
               {activeEvents.map((evt) => {
@@ -583,8 +608,19 @@ export default function DowntimeTracking() {
             <tbody>
               {allEvents.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center text-slate-500 py-8">
-                    No downtime events found
+                  <td colSpan={8} className="py-4">
+                    <EmptyState
+                      icon={ClockIcon}
+                      title="No downtime events found"
+                      description="No events match the current filters. Log a downtime event to start tracking."
+                      action={{
+                        label: 'Log Downtime',
+                        onClick: () => {
+                          setNewForm({ work_center_id: 0, category: 'other', planned_type: 'unplanned', reason_code: '', description: '' });
+                          setShowNewModal(true);
+                        },
+                      }}
+                    />
                   </td>
                 </tr>
               ) : (

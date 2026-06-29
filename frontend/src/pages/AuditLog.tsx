@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDateTime } from '../utils/centralTime';
 import {
@@ -53,6 +54,7 @@ export default function AuditLog() {
   const [logs, setLogs] = useState<AuditEntry[]>([]);
   const [summary, setSummary] = useState<AuditSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [selectedLog, setSelectedLog] = useState<AuditEntry | null>(null);
   
   // Filters
@@ -68,6 +70,8 @@ export default function AuditLog() {
   }, []);
 
   const loadData = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [logsRes, summaryRes] = await Promise.all([
         api.getAuditLogs({ limit: 100 }),
@@ -77,6 +81,7 @@ export default function AuditLog() {
       setSummary(summaryRes);
     } catch (err) {
       console.error('Failed to load audit logs:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -97,16 +102,18 @@ export default function AuditLog() {
 
   const applyFilters = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const params: any = { limit: 200 };
       if (search) params.search = search;
       if (actionFilter) params.action = actionFilter;
       if (resourceFilter) params.resource_type = resourceFilter;
-      
+
       const logsRes = await api.getAuditLogs(params);
       setLogs(logsRes);
     } catch (err) {
       console.error('Failed to filter:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -218,6 +225,14 @@ export default function AuditLog() {
 
       {/* Log Table */}
       <div className="card overflow-hidden">
+        {loadError ? (
+          <ErrorState
+            className="py-12"
+            message="Could not load audit logs."
+            onRetry={() => (search || actionFilter || resourceFilter ? applyFilters() : loadData())}
+          />
+        ) : (
+        <>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-700">
             <thead className="bg-slate-800">
@@ -281,7 +296,13 @@ export default function AuditLog() {
           </table>
         </div>
         {logs.length === 0 && (
-          <p className="text-center text-slate-400 py-8">No audit logs found</p>
+          <EmptyState
+            icon={ShieldCheckIcon}
+            title="No audit logs found"
+            description="Audit events will appear here as users create, update, and delete records. Try adjusting your filters."
+          />
+        )}
+        </>
         )}
       </div>
 

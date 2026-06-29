@@ -19,6 +19,7 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import RoutingPage from './Routing';
+import { ToastProvider } from '../components/ui';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -100,7 +101,9 @@ const draftRouting = {
 function renderPage() {
   return render(
     <MemoryRouter>
-      <RoutingPage />
+      <ToastProvider>
+        <RoutingPage />
+      </ToastProvider>
     </MemoryRouter>
   );
 }
@@ -218,9 +221,9 @@ describe('Routing — released time-standard editing', () => {
     fireEvent.click(within(dialog).getByText('Save Time Standards'));
 
     await waitFor(() => {
-      expect(window.alert).toHaveBeenCalledWith(
-        "You need the Admin or Manager role to edit a released routing's time standards."
-      );
+      expect(
+        screen.getByText("You need the Admin or Manager role to edit a released routing's time standards.")
+      ).toBeInTheDocument();
     });
   });
 
@@ -235,7 +238,7 @@ describe('Routing — released time-standard editing', () => {
     fireEvent.click(within(dialog).getByText('Save Time Standards'));
 
     await waitFor(() => {
-      expect(window.alert).toHaveBeenCalledWith(serverMsg);
+      expect(screen.getByText(serverMsg)).toBeInTheDocument();
     });
   });
 
