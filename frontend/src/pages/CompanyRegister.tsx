@@ -101,7 +101,7 @@ export default function CompanyRegister() {
                 required
                 value={form.company_name}
                 onChange={(e) => setForm({ ...form, company_name: e.target.value })}
-                className="du-input du-input-bordered w-full h-12 bg-[#151b28]"
+                className="du-input du-input-bordered w-full h-12 bg-fd-panel"
                 placeholder="Your Company LLC"
               />
             </div>
@@ -118,7 +118,7 @@ export default function CompanyRegister() {
                   required
                   value={form.admin_first_name}
                   onChange={(e) => setForm({ ...form, admin_first_name: e.target.value })}
-                  className="du-input du-input-bordered w-full h-12 bg-[#151b28]"
+                  className="du-input du-input-bordered w-full h-12 bg-fd-panel"
                 />
               </div>
               <div className="space-y-2">
@@ -128,7 +128,7 @@ export default function CompanyRegister() {
                   required
                   value={form.admin_last_name}
                   onChange={(e) => setForm({ ...form, admin_last_name: e.target.value })}
-                  className="du-input du-input-bordered w-full h-12 bg-[#151b28]"
+                  className="du-input du-input-bordered w-full h-12 bg-fd-panel"
                 />
               </div>
             </div>
@@ -140,7 +140,7 @@ export default function CompanyRegister() {
                 required
                 value={form.admin_email}
                 onChange={(e) => setForm({ ...form, admin_email: e.target.value })}
-                className="du-input du-input-bordered w-full h-12 bg-[#151b28]"
+                className="du-input du-input-bordered w-full h-12 bg-fd-panel"
                 placeholder="admin@yourcompany.com"
               />
             </div>
@@ -153,7 +153,7 @@ export default function CompanyRegister() {
                 minLength={12}
                 value={form.admin_password}
                 onChange={(e) => setForm({ ...form, admin_password: e.target.value })}
-                className="du-input du-input-bordered w-full h-12 bg-[#151b28]"
+                className="du-input du-input-bordered w-full h-12 bg-fd-panel"
               />
               <p className="text-xs text-slate-400">Min 12 chars, uppercase, lowercase, number, special char</p>
             </div>
@@ -165,7 +165,7 @@ export default function CompanyRegister() {
                 required
                 value={form.confirm_password}
                 onChange={(e) => setForm({ ...form, confirm_password: e.target.value })}
-                className="du-input du-input-bordered w-full h-12 bg-[#151b28]"
+                className="du-input du-input-bordered w-full h-12 bg-fd-panel"
               />
             </div>
 

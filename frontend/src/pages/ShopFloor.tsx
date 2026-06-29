@@ -13,7 +13,7 @@ import {
   isDateBeforeTodayInCentral,
 } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
-import { EmptyState, ErrorState } from '../components/ui';
+import { Button, EmptyState, ErrorState, StatusBadge, statusColor, statusVariant } from '../components/ui';
 import {
   PlayIcon,
   StopIcon,
@@ -51,6 +51,17 @@ interface WorkOrderDetails {
 }
 
 const WORK_CENTER_STORAGE_KEY = 'shop_floor_work_center_id';
+
+// Solid dot color paired with the central status variant, so the queue pill's
+// dot stays in lockstep with the canonical bg/text from statusColor().
+const STATUS_DOT_CLASS: Record<ReturnType<typeof statusVariant>, string> = {
+  green: 'bg-emerald-400',
+  blue: 'bg-blue-400',
+  amber: 'bg-amber-400',
+  red: 'bg-red-400',
+  slate: 'bg-slate-400',
+};
+const dotClass = (status: string) => STATUS_DOT_CLASS[statusVariant(status)];
 
 export default function ShopFloor() {
   const { can } = usePermissions();
@@ -482,14 +493,14 @@ export default function ShopFloor() {
           <p className="page-subtitle">Clock in/out and manage work center queues</p>
         </div>
         <div className="page-actions">
-          <button
+          <Button
+            variant="secondary"
             onClick={handleRefresh}
             disabled={refreshing}
-            className="btn-secondary"
           >
             <ArrowPathIcon className={`h-5 w-5 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -529,18 +540,19 @@ export default function ShopFloor() {
                   <ClockIcon className="h-4 w-4" />
                   {getElapsedTime(job.clock_in)}
                 </span>
-                <button
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => {
                     setClockOutJob(job);
                     const remaining = Math.max(0, (job.quantity_ordered || 0) - (job.quantity_complete || 0));
                     setClockOutData({ quantity_produced: remaining, quantity_scrapped: 0, notes: '' });
                     setClockOutModal(true);
                   }}
-                  className="btn-secondary btn-sm"
                 >
                   <StopIcon className="h-4 w-4 mr-1.5" />
                   Clock Out
-                </button>
+                </Button>
               </div>
             </div>
           ))}
@@ -744,21 +756,10 @@ export default function ShopFloor() {
                           )}
                         </td>
                         <td>
-                          <span className={`
-                            inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs font-semibold
-                            ${item.status === 'in_progress'
-                              ? 'bg-emerald-500/20 text-emerald-400'
-                              : item.status === 'ready'
-                              ? 'bg-blue-500/20 text-blue-400'
-                            : 'bg-surface-100 text-surface-600'
-                          }
-                        `}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${
-                            item.status === 'in_progress' ? 'bg-emerald-500/100' :
-                            item.status === 'ready' ? 'bg-blue-500/100' : 'bg-surface-400'
-                          }`}></span>
-                          {item.status.replace('_', ' ')}
-                        </span>
+                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs font-semibold capitalize ${statusColor(item.status)}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${dotClass(item.status)}`}></span>
+                            {item.status.replace('_', ' ')}
+                          </span>
                         </td>
                         <td onClick={(e) => e.stopPropagation()}>
                           <div className="flex flex-col gap-2">
@@ -810,16 +811,17 @@ export default function ShopFloor() {
                                     <h3 className="text-sm font-semibold text-surface-900">
                                       Work Order Details
                                     </h3>
-                                    <button
+                                    <Button
+                                      variant="secondary"
+                                      size="sm"
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         navigate(`/work-orders/${details.id}`);
                                       }}
-                                      className="btn-secondary btn-sm"
                                     >
                                       <ArrowTopRightOnSquareIcon className="h-4 w-4 mr-1.5" />
                                       Open Full View
-                                    </button>
+                                    </Button>
                                   </div>
 
                                   {/* Definition row */}
@@ -884,13 +886,7 @@ export default function ShopFloor() {
                                               <td className="px-3 py-2">{op.name}</td>
                                               <td className="px-3 py-2">{op.work_center_name}</td>
                                               <td className="px-3 py-2">
-                                                <span className={`inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium ${
-                                                  op.status === 'complete' ? 'bg-green-500/20 text-green-400' :
-                                                  op.status === 'in_progress' ? 'bg-blue-500/20 text-blue-400' :
-                                                  'bg-surface-100 text-surface-600'
-                                                }`}>
-                                                  {op.status.replace('_', ' ')}
-                                                </span>
+                                                <StatusBadge status={op.status} className="rounded-sm" />
                                               </td>
                                               <td className="px-3 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || '\u2014'}</td>
                                               <td className="px-3 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || '\u2014'}</td>
@@ -1001,17 +997,16 @@ export default function ShopFloor() {
         </div>
 
         <div className="flex justify-end gap-3 mt-6">
-          <button
+          <Button
+            variant="secondary"
             onClick={closeClockOutModal}
             disabled={clockingOut}
-            className="btn-secondary"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={handleClockOut}
             disabled={clockingOut}
-            className="btn-primary"
           >
             {clockingOut ? (
               <ArrowPathIcon className="h-5 w-5 mr-2 animate-spin" />
@@ -1019,7 +1014,7 @@ export default function ShopFloor() {
               <CheckCircleIcon className="h-5 w-5 mr-2" />
             )}
             {clockingOut ? 'Saving...' : 'Complete Clock Out'}
-          </button>
+          </Button>
         </div>
       </Modal>
     </div>

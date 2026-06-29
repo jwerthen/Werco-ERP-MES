@@ -5,6 +5,7 @@ import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { EmptyState, ErrorState } from '../components/ui';
 import { MiniStat, CockpitPanel } from '../components/cockpit';
+import { statusVariant, type StatusVariant } from '../components/ui';
 import { ActiveAssignment, DashboardData, SignedInUserStatus, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
@@ -48,11 +49,15 @@ const workCenterTypeColors: Record<string, string> = {
   shipping: 'bg-slate-600',
 };
 
-const statusColors: Record<string, { bg: string; dot: string; text: string }> = {
-  available: { bg: 'bg-fd-green/10', dot: 'bg-fd-green', text: 'text-fd-green' },
-  in_use: { bg: 'bg-fd-blue/10', dot: 'bg-fd-blue', text: 'text-fd-blue' },
-  maintenance: { bg: 'bg-fd-amber/10', dot: 'bg-fd-amber', text: 'text-fd-amber' },
-  offline: { bg: 'bg-fd-red/10', dot: 'bg-fd-red', text: 'text-fd-red' },
+// Work-center status dot colors derived from the central status variant so a
+// given status reads identically across the app. `statusVariant()` resolves
+// available->green, in_use->blue, maintenance->amber, offline->slate.
+const variantDotColor: Record<StatusVariant, string> = {
+  green: 'bg-fd-green',
+  blue: 'bg-fd-blue',
+  amber: 'bg-fd-amber',
+  red: 'bg-fd-red',
+  slate: 'bg-slate-500',
 };
 
 const roleBadgeClasses: Record<string, string> = {
@@ -907,7 +912,7 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
 }
 
 function WorkCenterRow({ wc }: { wc: WorkCenterStatus }) {
-  const statusStyle = statusColors[wc.status] || statusColors.offline;
+  const statusDot = variantDotColor[statusVariant(wc.status)];
   const typeColor = workCenterTypeColors[wc.type] || 'bg-slate-600';
 
   const scrollToLiveGroup = () => {
@@ -918,7 +923,7 @@ function WorkCenterRow({ wc }: { wc: WorkCenterStatus }) {
     <div className="flex items-center gap-2 py-2 first:pt-0">
       <span className={`h-6 w-1 flex-shrink-0 rounded-sm ${typeColor}`} title={wc.type.replace('_', ' ')} />
       <div
-        className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${statusStyle.dot} animate-pulse`}
+        className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${statusDot} animate-pulse`}
         title={wc.status.replace('_', ' ')}
         aria-label={`Status: ${wc.status.replace('_', ' ')}`}
       />

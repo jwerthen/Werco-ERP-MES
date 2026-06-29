@@ -13,7 +13,7 @@ import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, useToast, statusColor, Button } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ArrowLeftIcon,
@@ -42,18 +42,6 @@ import {
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
-
-const statusColors: Record<string, string> = {
-  draft: 'bg-slate-800 text-slate-100',
-  released: 'bg-blue-500/20 text-blue-300',
-  in_progress: 'bg-green-500/20 text-green-300',
-  on_hold: 'bg-yellow-500/20 text-yellow-300',
-  complete: 'bg-emerald-500/20 text-emerald-300',
-  closed: 'bg-slate-800 text-slate-400',
-  cancelled: 'bg-red-500/20 text-red-300',
-  pending: 'bg-slate-800 text-slate-100',
-  ready: 'bg-blue-500/20 text-blue-300',
-};
 
 interface MaterialRequirement {
   bom_item_id: number;
@@ -932,14 +920,14 @@ export default function WorkOrderDetail() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <span className={`px-3 py-1 rounded-full text-sm font-medium ${statusColors[workOrder.status]}`}>
+          <span className={`px-3 py-1 rounded-full text-sm font-medium capitalize ${statusColor(workOrder.status)}`}>
             {workOrder.status.replace('_', ' ')}
           </span>
           {workOrder.status === 'draft' && (
-            <button onClick={handleRelease} className="btn-primary flex items-center">
+            <Button onClick={handleRelease} className="flex items-center">
               <PlayIcon className="h-5 w-5 mr-2" />
               Release
-            </button>
+            </Button>
           )}
           {workOrder.status === 'released' && (
             <button onClick={handleStart} className="btn-success flex items-center">
@@ -948,10 +936,10 @@ export default function WorkOrderDetail() {
             </button>
           )}
           {workOrder.status === 'in_progress' && (
-            <button
+            <Button
               onClick={handleComplete}
               disabled={completing}
-              className="btn-primary flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {completing ? (
                 <ArrowPathIcon className="h-5 w-5 mr-2 animate-spin" />
@@ -959,24 +947,26 @@ export default function WorkOrderDetail() {
                 <CheckCircleIcon className="h-5 w-5 mr-2" />
               )}
               {completing ? 'Completing...' : 'Complete'}
-            </button>
+            </Button>
           )}
-          <button 
+          <Button
+            variant="secondary"
             onClick={() => window.open(`/print/traveler/${workOrder.id}?autoprint=1`, '_blank')}
-            className="btn-secondary flex items-center"
+            className="flex items-center"
           >
             <PrinterIcon className="h-5 w-5 mr-2" />
             Print Traveler
-          </button>
+          </Button>
           {isAdminView && (
-            <button
+            <Button
+              variant="secondary"
               onClick={handleDelete}
               disabled={deleting}
-              className="btn-secondary flex items-center text-red-300 hover:text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center text-red-300 hover:text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <TrashIcon className="h-5 w-5 mr-2" />
               {deleting ? 'Deleting...' : 'Delete'}
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -1152,14 +1142,14 @@ export default function WorkOrderDetail() {
                   className="input mt-1 w-full"
                 />
               </label>
-              <button
+              <Button
                 type="submit"
                 disabled={documentBusy || !documentUploadFile}
-                className="btn-primary w-full flex items-center justify-center"
+                className="w-full flex items-center justify-center"
               >
                 <ArrowUpTrayIcon className="h-4 w-4 mr-2" />
                 {documentBusy ? 'Uploading...' : 'Upload PDF'}
-              </button>
+              </Button>
             </form>
 
             <form onSubmit={handleAttachExistingPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
@@ -1176,14 +1166,15 @@ export default function WorkOrderDetail() {
                   </option>
                 ))}
               </select>
-              <button
+              <Button
                 type="submit"
+                variant="secondary"
                 disabled={documentBusy || !attachDocumentId}
-                className="btn-secondary w-full flex items-center justify-center"
+                className="w-full flex items-center justify-center"
               >
                 <PaperClipIcon className="h-4 w-4 mr-2" />
                 {documentBusy ? 'Attaching...' : 'Attach PDF'}
-              </button>
+              </Button>
             </form>
           </div>
 
@@ -1199,22 +1190,24 @@ export default function WorkOrderDetail() {
               </div>
               {selectedDocument && (
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => setSelectedDocumentId(selectedDocument.id)}
-                    className="btn-secondary btn-sm flex items-center"
+                    className="flex items-center"
                   >
                     <EyeIcon className="h-4 w-4 mr-1" />
                     Preview
-                  </button>
-                  <button
-                    type="button"
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => handleDownloadWorkOrderPdf(selectedDocument)}
-                    className="btn-secondary btn-sm flex items-center"
+                    className="flex items-center"
                   >
                     <ArrowDownTrayIcon className="h-4 w-4 mr-1" />
                     Download
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
@@ -1253,22 +1246,23 @@ export default function WorkOrderDetail() {
             <div className="flex items-center gap-2">
               {canManageNests && (
                 <>
-                  <button
-                    type="button"
+                  <Button
+                    size="sm"
                     onClick={() => setNestImportWizardOpen(true)}
-                    className="btn-primary btn-sm flex items-center gap-1.5 whitespace-nowrap"
+                    className="flex items-center gap-1.5 whitespace-nowrap"
                   >
                     <ArrowUpTrayIcon className="h-4 w-4" />
                     Import nest package
-                  </button>
-                  <button
-                    type="button"
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={openAddNestModal}
-                    className="btn-secondary btn-sm flex items-center gap-1.5 whitespace-nowrap"
+                    className="flex items-center gap-1.5 whitespace-nowrap"
                   >
                     <PlusIcon className="h-4 w-4" />
                     Add nest manually
-                  </button>
+                  </Button>
                 </>
               )}
             </div>
@@ -1583,9 +1577,9 @@ export default function WorkOrderDetail() {
                 placeholder="What is stopping the job?"
               />
             </div>
-            <button type="submit" disabled={submittingBlocker} className="btn-primary w-full">
+            <Button type="submit" disabled={submittingBlocker} className="w-full">
               {submittingBlocker ? 'Reporting...' : 'Report Blocker'}
-            </button>
+            </Button>
           </form>
         </div>
       </CockpitPanel>
@@ -1746,7 +1740,7 @@ export default function WorkOrderDetail() {
                           </>
                         )}
                         <td className="px-4 py-3">
-                          <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[op.status]}`}>
+                          <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium capitalize ${statusColor(op.status)}`}>
                             {op.status.replace('_', ' ')}
                           </span>
                         </td>

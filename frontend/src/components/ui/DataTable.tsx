@@ -513,7 +513,7 @@ export function DataTable<T>({
           {Array.from({ length: 3 }).map((_, i) => (
             <div
               key={i}
-              className="bg-[#151b28] rounded-sm border border-slate-700 p-4 animate-pulse"
+              className="bg-fd-panel rounded-sm border border-slate-700 p-4 animate-pulse"
             >
               <div className="h-5 bg-slate-700 rounded w-1/2 mb-3" />
               <div className="grid grid-cols-2 gap-3">

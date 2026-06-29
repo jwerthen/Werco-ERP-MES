@@ -716,7 +716,7 @@ export default function POUpload() {
                     className="input w-full"
                   />
                   {vendorResults.length > 0 && (
-                    <div className="absolute z-10 w-full mt-1 bg-[#151b28] border rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                    <div className="absolute z-10 w-full mt-1 bg-fd-panel border rounded-lg shadow-lg max-h-48 overflow-y-auto">
                       {vendorResults.map((v) => (
                         <button
                           key={v.id}
@@ -968,7 +968,7 @@ export default function POUpload() {
                               <button
                                 key={sug.id}
                                 onClick={() => selectPartForLine(idx, sug.id, sug.part_number)}
-                                className="text-xs px-2 py-1 rounded bg-[#151b28] border hover:bg-slate-800"
+                                className="text-xs px-2 py-1 rounded bg-fd-panel border hover:bg-slate-800"
                               >
                                 {sug.part_number} ({sug.score}%)
                               </button>
@@ -986,7 +986,7 @@ export default function POUpload() {
                             className="input w-full text-sm"
                           />
                           {partResults[idx]?.length > 0 && (
-                            <div className="absolute z-10 w-full mt-1 bg-[#151b28] border rounded-lg shadow-lg max-h-32 overflow-y-auto">
+                            <div className="absolute z-10 w-full mt-1 bg-fd-panel border rounded-lg shadow-lg max-h-32 overflow-y-auto">
                               {partResults[idx].map((p: any) => (
                                 <button
                                   key={p.id}

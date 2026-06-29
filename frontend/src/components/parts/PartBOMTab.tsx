@@ -490,7 +490,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                 )}
               </tr>
             </thead>
-            <tbody className="bg-[#151b28] divide-y divide-slate-700">
+            <tbody className="bg-fd-panel divide-y divide-slate-700">
               {viewMode === 'single' ? (
                 bom.items.length > 0 ? (
                   bom.items.map(item => (

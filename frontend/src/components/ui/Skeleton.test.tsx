@@ -105,7 +105,7 @@ describe('Skeleton Components', () => {
     it('renders card with skeleton content', () => {
       render(<SkeletonCard />);
       const card = screen.getByTestId('skeleton-card');
-      expect(card).toHaveClass('bg-[#151b28]');
+      expect(card).toHaveClass('bg-fd-panel');
       expect(card).toHaveClass('rounded-lg');
     });
 
@@ -149,7 +149,7 @@ describe('Skeleton Components', () => {
     it('renders stat card skeleton', () => {
       render(<SkeletonStatCard />);
       const card = screen.getByTestId('skeleton-stat-card');
-      expect(card).toHaveClass('bg-[#151b28]');
+      expect(card).toHaveClass('bg-fd-panel');
       expect(card).toHaveClass('animate-pulse');
     });
   });

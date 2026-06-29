@@ -29,7 +29,8 @@ import {
   Squares2X2Icon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { Button, EmptyState, ErrorState, statusVariant, useToast } from '../components/ui';
+import type { StatusVariant } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface WorkCenter {
@@ -132,13 +133,20 @@ interface MachineCapacityOverview extends CapacityHeatmapRow {
   overloaded_days: number;
 }
 
-const statusColors: Record<string, string> = {
-  pending: 'bg-slate-500',
-  ready: 'bg-blue-500/100',
-  in_progress: 'bg-green-500/100',
-  complete: 'bg-emerald-600',
-  on_hold: 'bg-yellow-500/100',
+// Solid-fill Gantt-bar color per canonical status variant. The bars are a
+// page-specific solid-fill visualization (white text), not badge pills — but
+// the variant is resolved through the central statusVariant() so shared
+// statuses (in_progress, ready, on_hold, complete) stay in sync with the rest
+// of the app instead of drifting.
+const variantBarFill: Record<StatusVariant, string> = {
+  green: 'bg-emerald-600',
+  blue: 'bg-blue-500/100',
+  amber: 'bg-amber-500/100',
+  red: 'bg-red-500/100',
+  slate: 'bg-slate-500',
 };
+
+const statusBarFill = (status: string): string => variantBarFill[statusVariant(status)];
 
 const priorityColors: Record<number, string> = {
   1: 'border-l-red-500',
@@ -850,23 +858,24 @@ export default function Scheduling() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
+          <Button
             onClick={handleAutoScheduleAll}
             disabled={runningAutoSchedule}
-            className="btn-primary btn-sm flex items-center disabled:opacity-50"
+            size="sm"
+            className="flex items-center disabled:opacity-50"
             title="Auto-schedule all unscheduled work orders to their earliest available capacity"
           >
             <BoltIcon className="h-4 w-4 mr-1" />
             {runningAutoSchedule ? 'Scheduling...' : 'Auto-Schedule All'}
-          </button>
+          </Button>
           <div className="flex items-center gap-0.5 border-l border-slate-700 pl-2 ml-1">
             <button onClick={() => navigateWeek(-1)} className="p-1.5 hover:bg-slate-800 rounded-md transition-colors">
               <ChevronLeftIcon className="h-4 w-4 text-slate-400" />
             </button>
-            <button onClick={goToToday} className="btn-secondary btn-sm flex items-center">
+            <Button variant="secondary" size="sm" onClick={goToToday} className="flex items-center">
               <CalendarIcon className="h-3.5 w-3.5 mr-1" />
               Today
-            </button>
+            </Button>
             <button onClick={() => navigateWeek(1)} className="p-1.5 hover:bg-slate-800 rounded-md transition-colors">
               <ChevronRightIcon className="h-4 w-4 text-slate-400" />
             </button>
@@ -1153,7 +1162,7 @@ export default function Scheduling() {
                                   onClick={() => openScheduleModal(job)}
                                   className={`text-xs p-1.5 rounded cursor-move hover:opacity-90 border-l-4 shadow-sm ${
                                     priorityColors[job.priority] || 'border-l-gray-400'
-                                  } ${statusColors[job.operation_status] || statusColors[job.status]} text-white ${
+                                  } ${statusBarFill(job.operation_status || job.status)} text-white ${
                                     dragState.job?.work_order_id === job.work_order_id ? 'opacity-50' : ''
                                   }`}
                                   style={{
@@ -1237,15 +1246,16 @@ export default function Scheduling() {
               />
               Scheduled
             </label>
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => setShowBulkActions(!showBulkActions)}
-              className={`btn-secondary btn-sm flex items-center gap-1 ${showBulkActions ? 'bg-slate-700' : ''}`}
+              className={`flex items-center gap-1 ${showBulkActions ? 'bg-slate-700' : ''}`}
             >
               <FunnelIcon className="h-3.5 w-3.5" />
               Bulk
               <ChevronDownIcon className={`h-3 w-3 transition-transform ${showBulkActions ? 'rotate-180' : ''}`} />
-            </button>
+            </Button>
           </div>
         </div>
         {showBulkActions && (
@@ -1285,14 +1295,14 @@ export default function Scheduling() {
                     </option>
                   ))}
                 </select>
-                <button
-                  type="button"
-                  className="btn-secondary text-sm"
+                <Button
+                  variant="secondary"
+                  className="text-sm"
                   disabled={bulkActionRunning !== null}
                   onClick={handleBulkSetPriority}
                 >
                   Apply
-                </button>
+                </Button>
               </div>
             )}
             <div className="flex gap-2">
@@ -1308,14 +1318,14 @@ export default function Scheduling() {
                   </option>
                 ))}
               </select>
-              <button
-                type="button"
-                className="btn-secondary text-sm"
+              <Button
+                variant="secondary"
+                className="text-sm"
                 disabled={bulkActionRunning !== null}
                 onClick={handleBulkMoveWorkCenter}
               >
                 Move
-              </button>
+              </Button>
             </div>
             <div className="flex gap-2">
               <input
@@ -1326,24 +1336,23 @@ export default function Scheduling() {
                 min={-30}
                 max={30}
               />
-              <button
-                type="button"
-                className="btn-secondary text-sm"
+              <Button
+                variant="secondary"
+                className="text-sm"
                 disabled={bulkActionRunning !== null}
                 onClick={handleBulkShiftDates}
               >
                 Shift Dates
-              </button>
+              </Button>
             </div>
-            <button
-              type="button"
-              className="btn-primary text-sm flex items-center justify-center"
+            <Button
+              className="text-sm flex items-center justify-center"
               disabled={bulkActionRunning !== null}
               onClick={handleBulkScheduleEarliest}
             >
               <BoltIcon className="h-4 w-4 mr-1" />
               Schedule Selected Earliest
-            </button>
+            </Button>
           </div>
         </div>
         )}
@@ -1519,9 +1528,9 @@ export default function Scheduling() {
       {/* Compact Legend */}
       <div className="flex flex-wrap gap-4 text-xs text-slate-400 px-1">
         <div className="flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded bg-blue-500/100" /> Ready
-          <span className="w-2 h-2 rounded bg-green-500/100 ml-1" /> In Progress
-          <span className="w-2 h-2 rounded bg-yellow-500/100 ml-1" /> On Hold
+          <span className="w-2 h-2 rounded bg-blue-500/100" /> Ready / In Progress
+          <span className="w-2 h-2 rounded bg-amber-500/100 ml-1" /> On Hold
+          <span className="w-2 h-2 rounded bg-emerald-600 ml-1" /> Complete
         </div>
         <div className="flex items-center gap-1.5">
           <span className="w-2 h-0.5 bg-red-500/100" /> High Priority
@@ -1675,15 +1684,15 @@ export default function Scheduling() {
 
               <div className="flex justify-between gap-3 pt-4 border-t">
                 <div className="flex gap-2">
-                  <button
-                    type="button"
-                    className="btn-secondary flex items-center text-sm"
+                  <Button
+                    variant="secondary"
+                    className="flex items-center text-sm"
                     onClick={() => handleScheduleEarliest(selectedJob)}
                     disabled={schedulingEarliestWorkOrderId === selectedJob.work_order_id}
                   >
                     <BoltIcon className="h-4 w-4 mr-1" />
                     Earliest Slot
-                  </button>
+                  </Button>
                   {selectedJob.scheduled_start && (
                     <button
                       type="button"
@@ -1695,10 +1704,10 @@ export default function Scheduling() {
                   )}
                 </div>
                 <div className="flex gap-3">
-                  <button type="button" onClick={() => { setShowScheduleModal(false); setCapacityPreview(null); }} className="btn-secondary">
+                  <Button variant="secondary" onClick={() => { setShowScheduleModal(false); setCapacityPreview(null); }}>
                     Cancel
-                  </button>
-                  <button type="submit" className="btn-primary">Schedule</button>
+                  </Button>
+                  <Button type="submit">Schedule</Button>
                 </div>
               </div>
             </form>

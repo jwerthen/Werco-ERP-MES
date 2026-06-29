@@ -24,6 +24,8 @@ import {
   DataTableColumn,
   StatusBadge,
   MobileDataCard,
+  Button,
+  statusColor,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
@@ -122,12 +124,6 @@ const QUEUE_DAYS_BADGE: Record<string, string> = {
   urgent: 'bg-red-500/20 text-red-300',
   warn: 'bg-amber-500/20 text-amber-300',
   ok: 'bg-green-500/20 text-emerald-300',
-};
-
-const HISTORY_STATUS_COLORS: Record<string, string> = {
-  passed: 'bg-green-500/20 text-emerald-300',
-  failed: 'bg-red-500/20 text-red-300',
-  partial: 'bg-amber-500/20 text-amber-300',
 };
 
 export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
@@ -692,10 +688,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       align: 'center',
       accessor: (item) => item.inspection_status || item.status,
       render: (item) => (
-        <StatusBadge
-          status={item.inspection_status || item.status}
-          colorMap={HISTORY_STATUS_COLORS}
-        />
+        <StatusBadge status={item.inspection_status || item.status} />
       ),
     },
     {
@@ -713,10 +706,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       title={item.receipt_number}
       subtitle={`${item.po_number} · ${item.part_number}`}
       badge={
-        <StatusBadge
-          status={item.inspection_status || item.status}
-          colorMap={HISTORY_STATUS_COLORS}
-        />
+        <StatusBadge status={item.inspection_status || item.status} />
       }
       fields={[
         { label: "Recv'd", value: item.quantity_received },
@@ -907,11 +897,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <h3 className="text-lg font-bold text-werco-primary">{selectedPO.po_number}</h3>
-                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                              selectedPO.status === 'sent' ? 'bg-blue-500/20 text-blue-300' :
-                              selectedPO.status === 'partial' ? 'bg-amber-500/20 text-amber-300' :
-                              'bg-slate-800/50 text-slate-100'
-                            }`}>
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(selectedPO.status)}`}>
                               {selectedPO.status.charAt(0).toUpperCase() + selectedPO.status.slice(1)}
                             </span>
                             {selectedPO.is_approved_vendor && (
@@ -947,13 +933,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                     </div>
 
                     {selectedPO.notes && (
-                      <div className="mb-3 px-3 py-2 bg-[#151b28] rounded-lg border border-slate-700 text-sm text-slate-400 flex-shrink-0">
+                      <div className="mb-3 px-3 py-2 bg-fd-panel rounded-lg border border-slate-700 text-sm text-slate-400 flex-shrink-0">
                         <span className="text-slate-400 font-medium">Notes: </span>{selectedPO.notes}
                       </div>
                     )}
 
                     {/* Lines Table — scrollable */}
-                    <div className="flex-1 overflow-y-auto bg-[#151b28] rounded-lg border border-slate-700">
+                    <div className="flex-1 overflow-y-auto bg-fd-panel rounded-lg border border-slate-700">
                       <table className="w-full divide-y divide-slate-700">
                         <thead className="bg-slate-800/50 sticky top-0">
                           <tr>
@@ -1036,7 +1022,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                         <summary className="text-sm font-semibold text-slate-400 cursor-pointer hover:text-slate-100">
                           Receipt History ({selectedPO.lines?.reduce((c: number, l: any) => c + (l.receipts?.length || 0), 0)} receipts)
                         </summary>
-                        <div className="mt-2 bg-[#151b28] rounded-lg border border-slate-700 overflow-x-auto max-h-48 overflow-y-auto">
+                        <div className="mt-2 bg-fd-panel rounded-lg border border-slate-700 overflow-x-auto max-h-48 overflow-y-auto">
                           <table className="w-full divide-y divide-slate-700">
                             <thead className="bg-slate-800 sticky top-0">
                               <tr>
@@ -1057,12 +1043,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                                     <td className="px-3 py-1.5 text-right text-sm font-medium">{r.quantity_received}</td>
                                     <td className="px-3 py-1.5 font-mono text-sm">{r.lot_number}</td>
                                     <td className="px-3 py-1.5 text-center">
-                                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                        r.status === 'accepted' ? 'bg-green-500/20 text-emerald-300' :
-                                        r.status === 'pending_inspection' ? 'bg-amber-500/20 text-amber-300' :
-                                        r.status === 'rejected' ? 'bg-red-500/20 text-red-300' :
-                                        'bg-slate-800/50 text-slate-100'
-                                      }`}>
+                                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColor(r.status)}`}>
                                         {r.status.replace(/_/g, ' ')}
                                       </span>
                                     </td>
@@ -1324,12 +1305,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             </div>
 
             <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-              <button onClick={() => setShowReceiveModal(false)} className="btn-secondary px-6">
+              <Button variant="secondary" className="px-6" onClick={() => setShowReceiveModal(false)}>
                 Cancel
-              </button>
-              <button onClick={handleReceive} className="btn-primary px-6">
+              </Button>
+              <Button className="px-6" onClick={handleReceive}>
                 Receive Material
-              </button>
+              </Button>
             </div>
           </>
         )}
@@ -1514,12 +1495,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
             </div>
 
             <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-              <button onClick={() => setShowInspectModal(false)} className="btn-secondary px-6">
+              <Button variant="secondary" className="px-6" onClick={() => setShowInspectModal(false)}>
                 Cancel
-              </button>
-              <button onClick={handleInspect} className="btn-primary px-6">
+              </Button>
+              <Button className="px-6" onClick={handleInspect}>
                 Complete Inspection
-              </button>
+              </Button>
             </div>
           </>
         )}

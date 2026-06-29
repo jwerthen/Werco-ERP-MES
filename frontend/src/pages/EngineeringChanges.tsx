@@ -17,6 +17,8 @@ import {
   DataTable,
   DataTableColumn,
   MobileDataCard,
+  StatusBadge,
+  Button,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
@@ -131,7 +133,9 @@ const typeBadge: Record<ECOType, string> = { design: 'bg-blue-500/20 text-blue-3
 const typeLabel: Record<ECOType, string> = { design: 'Design', process: 'Process', material: 'Material', documentation: 'Documentation', other: 'Other' };
 const priorityBadge: Record<ECOPriority, string> = { low: 'bg-slate-800 text-slate-100', medium: 'bg-blue-500/20 text-blue-300', high: 'bg-orange-500/20 text-orange-300', critical: 'bg-red-500/20 text-red-300' };
 const priorityLabel: Record<ECOPriority, string> = { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical' };
-const statusBadge: Record<ECOStatus, string> = { draft: 'bg-slate-800 text-slate-100', submitted: 'bg-blue-500/20 text-blue-300', under_review: 'bg-purple-500/20 text-purple-300', approved: 'bg-green-500/20 text-green-300', rejected: 'bg-red-500/20 text-red-300', in_implementation: 'bg-yellow-500/20 text-yellow-300', completed: 'bg-emerald-500/20 text-emerald-300', cancelled: 'bg-slate-800/50 text-slate-100' };
+// Status colors are NOT declared here — they come from the central statusColors
+// source of truth via <StatusBadge>. `statusLabel` is kept only for sort
+// accessors and the filter <select> option labels (not coloring).
 const statusLabel: Record<ECOStatus, string> = { draft: 'Draft', submitted: 'Submitted', under_review: 'Under Review', approved: 'Approved', rejected: 'Rejected', in_implementation: 'In Implementation', completed: 'Completed', cancelled: 'Cancelled' };
 const taskStatusLabel: Record<string, string> = { pending: 'Pending', in_progress: 'In Progress', completed: 'Completed', skipped: 'Skipped' };
 
@@ -160,8 +164,8 @@ const typeChip = (eco: ECO) =>
   badge(typeBadge[eco.eco_type] || 'bg-slate-800 text-slate-100', typeLabel[eco.eco_type] || eco.eco_type);
 const priorityChip = (eco: ECO) =>
   badge(priorityBadge[eco.priority] || 'bg-slate-800 text-slate-100', priorityLabel[eco.priority] || eco.priority);
-const statusChip = (eco: ECO) =>
-  badge(statusBadge[eco.status] || 'bg-slate-800 text-slate-100', statusLabel[eco.status] || eco.status);
+// Status pills pull their color from the central statusColors map via StatusBadge.
+const statusChip = (eco: ECO) => <StatusBadge status={eco.status} />;
 
 interface RowActionHandlers {
   onSubmit: (id: number) => void;
@@ -581,13 +585,10 @@ export default function EngineeringChanges() {
           <h1 className="text-2xl font-bold text-white">Engineering Changes</h1>
           <p className="text-sm text-slate-400 mt-1">Manage Engineering Change Orders (ECO/ECN)</p>
         </div>
-        <button
-          onClick={openCreateModal}
-          className="inline-flex items-center gap-2 rounded-sm bg-werco-navy-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-werco-navy-700"
-        >
+        <Button onClick={openCreateModal} className="inline-flex items-center gap-2">
           <PlusIcon className="h-5 w-5" />
           New ECO
-        </button>
+        </Button>
       </div>
 
       {/* Dashboard Cards */}
@@ -820,21 +821,13 @@ export default function EngineeringChanges() {
                 </div>
               </div>
               <div className="flex justify-end gap-3 border-t pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  className="rounded-md border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800/50"
-                >
+                <Button variant="secondary" onClick={() => setShowCreateModal(false)}>
                   Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={createLoading}
-                  className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500/100 disabled:opacity-50"
-                >
+                </Button>
+                <Button type="submit" disabled={createLoading} className="inline-flex items-center gap-2">
                   {createLoading && <ArrowPathIcon className="h-4 w-4 animate-spin" />}
                   Create ECO
-                </button>
+                </Button>
               </div>
             </form>
       </Modal>
@@ -901,7 +894,7 @@ export default function EngineeringChanges() {
               {detailEcoLive.approvals.length > 0 && (
                 <div>
                   <h4 className="text-xs font-semibold uppercase text-slate-400 mb-2">Approval Workflow</h4>
-                  <div className="rounded border bg-[#151b28] divide-y">
+                  <div className="rounded border bg-fd-panel divide-y">
                     {detailEcoLive.approvals.map((a) => (
                       <div key={a.id} className="flex items-center justify-between px-4 py-2 text-sm">
                         <div><span className="font-medium text-white">{userName(a.approver)}</span><span className="ml-2 text-slate-400">({a.role})</span></div>
@@ -921,7 +914,7 @@ export default function EngineeringChanges() {
               {detailEcoLive.implementation_tasks.length > 0 && (
                 <div>
                   <h4 className="text-xs font-semibold uppercase text-slate-400 mb-2">Implementation Tasks</h4>
-                  <div className="rounded border bg-[#151b28] divide-y">
+                  <div className="rounded border bg-fd-panel divide-y">
                     {detailEcoLive.implementation_tasks.map((t) => (
                       <div key={t.id} className="flex items-center justify-between px-4 py-2 text-sm">
                         <div className="flex items-center gap-2">
@@ -966,19 +959,12 @@ export default function EngineeringChanges() {
                 />
               </div>
               <div className="flex justify-end gap-3">
-                <button
-                  onClick={() => setShowRejectModal(false)}
-                  className="rounded-md border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800/50"
-                >
+                <Button variant="secondary" onClick={() => setShowRejectModal(false)}>
                   Cancel
-                </button>
-                <button
-                  onClick={handleReject}
-                  disabled={actionLoading !== null}
-                  className="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500/100/100 disabled:opacity-50"
-                >
+                </Button>
+                <Button variant="danger" onClick={handleReject} disabled={actionLoading !== null}>
                   Reject ECO
-                </button>
+                </Button>
               </div>
             </div>
       </Modal>

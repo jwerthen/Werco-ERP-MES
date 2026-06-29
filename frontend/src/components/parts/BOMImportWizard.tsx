@@ -183,7 +183,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
   const overlay = (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]" onClick={onClose}>
       <div
-        className="bg-[#151b28] rounded-xl shadow-xl mx-4 animate-scale-in flex flex-col"
+        className="bg-fd-panel rounded-xl shadow-xl mx-4 animate-scale-in flex flex-col"
         style={{ maxWidth: step === 'preview' ? '72rem' : '32rem', maxHeight: '90vh', width: '100%' }}
         onClick={e => e.stopPropagation()}
       >
@@ -323,7 +323,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
                           <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase">Remove</th>
                         </tr>
                       </thead>
-                      <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                      <tbody className="bg-fd-panel divide-y divide-slate-700">
                         {displayItems.map((item, idx) => {
                           const lineNumber = item.line_number || (idx + 1) * 10;
                           return (

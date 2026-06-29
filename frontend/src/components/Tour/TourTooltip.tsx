@@ -102,7 +102,7 @@ export default function TourTooltip({ step, targetRect, stepIndex, totalSteps }:
   return (
     <div
       ref={tooltipRef}
-      className="fixed pointer-events-auto bg-[#151b28] rounded-2xl shadow-2xl border border-slate-700 overflow-hidden animate-fade-in"
+      className="fixed pointer-events-auto bg-fd-panel rounded-2xl shadow-2xl border border-slate-700 overflow-hidden animate-fade-in"
       style={{
         top: position.top,
         left: position.left,

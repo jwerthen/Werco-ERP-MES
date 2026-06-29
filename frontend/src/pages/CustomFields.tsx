@@ -259,7 +259,7 @@ export default function CustomFieldsPage() {
                     <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                <tbody className="bg-fd-panel divide-y divide-slate-700">
                   {groupFields.map((field) => (
                     <tr key={field.id} className={!field.is_active ? 'opacity-50' : ''}>
                       <td className="px-4 py-3">

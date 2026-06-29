@@ -7,6 +7,7 @@ import { Breadcrumbs } from '../components/ui/Breadcrumbs';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import { Tabs, Tab } from '../components/ui/Tabs';
 import { StatusBadge } from '../components/ui/StatusBadge';
+import { Button, statusVariant, type StatusVariant } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
 import { PartOverviewTab } from '../components/parts/PartOverviewTab';
 import { PartBOMTab } from '../components/parts/PartBOMTab';
@@ -37,21 +38,19 @@ interface PartReadiness {
   checks: Record<string, string>;
 }
 
-// Map a BOM/Routing status to an instrument-panel value color, preserving the
-// active/released-vs-draft-vs-obsolete coloring the StatusBadge used.
-function statusColor(status: string): string {
-  switch (status) {
-    case 'active':
-    case 'released':
-      return 'text-fd-green';
-    case 'draft':
-    case 'pending_approval':
-      return 'text-fd-amber';
-    case 'obsolete':
-      return 'text-slate-400';
-    default:
-      return 'text-slate-300';
-  }
+// Map a BOM/Routing status to an instrument-panel value color (text-only, for
+// MiniStat values). Derived from the central status variant so it can't drift
+// from the canonical status coloring used by StatusBadge.
+const variantValueColor: Record<StatusVariant, string> = {
+  green: 'text-fd-green',
+  blue: 'text-fd-blue',
+  amber: 'text-fd-amber',
+  red: 'text-fd-red',
+  slate: 'text-slate-400',
+};
+
+function statusValueColor(status: string): string {
+  return variantValueColor[statusVariant(status)];
 }
 
 export default function PartDetail() {
@@ -174,13 +173,14 @@ export default function PartDetail() {
             {part.drawing_number && <span className="min-w-0 truncate tabular-nums">Dwg: {part.drawing_number}</span>}
           </div>
         </div>
-        <button
+        <Button
+          variant="secondary"
           onClick={() => navigate(`/parts/${part.id}/edit`)}
-          className="btn-secondary flex items-center gap-2 shrink-0"
+          className="flex items-center gap-2 shrink-0"
         >
           <PencilIcon className="h-4 w-4" />
           Edit Part
-        </button>
+        </Button>
       </div>
 
       {/* Quick Stats */}
@@ -198,7 +198,7 @@ export default function PartDetail() {
           iconColor="text-fd-blue"
           label="BOM Status"
           value={bom ? bom.status.replace(/_/g, ' ') : 'None'}
-          valueColor={bom ? statusColor(bom.status) : 'text-slate-500'}
+          valueColor={bom ? statusValueColor(bom.status) : 'text-slate-500'}
         />
         <MiniStat
           icon={WrenchScrewdriverIcon}
@@ -206,7 +206,7 @@ export default function PartDetail() {
           iconColor="text-fd-cyan"
           label="Routing Status"
           value={routing ? routing.status.replace(/_/g, ' ') : 'None'}
-          valueColor={routing ? statusColor(routing.status) : 'text-slate-500'}
+          valueColor={routing ? statusValueColor(routing.status) : 'text-slate-500'}
         />
         <MiniStat
           icon={ClipboardDocumentCheckIcon}

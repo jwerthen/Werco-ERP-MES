@@ -727,7 +727,7 @@ export default function OperatorCertifications() {
               description="Skill assessments by operator and work center will appear here."
             />
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
+            <div className="overflow-x-auto rounded-xl border border-slate-700 bg-fd-panel shadow-sm">
               <table className="min-w-full divide-y divide-slate-700 text-sm">
                 <thead className="bg-slate-800">
                   <tr>
@@ -740,7 +740,7 @@ export default function OperatorCertifications() {
                 <tbody className="divide-y divide-gray-100">
                   {operators.map((op) => (
                     <tr key={op.id} className="hover:bg-slate-800">
-                      <td className="sticky left-0 z-10 bg-[#151b28] px-4 py-3 font-medium text-white whitespace-nowrap">{op.name}</td>
+                      <td className="sticky left-0 z-10 bg-fd-panel px-4 py-3 font-medium text-white whitespace-nowrap">{op.name}</td>
                       {workCenters.map((wc) => {
                         const entry = matrixMap.get(`${op.id}-${wc.id}`);
                         const level = entry?.skill_level ?? 0;

@@ -445,7 +445,7 @@ export default function ActionInbox() {
         )}
       </div>
 
-      <div className="rounded-lg border border-slate-700 bg-[#151b28] overflow-hidden">
+      <div className="rounded-lg border border-slate-700 bg-fd-panel overflow-hidden">
         {loading ? (
           <div className="flex items-center justify-center gap-3 py-16 text-slate-300">
             <ArrowPathIcon className="h-6 w-6 animate-spin" />

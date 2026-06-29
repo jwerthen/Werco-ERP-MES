@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { Button, EmptyState, ErrorState, statusVariant, useToast } from '../components/ui';
 import { WorkCenter, WorkCenterType } from '../types';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import {
@@ -14,11 +14,14 @@ import {
   NoSymbolIcon,
 } from '@heroicons/react/24/outline';
 
-const statusColors: Record<string, string> = {
-  available: 'bg-green-500/100',
-  in_use: 'bg-blue-500/100',
-  maintenance: 'bg-yellow-500/100',
-  offline: 'bg-red-500/100',
+// Solid status-dot color per canonical semantic variant (resolved from the
+// central statusColors source so this page can't drift from the rest of the app).
+const statusDotColor: Record<ReturnType<typeof statusVariant>, string> = {
+  green: 'bg-green-500',
+  blue: 'bg-blue-500',
+  amber: 'bg-amber-500',
+  red: 'bg-red-500',
+  slate: 'bg-slate-500',
 };
 
 export default function WorkCenters() {
@@ -210,13 +213,13 @@ export default function WorkCenters() {
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Work Centers</h1>
-        <button
+        <Button
           onClick={() => { resetForm(); setShowModal(true); }}
-          className="btn-primary flex items-center"
+          className="flex items-center"
         >
           <PlusIcon className="h-5 w-5 mr-2" />
           Add Work Center
-        </button>
+        </Button>
       </div>
 
       {/* Status KPI strip */}
@@ -311,7 +314,7 @@ export default function WorkCenters() {
                       <td className="py-1.5 pr-2 min-w-0" title={detail || undefined}>
                         <div className="flex items-center gap-2 min-w-0">
                           <span
-                            className={`h-2 w-2 flex-shrink-0 rounded-full ${statusColors[wc.current_status]}`}
+                            className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
                           />
                           <span className="font-semibold text-white flex-shrink-0">{wc.code}</span>
                           <span className="text-slate-400 truncate">{wc.name}</span>
@@ -461,16 +464,15 @@ export default function WorkCenters() {
               </div>
               
               <div className="flex justify-end gap-3 mt-6">
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
                   onClick={() => { setShowModal(false); resetForm(); }}
-                  className="btn-secondary"
                 >
                   Cancel
-                </button>
-                <button type="submit" className="btn-primary">
+                </Button>
+                <Button type="submit">
                   {editingWc ? 'Update' : 'Create'}
-                </button>
+                </Button>
               </div>
             </form>
       </Modal>

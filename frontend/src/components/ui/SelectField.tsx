@@ -184,7 +184,7 @@ export function SelectField<TValue extends string | number = string | number>({
         <div
           ref={menuRef}
           style={menuStyle}
-          className={`z-50 overflow-hidden rounded-xl border border-slate-700 bg-[#151b28] shadow-2xl shadow-black/40 ${menuClassName}`}
+          className={`z-50 overflow-hidden rounded-xl border border-slate-700 bg-fd-panel shadow-2xl shadow-black/40 ${menuClassName}`}
         >
           {searchable && (
             <div className="relative border-b border-slate-700/70">

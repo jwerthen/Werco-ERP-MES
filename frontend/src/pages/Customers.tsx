@@ -13,6 +13,8 @@ import {
   DataTableColumn,
   StatusBadge,
   MobileDataCard,
+  Button,
+  statusColor,
 } from '../components/ui';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -110,16 +112,6 @@ const EMPTY_CUSTOMER_FORM = {
 };
 
 type CustomerFormData = typeof EMPTY_CUSTOMER_FORM;
-
-const statusColors: Record<string, string> = {
-  draft: 'bg-slate-800 text-slate-100',
-  released: 'bg-blue-500/20 text-blue-300',
-  in_progress: 'bg-yellow-500/20 text-yellow-300',
-  complete: 'bg-green-500/20 text-green-300',
-  on_hold: 'bg-orange-500/20 text-orange-300',
-  cancelled: 'bg-red-500/20 text-red-300',
-  closed: 'bg-purple-500/20 text-purple-300',
-};
 
 export default function Customers() {
   const navigate = useNavigate();
@@ -269,14 +261,6 @@ export default function Customers() {
     setInitialFormData(EMPTY_CUSTOMER_FORM);
   };
 
-  const statusColorMap = useMemo(
-    () => ({
-      active: 'bg-green-500/20 text-green-300',
-      inactive: 'bg-slate-800 text-slate-400',
-    }),
-    []
-  );
-
   const renderRequirements = (customer: Customer) => (
     <div className="flex gap-1">
       {customer.requires_coc && (
@@ -345,7 +329,7 @@ export default function Customers() {
       sortable: true,
       accessor: (c) => (c.is_active ? 'active' : 'inactive'),
       render: (c) => (
-        <StatusBadge status={c.is_active ? 'active' : 'inactive'} colorMap={statusColorMap} />
+        <StatusBadge status={c.is_active ? 'active' : 'inactive'} />
       ),
     },
     {
@@ -362,13 +346,13 @@ export default function Customers() {
         </button>
       ),
     },
-  ], [statusColorMap]);
+  ], []);
 
   const renderMobileCard = (customer: Customer) => (
     <MobileDataCard
       title={customer.name}
       subtitle={customer.code ? `Code: ${customer.code}` : undefined}
-      badge={<StatusBadge status={customer.is_active ? 'active' : 'inactive'} colorMap={statusColorMap} />}
+      badge={<StatusBadge status={customer.is_active ? 'active' : 'inactive'} />}
       onClick={() => viewCustomerDetails(customer)}
       className={!customer.is_active ? 'opacity-60' : ''}
       fields={[
@@ -397,13 +381,13 @@ export default function Customers() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Customers</h1>
-        <button
+        <Button
           onClick={() => { resetForm(); setShowModal(true); }}
-          className="btn-primary flex items-center"
+          className="flex items-center"
         >
           <PlusIcon className="h-5 w-5 mr-2" />
           Add Customer
-        </button>
+        </Button>
       </div>
 
       {/* Filters */}
@@ -648,9 +632,9 @@ export default function Customers() {
               </FormField>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <button type="button" onClick={requestCloseModal} className="btn-secondary" disabled={saving}>
+                <Button variant="secondary" onClick={requestCloseModal} disabled={saving}>
                   Cancel
-                </button>
+                </Button>
                 <LoadingButton type="submit" loading={saving} loadingText="Saving...">
                   {editingCustomer ? 'Update' : 'Create'}
                 </LoadingButton>
@@ -718,9 +702,9 @@ export default function Customers() {
                       <h3 className="text-sm font-medium text-slate-300 mb-2">Work Orders by Status</h3>
                       <div className="flex flex-wrap gap-2">
                         {Object.entries(customerStats.work_order_counts.by_status).map(([status, count]) => (
-                          <span 
-                            key={status} 
-                            className={`px-3 py-1 rounded-full text-sm font-medium ${statusColors[status] || 'bg-slate-800 text-slate-100'}`}
+                          <span
+                            key={status}
+                            className={`px-3 py-1 rounded-full text-sm font-medium ${statusColor(status)}`}
                           >
                             {status.replace('_', ' ')}: {count}
                           </span>
@@ -756,7 +740,7 @@ export default function Customers() {
                       Customer Menu: Parts, Assemblies, Current and Past Work Orders
                     </h3>
                     <div className="grid grid-cols-2 gap-3">
-                      <div className="border rounded-lg bg-[#151b28]">
+                      <div className="border rounded-lg bg-fd-panel">
                         <div className="px-3 py-2 border-b text-xs font-semibold text-slate-300 flex items-center justify-between">
                           <span>Assemblies</span>
                           <span>{customerStats.assemblies.length}</span>
@@ -773,7 +757,7 @@ export default function Customers() {
                         </div>
                       </div>
 
-                      <div className="border rounded-lg bg-[#151b28]">
+                      <div className="border rounded-lg bg-fd-panel">
                         <div className="px-3 py-2 border-b text-xs font-semibold text-slate-300 flex items-center justify-between">
                           <span>Parts</span>
                           <span>{customerStats.parts.length}</span>
@@ -790,7 +774,7 @@ export default function Customers() {
                         </div>
                       </div>
 
-                      <div className="border rounded-lg bg-[#151b28]">
+                      <div className="border rounded-lg bg-fd-panel">
                         <div className="px-3 py-2 border-b text-xs font-semibold text-slate-300 flex items-center justify-between">
                           <span>Current Work Orders</span>
                           <span>{customerStats.current_work_orders.length}</span>
@@ -808,7 +792,7 @@ export default function Customers() {
                             >
                               <div className="flex items-center justify-between gap-2">
                                 <span className="font-mono text-white">{wo.work_order_number}</span>
-                                <span className={`px-2 py-0.5 rounded ${statusColors[wo.status] || 'bg-slate-800 text-slate-300'}`}>
+                                <span className={`px-2 py-0.5 rounded ${statusColor(wo.status)}`}>
                                   {wo.status.replace('_', ' ')}
                                 </span>
                               </div>
@@ -822,7 +806,7 @@ export default function Customers() {
                         </div>
                       </div>
 
-                      <div className="border rounded-lg bg-[#151b28]">
+                      <div className="border rounded-lg bg-fd-panel">
                         <div className="px-3 py-2 border-b text-xs font-semibold text-slate-300 flex items-center justify-between">
                           <span>Past Work Orders</span>
                           <span>{customerStats.past_work_orders.length}</span>
@@ -840,7 +824,7 @@ export default function Customers() {
                             >
                               <div className="flex items-center justify-between gap-2">
                                 <span className="font-mono text-white">{wo.work_order_number}</span>
-                                <span className={`px-2 py-0.5 rounded ${statusColors[wo.status] || 'bg-slate-800 text-slate-300'}`}>
+                                <span className={`px-2 py-0.5 rounded ${statusColor(wo.status)}`}>
                                   {wo.status.replace('_', ' ')}
                                 </span>
                               </div>
@@ -873,13 +857,12 @@ export default function Customers() {
 
             {/* Footer */}
             <div className="px-6 py-4 border-t bg-slate-800/50 flex justify-end gap-3">
-              <button onClick={closeDetails} className="btn-secondary">Close</button>
-              <button
+              <Button variant="secondary" onClick={closeDetails}>Close</Button>
+              <Button
                 onClick={() => { closeDetails(); handleEdit(selectedCustomer); }}
-                className="btn-primary"
               >
                 Edit Customer
-              </button>
+              </Button>
             </div>
           </>
         )}

@@ -43,7 +43,7 @@ function LoadingSpinner({ label = 'Loading...' }: { label?: string }) {
  */
 export function CardSkeleton() {
   return (
-    <div className="animate-pulse bg-[#151b28] rounded-xl p-6 shadow-sm">
+    <div className="animate-pulse bg-fd-panel rounded-xl p-6 shadow-sm">
       <div className="flex items-center gap-4 mb-4">
         <div className="w-12 h-12 bg-slate-700 rounded-lg"></div>
         <div className="flex-1">
@@ -91,7 +91,7 @@ export function TableSkeleton({ rows = 5 }: { rows?: number }) {
  */
 export function ChartSkeleton() {
   return (
-    <div className="animate-pulse bg-[#151b28] rounded-xl p-6">
+    <div className="animate-pulse bg-fd-panel rounded-xl p-6">
       <div className="h-5 bg-slate-700 rounded w-1/4 mb-6"></div>
       <div className="flex items-end justify-between h-48 gap-2">
         {Array.from({ length: 7 }).map((_, i) => (
