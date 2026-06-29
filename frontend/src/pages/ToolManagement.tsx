@@ -258,7 +258,7 @@ export default function ToolManagement() {
       </div>
 
       {/* Table */}
-      <div className="bg-[#151b28] rounded-lg shadow overflow-hidden">
+      <div className="bg-[#151b28] rounded-lg shadow overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-slate-800 text-left text-xs font-medium text-slate-400 uppercase">
             <tr>

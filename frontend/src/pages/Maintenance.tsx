@@ -274,7 +274,7 @@ export default function Maintenance() {
           )}
 
           <h3 className="text-lg font-semibold mt-6">Recent Work Orders</h3>
-          <div className="bg-[#151b28] rounded-lg shadow overflow-hidden">
+          <div className="bg-[#151b28] rounded-lg shadow overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-800 text-left text-xs font-medium text-slate-400 uppercase">
                 <tr>
@@ -313,7 +313,7 @@ export default function Maintenance() {
 
       {/* Schedules Tab */}
       {activeTab === 'schedules' && (
-        <div className="bg-[#151b28] rounded-lg shadow overflow-hidden">
+        <div className="bg-[#151b28] rounded-lg shadow overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-800 text-left text-xs font-medium text-slate-400 uppercase">
               <tr>
@@ -373,7 +373,7 @@ export default function Maintenance() {
             </select>
           </div>
 
-          <div className="bg-[#151b28] rounded-lg shadow overflow-hidden">
+          <div className="bg-[#151b28] rounded-lg shadow overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-800 text-left text-xs font-medium text-slate-400 uppercase">
                 <tr>

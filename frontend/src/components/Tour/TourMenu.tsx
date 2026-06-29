@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTour } from '../../context/TourContext';
 import { getToursForRole, getHelpTipsForRole, getTour } from '../../data/tours';
 import { useAuth } from '../../context/AuthContext';
+import { useKeyboardShortcutsContext } from '../../context/KeyboardShortcutsContext';
 import { usePermissions } from '../../hooks/usePermissions';
 import { ROLE_LABELS } from '../../utils/permissions';
 import {
@@ -54,6 +55,7 @@ export default function TourMenu() {
   const { startTour, isTourComplete, resetAllTours, isActive } = useTour();
   const { user } = useAuth();
   const { role, isSuperuser } = usePermissions();
+  const { showHelp } = useKeyboardShortcutsContext();
   const navigate = useNavigate();
 
   // Get role-filtered tours and tips
@@ -337,7 +339,7 @@ export default function TourMenu() {
               <button
                 onClick={() => {
                   setIsOpen(false);
-                  navigate('/');
+                  showHelp();
                 }}
                 className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700 rounded-lg transition-colors"
               >

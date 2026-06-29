@@ -143,6 +143,14 @@ export default function OperatorKiosk() {
     onTimeout: handleIdleLogout,
   });
 
+  // Mutations are blocked while a request is in flight (busy) OR while the
+  // station is offline. Firing a clock-in/out, complete, hold, or scrap against
+  // a dead connection silently drops the record, so we hard-disable the buttons
+  // rather than letting the tap no-op. The offline banner (id below) carries the
+  // human-readable reason and is referenced via aria-describedby.
+  const mutationsBlocked = busy || !online;
+  const OFFLINE_HINT_ID = 'kiosk-offline-hint';
+
   // --- Mutations (all send source:"kiosk") ----------------------------------
   const handleClockIn = useCallback(
     async (item: KioskQueueItem) => {
@@ -330,10 +338,15 @@ export default function OperatorKiosk() {
         </div>
       </header>
 
-      {/* Offline banner */}
+      {/* Offline banner — also the accessible explanation for the disabled
+          mutation buttons (referenced via aria-describedby). */}
       {!online && (
-        <div role="alert" className="border-b border-fd-red bg-fd-red/15 px-5 py-4 text-center text-xl font-bold text-fd-red">
-          OFFLINE — changes are not being saved. Reconnecting…
+        <div
+          role="alert"
+          id={OFFLINE_HINT_ID}
+          className="border-b border-fd-red bg-fd-red/15 px-5 py-4 text-center text-xl font-bold text-fd-red"
+        >
+          OFFLINE — actions are disabled until the connection is restored. Reconnecting…
         </div>
       )}
 
@@ -379,7 +392,7 @@ export default function OperatorKiosk() {
               <KioskActiveJobBanner
                 job={activeJob}
                 nowMs={nowMs}
-                busy={busy}
+                busy={mutationsBlocked}
                 onReportProduction={() => setView({ name: 'production', job: activeJob })}
                 onComplete={() => setView({ name: 'complete', job: activeJob })}
                 onHold={() => {
@@ -402,7 +415,7 @@ export default function OperatorKiosk() {
               ) : (
                 <div className="space-y-3">
                   {queue.map((item) => (
-                    <KioskQueueCard key={item.operation_id} item={item} disabled={busy} onSelect={(it) => setView({ name: 'confirm', item: it })} />
+                    <KioskQueueCard key={item.operation_id} item={item} disabled={mutationsBlocked} onSelect={(it) => setView({ name: 'confirm', item: it })} />
                   ))}
                 </div>
               )}
@@ -443,11 +456,13 @@ export default function OperatorKiosk() {
               </button>
               <button
                 type="button"
-                disabled={busy}
+                disabled={mutationsBlocked}
+                aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
+                title={!online ? 'Offline — clock in is disabled until reconnected' : undefined}
                 onClick={() => void handleClockIn(view.item)}
-                className="min-h-20 rounded border border-fd-green bg-fd-green/15 text-2xl font-bold uppercase tracking-wide text-fd-green transition-colors hover:bg-fd-green/25 disabled:opacity-40"
+                className="min-h-20 rounded border border-fd-green bg-fd-green/15 text-2xl font-bold uppercase tracking-wide text-fd-green transition-colors hover:bg-fd-green/25 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {busy ? 'Clocking in…' : 'Clock in'}
+                {!online ? 'Offline' : busy ? 'Clocking in…' : 'Clock in'}
               </button>
             </div>
           </section>
@@ -459,7 +474,7 @@ export default function OperatorKiosk() {
             jobLabel={jobLabel(view.job)}
             confirmLabel="Save"
             requireTotalPositive
-            busy={busy}
+            busy={mutationsBlocked}
             onConfirm={(good, scrap, reason) => void handleReportProduction(view.job, good, scrap, reason)}
             onCancel={() => setView({ name: 'queue' })}
           />
@@ -472,7 +487,7 @@ export default function OperatorKiosk() {
             confirmLabel="Complete"
             initialGood={Math.max(0, Number(view.job.quantity_ordered || 0) - Number(view.job.quantity_complete || 0))}
             requireTotalPositive={false}
-            busy={busy}
+            busy={mutationsBlocked}
             onConfirm={(good, scrap, reason) => void handleComplete(view.job, good, scrap, reason)}
             onCancel={() => setView({ name: 'queue' })}
           />
@@ -483,7 +498,7 @@ export default function OperatorKiosk() {
             <h2 className="text-3xl font-bold text-fd-ink">Hold job</h2>
             <p className="mt-1 font-mono text-lg text-fd-mute">{jobLabel(view.job)}</p>
             <p className="mt-4 mb-2 text-lg font-semibold text-fd-amber">Why is this job stopping? — required</p>
-            <KioskReasonGrid reasons={HOLD_REASONS} selected={holdReason} onSelect={setHoldReason} disabled={busy} tone="amber" />
+            <KioskReasonGrid reasons={HOLD_REASONS} selected={holdReason} onSelect={setHoldReason} disabled={mutationsBlocked} tone="amber" />
             <div className="mt-6 grid grid-cols-2 gap-3">
               <button
                 type="button"
@@ -495,11 +510,13 @@ export default function OperatorKiosk() {
               </button>
               <button
                 type="button"
-                disabled={busy || !holdReason}
+                disabled={mutationsBlocked || !holdReason}
+                aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
+                title={!online ? 'Offline — hold is disabled until reconnected' : undefined}
                 onClick={() => holdReason && void handleHold(view.job, holdReason)}
                 className="min-h-20 rounded border border-fd-amber bg-fd-amber/15 text-xl font-bold uppercase tracking-wide text-fd-amber transition-colors hover:bg-fd-amber/25 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {busy ? 'Holding…' : 'Hold job'}
+                {!online ? 'Offline' : busy ? 'Holding…' : 'Hold job'}
               </button>
             </div>
           </section>

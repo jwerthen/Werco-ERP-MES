@@ -261,6 +261,7 @@ export default function WorkCenters() {
             className="min-w-0"
             footer={`${group.items.length} center${group.items.length !== 1 ? 's' : ''}`}
           >
+            <div className="overflow-x-auto">
             <table className="w-full text-sm tabular-nums">
               <thead>
                 <tr className="text-[10px] uppercase tracking-wide text-slate-500 border-b border-fd-line">
@@ -321,6 +322,7 @@ export default function WorkCenters() {
                 })}
               </tbody>
             </table>
+            </div>
           </CockpitPanel>
         ))}
       </div>

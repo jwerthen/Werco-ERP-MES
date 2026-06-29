@@ -28,6 +28,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
+import { ConfirmDialog } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 import { ScanResolveResult } from '../types/scan';
@@ -114,6 +115,7 @@ export default function ShopFloorSimple() {
   
   // Modal states
   const [checkOutModal, setCheckOutModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
+  const [completeConfirm, setCompleteConfirm] = useState<Operation | null>(null);
   const [productionModal, setProductionModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
   const [detailsModal, setDetailsModal] = useState<any | null>(null);
   const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
@@ -644,6 +646,7 @@ export default function ShopFloorSimple() {
   };
 
   const handleCompleteOperation = async (operation: Operation) => {
+    setCompleteConfirm(null);
     setActionLoading(operation.id);
     try {
       await api.completeOperation(operation.id, {
@@ -1510,7 +1513,7 @@ export default function ShopFloorSimple() {
                       </div>
                       <div className="flex gap-2">
                         <button
-                          onClick={() => handleCompleteOperation(op)}
+                          onClick={() => setCompleteConfirm(op)}
                           disabled={actionLoading === op.id}
                           className="btn-success btn-sm"
                         >
@@ -1677,6 +1680,20 @@ export default function ShopFloorSimple() {
           })}
         </div>
       )}
+
+      {/* Confirm full-quantity completion (closes the operation, no undo) */}
+      <ConfirmDialog
+        open={completeConfirm !== null}
+        title="Complete operation at full quantity?"
+        message="This closes the operation and cannot be undone."
+        confirmLabel="Complete Operation"
+        cancelLabel="Cancel"
+        variant="warning"
+        onConfirm={() => {
+          if (completeConfirm) handleCompleteOperation(completeConfirm);
+        }}
+        onCancel={() => setCompleteConfirm(null)}
+      />
 
       {/* Add Production Modal */}
       {productionModal && createPortal((

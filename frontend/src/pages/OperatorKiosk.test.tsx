@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import OperatorKiosk from './OperatorKiosk';
 import api from '../services/api';
@@ -258,5 +258,67 @@ describe('OperatorKiosk', () => {
     renderKiosk();
     expect(await screen.findByText(/scan your badge/i)).toBeInTheDocument();
     expect(mockedApi.getWorkCenterQueue).not.toHaveBeenCalled();
+  });
+
+  describe('offline gating (mutationsBlocked = busy || !online)', () => {
+    // `online` flips to false when a poll refresh rejects, and to true when it
+    // succeeds. To exercise the OFFLINE state with last-known data still on
+    // screen, we let the FIRST refresh succeed (populating the active job +
+    // queue, online=true), then make subsequent refreshes reject and advance the
+    // 15s poll timer so the next tick trips offline while the data is retained.
+    const POLL_MS = 15_000;
+
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => {
+      act(() => jest.runOnlyPendingTimers());
+      jest.useRealTimers();
+    });
+
+    async function goOffline() {
+      // Make the next refresh fail (both calls reject -> Promise.all rejects).
+      mockedApi.getWorkCenterQueue.mockRejectedValue(new Error('network down'));
+      mockedApi.getMyActiveJob.mockRejectedValue(new Error('network down'));
+      // Fire the poll tick and let the rejected refresh settle.
+      await act(async () => {
+        jest.advanceTimersByTime(POLL_MS);
+      });
+    }
+
+    it('disables the active-job mutation buttons (Report/Complete/Hold) when offline', async () => {
+      mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
+      renderKiosk();
+
+      // Online first: the active-job actions are enabled.
+      const report = await screen.findByRole('button', { name: /report production/i });
+      expect(report).toBeEnabled();
+      expect(screen.getByRole('button', { name: /^complete$/i })).toBeEnabled();
+      expect(screen.getByRole('button', { name: /^hold$/i })).toBeEnabled();
+
+      await goOffline();
+
+      // The OFFLINE banner appears and the mutation actions are hard-disabled.
+      expect(await screen.findByText(/actions are disabled until the connection is restored/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /report production/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /^complete$/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /^hold$/i })).toBeDisabled();
+    });
+
+    it('disables the clock-in confirm button and labels it "Offline" while offline', async () => {
+      // No active job: the queue card -> confirm screen is the clock-in path.
+      mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [], active_job: null });
+      renderKiosk();
+
+      // Online: open the confirm screen and verify Clock in is enabled.
+      fireEvent.click(await screen.findByRole('button', { name: /WO-2026-0142/i }));
+      const clockIn = screen.getByRole('button', { name: /^clock in$/i });
+      expect(clockIn).toBeEnabled();
+
+      await goOffline();
+
+      // Same confirm screen (form state retained), but Clock in is now disabled
+      // and relabelled "Offline" — the tap can't silently drop the record.
+      const offlineBtn = await screen.findByRole('button', { name: /^offline$/i });
+      expect(offlineBtn).toBeDisabled();
+    });
   });
 });
