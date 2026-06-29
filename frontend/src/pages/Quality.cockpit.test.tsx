@@ -123,9 +123,14 @@ describe('Quality cockpit MiniStat strip', () => {
     renderQuality();
 
     const ncrTile = await screen.findByRole('button', { name: /Open NCRs/i });
+    // The NCR list renders both a desktop <table> and a parallel mobile-card list
+    // (DataTable.mobileCards), so each NCR number appears twice in jsdom. Scope
+    // the row assertions to the desktop table to keep the filter intent intact.
+    const desktopTable = () =>
+      within(screen.getByTestId('data-table'));
     // No filter applied yet: both NCR rows are visible.
-    expect(screen.getByText('NCR-0001')).toBeInTheDocument();
-    expect(screen.getByText('NCR-0002')).toBeInTheDocument();
+    expect(desktopTable().getByText('NCR-0001')).toBeInTheDocument();
+    expect(desktopTable().getByText('NCR-0002')).toBeInTheDocument();
     // Tile starts inactive (default filter is empty on /quality).
     expect(ncrTile).toHaveAttribute('aria-pressed', 'false');
 
@@ -135,7 +140,7 @@ describe('Quality cockpit MiniStat strip', () => {
       expect(ncrTile).toHaveAttribute('aria-pressed', 'true');
     });
     // Filter switched to "open": the open NCR stays, the closed one is filtered out.
-    expect(screen.getByText('NCR-0001')).toBeInTheDocument();
-    expect(screen.queryByText('NCR-0002')).not.toBeInTheDocument();
+    expect(desktopTable().getByText('NCR-0001')).toBeInTheDocument();
+    expect(desktopTable().queryByText('NCR-0002')).not.toBeInTheDocument();
   });
 });

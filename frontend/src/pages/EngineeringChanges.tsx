@@ -5,17 +5,19 @@ import {
   CheckCircleIcon,
   PlusIcon,
   XMarkIcon,
-  ChevronDownIcon,
-  ChevronUpIcon,
   MagnifyingGlassIcon,
   FunnelIcon,
   DocumentTextIcon,
   ArrowPathIcon,
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
-import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  useToast,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -148,6 +150,146 @@ const fmt = (n: number) =>
 const userName = (u: UserSummary | null) =>
   u ? `${u.first_name} ${u.last_name}` : '-';
 
+const badge = (cls: string, label: string) => (
+  <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
+    {label}
+  </span>
+);
+
+const typeChip = (eco: ECO) =>
+  badge(typeBadge[eco.eco_type] || 'bg-slate-800 text-slate-100', typeLabel[eco.eco_type] || eco.eco_type);
+const priorityChip = (eco: ECO) =>
+  badge(priorityBadge[eco.priority] || 'bg-slate-800 text-slate-100', priorityLabel[eco.priority] || eco.priority);
+const statusChip = (eco: ECO) =>
+  badge(statusBadge[eco.status] || 'bg-slate-800 text-slate-100', statusLabel[eco.status] || eco.status);
+
+interface RowActionHandlers {
+  onSubmit: (id: number) => void;
+  onApprove: (id: number) => void;
+  onReject: (id: number) => void;
+  onImplement: (id: number) => void;
+  onComplete: (id: number) => void;
+  actionLoading: number | null;
+}
+
+// Renders the status-appropriate workflow buttons for an ECO. `compact` uses the
+// smaller table styling; the mobile card reuses the same set.
+function EcoRowActions({ eco, h }: { eco: ECO; h: RowActionHandlers }) {
+  const busy = h.actionLoading === eco.id;
+  return (
+    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+      {eco.status === 'draft' && (
+        <button
+          onClick={() => h.onSubmit(eco.id)}
+          disabled={busy}
+          className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+        >
+          Submit
+        </button>
+      )}
+      {(eco.status === 'submitted' || eco.status === 'under_review') && (
+        <>
+          <button
+            onClick={() => h.onApprove(eco.id)}
+            disabled={busy}
+            className="rounded bg-green-600 px-2 py-1 text-xs font-medium text-white hover:bg-green-500 disabled:opacity-50"
+          >
+            Approve
+          </button>
+          <button
+            onClick={() => h.onReject(eco.id)}
+            disabled={busy}
+            className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+          >
+            Reject
+          </button>
+        </>
+      )}
+      {eco.status === 'approved' && (
+        <button
+          onClick={() => h.onImplement(eco.id)}
+          disabled={busy}
+          className="rounded bg-purple-600 px-2 py-1 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50"
+        >
+          Implement
+        </button>
+      )}
+      {eco.status === 'in_implementation' && (
+        <button
+          onClick={() => h.onComplete(eco.id)}
+          disabled={busy}
+          className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+        >
+          Complete
+        </button>
+      )}
+    </div>
+  );
+}
+
+function buildEcoColumns(h: RowActionHandlers): Array<DataTableColumn<ECO>> {
+  return [
+    {
+      key: 'eco_number',
+      header: 'ECO Number',
+      sortable: true,
+      accessor: (e) => e.eco_number,
+      render: (e) => <span className="font-mono font-medium text-werco-navy-400">{e.eco_number}</span>,
+    },
+    {
+      key: 'title',
+      header: 'Title',
+      sortable: true,
+      accessor: (e) => e.title,
+      className: 'max-w-[220px]',
+      render: (e) => <span className="text-white block truncate max-w-[220px]">{e.title}</span>,
+    },
+    {
+      key: 'eco_type',
+      header: 'Type',
+      sortable: true,
+      accessor: (e) => typeLabel[e.eco_type] || e.eco_type,
+      render: typeChip,
+    },
+    {
+      key: 'priority',
+      header: 'Priority',
+      sortable: true,
+      accessor: (e) => priorityLabel[e.priority] || e.priority,
+      render: priorityChip,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (e) => statusLabel[e.status] || e.status,
+      render: statusChip,
+    },
+    {
+      key: 'requester',
+      header: 'Requestor',
+      sortable: true,
+      accessor: (e) => userName(e.requester),
+      className: 'text-slate-300',
+      render: (e) => userName(e.requester),
+    },
+    {
+      key: 'created_at',
+      header: 'Date',
+      sortable: true,
+      accessor: (e) => e.created_at ?? '',
+      csv: (e) => formatDate(e.created_at),
+      className: 'text-slate-400',
+      render: (e) => formatDate(e.created_at),
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      render: (e) => <EcoRowActions eco={e} h={h} />,
+    },
+  ];
+}
+
 // ── Component ────────────────────────────────────────────────────
 
 export default function EngineeringChanges() {
@@ -165,8 +307,8 @@ export default function EngineeringChanges() {
   const [typeFilter, setTypeFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
 
-  // Expand
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  // Detail modal (replaces the inline expand row — DataTable rows can't host expansion)
+  const [detailEco, setDetailEco] = useState<ECO | null>(null);
 
   // Create ECO modal
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -238,11 +380,14 @@ export default function EngineeringChanges() {
     );
   }, [ecos, searchTerm]);
 
-  // ── Row expand ─────────────────────────────────────────────────
+  // ── Detail modal ───────────────────────────────────────────────
 
-  const toggleExpand = useCallback((id: number) => {
-    setExpandedId((prev) => (prev === id ? null : id));
-  }, []);
+  // Keep the open detail modal in sync with the latest loaded data (so a status
+  // change reflected in a reload updates the modal in place).
+  const detailEcoLive = useMemo(
+    () => (detailEco ? ecos.find((e) => e.id === detailEco.id) ?? detailEco : null),
+    [detailEco, ecos]
+  );
 
   // ── Actions ────────────────────────────────────────────────────
 
@@ -378,6 +523,54 @@ export default function EngineeringChanges() {
     }
   }, [createForm, loadEcos, loadDashboard]);
 
+  // ── Table columns + mobile cards ───────────────────────────────
+
+  const columns = useMemo(
+    () =>
+      buildEcoColumns({
+        onSubmit: handleSubmit,
+        onApprove: handleApprove,
+        onReject: openRejectModal,
+        onImplement: handleImplement,
+        onComplete: handleComplete,
+        actionLoading,
+      }),
+    [handleSubmit, handleApprove, openRejectModal, handleImplement, handleComplete, actionLoading]
+  );
+
+  const renderMobileCard = useCallback(
+    (eco: ECO) => (
+      <MobileDataCard
+        title={eco.eco_number}
+        subtitle={eco.title}
+        badge={statusChip(eco)}
+        onClick={() => setDetailEco(eco)}
+        fields={[
+          { label: 'Type', value: typeChip(eco) },
+          { label: 'Priority', value: priorityChip(eco) },
+          { label: 'Requestor', value: userName(eco.requester) },
+          { label: 'Date', value: formatDate(eco.created_at) },
+        ]}
+        actions={
+          <EcoRowActions
+            eco={eco}
+            h={{
+              onSubmit: handleSubmit,
+              onApprove: handleApprove,
+              onReject: openRejectModal,
+              onImplement: handleImplement,
+              onComplete: handleComplete,
+              actionLoading,
+            }}
+          />
+        }
+      />
+    ),
+    [handleSubmit, handleApprove, openRejectModal, handleImplement, handleComplete, actionLoading]
+  );
+
+  const hasFilters = !!(searchTerm || statusFilter || typeFilter || priorityFilter);
+
   // ── Render ─────────────────────────────────────────────────────
 
   return (
@@ -484,226 +677,33 @@ export default function EngineeringChanges() {
       </div>
 
       {/* Table */}
-      {loading ? (
-        <SkeletonTable rows={6} columns={7} />
-      ) : error ? (
-        <ErrorState
-          title="Failed to load engineering changes"
-          message={error}
-          onRetry={loadEcos}
-        />
-      ) : (
-        <div className="overflow-x-auto rounded-lg border bg-[#151b28] shadow-sm">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800/50">
-              <tr>
-                <th className="w-8 px-3 py-3" />
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">ECO Number</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Title</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Priority</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Requestor</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Date</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-slate-400">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700">
-              {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="px-4 py-8">
-                    {searchTerm || statusFilter || typeFilter || priorityFilter ? (
-                      <EmptyState
-                        icon={DocumentTextIcon}
-                        title="No matching ECOs"
-                        description="No engineering change orders match the current search or filters."
-                      />
-                    ) : (
-                      <EmptyState
-                        icon={DocumentTextIcon}
-                        title="No engineering change orders"
-                        description="Engineering change orders you create will appear here."
-                        action={{ label: 'New ECO', onClick: openCreateModal }}
-                      />
-                    )}
-                  </td>
-                </tr>
-              ) : (
-                filtered.map((eco) => (
-                  <React.Fragment key={eco.id}>
-                    <tr
-                      className="hover:bg-slate-800/50 cursor-pointer"
-                      onClick={() => toggleExpand(eco.id)}
-                    >
-                      <td className="px-3 py-3">
-                        {expandedId === eco.id ? (
-                          <ChevronUpIcon className="h-4 w-4 text-slate-500" />
-                        ) : (
-                          <ChevronDownIcon className="h-4 w-4 text-slate-500" />
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-sm font-mono font-medium text-indigo-600">
-                        {eco.eco_number}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-white max-w-[200px] truncate">
-                        {eco.title}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${typeBadge[eco.eco_type] || 'bg-slate-800 text-slate-100'}`}>
-                          {typeLabel[eco.eco_type] || eco.eco_type}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${priorityBadge[eco.priority] || 'bg-slate-800 text-slate-100'}`}>
-                          {priorityLabel[eco.priority] || eco.priority}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${statusBadge[eco.status] || 'bg-slate-800 text-slate-100'}`}>
-                          {statusLabel[eco.status] || eco.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-slate-300">
-                        {userName(eco.requester)}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-slate-400">
-                        {formatDate(eco.created_at)}
-                      </td>
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center gap-1">
-                          {eco.status === 'draft' && (
-                            <button
-                              onClick={() => handleSubmit(eco.id)}
-                              disabled={actionLoading === eco.id}
-                              className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500/100/100 disabled:opacity-50"
-                            >
-                              Submit
-                            </button>
-                          )}
-                          {(eco.status === 'submitted' || eco.status === 'under_review') && (
-                            <>
-                              <button
-                                onClick={() => handleApprove(eco.id)}
-                                disabled={actionLoading === eco.id}
-                                className="rounded bg-green-600 px-2 py-1 text-xs font-medium text-white hover:bg-green-500/100 disabled:opacity-50"
-                              >
-                                Approve
-                              </button>
-                              <button
-                                onClick={() => openRejectModal(eco.id)}
-                                disabled={actionLoading === eco.id}
-                                className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-500/100/100 disabled:opacity-50"
-                              >
-                                Reject
-                              </button>
-                            </>
-                          )}
-                          {eco.status === 'approved' && (
-                            <button
-                              onClick={() => handleImplement(eco.id)}
-                              disabled={actionLoading === eco.id}
-                              className="rounded bg-purple-600 px-2 py-1 text-xs font-medium text-white hover:bg-purple-500/100 disabled:opacity-50"
-                            >
-                              Implement
-                            </button>
-                          )}
-                          {eco.status === 'in_implementation' && (
-                            <button
-                              onClick={() => handleComplete(eco.id)}
-                              disabled={actionLoading === eco.id}
-                              className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500/100/100 disabled:opacity-50"
-                            >
-                              Complete
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-
-                    {/* Expanded detail row */}
-                    {expandedId === eco.id && (
-                      <tr>
-                        <td colSpan={9} className="bg-slate-800/50 px-6 py-4">
-                          <div className="space-y-4">
-                            {/* Description & Reason */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div>
-                                <h4 className="text-xs font-semibold uppercase text-slate-400 mb-1">Description</h4>
-                                <p className="text-sm text-slate-300 whitespace-pre-wrap">{eco.description}</p>
-                              </div>
-                              <div>
-                                <h4 className="text-xs font-semibold uppercase text-slate-400 mb-1">Reason for Change</h4>
-                                <p className="text-sm text-slate-300 whitespace-pre-wrap">{eco.reason_for_change}</p>
-                              </div>
-                            </div>
-
-                            {/* Extra details */}
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                              {eco.proposed_solution && (
-                                <div><span className="text-xs font-semibold uppercase text-slate-400">Proposed Solution</span><p className="text-slate-300 mt-0.5">{eco.proposed_solution}</p></div>
-                              )}
-                              <div><span className="text-xs font-semibold uppercase text-slate-400">Est. Cost</span><p className="text-slate-300 mt-0.5">{fmt(eco.estimated_cost)}</p></div>
-                              {eco.actual_cost > 0 && <div><span className="text-xs font-semibold uppercase text-slate-400">Actual Cost</span><p className="text-slate-300 mt-0.5">{fmt(eco.actual_cost)}</p></div>}
-                              {eco.target_date && <div><span className="text-xs font-semibold uppercase text-slate-400">Target Date</span><p className="text-slate-300 mt-0.5">{formatDate(eco.target_date)}</p></div>}
-                              {eco.assignee && <div><span className="text-xs font-semibold uppercase text-slate-400">Assigned To</span><p className="text-slate-300 mt-0.5">{userName(eco.assignee)}</p></div>}
-                              {eco.completed_date && <div><span className="text-xs font-semibold uppercase text-slate-400">Completed</span><p className="text-slate-300 mt-0.5">{formatDate(eco.completed_date)}</p></div>}
-                            </div>
-
-                            {/* Approval Workflow */}
-                            {eco.approvals.length > 0 && (
-                              <div>
-                                <h4 className="text-xs font-semibold uppercase text-slate-400 mb-2">Approval Workflow</h4>
-                                <div className="rounded border bg-[#151b28] divide-y">
-                                  {eco.approvals.map((a) => (
-                                    <div key={a.id} className="flex items-center justify-between px-4 py-2 text-sm">
-                                      <div><span className="font-medium text-white">{userName(a.approver)}</span><span className="ml-2 text-slate-400">({a.role})</span></div>
-                                      <div className="flex items-center gap-3">
-                                        {a.comments && <span className="text-slate-400 italic text-xs max-w-[200px] truncate">{a.comments}</span>}
-                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${a.status === 'approved' ? 'bg-green-500/20 text-green-300' : a.status === 'rejected' ? 'bg-red-500/20 text-red-300' : 'bg-yellow-500/20 text-yellow-300'}`}>
-                                          {a.status === 'approved' ? 'Approved' : a.status === 'rejected' ? 'Rejected' : 'Pending'}
-                                        </span>
-                                        {a.decision_date && <span className="text-xs text-slate-500">{formatDate(a.decision_date)}</span>}
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                            {/* Implementation Tasks */}
-                            {eco.implementation_tasks.length > 0 && (
-                              <div>
-                                <h4 className="text-xs font-semibold uppercase text-slate-400 mb-2">Implementation Tasks</h4>
-                                <div className="rounded border bg-[#151b28] divide-y">
-                                  {eco.implementation_tasks.map((t) => (
-                                    <div key={t.id} className="flex items-center justify-between px-4 py-2 text-sm">
-                                      <div className="flex items-center gap-2">
-                                        <span className="text-slate-500 font-mono text-xs">#{t.task_number}</span>
-                                        <span className="text-white">{t.description}</span>
-                                        {t.department && <span className="text-xs text-slate-400 bg-slate-800 rounded px-1.5 py-0.5">{t.department}</span>}
-                                      </div>
-                                      <div className="flex items-center gap-3">
-                                        {t.assignee && <span className="text-xs text-slate-400">{userName(t.assignee)}</span>}
-                                        {t.due_date && <span className="text-xs text-slate-500">Due: {formatDate(t.due_date)}</span>}
-                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${t.status === 'completed' ? 'bg-green-500/20 text-green-300' : t.status === 'in_progress' ? 'bg-blue-500/20 text-blue-300' : t.status === 'skipped' ? 'bg-slate-800 text-slate-100' : 'bg-yellow-500/20 text-yellow-300'}`}>
-                                          {taskStatusLabel[t.status] || t.status}
-                                        </span>
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <DataTable<ECO>
+        columns={columns}
+        data={filtered}
+        rowKey={(e) => e.id}
+        onRowClick={(e) => setDetailEco(e)}
+        loading={loading}
+        error={error || false}
+        onRetry={loadEcos}
+        defaultSort={{ key: 'created_at', dir: 'desc' }}
+        pageSize={25}
+        csvExport={{ filename: 'engineering-changes' }}
+        mobileCards={renderMobileCard}
+        empty={
+          hasFilters
+            ? {
+                icon: DocumentTextIcon,
+                title: 'No matching ECOs',
+                description: 'No engineering change orders match the current search or filters.',
+              }
+            : {
+                icon: DocumentTextIcon,
+                title: 'No engineering change orders',
+                description: 'Engineering change orders you create will appear here.',
+                action: { label: 'New ECO', onClick: openCreateModal },
+              }
+        }
+      />
 
       {/* Results count */}
       {!loading && !error && (
@@ -837,6 +837,113 @@ export default function EngineeringChanges() {
                 </button>
               </div>
             </form>
+      </Modal>
+
+      {/* ── ECO Detail Modal (replaces the inline expand row) ─────── */}
+      <Modal open={!!detailEcoLive} onClose={() => setDetailEco(null)} size="lg" scroll={false} padded={false}>
+        {detailEcoLive && (
+          <>
+            <div className="flex items-start justify-between border-b px-6 py-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-lg font-semibold text-white font-mono">{detailEcoLive.eco_number}</h2>
+                  {statusChip(detailEcoLive)}
+                  {typeChip(detailEcoLive)}
+                  {priorityChip(detailEcoLive)}
+                </div>
+                <p className="text-sm text-slate-400 mt-1 truncate">{detailEcoLive.title}</p>
+              </div>
+              <div className="flex items-center gap-3 pl-3">
+                <EcoRowActions
+                  eco={detailEcoLive}
+                  h={{
+                    onSubmit: handleSubmit,
+                    onApprove: handleApprove,
+                    onReject: openRejectModal,
+                    onImplement: handleImplement,
+                    onComplete: handleComplete,
+                    actionLoading,
+                  }}
+                />
+                <button onClick={() => setDetailEco(null)}>
+                  <XMarkIcon className="h-5 w-5 text-slate-500 hover:text-slate-400" />
+                </button>
+              </div>
+            </div>
+            <div className="space-y-4 px-6 py-4 max-h-[70vh] overflow-y-auto">
+              {/* Description & Reason */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <h4 className="text-xs font-semibold uppercase text-slate-400 mb-1">Description</h4>
+                  <p className="text-sm text-slate-300 whitespace-pre-wrap">{detailEcoLive.description}</p>
+                </div>
+                <div>
+                  <h4 className="text-xs font-semibold uppercase text-slate-400 mb-1">Reason for Change</h4>
+                  <p className="text-sm text-slate-300 whitespace-pre-wrap">{detailEcoLive.reason_for_change}</p>
+                </div>
+              </div>
+
+              {/* Extra details */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                {detailEcoLive.proposed_solution && (
+                  <div><span className="text-xs font-semibold uppercase text-slate-400">Proposed Solution</span><p className="text-slate-300 mt-0.5">{detailEcoLive.proposed_solution}</p></div>
+                )}
+                <div><span className="text-xs font-semibold uppercase text-slate-400">Est. Cost</span><p className="text-slate-300 mt-0.5">{fmt(detailEcoLive.estimated_cost)}</p></div>
+                {detailEcoLive.actual_cost > 0 && <div><span className="text-xs font-semibold uppercase text-slate-400">Actual Cost</span><p className="text-slate-300 mt-0.5">{fmt(detailEcoLive.actual_cost)}</p></div>}
+                {detailEcoLive.target_date && <div><span className="text-xs font-semibold uppercase text-slate-400">Target Date</span><p className="text-slate-300 mt-0.5">{formatDate(detailEcoLive.target_date)}</p></div>}
+                {detailEcoLive.assignee && <div><span className="text-xs font-semibold uppercase text-slate-400">Assigned To</span><p className="text-slate-300 mt-0.5">{userName(detailEcoLive.assignee)}</p></div>}
+                {detailEcoLive.completed_date && <div><span className="text-xs font-semibold uppercase text-slate-400">Completed</span><p className="text-slate-300 mt-0.5">{formatDate(detailEcoLive.completed_date)}</p></div>}
+                <div><span className="text-xs font-semibold uppercase text-slate-400">Requestor</span><p className="text-slate-300 mt-0.5">{userName(detailEcoLive.requester)}</p></div>
+                <div><span className="text-xs font-semibold uppercase text-slate-400">Created</span><p className="text-slate-300 mt-0.5">{formatDate(detailEcoLive.created_at)}</p></div>
+              </div>
+
+              {/* Approval Workflow */}
+              {detailEcoLive.approvals.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold uppercase text-slate-400 mb-2">Approval Workflow</h4>
+                  <div className="rounded border bg-[#151b28] divide-y">
+                    {detailEcoLive.approvals.map((a) => (
+                      <div key={a.id} className="flex items-center justify-between px-4 py-2 text-sm">
+                        <div><span className="font-medium text-white">{userName(a.approver)}</span><span className="ml-2 text-slate-400">({a.role})</span></div>
+                        <div className="flex items-center gap-3">
+                          {a.comments && <span className="text-slate-400 italic text-xs max-w-[200px] truncate">{a.comments}</span>}
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${a.status === 'approved' ? 'bg-green-500/20 text-green-300' : a.status === 'rejected' ? 'bg-red-500/20 text-red-300' : 'bg-yellow-500/20 text-yellow-300'}`}>
+                            {a.status === 'approved' ? 'Approved' : a.status === 'rejected' ? 'Rejected' : 'Pending'}
+                          </span>
+                          {a.decision_date && <span className="text-xs text-slate-500">{formatDate(a.decision_date)}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Implementation Tasks */}
+              {detailEcoLive.implementation_tasks.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold uppercase text-slate-400 mb-2">Implementation Tasks</h4>
+                  <div className="rounded border bg-[#151b28] divide-y">
+                    {detailEcoLive.implementation_tasks.map((t) => (
+                      <div key={t.id} className="flex items-center justify-between px-4 py-2 text-sm">
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-500 font-mono text-xs">#{t.task_number}</span>
+                          <span className="text-white">{t.description}</span>
+                          {t.department && <span className="text-xs text-slate-400 bg-slate-800 rounded px-1.5 py-0.5">{t.department}</span>}
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {t.assignee && <span className="text-xs text-slate-400">{userName(t.assignee)}</span>}
+                          {t.due_date && <span className="text-xs text-slate-500">Due: {formatDate(t.due_date)}</span>}
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${t.status === 'completed' ? 'bg-green-500/20 text-green-300' : t.status === 'in_progress' ? 'bg-blue-500/20 text-blue-300' : t.status === 'skipped' ? 'bg-slate-800 text-slate-100' : 'bg-yellow-500/20 text-yellow-300'}`}>
+                            {taskStatusLabel[t.status] || t.status}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </Modal>
 
       {/* ── Reject Modal ──────────────────────────────────────────── */}

@@ -17,7 +17,12 @@ import {
   UsersIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  useToast,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+} from '../components/ui';
 import { importTimeoutMessage } from '../utils/apiError';
 
 interface UserData {
@@ -136,6 +141,99 @@ export default function Users() {
   });
 
   const [newPassword, setNewPassword] = useState('');
+
+  // A0.4: badge-print selection backed by DataTable's selection prop (Set-based).
+  const selectedKeySet = React.useMemo(() => new Set<number>(selectedUserIds), [selectedUserIds]);
+
+  const userColumns: Array<DataTableColumn<UserData>> = React.useMemo(
+    () => [
+      {
+        key: 'employee',
+        header: 'Employee',
+        sortable: true,
+        accessor: (u) => `${u.last_name} ${u.first_name}`,
+        csv: (u) => `${u.first_name} ${u.last_name}`,
+        render: (u) => (
+          <div>
+            <div className="font-medium">{u.first_name} {u.last_name}</div>
+            <div className="text-sm text-slate-400">ID: {u.employee_id}</div>
+          </div>
+        ),
+      },
+      {
+        key: 'email',
+        header: 'Email',
+        sortable: true,
+        accessor: (u) => u.email,
+      },
+      {
+        key: 'role',
+        header: 'Role',
+        sortable: true,
+        accessor: (u) => roleLabels[u.role],
+        render: (u) => (
+          <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${roleColors[u.role]}`}>
+            {roleLabels[u.role]}
+          </span>
+        ),
+      },
+      {
+        key: 'department',
+        header: 'Department',
+        sortable: true,
+        accessor: (u) => u.department || '',
+        render: (u) => u.department || '-',
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: (u) => (u.is_active ? 'Active' : 'Inactive'),
+        render: (u) => (
+          <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
+            u.is_active ? 'bg-green-500/20 text-emerald-300' : 'bg-slate-800/50 text-slate-400'
+          }`}>
+            {u.is_active ? 'Active' : 'Inactive'}
+          </span>
+        ),
+      },
+      {
+        key: 'actions',
+        header: 'Actions',
+        align: 'center',
+        render: (u) => (
+          <div className="flex justify-center gap-2" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => handleEdit(u)}
+              className="text-slate-400 hover:text-slate-400"
+              title="Edit"
+            >
+              <PencilIcon className="h-5 w-5" />
+            </button>
+            <button
+              onClick={() => openPasswordReset(u.id)}
+              className="text-slate-400 hover:text-blue-600"
+              title="Reset Password"
+            >
+              <KeyIcon className="h-5 w-5" />
+            </button>
+            <button
+              onClick={() => handleToggleActive(u)}
+              className={u.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
+              title={u.is_active ? 'Deactivate' : 'Activate'}
+            >
+              {u.is_active ? (
+                <UserMinusIcon className="h-5 w-5" />
+              ) : (
+                <UserPlusIcon className="h-5 w-5" />
+              )}
+            </button>
+          </div>
+        ),
+      },
+    ],
+    []
+  );
 
   const loadUsers = useCallback(async () => {
     setLoadError(false);
@@ -282,13 +380,6 @@ export default function Users() {
     );
   };
 
-  // Membership-based, not count-based: counts go stale when the users list refetches.
-  const allVisibleSelected = users.length > 0 && users.every((u) => selectedUserIds.includes(u.id));
-
-  const toggleSelectAllBadges = () => {
-    setSelectedUserIds(allVisibleSelected ? [] : users.map((u) => u.id));
-  };
-
   const handlePrintBadges = () => {
     if (selectedUserIds.length === 0) return;
     window.open(`/print/badges?user_ids=${selectedUserIds.join(',')}`, '_blank');
@@ -336,14 +427,6 @@ export default function Users() {
       phone: ''
     });
   };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6">
@@ -495,119 +578,97 @@ export default function Users() {
         </div>
       )}
 
-      <div className="card overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800">
-              <tr>
-                <th className="px-4 py-3 text-left">
+      <DataTable<UserData>
+        columns={userColumns}
+        data={users}
+        rowKey={(u) => u.id}
+        loading={loading}
+        error={loadError}
+        onRetry={loadUsers}
+        defaultSort={{ key: 'employee', dir: 'asc' }}
+        pageSize={25}
+        csvExport={{ filename: 'users' }}
+        selection={{
+          selectedKeys: selectedKeySet as Set<string | number>,
+          onChange: (keys) => setSelectedUserIds(Array.from(keys).map((k) => Number(k))),
+        }}
+        empty={{
+          icon: UsersIcon,
+          title: 'No users found',
+          description: showInactive
+            ? 'No users match the current filter.'
+            : 'Add a user or import a CSV to get started.',
+          action: canManageUsers
+            ? { label: 'Add User', onClick: () => { resetForm(); setShowModal(true); } }
+            : undefined,
+        }}
+        mobileCards={(user) => (
+          <MobileDataCard
+            key={user.id}
+            title={`${user.first_name} ${user.last_name}`}
+            subtitle={`ID: ${user.employee_id}`}
+            className={!user.is_active ? 'opacity-60' : ''}
+            badge={
+              <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${roleColors[user.role]}`}>
+                {roleLabels[user.role]}
+              </span>
+            }
+            fields={[
+              { label: 'Email', value: user.email, fullWidth: true },
+              { label: 'Department', value: user.department || '-' },
+              {
+                label: 'Status',
+                value: (
+                  <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${
+                    user.is_active ? 'bg-green-500/20 text-emerald-300' : 'bg-slate-800/50 text-slate-400'
+                  }`}>
+                    {user.is_active ? 'Active' : 'Inactive'}
+                  </span>
+                ),
+              },
+            ]}
+            actions={
+              <>
+                <label className="flex items-center gap-1.5 text-xs text-slate-300 mr-auto cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={allVisibleSelected}
-                    onChange={toggleSelectAllBadges}
+                    checked={selectedUserIds.includes(user.id)}
+                    onChange={() => toggleBadgeSelection(user.id)}
                     className="rounded border-slate-600"
-                    aria-label="Select all users for badge printing"
+                    aria-label={`Select ${user.first_name} ${user.last_name} for badge printing`}
                   />
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Employee</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Email</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Role</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Department</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="bg-[#151b28] divide-y divide-slate-700">
-              {users.map((user) => (
-                <tr key={user.id} className={`hover:bg-slate-800 ${!user.is_active ? 'opacity-60' : ''}`}>
-                  <td className="px-4 py-4">
-                    <input
-                      type="checkbox"
-                      checked={selectedUserIds.includes(user.id)}
-                      onChange={() => toggleBadgeSelection(user.id)}
-                      className="rounded border-slate-600"
-                      aria-label={`Select ${user.first_name} ${user.last_name} for badge printing`}
-                    />
-                  </td>
-                  <td className="px-4 py-4">
-                    <div>
-                      <div className="font-medium">{user.first_name} {user.last_name}</div>
-                      <div className="text-sm text-slate-400">ID: {user.employee_id}</div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-4 text-sm">{user.email}</td>
-                  <td className="px-4 py-4">
-                    <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${roleColors[user.role]}`}>
-                      {roleLabels[user.role]}
-                    </span>
-                  </td>
-                  <td className="px-4 py-4 text-sm">{user.department || '-'}</td>
-                  <td className="px-4 py-4">
-                    <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
-                      user.is_active ? 'bg-green-500/20 text-emerald-300' : 'bg-slate-800/50 text-slate-400'
-                    }`}>
-                      {user.is_active ? 'Active' : 'Inactive'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-4">
-                    <div className="flex justify-center gap-2">
-                      <button
-                        onClick={() => handleEdit(user)}
-                        className="text-slate-400 hover:text-slate-400"
-                        title="Edit"
-                      >
-                        <PencilIcon className="h-5 w-5" />
-                      </button>
-                      <button
-                        onClick={() => openPasswordReset(user.id)}
-                        className="text-slate-400 hover:text-blue-600"
-                        title="Reset Password"
-                      >
-                        <KeyIcon className="h-5 w-5" />
-                      </button>
-                      <button
-                        onClick={() => handleToggleActive(user)}
-                        className={user.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
-                        title={user.is_active ? 'Deactivate' : 'Activate'}
-                      >
-                        {user.is_active ? (
-                          <UserMinusIcon className="h-5 w-5" />
-                        ) : (
-                          <UserPlusIcon className="h-5 w-5" />
-                        )}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {users.length === 0 && (
-          loadError ? (
-            <ErrorState
-              message="Could not load users."
-              onRetry={loadUsers}
-              className="py-8"
-            />
-          ) : (
-            <EmptyState
-              icon={UsersIcon}
-              title="No users found"
-              description={
-                showInactive
-                  ? 'No users match the current filter.'
-                  : 'Add a user or import a CSV to get started.'
-              }
-              action={
-                canManageUsers
-                  ? { label: 'Add User', onClick: () => { resetForm(); setShowModal(true); } }
-                  : undefined
-              }
-            />
-          )
+                  Badge
+                </label>
+                <button
+                  onClick={() => handleEdit(user)}
+                  className="text-slate-400 hover:text-slate-200"
+                  title="Edit"
+                >
+                  <PencilIcon className="h-5 w-5" />
+                </button>
+                <button
+                  onClick={() => openPasswordReset(user.id)}
+                  className="text-slate-400 hover:text-blue-600"
+                  title="Reset Password"
+                >
+                  <KeyIcon className="h-5 w-5" />
+                </button>
+                <button
+                  onClick={() => handleToggleActive(user)}
+                  className={user.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
+                  title={user.is_active ? 'Deactivate' : 'Activate'}
+                >
+                  {user.is_active ? (
+                    <UserMinusIcon className="h-5 w-5" />
+                  ) : (
+                    <UserPlusIcon className="h-5 w-5" />
+                  )}
+                </button>
+              </>
+            }
+          />
         )}
-      </div>
+      />
 
       {/* Add/Edit User Modal */}
       <Modal

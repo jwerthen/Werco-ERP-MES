@@ -10,7 +10,13 @@ import {
   DocumentTextIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  useToast,
+  DataTable,
+  DataTableColumn,
+  StatusBadge,
+  MobileDataCard,
+} from '../components/ui';
 
 interface QuoteLine {
   id: number;
@@ -161,6 +167,13 @@ export default function Quotes() {
     setSearchParams(nextParams, { replace: true });
   };
 
+  const selectQuote = (quote: Quote) => {
+    setSelectedQuote(quote);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set('id', String(quote.id));
+    setSearchParams(nextParams, { replace: true });
+  };
+
   const addLine = () => {
     setNewQuote({
       ...newQuote,
@@ -192,13 +205,136 @@ export default function Quotes() {
     return newQuote.lines.reduce((sum, line) => sum + (line.quantity * line.unit_price), 0);
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
-  }
+  // Row actions (Send / Convert / WO-created) — shared by table + mobile cards.
+  const renderRowActions = (q: Quote) => (
+    <div className="flex justify-center gap-2">
+      {q.status === 'draft' && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            handleSend(q.id);
+          }}
+          className="text-blue-600 hover:text-blue-300"
+          title="Send to Customer"
+        >
+          <PaperAirplaneIcon className="h-5 w-5" />
+        </button>
+      )}
+      {(q.status === 'sent' || q.status === 'accepted') && !q.work_order_id && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            handleConvert(q.id);
+          }}
+          className="text-green-600 hover:text-green-300"
+          title="Convert to Work Order"
+        >
+          <ArrowRightIcon className="h-5 w-5" />
+        </button>
+      )}
+      {q.work_order_id && <span className="text-xs text-slate-400">WO Created</span>}
+    </div>
+  );
+
+  const columns: DataTableColumn<Quote>[] = [
+    {
+      key: 'quote_number',
+      header: 'Quote #',
+      sortable: true,
+      accessor: (q) => q.quote_number,
+      csv: (q) => `${q.quote_number} Rev ${q.revision}`,
+      render: (q) => (
+        <>
+          <span className="font-medium text-werco-primary">{q.quote_number}</span>
+          <span className="text-slate-400 text-sm ml-1">Rev {q.revision}</span>
+        </>
+      ),
+    },
+    {
+      key: 'customer_name',
+      header: 'Customer',
+      sortable: true,
+      accessor: (q) => q.customer_name,
+      render: (q) => (
+        <div>
+          <div className="font-medium">{q.customer_name}</div>
+          {q.customer_contact && (
+            <div className="text-sm text-slate-400">{q.customer_contact}</div>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (q) => q.status,
+      render: (q) => <StatusBadge status={q.status} colorMap={statusColors} />,
+    },
+    {
+      key: 'quote_date',
+      header: 'Date',
+      sortable: true,
+      accessor: (q) => q.quote_date,
+      csv: (q) => formatCentralDate(q.quote_date),
+      render: (q) => formatCentralDate(q.quote_date),
+    },
+    {
+      key: 'valid_until',
+      header: 'Valid Until',
+      sortable: true,
+      accessor: (q) => q.valid_until ?? '',
+      csv: (q) => (q.valid_until ? formatCentralDate(q.valid_until) : ''),
+      render: (q) => (q.valid_until ? formatCentralDate(q.valid_until) : '-'),
+    },
+    {
+      key: 'total',
+      header: 'Total',
+      sortable: true,
+      align: 'right',
+      accessor: (q) => q.total,
+      csv: (q) => q.total,
+      render: (q) => (
+        <span className="font-medium">
+          ${q.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+        </span>
+      ),
+    },
+    {
+      key: 'lines',
+      header: 'Lines',
+      sortable: true,
+      align: 'center',
+      accessor: (q) => q.lines.length,
+      render: (q) => q.lines.length,
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: renderRowActions,
+    },
+  ];
+
+  const renderMobileCard = (q: Quote) => (
+    <MobileDataCard
+      title={`${q.quote_number} Rev ${q.revision}`}
+      subtitle={q.customer_contact ? `${q.customer_name} • ${q.customer_contact}` : q.customer_name}
+      badge={<StatusBadge status={q.status} colorMap={statusColors} />}
+      highlight={selectedQuote?.id === q.id}
+      onClick={() => selectQuote(q)}
+      fields={[
+        { label: 'Date', value: formatCentralDate(q.quote_date) },
+        { label: 'Valid Until', value: q.valid_until ? formatCentralDate(q.valid_until) : '-' },
+        {
+          label: 'Total',
+          value: `$${q.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+        },
+        { label: 'Lines', value: q.lines.length },
+      ]}
+      actions={renderRowActions(q)}
+    />
+  );
 
   return (
     <div className="space-y-6">
@@ -218,13 +354,6 @@ export default function Quotes() {
 
       {/* Quotes Table */}
       <div className="card">
-        {loadError && (
-          <ErrorState
-            message="Could not load quotes."
-            onRetry={loadData}
-            className="my-4"
-          />
-        )}
         {selectedQuote && (
           <div className="mb-4 rounded-xl border border-werco-500/30 bg-werco-500/10 p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -246,88 +375,25 @@ export default function Quotes() {
             </div>
           </div>
         )}
-        {!loadError && (
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800/50">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Quote #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Date</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Valid Until</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Total</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Lines</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700">
-              {quotes.map((q) => (
-                <tr key={q.id} className={`${selectedQuote?.id === q.id ? 'bg-werco-500/10' : ''} hover:bg-slate-800/50`}>
-                  <td className="px-4 py-3">
-                    <span className="font-medium text-werco-primary">{q.quote_number}</span>
-                    <span className="text-slate-400 text-sm ml-1">Rev {q.revision}</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="font-medium">{q.customer_name}</div>
-                    {q.customer_contact && (
-                      <div className="text-sm text-slate-400">{q.customer_contact}</div>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[q.status]}`}>
-                      {q.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    {formatCentralDate(q.quote_date)}
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    {q.valid_until ? formatCentralDate(q.valid_until) : '-'}
-                  </td>
-                  <td className="px-4 py-3 text-right font-medium">
-                    ${q.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="px-4 py-3 text-center">{q.lines.length}</td>
-                  <td className="px-4 py-3 text-center">
-                    <div className="flex justify-center gap-2">
-                      {q.status === 'draft' && (
-                        <button
-                          onClick={() => handleSend(q.id)}
-                          className="text-blue-600 hover:text-blue-300"
-                          title="Send to Customer"
-                        >
-                          <PaperAirplaneIcon className="h-5 w-5" />
-                        </button>
-                      )}
-                      {(q.status === 'sent' || q.status === 'accepted') && !q.work_order_id && (
-                        <button
-                          onClick={() => handleConvert(q.id)}
-                          className="text-green-600 hover:text-green-300"
-                          title="Convert to Work Order"
-                        >
-                          <ArrowRightIcon className="h-5 w-5" />
-                        </button>
-                      )}
-                      {q.work_order_id && (
-                        <span className="text-xs text-slate-400">WO Created</span>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {quotes.length === 0 && (
-            <EmptyState
-              icon={DocumentTextIcon}
-              title="No quotes yet"
-              description="Create a quote or generate one from an RFQ to get started."
-              action={{ label: 'New Quote', onClick: () => setShowCreateModal(true) }}
-            />
-          )}
-        </div>
-        )}
+        <DataTable<Quote>
+          columns={columns}
+          data={quotes}
+          rowKey={(q) => q.id}
+          onRowClick={selectQuote}
+          loading={loading}
+          error={loadError}
+          onRetry={loadData}
+          defaultSort={{ key: 'quote_date', dir: 'desc' }}
+          pageSize={25}
+          csvExport={{ filename: 'quotes' }}
+          mobileCards={renderMobileCard}
+          empty={{
+            icon: DocumentTextIcon,
+            title: 'No quotes yet',
+            description: 'Create a quote or generate one from an RFQ to get started.',
+            action: { label: 'New Quote', onClick: () => setShowCreateModal(true) },
+          }}
+        />
       </div>
 
       {/* Create Quote Modal */}

@@ -16,6 +16,7 @@ import {
   useToast,
   DataTable,
   DataTableColumn,
+  MobileDataCard,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
@@ -393,6 +394,105 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     },
   ], []);
 
+  // ---- Mobile cards (below md) ----
+  const renderSummaryCard = (item: InventorySummary) => {
+    const isLowStock = lowStockPartIds.has(item.part_id);
+    return (
+      <MobileDataCard
+        key={item.part_id}
+        title={item.part_number}
+        subtitle={item.part_name}
+        badge={renderTypeBadge(getPartType(item.part_id))}
+        highlight={isLowStock}
+        fields={[
+          {
+            label: 'On Hand',
+            value: item.total_on_hand,
+            className: 'font-medium',
+          },
+          { label: 'Allocated', value: item.total_allocated },
+          {
+            label: 'Available',
+            value: <span className="text-green-600 font-medium">{item.available}</span>,
+          },
+          {
+            label: 'Status',
+            value: isLowStock ? (
+              <span className="text-xs text-red-600 font-medium">LOW STOCK</span>
+            ) : (
+              <span className="text-slate-400">—</span>
+            ),
+          },
+          {
+            label: 'Locations',
+            fullWidth: true,
+            value: item.locations.length ? (
+              <div className="space-y-0.5">
+                {item.locations.map((loc, idx) => (
+                  <div key={idx} className="text-sm">
+                    <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
+                    <span className="text-slate-400 ml-2">({loc.quantity})</span>
+                    {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <span className="text-slate-400">—</span>
+            ),
+          },
+        ]}
+      />
+    );
+  };
+
+  const renderDetailCard = (item: InventoryItem) => (
+    <MobileDataCard
+      key={item.id}
+      title={item.part?.part_number ?? '—'}
+      subtitle={item.part?.name}
+      badge={renderTypeBadge(item.part?.part_type)}
+      fields={[
+        {
+          label: 'Location',
+          value: <span className="font-mono">{item.location}</span>,
+        },
+        {
+          label: 'Lot #',
+          value: item.lot_number || '-',
+        },
+        {
+          label: 'Qty',
+          value: item.quantity_on_hand,
+          className: 'font-medium',
+        },
+        {
+          label: 'Available',
+          value: <span className="text-green-600">{item.quantity_available}</span>,
+        },
+        {
+          label: 'Status',
+          value: (
+            <span className={`px-2 py-1 rounded text-xs ${
+              item.status === 'available' ? 'bg-green-500/20 text-emerald-300' :
+              item.status === 'quarantine' ? 'bg-yellow-500/20 text-yellow-300' :
+              'bg-slate-800/50 text-slate-100'
+            }`}>{item.status}</span>
+          ),
+        },
+      ]}
+      actions={
+        <button
+          onClick={(e) => { e.stopPropagation(); openTransfer(item); }}
+          className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors"
+          aria-label="Transfer inventory"
+        >
+          <ArrowsRightLeftIcon className="h-4 w-4" />
+          Transfer
+        </button>
+      }
+    />
+  );
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -595,6 +695,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             defaultSort={{ key: 'part', dir: 'asc' }}
             pageSize={25}
             csvExport={{ filename: 'inventory-summary' }}
+            mobileCards={renderSummaryCard}
             empty={{
               icon: CubeIcon,
               title: 'No inventory on hand',
@@ -612,6 +713,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             defaultSort={{ key: 'part', dir: 'asc' }}
             pageSize={25}
             csvExport={{ filename: 'inventory-detail' }}
+            mobileCards={renderDetailCard}
             empty={{
               icon: CubeIcon,
               title: 'No inventory on hand',

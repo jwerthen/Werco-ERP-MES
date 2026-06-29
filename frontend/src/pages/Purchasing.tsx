@@ -10,7 +10,14 @@ import {
   ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
-import { EmptyState, ErrorState, useToast, DataTable, DataTableColumn } from '../components/ui';
+import {
+  EmptyState,
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+} from '../components/ui';
 
 interface Vendor {
   id: number;
@@ -540,6 +547,48 @@ export default function Purchasing() {
     },
   ];
 
+  const renderPOCard = (po: PurchaseOrder) => (
+    <MobileDataCard
+      title={po.po_number}
+      subtitle={po.vendor_name || undefined}
+      onClick={() => handlePrintPO(po.id)}
+      badge={
+        <span
+          className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[po.status] || 'bg-slate-800/50'}`}
+        >
+          {po.status.replace('_', ' ')}
+        </span>
+      }
+      fields={[
+        { label: 'Order Date', value: po.order_date ? formatCentralDate(po.order_date) : '-' },
+        { label: 'Due Date', value: po.required_date ? formatCentralDate(po.required_date) : '-' },
+        {
+          label: 'Total',
+          value: <span className="tabular-nums">${Number(po.total || 0).toFixed(2)}</span>,
+        },
+        { label: 'Lines', value: <span className="tabular-nums">{po.line_count}</span> },
+      ]}
+      actions={
+        <div className="flex flex-wrap gap-3 justify-end" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => handlePrintPO(po.id)}
+            className="text-surface-600 hover:text-werco-primary text-sm"
+          >
+            Print
+          </button>
+          {po.status === 'draft' && (
+            <button
+              onClick={() => handleSendPO(po.id)}
+              className="text-werco-primary hover:underline text-sm"
+            >
+              Send
+            </button>
+          )}
+        </div>
+      }
+    />
+  );
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -647,6 +696,7 @@ export default function Purchasing() {
             defaultSort={{ key: 'po_number', dir: 'asc' }}
             pageSize={25}
             csvExport={{ filename: 'purchase-orders' }}
+            mobileCards={renderPOCard}
             empty={{
               icon: ClipboardDocumentListIcon,
               title: poSearch.trim() ? 'No matching purchase orders' : 'No purchase orders',

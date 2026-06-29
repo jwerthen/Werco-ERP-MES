@@ -14,10 +14,15 @@ import {
   DocumentTextIcon,
   TruckIcon,
 } from '@heroicons/react/24/outline';
-import { SkeletonTable } from '../components/ui/Skeleton';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  useToast,
+  DataTable,
+  DataTableColumn,
+  StatusBadge,
+  MobileDataCard,
+} from '../components/ui';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -410,7 +415,149 @@ export default function CustomerComplaints() {
     [rmaComplaint, rmaForm, loadComplaints, loadDashboard, showToast]
   );
 
+  // ── Table columns ──────────────────────────────────────────────
+
+  const columns = useMemo<Array<DataTableColumn<Complaint>>>(
+    () => [
+      {
+        key: 'expand',
+        header: '',
+        align: 'center',
+        headerClassName: 'w-8',
+        render: (c) =>
+          expandedId === c.id ? (
+            <ChevronUpIcon className="h-4 w-4 text-slate-400" />
+          ) : (
+            <ChevronDownIcon className="h-4 w-4 text-slate-400" />
+          ),
+      },
+      {
+        key: 'complaint_number',
+        header: 'Complaint #',
+        sortable: true,
+        className: 'font-medium',
+        accessor: (c) => c.complaint_number,
+      },
+      {
+        key: 'customer',
+        header: 'Customer',
+        sortable: true,
+        accessor: (c) => c.customer_name,
+        csv: (c) => c.customer_name,
+        render: (c) => (
+          <div>
+            <div className="font-medium">{c.customer_name}</div>
+            {c.customer_contact && (
+              <div className="text-xs text-slate-400">{c.customer_contact}</div>
+            )}
+          </div>
+        ),
+      },
+      {
+        key: 'date',
+        header: 'Date',
+        sortable: true,
+        accessor: (c) => c.date_received ?? '',
+        csv: (c) => formatDate(c.date_received),
+        render: (c) => formatDate(c.date_received),
+      },
+      {
+        key: 'severity',
+        header: 'Severity',
+        sortable: true,
+        accessor: (c) => c.severity,
+        csv: (c) => severityLabel[c.severity],
+        render: (c) => (
+          <StatusBadge status={c.severity} colorMap={severityBadge} className="capitalize" />
+        ),
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: (c) => c.status,
+        csv: (c) => statusLabel[c.status],
+        render: (c) => (
+          <span
+            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${statusBadge[c.status]}`}
+          >
+            {statusLabel[c.status]}
+          </span>
+        ),
+      },
+      {
+        key: 'description',
+        header: 'Description',
+        accessor: (c) => c.title,
+        csv: (c) => `${c.title} — ${c.description}`,
+        className: 'max-w-xs',
+        render: (c) => (
+          <div className="max-w-xs">
+            <div className="text-sm font-medium truncate">{c.title}</div>
+            <div className="text-xs text-slate-400 truncate">{c.description}</div>
+          </div>
+        ),
+      },
+      {
+        key: 'rmas',
+        header: 'RMAs',
+        sortable: true,
+        align: 'center',
+        accessor: (c) => c.rmas.length,
+      },
+      {
+        key: 'estimated_cost',
+        header: 'Est. Cost',
+        sortable: true,
+        align: 'right',
+        className: 'font-mono',
+        accessor: (c) => c.estimated_cost,
+        csv: (c) => c.estimated_cost,
+        render: (c) => fmt(c.estimated_cost),
+      },
+    ],
+    [expandedId]
+  );
+
+  // ── Mobile card renderer ───────────────────────────────────────
+
+  const renderMobileCard = useCallback(
+    (c: Complaint) => (
+      <MobileDataCard
+        title={c.complaint_number}
+        subtitle={c.title}
+        onClick={() => toggleExpand(c.id)}
+        badge={
+          <span
+            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${statusBadge[c.status]}`}
+          >
+            {statusLabel[c.status]}
+          </span>
+        }
+        fields={[
+          { label: 'Customer', value: c.customer_name },
+          {
+            label: 'Severity',
+            value: (
+              <StatusBadge status={c.severity} colorMap={severityBadge} className="capitalize" />
+            ),
+          },
+          { label: 'Date', value: formatDate(c.date_received) },
+          { label: 'RMAs', value: c.rmas.length },
+          { label: 'Est. Cost', value: <span className="font-mono">{fmt(c.estimated_cost)}</span> },
+        ]}
+      />
+    ),
+    [toggleExpand]
+  );
+
   // ── Render ─────────────────────────────────────────────────────
+
+  const activeFilter = !!(searchTerm || statusFilter || severityFilter);
+  const expandedComplaint = useMemo(
+    () => (expandedId === null ? null : filtered.find((c) => c.id === expandedId) ?? null),
+    [expandedId, filtered]
+  );
 
   return (
     <div className="p-6 space-y-6">
@@ -528,293 +675,208 @@ export default function CustomerComplaints() {
         </div>
       </div>
 
-      {/* Error */}
-      {error && (
-        <ErrorState
-          message={error}
-          onRetry={loadComplaints}
-        />
-      )}
-
       {/* Table */}
-      <div className="du-card bg-base-100 shadow-sm border overflow-x-auto">
-        <table className="du-table du-table-sm w-full">
-          <thead>
-            <tr>
-              <th className="w-8"></th>
-              <th>Complaint #</th>
-              <th>Customer</th>
-              <th>Date</th>
-              <th>Severity</th>
-              <th>Status</th>
-              <th>Description</th>
-              <th>RMAs</th>
-              <th className="text-right">Est. Cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr>
-                <td colSpan={9} className="p-0">
-                  <SkeletonTable rows={8} columns={9} showHeader={false} />
-                </td>
-              </tr>
-            ) : filtered.length === 0 ? (
-              <tr>
-                <td colSpan={9} className="p-0">
-                  {error ? (
-                    <ErrorState
-                      message="Could not load complaints."
-                      onRetry={loadComplaints}
-                    />
-                  ) : (
-                    <EmptyState
-                      icon={ExclamationTriangleIcon}
-                      title={
-                        searchTerm || statusFilter || severityFilter
-                          ? 'No matching complaints'
-                          : 'No complaints found'
-                      }
-                      description={
-                        searchTerm || statusFilter || severityFilter
-                          ? 'Try adjusting your search or filters.'
-                          : 'Logged customer complaints will appear here.'
-                      }
-                      action={
-                        searchTerm || statusFilter || severityFilter
-                          ? undefined
-                          : { label: 'New Complaint', onClick: openCreateModal }
-                      }
-                    />
-                  )}
-                </td>
-              </tr>
-            ) : (
-              filtered.map((c) => (
-                <React.Fragment key={c.id}>
-                  <tr
-                    className={`cursor-pointer hover:bg-base-200 ${
-                      expandedId === c.id ? 'bg-base-200' : ''
-                    }`}
-                    onClick={() => toggleExpand(c.id)}
-                  >
-                    <td>
-                      {expandedId === c.id ? (
-                        <ChevronUpIcon className="h-4 w-4" />
-                      ) : (
-                        <ChevronDownIcon className="h-4 w-4" />
-                      )}
-                    </td>
-                    <td className="font-medium text-sm">{c.complaint_number}</td>
-                    <td>
-                      <div className="text-sm font-medium">{c.customer_name}</div>
-                      {c.customer_contact && (
-                        <div className="text-xs text-slate-400">{c.customer_contact}</div>
-                      )}
-                    </td>
-                    <td className="text-sm">{formatDate(c.date_received)}</td>
-                    <td>
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                          severityBadge[c.severity]
-                        }`}
-                      >
-                        {severityLabel[c.severity]}
-                      </span>
-                    </td>
-                    <td>
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                          statusBadge[c.status]
-                        }`}
-                      >
-                        {statusLabel[c.status]}
-                      </span>
-                    </td>
-                    <td className="max-w-xs">
-                      <div className="text-sm font-medium truncate">{c.title}</div>
-                      <div className="text-xs text-slate-400 truncate">{c.description}</div>
-                    </td>
-                    <td className="text-center text-sm">{c.rmas.length}</td>
-                    <td className="text-right font-mono text-sm">{fmt(c.estimated_cost)}</td>
-                  </tr>
+      <DataTable<Complaint>
+        columns={columns}
+        data={filtered}
+        rowKey={(c) => c.id}
+        onRowClick={(c) => toggleExpand(c.id)}
+        loading={loading}
+        error={error ?? false}
+        onRetry={loadComplaints}
+        defaultSort={{ key: 'date', dir: 'desc' }}
+        pageSize={25}
+        csvExport={{ filename: 'customer-complaints' }}
+        mobileCards={renderMobileCard}
+        empty={{
+          icon: ExclamationTriangleIcon,
+          title: activeFilter ? 'No matching complaints' : 'No complaints found',
+          description: activeFilter
+            ? 'Try adjusting your search or filters.'
+            : 'Logged customer complaints will appear here.',
+          action: activeFilter ? undefined : { label: 'New Complaint', onClick: openCreateModal },
+        }}
+      />
 
-                  {/* Expanded detail */}
-                  {expandedId === c.id && (
+      {/* Expanded detail panel — shown for the selected complaint, preserving the
+          previous inline-expand detail grid, nested RMA table, and row actions. */}
+      {expandedComplaint && (
+        <div className="rounded-sm border border-fd-line bg-fd-panel">
+          <div className="flex items-center justify-between border-b border-fd-line px-4 py-2.5">
+            <h3 className="text-sm font-semibold text-white">
+              {expandedComplaint.complaint_number} — {expandedComplaint.title}
+            </h3>
+            <button
+              onClick={() => setExpandedId(null)}
+              className="du-btn du-btn-xs du-btn-circle du-btn-ghost"
+              aria-label="Collapse detail"
+            >
+              <XMarkIcon className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="p-4 space-y-4">
+            {/* Detail grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="space-y-2">
+                <h4 className="font-semibold text-sm text-slate-300">Complaint Details</h4>
+                <dl className="text-sm space-y-1">
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">PO Number:</dt>
+                    <dd>{expandedComplaint.customer_po_number || '-'}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Part:</dt>
+                    <dd>
+                      {expandedComplaint.part
+                        ? `${expandedComplaint.part.part_number} - ${expandedComplaint.part.name}`
+                        : '-'}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Lot #:</dt>
+                    <dd>{expandedComplaint.lot_number || '-'}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Serial #:</dt>
+                    <dd>{expandedComplaint.serial_number || '-'}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Qty Affected:</dt>
+                    <dd>{expandedComplaint.quantity_affected}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Occurrence Date:</dt>
+                    <dd>{formatDate(expandedComplaint.date_of_occurrence)}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="font-semibold text-sm text-slate-300">Investigation & Resolution</h4>
+                <dl className="text-sm space-y-1">
+                  <div>
+                    <dt className="text-slate-400">Investigation Findings:</dt>
+                    <dd className="mt-0.5">{expandedComplaint.investigation_findings || '-'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-400">Root Cause:</dt>
+                    <dd className="mt-0.5">{expandedComplaint.root_cause || '-'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-400">Containment Action:</dt>
+                    <dd className="mt-0.5">{expandedComplaint.containment_action || '-'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-400">Corrective Action:</dt>
+                    <dd className="mt-0.5">{expandedComplaint.corrective_action || '-'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-400">Resolution:</dt>
+                    <dd className="mt-0.5">{expandedComplaint.resolution_description || '-'}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="font-semibold text-sm text-slate-300">Financial & Status</h4>
+                <dl className="text-sm space-y-1">
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Estimated Cost:</dt>
+                    <dd className="font-mono">{fmt(expandedComplaint.estimated_cost)}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Actual Cost:</dt>
+                    <dd className="font-mono">{fmt(expandedComplaint.actual_cost)}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Resolved Date:</dt>
+                    <dd>{formatDate(expandedComplaint.resolved_date)}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Closed Date:</dt>
+                    <dd>{formatDate(expandedComplaint.closed_date)}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Customer Satisfied:</dt>
+                    <dd>
+                      {expandedComplaint.customer_satisfied === null
+                        ? '-'
+                        : expandedComplaint.customer_satisfied
+                          ? 'Yes'
+                          : 'No'}
+                    </dd>
+                  </div>
+                  {expandedComplaint.satisfaction_notes && (
+                    <div>
+                      <dt className="text-slate-400">Satisfaction Notes:</dt>
+                      <dd className="mt-0.5">{expandedComplaint.satisfaction_notes}</dd>
+                    </div>
+                  )}
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">NCR ID:</dt>
+                    <dd>{expandedComplaint.ncr_id || '-'}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">CAR ID:</dt>
+                    <dd>{expandedComplaint.car_id || '-'}</dd>
+                  </div>
+                </dl>
+              </div>
+            </div>
+
+            {/* RMAs table */}
+            {expandedComplaint.rmas.length > 0 && (
+              <div>
+                <h4 className="font-semibold text-sm text-slate-300 mb-2">
+                  Return Material Authorizations
+                </h4>
+                <table className="du-table du-table-sm w-full">
+                  <thead>
                     <tr>
-                      <td colSpan={9} className="bg-base-200 p-0">
-                        <div className="p-4 space-y-4">
-                          {/* Detail grid */}
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div className="space-y-2">
-                              <h4 className="font-semibold text-sm text-slate-300">Complaint Details</h4>
-                              <dl className="text-sm space-y-1">
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">PO Number:</dt>
-                                  <dd>{c.customer_po_number || '-'}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Part:</dt>
-                                  <dd>{c.part ? `${c.part.part_number} - ${c.part.name}` : '-'}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Lot #:</dt>
-                                  <dd>{c.lot_number || '-'}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Serial #:</dt>
-                                  <dd>{c.serial_number || '-'}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Qty Affected:</dt>
-                                  <dd>{c.quantity_affected}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Occurrence Date:</dt>
-                                  <dd>{formatDate(c.date_of_occurrence)}</dd>
-                                </div>
-                              </dl>
-                            </div>
-
-                            <div className="space-y-2">
-                              <h4 className="font-semibold text-sm text-slate-300">Investigation & Resolution</h4>
-                              <dl className="text-sm space-y-1">
-                                <div>
-                                  <dt className="text-slate-400">Investigation Findings:</dt>
-                                  <dd className="mt-0.5">{c.investigation_findings || '-'}</dd>
-                                </div>
-                                <div>
-                                  <dt className="text-slate-400">Root Cause:</dt>
-                                  <dd className="mt-0.5">{c.root_cause || '-'}</dd>
-                                </div>
-                                <div>
-                                  <dt className="text-slate-400">Containment Action:</dt>
-                                  <dd className="mt-0.5">{c.containment_action || '-'}</dd>
-                                </div>
-                                <div>
-                                  <dt className="text-slate-400">Corrective Action:</dt>
-                                  <dd className="mt-0.5">{c.corrective_action || '-'}</dd>
-                                </div>
-                                <div>
-                                  <dt className="text-slate-400">Resolution:</dt>
-                                  <dd className="mt-0.5">{c.resolution_description || '-'}</dd>
-                                </div>
-                              </dl>
-                            </div>
-
-                            <div className="space-y-2">
-                              <h4 className="font-semibold text-sm text-slate-300">Financial & Status</h4>
-                              <dl className="text-sm space-y-1">
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Estimated Cost:</dt>
-                                  <dd className="font-mono">{fmt(c.estimated_cost)}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Actual Cost:</dt>
-                                  <dd className="font-mono">{fmt(c.actual_cost)}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Resolved Date:</dt>
-                                  <dd>{formatDate(c.resolved_date)}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Closed Date:</dt>
-                                  <dd>{formatDate(c.closed_date)}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">Customer Satisfied:</dt>
-                                  <dd>
-                                    {c.customer_satisfied === null
-                                      ? '-'
-                                      : c.customer_satisfied
-                                        ? 'Yes'
-                                        : 'No'}
-                                  </dd>
-                                </div>
-                                {c.satisfaction_notes && (
-                                  <div>
-                                    <dt className="text-slate-400">Satisfaction Notes:</dt>
-                                    <dd className="mt-0.5">{c.satisfaction_notes}</dd>
-                                  </div>
-                                )}
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">NCR ID:</dt>
-                                  <dd>{c.ncr_id || '-'}</dd>
-                                </div>
-                                <div className="flex justify-between">
-                                  <dt className="text-slate-400">CAR ID:</dt>
-                                  <dd>{c.car_id || '-'}</dd>
-                                </div>
-                              </dl>
-                            </div>
-                          </div>
-
-                          {/* RMAs table */}
-                          {c.rmas.length > 0 && (
-                            <div>
-                              <h4 className="font-semibold text-sm text-slate-300 mb-2">
-                                Return Material Authorizations
-                              </h4>
-                              <table className="du-table du-table-sm w-full">
-                                <thead>
-                                  <tr>
-                                    <th>RMA #</th>
-                                    <th>Status</th>
-                                    <th>Quantity</th>
-                                    <th>Disposition</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {c.rmas.map((rma) => (
-                                    <tr key={rma.id}>
-                                      <td className="font-medium text-sm">{rma.rma_number}</td>
-                                      <td>
-                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-500/20 text-blue-300">
-                                          {rmaStatusLabel[rma.status] || rma.status}
-                                        </span>
-                                      </td>
-                                      <td>{rma.quantity}</td>
-                                      <td>{rma.disposition || '-'}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-
-                          {/* Action buttons */}
-                          <div className="flex gap-2 pt-2 border-t border-base-300">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openRMAModal(c);
-                              }}
-                              className="du-btn du-btn-sm du-btn-outline gap-1"
-                            >
-                              <TruckIcon className="h-4 w-4" />
-                              Create RMA
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleExpand(c.id);
-                              }}
-                              className="du-btn du-btn-sm du-btn-ghost gap-1"
-                            >
-                              <DocumentTextIcon className="h-4 w-4" />
-                              Full Details
-                            </button>
-                          </div>
-                        </div>
-                      </td>
+                      <th>RMA #</th>
+                      <th>Status</th>
+                      <th>Quantity</th>
+                      <th>Disposition</th>
                     </tr>
-                  )}
-                </React.Fragment>
-              ))
+                  </thead>
+                  <tbody>
+                    {expandedComplaint.rmas.map((rma) => (
+                      <tr key={rma.id}>
+                        <td className="font-medium text-sm">{rma.rma_number}</td>
+                        <td>
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-500/20 text-blue-300">
+                            {rmaStatusLabel[rma.status] || rma.status}
+                          </span>
+                        </td>
+                        <td>{rma.quantity}</td>
+                        <td>{rma.disposition || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
-          </tbody>
-        </table>
-      </div>
+
+            {/* Action buttons */}
+            <div className="flex gap-2 pt-2 border-t border-base-300">
+              <button
+                onClick={() => openRMAModal(expandedComplaint)}
+                className="du-btn du-btn-sm du-btn-outline gap-1"
+              >
+                <TruckIcon className="h-4 w-4" />
+                Create RMA
+              </button>
+              <button
+                onClick={() => setExpandedId(null)}
+                className="du-btn du-btn-sm du-btn-ghost gap-1"
+              >
+                <DocumentTextIcon className="h-4 w-4" />
+                Full Details
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Results count */}
       {!loading && (

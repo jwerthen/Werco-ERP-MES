@@ -9,9 +9,16 @@ import {
   MagnifyingGlassIcon,
   CalendarDaysIcon,
 } from '@heroicons/react/24/outline';
-import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  EmptyState,
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+  StatusBadge,
+  MobileDataCard,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -360,6 +367,173 @@ export default function OperatorCertifications() {
     };
   }, [skillMatrix]);
 
+  // ── Table columns + mobile cards ───────────────────────────────
+
+  const certColumns = useMemo<Array<DataTableColumn<Certification>>>(() => [
+    {
+      key: 'operator',
+      header: 'Operator',
+      sortable: true,
+      className: 'font-medium text-white',
+      accessor: (c) => c.user_name || `User #${c.user_id}`,
+    },
+    {
+      key: 'certification',
+      header: 'Certification',
+      sortable: true,
+      className: 'text-slate-300',
+      accessor: (c) => c.certification_name,
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      sortable: true,
+      className: 'text-slate-400 capitalize',
+      accessor: (c) => c.certification_type,
+      render: (c) => c.certification_type.replace(/_/g, ' '),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (c) => c.status,
+      csv: (c) => statusLabel[c.status] || c.status,
+      render: (c) => <StatusBadge status={c.status} colorMap={statusBadge} className="rounded-full" />,
+    },
+    {
+      key: 'issued',
+      header: 'Issued',
+      sortable: true,
+      className: 'text-slate-400',
+      accessor: (c) => c.issue_date ?? '',
+      csv: (c) => formatDate(c.issue_date),
+      render: (c) => formatDate(c.issue_date),
+    },
+    {
+      key: 'expires',
+      header: 'Expires',
+      sortable: true,
+      className: 'text-slate-400',
+      accessor: (c) => c.expiration_date ?? '',
+      csv: (c) => formatDate(c.expiration_date),
+      render: (c) => formatDate(c.expiration_date),
+    },
+    {
+      key: 'authority',
+      header: 'Authority',
+      sortable: true,
+      className: 'text-slate-400',
+      accessor: (c) => c.issuing_authority ?? '',
+      render: (c) => c.issuing_authority || '-',
+    },
+  ], []);
+
+  const renderCertCard = useCallback((c: Certification) => (
+    <MobileDataCard
+      title={c.user_name || `User #${c.user_id}`}
+      subtitle={c.certification_name}
+      badge={<StatusBadge status={c.status} colorMap={statusBadge} className="rounded-full" />}
+      fields={[
+        { label: 'Type', value: <span className="capitalize">{c.certification_type.replace(/_/g, ' ')}</span> },
+        { label: 'Authority', value: c.issuing_authority || '-' },
+        { label: 'Issued', value: formatDate(c.issue_date) },
+        { label: 'Expires', value: formatDate(c.expiration_date) },
+      ]}
+    />
+  ), []);
+
+  const trainingColumns = useMemo<Array<DataTableColumn<TrainingRecord>>>(() => [
+    {
+      key: 'operator',
+      header: 'Operator',
+      sortable: true,
+      className: 'font-medium text-white',
+      accessor: (t) => t.user_name || `User #${t.user_id}`,
+    },
+    {
+      key: 'training',
+      header: 'Training',
+      sortable: true,
+      className: 'text-slate-300',
+      accessor: (t) => t.training_name,
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      sortable: true,
+      className: 'text-slate-400 capitalize',
+      accessor: (t) => t.training_type ?? '',
+      render: (t) => (t.training_type || '-').replace(/_/g, ' '),
+    },
+    {
+      key: 'trainer',
+      header: 'Trainer',
+      sortable: true,
+      className: 'text-slate-400',
+      accessor: (t) => t.trainer ?? '',
+      render: (t) => t.trainer || '-',
+    },
+    {
+      key: 'date',
+      header: 'Date',
+      sortable: true,
+      className: 'text-slate-400',
+      accessor: (t) => t.training_date,
+      csv: (t) => formatDate(t.training_date),
+      render: (t) => formatDate(t.training_date),
+    },
+    {
+      key: 'hours',
+      header: 'Hours',
+      sortable: true,
+      align: 'right',
+      className: 'text-slate-400 tabular-nums',
+      accessor: (t) => t.hours ?? null,
+      csv: (t) => (t.hours != null ? t.hours : ''),
+      render: (t) => (t.hours != null ? `${t.hours}h` : '-'),
+    },
+    {
+      key: 'result',
+      header: 'Result',
+      sortable: true,
+      accessor: (t) => (t.passed ? 'Passed' : 'Failed'),
+      render: (t) => (
+        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${t.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
+          {t.passed ? 'Passed' : 'Failed'}
+        </span>
+      ),
+    },
+    {
+      key: 'score',
+      header: 'Score',
+      sortable: true,
+      align: 'right',
+      className: 'text-slate-400 tabular-nums',
+      accessor: (t) => t.score ?? null,
+      csv: (t) => (t.score != null ? t.score : ''),
+      render: (t) => (t.score != null ? `${t.score}%` : '-'),
+    },
+  ], []);
+
+  const renderTrainingCard = useCallback((t: TrainingRecord) => (
+    <MobileDataCard
+      title={t.user_name || `User #${t.user_id}`}
+      subtitle={t.training_name}
+      badge={
+        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${t.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
+          {t.passed ? 'Passed' : 'Failed'}
+        </span>
+      }
+      fields={[
+        { label: 'Type', value: <span className="capitalize">{(t.training_type || '-').replace(/_/g, ' ')}</span> },
+        { label: 'Trainer', value: t.trainer || '-' },
+        { label: 'Date', value: formatDate(t.training_date) },
+        { label: 'Hours', value: t.hours != null ? `${t.hours}h` : '-' },
+        { label: 'Score', value: t.score != null ? `${t.score}%` : '-' },
+      ]}
+    />
+  ), []);
+
   // ── Render ─────────────────────────────────────────────────────
 
   const tabs: { key: TabKey; label: string }[] = [
@@ -477,127 +651,61 @@ export default function OperatorCertifications() {
 
       {/* Certifications Tab */}
       {activeTab === 'certifications' && (
-        loading ? (
-          <SkeletonTable rows={6} columns={7} />
-        ) : error ? (
-          <ErrorState message={error} onRetry={loadCertifications} />
-        ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
-            <table className="min-w-full divide-y divide-slate-700 text-sm">
-              <thead className="bg-slate-800">
-                <tr>
-                  <th className="px-4 py-3 text-left font-medium text-slate-400">Operator</th>
-                  <th className="px-4 py-3 text-left font-medium text-slate-400">Certification</th>
-                  <th className="px-4 py-3 text-left font-medium text-slate-400">Type</th>
-                  <th className="px-4 py-3 text-left font-medium text-slate-400">Status</th>
-                  <th className="px-4 py-3 text-left font-medium text-slate-400">Issued</th>
-                  <th className="px-4 py-3 text-left font-medium text-slate-400">Expires</th>
-                  <th className="px-4 py-3 text-left font-medium text-slate-400">Authority</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {filteredCerts.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-10">
-                      {searchTerm ? (
-                        <EmptyState
-                          icon={MagnifyingGlassIcon}
-                          title="No matching certifications"
-                          description="No certifications match your search."
-                        />
-                      ) : (
-                        <EmptyState
-                          icon={CheckCircleIcon}
-                          title="No certifications"
-                          description="Operator certifications will appear here once added."
-                          action={{ label: 'New Certification', onClick: openCertModal }}
-                        />
-                      )}
-                    </td>
-                  </tr>
-                ) : (
-                  filteredCerts.map((cert) => (
-                    <tr key={cert.id} className="hover:bg-slate-800 transition-colors">
-                      <td className="px-4 py-3 font-medium text-white">{cert.user_name || `User #${cert.user_id}`}</td>
-                      <td className="px-4 py-3 text-slate-300">{cert.certification_name}</td>
-                      <td className="px-4 py-3 text-slate-400 capitalize">{cert.certification_type.replace(/_/g, ' ')}</td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${statusBadge[cert.status] || 'bg-slate-800/50 text-slate-100'}`}>
-                          {statusLabel[cert.status] || cert.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-slate-400">{formatDate(cert.issue_date)}</td>
-                      <td className="px-4 py-3 text-slate-400">{formatDate(cert.expiration_date)}</td>
-                      <td className="px-4 py-3 text-slate-400">{cert.issuing_authority || '-'}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        )
+        <DataTable
+          columns={certColumns}
+          data={filteredCerts}
+          rowKey={(c) => c.id}
+          loading={loading}
+          error={error ?? false}
+          onRetry={loadCertifications}
+          defaultSort={{ key: 'operator', dir: 'asc' }}
+          pageSize={25}
+          csvExport={{ filename: 'operator-certifications' }}
+          mobileCards={renderCertCard}
+          empty={
+            searchTerm
+              ? {
+                  icon: MagnifyingGlassIcon,
+                  title: 'No matching certifications',
+                  description: 'No certifications match your search.',
+                }
+              : {
+                  icon: CheckCircleIcon,
+                  title: 'No certifications',
+                  description: 'Operator certifications will appear here once added.',
+                  action: { label: 'New Certification', onClick: openCertModal },
+                }
+          }
+        />
       )}
 
       {/* Training Records Tab */}
-      {activeTab === 'training' && trainingError && (
-        <ErrorState message={trainingError} onRetry={loadTrainingRecords} />
-      )}
-      {activeTab === 'training' && !trainingError && (
-        <div className="overflow-x-auto rounded-xl border border-slate-700 bg-[#151b28] shadow-sm">
-          <table className="min-w-full divide-y divide-slate-700 text-sm">
-            <thead className="bg-slate-800">
-              <tr>
-                <th className="px-4 py-3 text-left font-medium text-slate-400">Operator</th>
-                <th className="px-4 py-3 text-left font-medium text-slate-400">Training</th>
-                <th className="px-4 py-3 text-left font-medium text-slate-400">Type</th>
-                <th className="px-4 py-3 text-left font-medium text-slate-400">Trainer</th>
-                <th className="px-4 py-3 text-left font-medium text-slate-400">Date</th>
-                <th className="px-4 py-3 text-left font-medium text-slate-400">Hours</th>
-                <th className="px-4 py-3 text-left font-medium text-slate-400">Result</th>
-                <th className="px-4 py-3 text-left font-medium text-slate-400">Score</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {filteredTraining.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-4 py-10">
-                    {searchTerm ? (
-                      <EmptyState
-                        icon={MagnifyingGlassIcon}
-                        title="No matching training records"
-                        description="No training records match your search."
-                      />
-                    ) : (
-                      <EmptyState
-                        icon={CalendarDaysIcon}
-                        title="No training records"
-                        description="Completed and scheduled training will appear here."
-                        action={{ label: 'New Training Record', onClick: openTrainingModal }}
-                      />
-                    )}
-                  </td>
-                </tr>
-              ) : (
-                filteredTraining.map((tr) => (
-                  <tr key={tr.id} className="hover:bg-slate-800 transition-colors">
-                    <td className="px-4 py-3 font-medium text-white">{tr.user_name || `User #${tr.user_id}`}</td>
-                    <td className="px-4 py-3 text-slate-300">{tr.training_name}</td>
-                    <td className="px-4 py-3 text-slate-400 capitalize">{(tr.training_type || '-').replace(/_/g, ' ')}</td>
-                    <td className="px-4 py-3 text-slate-400">{tr.trainer || '-'}</td>
-                    <td className="px-4 py-3 text-slate-400">{formatDate(tr.training_date)}</td>
-                    <td className="px-4 py-3 text-slate-400 tabular-nums">{tr.hours != null ? `${tr.hours}h` : '-'}</td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tr.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
-                        {tr.passed ? 'Passed' : 'Failed'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-slate-400 tabular-nums">{tr.score != null ? `${tr.score}%` : '-'}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+      {activeTab === 'training' && (
+        <DataTable
+          columns={trainingColumns}
+          data={filteredTraining}
+          rowKey={(t) => t.id}
+          error={trainingError ?? false}
+          onRetry={loadTrainingRecords}
+          defaultSort={{ key: 'date', dir: 'desc' }}
+          pageSize={25}
+          csvExport={{ filename: 'training-records' }}
+          mobileCards={renderTrainingCard}
+          empty={
+            searchTerm
+              ? {
+                  icon: MagnifyingGlassIcon,
+                  title: 'No matching training records',
+                  description: 'No training records match your search.',
+                }
+              : {
+                  icon: CalendarDaysIcon,
+                  title: 'No training records',
+                  description: 'Completed and scheduled training will appear here.',
+                  action: { label: 'New Training Record', onClick: openTrainingModal },
+                }
+          }
+        />
       )}
 
       {/* Skill Matrix Tab */}

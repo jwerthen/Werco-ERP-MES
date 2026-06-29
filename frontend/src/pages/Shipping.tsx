@@ -1,8 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
-import { EmptyState, ErrorState } from '../components/ui';
+import {
+  EmptyState,
+  ErrorState,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+  MobileDataList,
+} from '../components/ui';
 import { Modal } from '../components/ui/Modal';
 import usePermissions from '../hooks/usePermissions';
 import ScheduleShipmentModal, { ScheduleShipmentTarget } from '../components/shipping/ScheduleShipmentModal';
@@ -192,6 +199,195 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
   const toggleTracking = (id: number) =>
     setExpandedTracking((prev) => ({ ...prev, [id]: !prev[id] }));
 
+  // ---- Ready-to-Ship row actions (shared by table + mobile cards) ----
+  const renderReadyActions = (wo: ReadyToShip) => (
+    <>
+      {canSchedule && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            scheduleForWorkOrder(wo);
+          }}
+          disabled={schedulingWoId === wo.work_order_id}
+          className="btn-primary text-sm px-3 py-1 disabled:opacity-60"
+        >
+          <PaperAirplaneIcon className="h-4 w-4 inline mr-1" />
+          {schedulingWoId === wo.work_order_id ? 'Starting…' : 'Schedule Shipment'}
+        </button>
+      )}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          openCreateModal(wo);
+        }}
+        className="btn-secondary text-sm px-3 py-1"
+      >
+        <TruckIcon className="h-4 w-4 inline mr-1" />
+        Manual
+      </button>
+    </>
+  );
+
+  // ---- Ready-to-Ship columns ----
+  const readyColumns = useMemo<Array<DataTableColumn<ReadyToShip>>>(() => [
+    {
+      key: 'work_order_number',
+      header: 'WO #',
+      sortable: true,
+      accessor: (wo) => wo.work_order_number,
+      className: 'font-medium text-werco-primary',
+    },
+    {
+      key: 'part',
+      header: 'Part',
+      sortable: true,
+      accessor: (wo) => wo.part_number ?? '',
+      csv: (wo) => `${wo.part_number ?? ''} ${wo.part_name ?? ''}`.trim(),
+      render: (wo) => (
+        <div className="min-w-0">
+          <div className="font-medium truncate">{wo.part_number}</div>
+          <div className="text-sm text-slate-400 truncate">{wo.part_name}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'customer',
+      header: 'Customer',
+      sortable: true,
+      accessor: (wo) => wo.customer_name ?? '',
+      render: (wo) => <span className="truncate">{wo.customer_name || '-'}</span>,
+    },
+    {
+      key: 'qty',
+      header: 'Qty',
+      sortable: true,
+      align: 'right',
+      className: 'font-medium tabular-nums',
+      accessor: (wo) => wo.quantity_complete,
+    },
+    {
+      key: 'due',
+      header: 'Due',
+      sortable: true,
+      className: 'tabular-nums',
+      accessor: (wo) => wo.due_date ?? '',
+      render: (wo) => (wo.due_date ? formatCentralDate(wo.due_date, { year: undefined }) : '-'),
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      className: 'whitespace-nowrap space-x-2',
+      render: (wo) => renderReadyActions(wo),
+    },
+  ], [canSchedule, schedulingWoId]);
+
+  const renderReadyCard = (wo: ReadyToShip) => (
+    <MobileDataCard
+      title={wo.work_order_number}
+      subtitle={`${wo.part_number ?? ''}${wo.part_name ? ` — ${wo.part_name}` : ''}`}
+      fields={[
+        { label: 'Customer', value: wo.customer_name || '-' },
+        { label: 'Qty', value: <span className="tabular-nums">{wo.quantity_complete}</span> },
+        {
+          label: 'Due',
+          value: wo.due_date ? formatCentralDate(wo.due_date, { year: undefined }) : '-',
+        },
+      ]}
+      actions={<div className="flex flex-wrap gap-2 justify-end">{renderReadyActions(wo)}</div>}
+    />
+  );
+
+  // ---- Recent-shipment row actions (shared by table + mobile cards) ----
+  const renderShipmentActions = (s: Shipment) => (
+    <>
+      {canSchedule && s.status !== 'cancelled' && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            scheduleForShipment(s);
+          }}
+          className="text-werco-primary hover:text-blue-300 text-sm"
+          title="Schedule carrier shipment"
+        >
+          <PaperAirplaneIcon className="h-5 w-5 inline" /> Schedule
+        </button>
+      )}
+      {s.status === 'pending' && canSchedule && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            handleShip(s.id);
+          }}
+          className="text-green-600 hover:text-emerald-300 text-sm"
+          title="Mark shipped (manual)"
+        >
+          <TruckIcon className="h-5 w-5 inline" /> Ship
+        </button>
+      )}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          window.open(`/print/packing-slip/${s.id}`, '_blank');
+        }}
+        className="text-blue-600 hover:text-blue-300 text-sm"
+        title="Print Packing Slip"
+      >
+        <PrinterIcon className="h-5 w-5 inline" />
+      </button>
+    </>
+  );
+
+  const renderTrackingBadge = (s: Shipment) =>
+    s.tracking_number ? (
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-sm">{s.tracking_number}</span>
+        {s.tracking_status && (
+          <span
+            className={`px-1.5 py-0.5 rounded-sm text-[10px] font-medium ${
+              trackingBadge[s.tracking_status.toLowerCase()] || 'bg-slate-500/20 text-slate-300'
+            }`}
+          >
+            {s.tracking_status.replace(/_/g, ' ')}
+          </span>
+        )}
+      </div>
+    ) : (
+      <span className="text-slate-400">-</span>
+    );
+
+  const renderShipmentCard = (s: Shipment) => {
+    const expanded = !!expandedTracking[s.id];
+    return (
+      <div key={s.id}>
+        <MobileDataCard
+          title={s.shipment_number}
+          subtitle={s.customer_name || s.ship_to_name || undefined}
+          badge={
+            <span className={`px-2 py-0.5 rounded-sm text-xs font-medium ${statusColors[s.status]}`}>
+              {s.status}
+            </span>
+          }
+          onClick={() => toggleTracking(s.id)}
+          fields={[
+            { label: 'WO #', value: s.work_order_number || '-' },
+            { label: 'Qty', value: <span className="tabular-nums">{s.quantity_shipped}</span> },
+            { label: 'Carrier', value: s.carrier || '-' },
+            { label: 'Tracking', value: renderTrackingBadge(s), fullWidth: true },
+          ]}
+          actions={
+            <div className="flex flex-wrap gap-3 justify-end">{renderShipmentActions(s)}</div>
+          }
+        />
+        {expanded && (
+          <div className="mt-2">
+            <ShipmentTrackingPanel shipmentId={s.id} />
+          </div>
+        )}
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -219,70 +415,31 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       {!loadError && (
       <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
         <h2 className="text-lg font-semibold mb-4">Ready to Ship ({readyToShip.length})</h2>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-fd-line">
-            <thead className="bg-fd-sunken">
-              <tr>
-                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
-                <th className="px-4 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
-                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Due</th>
-                <th className="px-4 py-2 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-fd-line">
-              {readyToShip.map((wo) => (
-                <tr key={wo.work_order_id} className="hover:bg-fd-sunken">
-                  <td className="px-4 py-2 font-medium text-werco-primary">{wo.work_order_number}</td>
-                  <td className="px-4 py-2 min-w-0">
-                    <div className="font-medium truncate">{wo.part_number}</div>
-                    <div className="text-sm text-slate-400 truncate">{wo.part_name}</div>
-                  </td>
-                  <td className="px-4 py-2 min-w-0 truncate">{wo.customer_name || '-'}</td>
-                  <td className="px-4 py-2 text-right font-medium tabular-nums">{wo.quantity_complete}</td>
-                  <td className="px-4 py-2 tabular-nums">
-                    {wo.due_date ? formatCentralDate(wo.due_date, { year: undefined }) : '-'}
-                  </td>
-                  <td className="px-4 py-2 text-center space-x-2 whitespace-nowrap">
-                    {canSchedule && (
-                      <button
-                        onClick={() => scheduleForWorkOrder(wo)}
-                        disabled={schedulingWoId === wo.work_order_id}
-                        className="btn-primary text-sm px-3 py-1 disabled:opacity-60"
-                      >
-                        <PaperAirplaneIcon className="h-4 w-4 inline mr-1" />
-                        {schedulingWoId === wo.work_order_id ? 'Starting…' : 'Schedule Shipment'}
-                      </button>
-                    )}
-                    <button
-                      onClick={() => openCreateModal(wo)}
-                      className="btn-secondary text-sm px-3 py-1"
-                    >
-                      <TruckIcon className="h-4 w-4 inline mr-1" />
-                      Manual
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {readyToShip.length === 0 && (
-            <EmptyState
-              icon={TruckIcon}
-              title="No work orders ready to ship"
-              description="Completed work orders awaiting shipment will appear here."
-            />
-          )}
-        </div>
+        <DataTable
+          columns={readyColumns}
+          data={readyToShip}
+          rowKey={(wo) => wo.work_order_id}
+          defaultSort={{ key: 'due', dir: 'asc' }}
+          pageSize={25}
+          csvExport={{ filename: 'ready-to-ship' }}
+          mobileCards={renderReadyCard}
+          empty={{
+            icon: TruckIcon,
+            title: 'No work orders ready to ship',
+            description: 'Completed work orders awaiting shipment will appear here.',
+          }}
+        />
       </div>
       )}
 
-      {/* Recent Shipments */}
+      {/* Recent Shipments — bespoke master/detail (expandable per-row tracking
+          panel), so it stays a hand-rolled table on desktop with a responsive
+          mobile-card fallback rather than a <DataTable>. */}
       {!loadError && (
       <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
         <h2 className="text-lg font-semibold mb-4">Recent Shipments</h2>
-        <div className="overflow-x-auto">
+        {/* Desktop table */}
+        <div className="hidden md:block overflow-x-auto">
           <table className="min-w-full divide-y divide-fd-line">
             <thead className="bg-fd-sunken">
               <tr>
@@ -325,51 +482,10 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                         </span>
                       </td>
                       <td className="px-4 py-2">{s.carrier || '-'}</td>
-                      <td className="px-4 py-2">
-                        {s.tracking_number ? (
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-sm">{s.tracking_number}</span>
-                            {s.tracking_status && (
-                              <span
-                                className={`px-1.5 py-0.5 rounded-sm text-[10px] font-medium ${
-                                  trackingBadge[s.tracking_status.toLowerCase()] || 'bg-slate-500/20 text-slate-300'
-                                }`}
-                              >
-                                {s.tracking_status.replace(/_/g, ' ')}
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          '-'
-                        )}
-                      </td>
+                      <td className="px-4 py-2">{renderTrackingBadge(s)}</td>
                       <td className="px-4 py-2 text-right tabular-nums">{s.quantity_shipped}</td>
                       <td className="px-4 py-2 text-center space-x-2 whitespace-nowrap">
-                        {canSchedule && s.status !== 'cancelled' && (
-                          <button
-                            onClick={() => scheduleForShipment(s)}
-                            className="text-werco-primary hover:text-blue-300 text-sm"
-                            title="Schedule carrier shipment"
-                          >
-                            <PaperAirplaneIcon className="h-5 w-5 inline" /> Schedule
-                          </button>
-                        )}
-                        {s.status === 'pending' && canSchedule && (
-                          <button
-                            onClick={() => handleShip(s.id)}
-                            className="text-green-600 hover:text-emerald-300 text-sm"
-                            title="Mark shipped (manual)"
-                          >
-                            <TruckIcon className="h-5 w-5 inline" /> Ship
-                          </button>
-                        )}
-                        <button
-                          onClick={() => window.open(`/print/packing-slip/${s.id}`, '_blank')}
-                          className="text-blue-600 hover:text-blue-300 text-sm"
-                          title="Print Packing Slip"
-                        >
-                          <PrinterIcon className="h-5 w-5 inline" />
-                        </button>
+                        {renderShipmentActions(s)}
                       </td>
                     </tr>
                     {expanded && (
@@ -390,6 +506,19 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
               title="No shipments yet"
               description="Shipments you create will appear here."
             />
+          )}
+        </div>
+
+        {/* Mobile cards (below md) — tap a card to expand its tracking panel. */}
+        <div className="md:hidden">
+          {shipments.length === 0 ? (
+            <EmptyState
+              icon={PaperAirplaneIcon}
+              title="No shipments yet"
+              description="Shipments you create will appear here."
+            />
+          ) : (
+            <MobileDataList>{shipments.map((s) => renderShipmentCard(s))}</MobileDataList>
           )}
         </div>
       </div>

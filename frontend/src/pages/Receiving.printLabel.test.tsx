@@ -81,6 +81,16 @@ beforeEach(() => {
   mockApi.getReceivingHistory.mockResolvedValue([]);
 });
 
+// The inspection queue renders both a desktop <table> and a parallel mobile-card
+// list (DataTable.mobileCards), so the receipt number appears twice in jsdom.
+// Resolve the desktop table row (the only match inside a <tr>).
+const findDesktopRow = async (text: string): Promise<HTMLElement> => {
+  await waitFor(() => expect(screen.getAllByText(text).length).toBeGreaterThan(0));
+  const cell = screen.getAllByText(text).find((el) => el.closest('tr') !== null);
+  expect(cell).toBeTruthy();
+  return (cell as HTMLElement).closest('tr') as HTMLElement;
+};
+
 describe('Receiving — print label button', () => {
   it('renders the Label button on a queue row for a privileged role and prints on click', async () => {
     mockApi.printReceiptLabel.mockResolvedValueOnce({
@@ -92,9 +102,7 @@ describe('Receiving — print label button', () => {
     });
     renderQueue();
 
-    await waitFor(() => expect(screen.getByText('RCV-20260618-001')).toBeInTheDocument());
-
-    const row = screen.getByText('RCV-20260618-001').closest('tr') as HTMLElement;
+    const row = await findDesktopRow('RCV-20260618-001');
     const labelBtn = within(row).getByRole('button', { name: /label/i });
     fireEvent.click(labelBtn);
 
@@ -106,8 +114,7 @@ describe('Receiving — print label button', () => {
     mockApi.printReceiptLabel.mockRejectedValueOnce(http(409, 'Print egress is disabled'));
     renderQueue();
 
-    await waitFor(() => expect(screen.getByText('RCV-20260618-001')).toBeInTheDocument());
-    const row = screen.getByText('RCV-20260618-001').closest('tr') as HTMLElement;
+    const row = await findDesktopRow('RCV-20260618-001');
     fireEvent.click(within(row).getByRole('button', { name: /label/i }));
 
     await waitFor(() =>
@@ -119,8 +126,7 @@ describe('Receiving — print label button', () => {
     mockAuthUser = { id: 2, role: 'operator' };
     renderQueue();
 
-    await waitFor(() => expect(screen.getByText('RCV-20260618-001')).toBeInTheDocument());
-    const row = screen.getByText('RCV-20260618-001').closest('tr') as HTMLElement;
+    const row = await findDesktopRow('RCV-20260618-001');
     expect(within(row).queryByRole('button', { name: /label/i })).toBeNull();
     // The Inspect button is unaffected.
     expect(within(row).getByRole('button', { name: /inspect/i })).toBeInTheDocument();

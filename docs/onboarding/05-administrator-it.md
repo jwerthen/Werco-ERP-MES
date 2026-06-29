@@ -99,17 +99,19 @@ A work center is a machine or station where work happens (a laser, a press brake
 
 > Heads up: You can't change a work center's **Code** after it's created — pick it carefully.
 
+Work centers are listed in a single sortable table — click any column header (Code/Name, Type, Rate, Capacity, Efficiency, Status) to sort, and use **Export CSV** to download the list. On a phone or tablet the table collapses to one card per work center. (On larger lists the table pages; use the controls at the bottom.)
+
 ### Edit a work center
-Click the **pencil** icon on the work center's card, change the details, and click **Update**.
+Click the **pencil** icon on the work center's row (or card, on a phone/tablet), change the details, and click **Update**.
 
 ### Set a work center's status
-Each card has a status dropdown. Pick one:
+Each row has a status dropdown. Pick one:
 - **Available** — ready to run.
 - **In Use** — currently running a job.
 - **Maintenance** — down for planned service.
 - **Offline** — out of service.
 
-Status updates immediately and shows as a colored dot on the card and on the Dashboard capacity view.
+Status updates immediately and shows as a colored dot on the row and on the Dashboard capacity view.
 
 > Tip: The list of work center **Types** (and which types appear in the dropdown) is managed on the **Work Center Types** tab in Admin Settings.
 

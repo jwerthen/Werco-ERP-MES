@@ -2,7 +2,13 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  useToast,
+  DataTable,
+  DataTableColumn,
+  StatusBadge,
+  MobileDataCard,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 import {
@@ -226,13 +232,179 @@ export default function Calibration() {
     setSearchParams(next ? { filter: next } : {});
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
-  }
+  const dueText = (eq: Equipment) => {
+    if (eq.days_until_due === undefined) return null;
+    return eq.days_until_due < 0
+      ? `${Math.abs(eq.days_until_due)} days overdue`
+      : eq.days_until_due === 0
+      ? 'Due today'
+      : `${eq.days_until_due} days`;
+  };
+
+  const dueColor = (eq: Equipment) =>
+    eq.days_until_due === undefined
+      ? ''
+      : eq.days_until_due < 0
+      ? 'text-red-600'
+      : eq.days_until_due <= 30
+      ? 'text-yellow-600'
+      : 'text-slate-400';
+
+  const columns: DataTableColumn<Equipment>[] = [
+    {
+      key: 'equipment_id',
+      header: 'ID',
+      sortable: true,
+      accessor: (eq) => eq.equipment_id,
+      render: (eq) => <span className="font-mono text-sm">{eq.equipment_id}</span>,
+    },
+    {
+      key: 'name',
+      header: 'Equipment',
+      sortable: true,
+      accessor: (eq) => eq.name,
+      csv: (eq) =>
+        eq.manufacturer ? `${eq.name} (${eq.manufacturer} ${eq.model || ''})`.trim() : eq.name,
+      render: (eq) => (
+        <div>
+          <div className="font-medium">{eq.name}</div>
+          {eq.manufacturer && (
+            <div className="text-sm text-slate-400">
+              {eq.manufacturer} {eq.model}
+            </div>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'equipment_type',
+      header: 'Type',
+      sortable: true,
+      accessor: (eq) => eq.equipment_type || '',
+      render: (eq) => eq.equipment_type || '-',
+    },
+    {
+      key: 'location',
+      header: 'Location',
+      sortable: true,
+      accessor: (eq) => eq.location || '',
+      render: (eq) => eq.location || '-',
+    },
+    {
+      key: 'last_calibration_date',
+      header: 'Last Cal',
+      sortable: true,
+      accessor: (eq) => eq.last_calibration_date || '',
+      csv: (eq) => (eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : ''),
+      render: (eq) =>
+        eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : '-',
+    },
+    {
+      key: 'next_calibration_date',
+      header: 'Next Due',
+      sortable: true,
+      accessor: (eq) =>
+        eq.days_until_due !== undefined ? eq.days_until_due : eq.next_calibration_date || '',
+      csv: (eq) => (eq.next_calibration_date ? formatCentralDate(eq.next_calibration_date) : ''),
+      render: (eq) =>
+        eq.next_calibration_date ? (
+          <div>
+            <div className="text-sm">{formatCentralDate(eq.next_calibration_date)}</div>
+            {eq.days_until_due !== undefined && (
+              <div className={`text-xs ${dueColor(eq)}`}>{dueText(eq)}</div>
+            )}
+          </div>
+        ) : (
+          '-'
+        ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (eq) => eq.status,
+      csv: (eq) => eq.status.replace('_', ' '),
+      render: (eq) => <StatusBadge status={eq.status} colorMap={statusColors} />,
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: (eq) => (
+        <div className="flex justify-center gap-2">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              openCalibrationModal(eq);
+            }}
+            className="text-green-600 hover:text-green-300 text-sm font-medium"
+            title="Record Calibration"
+          >
+            <WrenchIcon className="h-5 w-5" />
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              handleEdit(eq);
+            }}
+            className="text-slate-500 hover:text-slate-400 text-sm"
+          >
+            Edit
+          </button>
+        </div>
+      ),
+    },
+  ];
+
+  const renderMobileCard = (eq: Equipment) => (
+    <MobileDataCard
+      title={eq.name}
+      subtitle={
+        [eq.equipment_id, eq.manufacturer && `${eq.manufacturer} ${eq.model || ''}`.trim()]
+          .filter(Boolean)
+          .join(' • ') || undefined
+      }
+      badge={<StatusBadge status={eq.status} colorMap={statusColors} />}
+      fields={[
+        { label: 'Type', value: eq.equipment_type || '-' },
+        { label: 'Location', value: eq.location || '-' },
+        {
+          label: 'Last Cal',
+          value: eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : '-',
+        },
+        {
+          label: 'Next Due',
+          value: eq.next_calibration_date ? (
+            <div>
+              <div>{formatCentralDate(eq.next_calibration_date)}</div>
+              {eq.days_until_due !== undefined && (
+                <div className={`text-xs ${dueColor(eq)}`}>{dueText(eq)}</div>
+              )}
+            </div>
+          ) : (
+            '-'
+          ),
+        },
+      ]}
+      actions={
+        <>
+          <button
+            onClick={() => openCalibrationModal(eq)}
+            className="inline-flex items-center gap-1 text-sm font-medium text-green-400 hover:text-green-300"
+          >
+            <WrenchIcon className="h-4 w-4" />
+            Record
+          </button>
+          <button
+            onClick={() => handleEdit(eq)}
+            className="text-sm text-slate-300 hover:text-slate-100"
+          >
+            Edit
+          </button>
+        </>
+      }
+    />
+  );
 
   return (
     <div className="space-y-4">
@@ -318,99 +490,32 @@ export default function Calibration() {
       </div>
 
       {/* Equipment Table */}
-      {loadError ? (
-        <ErrorState
-          message="Could not load calibration equipment."
-          onRetry={loadEquipment}
-        />
-      ) : (
-      <div className="card overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800/50">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">ID</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Equipment</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Location</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Last Cal</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Next Due</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="bg-[#151b28] divide-y divide-slate-700">
-              {equipment.map((eq) => (
-                <tr key={eq.id} className="hover:bg-slate-800/50">
-                  <td className="px-4 py-4 font-mono text-sm">{eq.equipment_id}</td>
-                  <td className="px-4 py-4">
-                    <div>
-                      <div className="font-medium">{eq.name}</div>
-                      {eq.manufacturer && (
-                        <div className="text-sm text-slate-400">{eq.manufacturer} {eq.model}</div>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-4 text-sm">{eq.equipment_type || '-'}</td>
-                  <td className="px-4 py-4 text-sm">{eq.location || '-'}</td>
-                  <td className="px-4 py-4 text-sm">
-                    {eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : '-'}
-                  </td>
-                  <td className="px-4 py-4">
-                    {eq.next_calibration_date ? (
-                      <div>
-                        <div className="text-sm">{formatCentralDate(eq.next_calibration_date)}</div>
-                        {eq.days_until_due !== undefined && (
-                          <div className={`text-xs ${eq.days_until_due < 0 ? 'text-red-600' : eq.days_until_due <= 30 ? 'text-yellow-600' : 'text-slate-400'}`}>
-                            {eq.days_until_due < 0 ? `${Math.abs(eq.days_until_due)} days overdue` : 
-                             eq.days_until_due === 0 ? 'Due today' : 
-                             `${eq.days_until_due} days`}
-                          </div>
-                        )}
-                      </div>
-                    ) : '-'}
-                  </td>
-                  <td className="px-4 py-4">
-                    <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${statusColors[eq.status]}`}>
-                      {eq.status.replace('_', ' ')}
-                    </span>
-                  </td>
-                  <td className="px-4 py-4 text-center">
-                    <div className="flex justify-center gap-2">
-                      <button
-                        onClick={() => openCalibrationModal(eq)}
-                        className="text-green-600 hover:text-green-300 text-sm font-medium"
-                        title="Record Calibration"
-                      >
-                        <WrenchIcon className="h-5 w-5" />
-                      </button>
-                      <button
-                        onClick={() => handleEdit(eq)}
-                        className="text-slate-500 hover:text-slate-400 text-sm"
-                      >
-                        Edit
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {equipment.length === 0 && (
-          <EmptyState
-            icon={WrenchIcon}
-            title="No equipment found"
-            description={
-              statusFilter
-                ? 'No equipment matches the current filter.'
-                : 'Add measurement equipment to start tracking calibration.'
-            }
-            action={{ label: 'Add Equipment', onClick: () => { resetForm(); setShowModal(true); } }}
-          />
-        )}
-      </div>
-      )}
+      <DataTable
+        columns={columns}
+        data={equipment}
+        rowKey={(eq) => eq.id}
+        loading={loading}
+        error={loadError}
+        onRetry={loadEquipment}
+        defaultSort={{ key: 'next_calibration_date', dir: 'asc' }}
+        pageSize={25}
+        csvExport={{ filename: 'calibration-equipment' }}
+        mobileCards={renderMobileCard}
+        empty={{
+          icon: WrenchIcon,
+          title: 'No equipment found',
+          description: statusFilter
+            ? 'No equipment matches the current filter.'
+            : 'Add measurement equipment to start tracking calibration.',
+          action: {
+            label: 'Add Equipment',
+            onClick: () => {
+              resetForm();
+              setShowModal(true);
+            },
+          },
+        }}
+      />
 
       {/* Add/Edit Equipment Modal */}
       <Modal open={showModal} onClose={() => { setShowModal(false); resetForm(); }} size="2xl" closeOnBackdrop={false}>
