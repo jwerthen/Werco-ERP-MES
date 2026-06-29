@@ -74,27 +74,25 @@ Here's what's on it, top to bottom:
 
 ## Finding your way around
 
-Everything is reached from the menu on the left side of the screen — the sidebar. It's grouped by area of work, so related screens sit together.
+Everything is reached from the menu on the left side of the screen — the sidebar. It's split into labeled sections by area of work, so related screens sit together. Each section header is just a label; the screens themselves sit under it.
 
 ![Sidebar navigation menu with grouped sections](images/sidebar-nav.png)
-*The sidebar groups every screen by the kind of work it's for. Click a group to expand it.*
+*The sidebar splits every screen into labeled sections by the kind of work it's for.*
 
-The main groups are:
+The sections are:
 
-- **Dashboard** and **Action Inbox** — your home view and your to-do items. Admins, managers, and supervisors land on the Action Inbox right after signing in (it leads with the "Top 3 today" — the items most worth your attention); operators go straight to the station screen.
-- **Shop Floor** — Time Clock, Operations (the station view), and Downtime.
-- **Scheduling** and **Work Orders** — planning and tracking jobs.
+- **Overview** — Dashboard and Action Inbox: your home view and your to-do items. Admins, managers, and supervisors land on the Action Inbox right after signing in (it leads with the "Top 3 today" — the items most worth your attention); operators go straight to the station screen.
+- **Production** — Shop Floor (Time Clock, Operations, and Downtime), Scheduling, Work Orders, Maintenance, Tool Management, and OEE.
 - **Engineering** — Parts, Bill of Materials, Routing, and Engineering Changes.
-- **Warehouse** — Inventory, Materials & Supplies, Receiving, and Shipping (all in one place).
-- **Purchasing** — Purchase Orders, Upload PO, and MRP.
+- **Inventory & Purchasing** — Warehouse (Inventory, Materials & Supplies, Receiving, and Shipping, all in one place) and Purchasing (Purchase Orders, Upload PO, and MRP).
 - **Sales & Quoting** — AI RFQ Quote, Quote Calculator, Quotes, and Customers.
 - **Quality** — NCR / CAR / FAI, SPC, Calibration, Traceability, Customer Complaints, and QMS Standards.
-- **Maintenance**, **Tool Management**, **OEE**, **Documents**, **Job Costing**, **Analytics**, and **Reports** — operations and reporting screens.
-- **Administration** — setup, users, work centers, certifications, audit log, and settings.
+- **Insights** — Documents, Job Costing, Analytics, and Reports.
+- **Admin** — setup, users, work centers, certifications, audit log, and settings.
 
 > Heads up: You'll only see the parts of the menu your role is allowed to use. If a screen a coworker mentions isn't in your sidebar, your role probably doesn't include it — that's normal, not a bug.
 
-To open a screen: click a group to expand it, then click the screen you want. On a phone or tablet, tap the menu button (the three lines) at the top to open the sidebar.
+To open a screen: click it in the sidebar. Some entries (like Shop Floor or Engineering) group several screens — click the entry to expand it, then click the screen you want. On a phone or tablet, tap the menu button (the three lines) at the top to open the sidebar.
 
 ---
 

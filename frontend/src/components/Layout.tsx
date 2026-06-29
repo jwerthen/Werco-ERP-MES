@@ -17,6 +17,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { isKioskMode } from '../utils/kiosk';
 import { getCurrentShift } from '../utils/shifts';
+import { getRouteTitle } from '../utils/routeMeta';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
@@ -68,93 +69,144 @@ interface NavItem {
   platformOnly?: boolean;
 }
 
-const navigation: NavItem[] = [
-  { name: 'Dashboard', href: '/', icon: HomeIcon },
-  { name: 'Action Inbox', href: '/action-inbox', icon: BellAlertIcon },
+/**
+ * The sidebar is organized into a small number of scannable sections, each with
+ * a hairline mono/uppercase header. Every route lives under exactly one section;
+ * items keep their existing href / active-state / collapse behavior unchanged.
+ */
+interface NavSection {
+  /** Section header label (mono uppercase). Empty string = no header (Overview). */
+  label: string;
+  items: NavItem[];
+}
+
+const navSections: NavSection[] = [
   {
-    name: 'Shop Floor',
-    icon: WrenchScrewdriverIcon,
-    children: [
-      { name: 'Time Clock', href: '/shop-floor', icon: WrenchScrewdriverIcon },
-      { name: 'Operations', href: '/shop-floor/operations', icon: ClipboardDocumentListIcon },
-      { name: 'Downtime', href: '/downtime', icon: StopIcon },
-    ],
-  },
-  { name: 'Scheduling', href: '/scheduling', icon: CalendarDaysIcon },
-  { name: 'Work Orders', href: '/work-orders', icon: ClipboardDocumentListIcon },
-  {
-    name: 'Engineering',
-    icon: CubeIcon,
-    children: [
-      { name: 'Parts', href: '/parts', icon: CubeIcon },
-      { name: 'Bill of Materials', href: '/bom', icon: DocumentDuplicateIcon },
-      { name: 'Routing', href: '/routing', icon: ListBulletIcon },
-      { name: 'Engineering Changes', href: '/engineering-changes', icon: DocumentDuplicateIcon },
+    label: 'Overview',
+    items: [
+      { name: 'Dashboard', href: '/', icon: HomeIcon },
+      { name: 'Action Inbox', href: '/action-inbox', icon: BellAlertIcon },
     ],
   },
   {
-    name: 'Warehouse',
-    icon: ArchiveBoxIcon,
-    children: [
-      { name: 'Inventory', href: '/warehouse?tab=inventory', icon: ArchiveBoxIcon },
-      { name: 'Materials & Supplies', href: '/materials', icon: WrenchScrewdriverIcon },
-      { name: 'Receiving', href: '/warehouse?tab=receiving', icon: InboxArrowDownIcon },
-      { name: 'Shipping', href: '/warehouse?tab=shipping', icon: PaperAirplaneIcon },
+    label: 'Production',
+    items: [
+      {
+        name: 'Shop Floor',
+        icon: WrenchScrewdriverIcon,
+        children: [
+          { name: 'Time Clock', href: '/shop-floor', icon: WrenchScrewdriverIcon },
+          { name: 'Operations', href: '/shop-floor/operations', icon: ClipboardDocumentListIcon },
+          { name: 'Downtime', href: '/downtime', icon: StopIcon },
+        ],
+      },
+      { name: 'Scheduling', href: '/scheduling', icon: CalendarDaysIcon },
+      { name: 'Work Orders', href: '/work-orders', icon: ClipboardDocumentListIcon },
+      { name: 'Maintenance', href: '/maintenance', icon: WrenchIcon2 },
+      { name: 'Tool Management', href: '/tool-management', icon: WrenchScrewdriverIcon },
+      { name: 'OEE', href: '/oee', icon: ChartBarIcon },
     ],
   },
   {
-    name: 'Purchasing',
-    icon: TruckIcon,
-    children: [
-      { name: 'Purchase Orders', href: '/purchasing', icon: TruckIcon },
-      { name: 'Upload PO', href: '/po-upload', icon: DocumentDuplicateIcon },
-      { name: 'MRP', href: '/mrp', icon: CalculatorIcon },
+    label: 'Engineering',
+    items: [
+      {
+        name: 'Engineering',
+        icon: CubeIcon,
+        children: [
+          { name: 'Parts', href: '/parts', icon: CubeIcon },
+          { name: 'Bill of Materials', href: '/bom', icon: DocumentDuplicateIcon },
+          { name: 'Routing', href: '/routing', icon: ListBulletIcon },
+          { name: 'Engineering Changes', href: '/engineering-changes', icon: DocumentDuplicateIcon },
+        ],
+      },
     ],
   },
   {
-    name: 'Sales & Quoting',
-    icon: CurrencyDollarIcon,
-    children: [
-      { name: 'AI RFQ Quote', href: '/rfq-packages/new', icon: SparklesIcon },
-      { name: 'Quote Calculator', href: '/quote-calculator', icon: CalculatorIcon },
-      { name: 'Quotes', href: '/quotes', icon: CurrencyDollarIcon },
-      { name: 'Customers', href: '/customers', icon: BuildingOfficeIcon },
+    label: 'Inventory & Purchasing',
+    items: [
+      {
+        name: 'Warehouse',
+        icon: ArchiveBoxIcon,
+        children: [
+          { name: 'Inventory', href: '/warehouse?tab=inventory', icon: ArchiveBoxIcon },
+          { name: 'Materials & Supplies', href: '/materials', icon: WrenchScrewdriverIcon },
+          { name: 'Receiving', href: '/warehouse?tab=receiving', icon: InboxArrowDownIcon },
+          { name: 'Shipping', href: '/warehouse?tab=shipping', icon: PaperAirplaneIcon },
+        ],
+      },
+      {
+        name: 'Purchasing',
+        icon: TruckIcon,
+        children: [
+          { name: 'Purchase Orders', href: '/purchasing', icon: TruckIcon },
+          { name: 'Upload PO', href: '/po-upload', icon: DocumentDuplicateIcon },
+          { name: 'MRP', href: '/mrp', icon: CalculatorIcon },
+        ],
+      },
     ],
   },
   {
-    name: 'Quality',
-    icon: ShieldCheckIcon,
-    children: [
-      { name: 'NCR / CAR / FAI', href: '/quality', icon: ShieldCheckIcon },
-      { name: 'SPC', href: '/spc', icon: ChartBarIcon },
-      { name: 'Calibration', href: '/calibration', icon: WrenchIcon2 },
-      { name: 'Traceability', href: '/traceability', icon: DocumentMagnifyingGlassIcon },
-      { name: 'Customer Complaints', href: '/customer-complaints', icon: DocumentTextIcon },
-      { name: 'QMS Standards', href: '/qms-standards', icon: DocumentMagnifyingGlassIcon },
+    label: 'Sales & Quoting',
+    items: [
+      {
+        name: 'Sales & Quoting',
+        icon: CurrencyDollarIcon,
+        children: [
+          { name: 'AI RFQ Quote', href: '/rfq-packages/new', icon: SparklesIcon },
+          { name: 'Quote Calculator', href: '/quote-calculator', icon: CalculatorIcon },
+          { name: 'Quotes', href: '/quotes', icon: CurrencyDollarIcon },
+          { name: 'Customers', href: '/customers', icon: BuildingOfficeIcon },
+        ],
+      },
     ],
   },
-  { name: 'Maintenance', href: '/maintenance', icon: WrenchIcon2 },
-  { name: 'Tool Management', href: '/tool-management', icon: WrenchScrewdriverIcon },
-  { name: 'OEE', href: '/oee', icon: ChartBarIcon },
-  { name: 'Documents', href: '/documents', icon: DocumentTextIcon },
-  { name: 'Job Costing', href: '/job-costing', icon: CurrencyDollarIcon },
-  { name: 'Analytics', href: '/analytics', icon: ChartBarIcon },
-  { name: 'Reports', href: '/reports', icon: DocumentTextIcon },
   {
-    name: 'Administration',
-    icon: Cog6ToothIcon,
-    children: [
-      { name: 'Setup Wizard', href: '/setup', icon: RocketLaunchIcon },
-      { name: 'Import Center', href: '/import-center', icon: ArrowUpTrayIcon },
-      { name: 'Work Centers', href: '/work-centers', icon: CogIcon },
-      { name: 'Users', href: '/users', icon: UsersIcon },
-      { name: 'User Approvals', href: '/users?approvals=pending', icon: UserPlusIcon, adminOnly: true },
-      { name: 'Operator Certifications', href: '/certifications', icon: ShieldCheckIcon },
-      { name: 'Supplier Scorecards', href: '/supplier-scorecards', icon: ChartBarIcon },
-      { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
-      { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
-      { name: 'Platform Overview', href: '/platform', icon: BuildingOfficeIcon, platformOnly: true },
-      { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },
+    label: 'Quality',
+    items: [
+      {
+        name: 'Quality',
+        icon: ShieldCheckIcon,
+        children: [
+          { name: 'NCR / CAR / FAI', href: '/quality', icon: ShieldCheckIcon },
+          { name: 'SPC', href: '/spc', icon: ChartBarIcon },
+          { name: 'Calibration', href: '/calibration', icon: WrenchIcon2 },
+          { name: 'Traceability', href: '/traceability', icon: DocumentMagnifyingGlassIcon },
+          { name: 'Customer Complaints', href: '/customer-complaints', icon: DocumentTextIcon },
+          { name: 'QMS Standards', href: '/qms-standards', icon: DocumentMagnifyingGlassIcon },
+        ],
+      },
+    ],
+  },
+  {
+    label: 'Insights',
+    items: [
+      { name: 'Documents', href: '/documents', icon: DocumentTextIcon },
+      { name: 'Job Costing', href: '/job-costing', icon: CurrencyDollarIcon },
+      { name: 'Analytics', href: '/analytics', icon: ChartBarIcon },
+      { name: 'Reports', href: '/reports', icon: DocumentTextIcon },
+    ],
+  },
+  {
+    label: 'Admin',
+    items: [
+      {
+        name: 'Administration',
+        icon: Cog6ToothIcon,
+        children: [
+          { name: 'Setup Wizard', href: '/setup', icon: RocketLaunchIcon },
+          { name: 'Import Center', href: '/import-center', icon: ArrowUpTrayIcon },
+          { name: 'Work Centers', href: '/work-centers', icon: CogIcon },
+          { name: 'Users', href: '/users', icon: UsersIcon },
+          { name: 'User Approvals', href: '/users?approvals=pending', icon: UserPlusIcon, adminOnly: true },
+          { name: 'Operator Certifications', href: '/certifications', icon: ShieldCheckIcon },
+          { name: 'Supplier Scorecards', href: '/supplier-scorecards', icon: ChartBarIcon },
+          { name: 'Custom Fields', href: '/custom-fields', icon: AdjustmentsHorizontalIcon },
+          { name: 'Admin Settings', href: '/admin/settings', icon: Cog6ToothIcon, adminOnly: true },
+          { name: 'Platform Overview', href: '/platform', icon: BuildingOfficeIcon, platformOnly: true },
+          { name: 'Audit Log', href: '/audit-log', icon: ShieldCheckIcon },
+        ],
+      },
     ],
   },
 ];
@@ -406,18 +458,12 @@ export default function Layout({ children }: LayoutProps) {
     setSidebarOpen(false);
   }, [location.pathname]);
 
-  // Get current page title
-  const pageTitle = useMemo(() => {
-    for (const item of navigation) {
-      if (isHrefActive(item.href, location)) return item.name;
-      if (item.children) {
-        const child = item.children.find(c => isHrefActive(c.href, location));
-        if (child) return child.name;
-      }
-    }
-    return 'Werco ERP';
-
-  }, [location.pathname, location.search]);
+  // Get current page title from the shared route-title source so it resolves on
+  // detail routes too (not just nav entries) and stays in sync with breadcrumbs.
+  const pageTitle = useMemo(
+    () => getRouteTitle(location),
+    [location.pathname, location.search]
+  );
 
   const isShopFloorKiosk = useMemo(
     () =>
@@ -441,30 +487,38 @@ export default function Layout({ children }: LayoutProps) {
   }, [operatorDisplayName, user?.first_name, user?.last_name]);
 
   const visibleNavigation = useMemo(() => {
-    const withApprovalBadge = navigation.map((item) => {
-      if (item.name !== 'Administration' || !item.children) return item;
+    // Inject the live pending-approvals badge onto the Administration group.
+    const withApprovalBadge: NavSection[] = navSections.map((section) => ({
+      ...section,
+      items: section.items.map((item) => {
+        if (item.name !== 'Administration' || !item.children) return item;
+        return {
+          ...item,
+          children: item.children.map((child) =>
+            child.name === 'User Approvals'
+              ? { ...child, badge: pendingApprovalCount > 0 ? pendingApprovalCount : undefined }
+              : child
+          ),
+        };
+      }),
+    }));
 
-      return {
-        ...item,
-        children: item.children.map((child) =>
-          child.name === 'User Approvals'
-            ? { ...child, badge: pendingApprovalCount > 0 ? pendingApprovalCount : undefined }
-            : child
-        ),
-      };
-    });
-
+    // RBAC-gated nav visibility: kiosk and operator roles see a streamlined set.
+    let allowed: ((item: NavItem) => boolean) | null = null;
     if (isKiosk) {
-      return withApprovalBadge.filter(item => item.name === 'Shop Floor');
-    }
-
-    // Operators see a streamlined nav: Shop Floor, Quality, and Downtime
-    if (isOperator) {
+      allowed = (item) => item.name === 'Shop Floor';
+    } else if (isOperator) {
+      // Operators see a streamlined nav: Dashboard, Shop Floor, Quality, Maintenance.
       const operatorAllowed = new Set(['Dashboard', 'Shop Floor', 'Quality', 'Maintenance']);
-      return withApprovalBadge.filter(item => operatorAllowed.has(item.name));
+      allowed = (item) => operatorAllowed.has(item.name);
     }
 
-    return withApprovalBadge;
+    if (!allowed) return withApprovalBadge;
+
+    // Drop empty sections so no orphan headers render for streamlined roles.
+    return withApprovalBadge
+      .map((section) => ({ ...section, items: section.items.filter(allowed!) }))
+      .filter((section) => section.items.length > 0);
   }, [isKiosk, isOperator, pendingApprovalCount]);
 
   useEffect(() => {
@@ -558,19 +612,30 @@ export default function Layout({ children }: LayoutProps) {
 
         {/* Navigation */}
         <nav
-          className="relative flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide"
+          className="relative flex-1 px-3 py-4 overflow-y-auto scrollbar-hide"
           data-tour="sidebar"
           aria-label="Main navigation"
         >
-          {visibleNavigation.map(item => (
-            <NavGroup
-              key={item.name}
-              item={item}
-              location={location}
-              onNavigate={() => setSidebarOpen(false)}
-              isAdmin={isAdminUser}
-              isPlatformAdmin={isPlatformAdmin}
-            />
+          {visibleNavigation.map((section, idx) => (
+            <div key={section.label || `section-${idx}`} className={idx > 0 ? 'mt-4' : ''}>
+              {section.label && (
+                <p className="px-3 mb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-fd-faint select-none">
+                  {section.label}
+                </p>
+              )}
+              <div className="space-y-1">
+                {section.items.map(item => (
+                  <NavGroup
+                    key={item.name}
+                    item={item}
+                    location={location}
+                    onNavigate={() => setSidebarOpen(false)}
+                    isAdmin={isAdminUser}
+                    isPlatformAdmin={isPlatformAdmin}
+                  />
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 
@@ -642,7 +707,7 @@ export default function Layout({ children }: LayoutProps) {
               <span className="text-fd-ink">{pageTitle}</span>
             </div>
 
-            {/* Mobile logo / kiosk operator identity */}
+            {/* Mobile center: kiosk operator identity, else current page title */}
             <div className="lg:hidden flex-1 min-w-0 px-3">
               {isShopFloorKiosk ? (
                 <div className="flex items-center justify-center gap-2 min-w-0">
@@ -655,8 +720,9 @@ export default function Layout({ children }: LayoutProps) {
                   </div>
                 </div>
               ) : (
-                <div className="flex justify-center">
-                  <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-10 w-auto brightness-0 invert" />
+                <div className="min-w-0">
+                  <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-fd-faint leading-none">Werco</p>
+                  <p className="text-sm font-semibold text-fd-ink truncate leading-tight">{pageTitle}</p>
                 </div>
               )}
             </div>

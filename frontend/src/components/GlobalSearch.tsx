@@ -287,7 +287,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
           leaveFrom="opacity-100"
           leaveTo="opacity-0"
         >
-          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm" />
+          <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm" />
         </Transition.Child>
 
         <div className="fixed inset-0 z-10 overflow-y-auto p-4 sm:p-6 md:p-20">
@@ -300,14 +300,17 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
             leaveFrom="opacity-100 scale-100"
             leaveTo="opacity-0 scale-95"
           >
-            <Dialog.Panel className="mx-auto max-w-2xl transform overflow-hidden rounded-2xl bg-base-100 shadow-2xl ring-1 ring-base-300 transition-all">
+            <Dialog.Panel
+              className="mx-auto max-w-2xl transform overflow-hidden rounded-sm shadow-2xl transition-all"
+              style={{ background: 'var(--fd-panel)', border: '1px solid var(--fd-line-bright)' }}
+            >
               {/* Search Input */}
               <div className="relative">
-                <MagnifyingGlassIcon className="pointer-events-none absolute left-4 top-4.5 h-5 w-5 text-base-content/40" />
+                <MagnifyingGlassIcon className="pointer-events-none absolute left-4 top-4.5 h-5 w-5 text-fd-mute" />
                 <input
                   ref={inputRef}
                   type="text"
-                  className="du-input du-input-ghost w-full h-14 rounded-none pl-12 pr-12 text-lg text-base-content placeholder:text-base-content/50 focus:outline-none"
+                  className="w-full h-14 bg-transparent pl-12 pr-12 text-lg text-fd-ink placeholder:text-fd-faint focus:outline-none"
                   placeholder="Search across your workspace..."
                   value={query}
                   onChange={e => setQuery(e.target.value)}
@@ -316,7 +319,8 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                 {query && (
                   <button
                     onClick={() => setQuery('')}
-                    className="du-btn du-btn-ghost du-btn-sm du-btn-circle absolute right-3 top-3.5"
+                    className="absolute right-3 top-3.5 p-1.5 rounded-[3px] text-fd-mute hover:text-fd-ink hover:bg-white/5 transition-colors"
+                    aria-label="Clear search"
                   >
                     <XMarkIcon className="h-5 w-5" />
                   </button>
@@ -324,18 +328,18 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
               </div>
 
               {/* Results */}
-              <div className="max-h-[60vh] overflow-y-auto border-t border-base-300">
+              <div className="max-h-[60vh] overflow-y-auto" style={{ borderTop: '1px solid var(--fd-line)' }}>
                 {isLoading && (
                   <div className="py-8 text-center">
-                    <span className="du-loading du-loading-spinner du-loading-md text-primary" />
+                    <span className="du-loading du-loading-spinner du-loading-md text-fd-blue" />
                   </div>
                 )}
 
                 {!isLoading && displayResults.length > 0 && (
                   <div className="py-2">
                     {/* Section Header */}
-                    <div className="px-4 py-2 flex items-center gap-2 text-xs font-medium text-base-content/50 uppercase tracking-wider">
-                      <ClockIcon className="h-4 w-4" />
+                    <div className="px-4 py-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-fd-faint">
+                      <ClockIcon className="h-3.5 w-3.5" />
                       {query ? 'Results' : 'Recent'}
                     </div>
 
@@ -345,7 +349,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                         const IconComponent = iconMap[result.icon] || CubeIcon;
                         const config = typeConfig[result.type] || {
                           label: result.type,
-                          color: 'bg-base-200 text-base-content/70 border border-base-300',
+                          color: 'bg-fd-sunken text-fd-body border border-fd-line',
                         };
                         const isSelected = index === selectedIndex;
 
@@ -354,24 +358,28 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                             key={`${result.type}-${result.id}`}
                             className={`
                               px-4 py-3 cursor-pointer flex items-center gap-3 transition-colors
-                              ${isSelected ? 'bg-base-200' : 'hover:bg-base-200/60'}
+                              ${isSelected ? 'bg-white/[0.04] shadow-[inset_2px_0_0_#2f81f7]' : 'hover:bg-white/[0.02]'}
                             `}
                             onClick={() => handleSelect(result)}
                             onMouseEnter={() => setSelectedIndex(index)}
                           >
-                            <div className={`p-2 rounded-lg ${config.color}`}>
+                            <div className={`p-2 rounded-[3px] ${config.color}`}>
                               <IconComponent className="h-5 w-5" />
                             </div>
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2">
-                                <span className="font-medium text-base-content truncate">{result.title}</span>
-                                <span className={`du-badge du-badge-sm ${config.color}`}>{config.label}</span>
+                                <span className="font-medium text-fd-ink truncate">{result.title}</span>
+                                <span className={`inline-flex px-1.5 py-0.5 rounded-[3px] text-[10px] font-mono uppercase tracking-wide ${config.color}`}>{config.label}</span>
                               </div>
                               {result.subtitle && (
-                                <p className="text-sm text-base-content/60 truncate">{result.subtitle}</p>
+                                <p className="text-sm text-fd-mute truncate">{result.subtitle}</p>
                               )}
                             </div>
-                            {isSelected && <kbd className="du-kbd du-kbd-sm hidden sm:inline-flex">Enter</kbd>}
+                            {isSelected && (
+                              <kbd className="hidden sm:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-faint rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
+                                Enter
+                              </kbd>
+                            )}
                           </li>
                         );
                       })}
@@ -382,18 +390,18 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                 {/* Quick Actions when no results */}
                 {!isLoading && showQuickActions && (
                   <div className="py-2">
-                    <div className="px-4 py-2 text-xs font-medium text-base-content/50 uppercase tracking-wider">
+                    <div className="px-4 py-2 font-mono text-[10px] uppercase tracking-[0.14em] text-fd-faint">
                       Quick Actions
                     </div>
                     <ul>
                       {quickActions.map(action => (
                         <li
                           key={action.url}
-                          className="px-4 py-3 cursor-pointer flex items-center gap-3 hover:bg-base-200/60 transition-colors"
+                          className="px-4 py-3 cursor-pointer flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
                           onClick={() => handleSelect(action)}
                         >
-                          <action.icon className="h-5 w-5 text-base-content/50" />
-                          <span className="text-base-content">{action.name}</span>
+                          <action.icon className="h-5 w-5 text-fd-mute" />
+                          <span className="text-fd-body">{action.name}</span>
                         </li>
                       ))}
                     </ul>
@@ -403,9 +411,9 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                 {/* No Results */}
                 {!isLoading && query && displayResults.length === 0 && (
                   <div className="py-12 text-center">
-                    <MagnifyingGlassIcon className="mx-auto h-10 w-10 text-base-content/40" />
-                    <p className="mt-3 text-base-content/70">No results found for "{query}"</p>
-                    <p className="text-sm text-base-content/50 mt-1">
+                    <MagnifyingGlassIcon className="mx-auto h-10 w-10 text-fd-faint" />
+                    <p className="mt-3 text-fd-body">No results found for "{query}"</p>
+                    <p className="text-sm text-fd-mute mt-1">
                       Try searching for parts, work orders, customers, or quotes
                     </p>
                   </div>
@@ -413,18 +421,21 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
               </div>
 
               {/* Footer */}
-              <div className="flex items-center justify-between gap-4 px-4 py-3 border-t border-base-300 text-xs text-base-content/50">
+              <div
+                className="flex items-center justify-between gap-4 px-4 py-3 font-mono text-[11px] text-fd-mute"
+                style={{ borderTop: '1px solid var(--fd-line)', background: 'var(--fd-sunken)' }}
+              >
                 <div className="flex items-center gap-4">
-                  <span className="flex items-center gap-1">
-                    <kbd className="du-kbd du-kbd-sm">Up/Down</kbd>
+                  <span className="flex items-center gap-1.5">
+                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint" style={{ border: '1px solid var(--fd-line)' }}>Up/Down</kbd>
                     Navigate
                   </span>
-                  <span className="flex items-center gap-1">
-                    <kbd className="du-kbd du-kbd-sm">Enter</kbd>
+                  <span className="flex items-center gap-1.5">
+                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint" style={{ border: '1px solid var(--fd-line)' }}>Enter</kbd>
                     Select
                   </span>
-                  <span className="flex items-center gap-1">
-                    <kbd className="du-kbd du-kbd-sm">Esc</kbd>
+                  <span className="flex items-center gap-1.5">
+                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint" style={{ border: '1px solid var(--fd-line)' }}>Esc</kbd>
                     Close
                   </span>
                 </div>

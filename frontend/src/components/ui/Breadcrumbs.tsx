@@ -13,16 +13,19 @@ interface BreadcrumbsProps {
 
 export function Breadcrumbs({ crumbs }: BreadcrumbsProps) {
   return (
-    <nav className="flex items-center text-sm text-slate-400 mb-1" aria-label="Breadcrumb">
+    <nav
+      className="flex items-center font-mono text-xs tracking-[0.04em] text-fd-mute mb-1"
+      aria-label="Breadcrumb"
+    >
       {crumbs.map((crumb, idx) => (
         <React.Fragment key={idx}>
-          {idx > 0 && <ChevronRightIcon className="h-3.5 w-3.5 mx-1.5 text-slate-500 flex-shrink-0" />}
+          {idx > 0 && <ChevronRightIcon className="h-3 w-3 mx-1.5 text-fd-faint flex-shrink-0" />}
           {crumb.href ? (
-            <Link to={crumb.href} className="hover:text-werco-navy-600 transition-colors">
+            <Link to={crumb.href} className="hover:text-fd-blue transition-colors">
               {crumb.label}
             </Link>
           ) : (
-            <span className="text-white font-medium">{crumb.label}</span>
+            <span className="text-fd-ink font-medium truncate">{crumb.label}</span>
           )}
         </React.Fragment>
       ))}
