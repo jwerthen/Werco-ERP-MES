@@ -11,7 +11,8 @@ import {
   MagnifyingGlassIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
-import { SelectField, SelectOption, ErrorState, useToast } from '../components/ui';
+import { SelectField, SelectOption, ErrorState, useToast, FormField } from '../components/ui';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 
 interface Part {
   id: number;
@@ -155,6 +156,27 @@ export default function WorkOrderNew() {
     due_date: '',
     notes: ''
   });
+
+  // Snapshot of the values the form opened with, so an untouched form is never
+  // treated as dirty. This is a create-only page, so the snapshot is the empty
+  // form captured on mount.
+  const initialForm = useMemo(() => ({
+    part_id: 0,
+    quantity_ordered: 1,
+    priority: 5,
+    customer_name: '',
+    customer_po: '',
+    due_date: '',
+    notes: ''
+  }), []);
+
+  const isFormDirty = useMemo(
+    () =>
+      JSON.stringify(form) !== JSON.stringify(initialForm) ||
+      operations.length > 0,
+    [form, initialForm, operations]
+  );
+  const { confirmDiscard } = useUnsavedChanges(isFormDirty);
 
   useEffect(() => {
     loadInitialData();
@@ -751,12 +773,13 @@ export default function WorkOrderNew() {
           <h2 className="text-lg font-semibold text-white mb-4">Work Order Details</h2>
           
           <div className="space-y-4">
-            <div>
-              <label className="label">Part *</label>
+            <FormField label="Part" required>
+              {(field) => (
               <div className="relative">
                 <div className="relative">
                   <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
                   <input
+                    {...field}
                     type="text"
                     value={partSearch}
                     onChange={(e) => {
@@ -775,6 +798,7 @@ export default function WorkOrderNew() {
                     onKeyDown={handlePartKeyDown}
                     className="input pl-10 pr-20"
                     placeholder="Search parts, assemblies, or BOM components"
+                    autoFocus
                     role="combobox"
                     aria-expanded={showPartDropdown}
                     aria-controls="work-order-part-results"
@@ -885,36 +909,40 @@ export default function WorkOrderNew() {
                   </div>
                 )}
               </div>
-            </div>
+              )}
+            </FormField>
 
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="label">Quantity *</label>
-                <input
-                  type="number"
-                  value={form.quantity_ordered}
-                  onChange={(e) => handleQuantityChange(parseInt(e.target.value) || 1)}
-                  className="input"
-                  min={1}
-                  required
-                />
-              </div>
-              <div>
-                <label className="label">Priority</label>
+              <FormField label="Quantity" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="number"
+                    value={form.quantity_ordered}
+                    onChange={(e) => handleQuantityChange(parseInt(e.target.value) || 1)}
+                    className="input"
+                    min={1}
+                    required
+                  />
+                )}
+              </FormField>
+              <FormField label="Priority">
                 <SelectField
                   value={form.priority}
                   onChange={(priority) => setForm({ ...form, priority })}
                   options={priorityOptions}
                   ariaLabel="Priority"
                 />
-              </div>
+              </FormField>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div className="relative">
-                <label className="label">Customer Name</label>
+              <FormField label="Customer Name" className="relative">
+                {(field) => (
+                <>
                 <div className="relative">
                   <input
+                    {...field}
                     type="text"
                     value={customerSearch}
                     onChange={(e) => {
@@ -998,37 +1026,45 @@ export default function WorkOrderNew() {
                     )}
                   </div>
                 )}
-              </div>
-              <div>
-                <label className="label">Customer PO #</label>
+                </>
+                )}
+              </FormField>
+              <FormField label="Customer PO #">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={form.customer_po}
+                    onChange={(e) => setForm({ ...form, customer_po: e.target.value })}
+                    className="input"
+                  />
+                )}
+              </FormField>
+            </div>
+
+            <FormField label="Due Date">
+              {(field) => (
                 <input
-                  type="text"
-                  value={form.customer_po}
-                  onChange={(e) => setForm({ ...form, customer_po: e.target.value })}
+                  {...field}
+                  type="date"
+                  value={form.due_date}
+                  onChange={(e) => setForm({ ...form, due_date: e.target.value })}
                   className="input"
                 />
-              </div>
-            </div>
+              )}
+            </FormField>
 
-            <div>
-              <label className="label">Due Date</label>
-              <input
-                type="date"
-                value={form.due_date}
-                onChange={(e) => setForm({ ...form, due_date: e.target.value })}
-                className="input"
-              />
-            </div>
-
-            <div>
-              <label className="label">Notes</label>
-              <textarea
-                value={form.notes}
-                onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                className="input"
-                rows={2}
-              />
-            </div>
+            <FormField label="Notes">
+              {(field) => (
+                <textarea
+                  {...field}
+                  value={form.notes}
+                  onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                  className="input"
+                  rows={2}
+                />
+              )}
+            </FormField>
           </div>
         </div>
 
@@ -1359,7 +1395,10 @@ export default function WorkOrderNew() {
         <div className="flex justify-end gap-3">
           <button
             type="button"
-            onClick={() => navigate('/work-orders')}
+            onClick={() => {
+              if (!confirmDiscard()) return;
+              navigate('/work-orders');
+            }}
             className="btn-secondary"
           >
             Cancel

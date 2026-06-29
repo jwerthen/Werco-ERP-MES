@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { LoadingButton } from '../components/ui/LoadingButton';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, FormField, useToast } from '../components/ui';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { Part, PartType } from '../types';
 import { isMaterialSupplyPartType } from '../utils/catalogGroups';
 import { useNavigate } from 'react-router-dom';
@@ -160,7 +161,16 @@ export default function BOMPage() {
   const [partSearch, setPartSearch] = useState('');
   const [partTypeFilter, setPartTypeFilter] = useState('all');
 
-  const [newBOM, setNewBOM] = useState({ part_id: 0, revision: 'A', description: '', bom_type: 'standard' });
+  const EMPTY_BOM = { part_id: 0, revision: 'A', description: '', bom_type: 'standard' };
+  const EMPTY_PART = {
+    part_number: '',
+    name: '',
+    part_type: 'manufactured' as PartType,
+    revision: 'A',
+    description: ''
+  };
+
+  const [newBOM, setNewBOM] = useState(EMPTY_BOM);
   const [newItem, setNewItem] = useState({
     component_part_id: 0,
     item_number: 10,
@@ -174,13 +184,47 @@ export default function BOMPage() {
     torque_spec: '',
     installation_notes: ''
   });
-  const [newPart, setNewPart] = useState({
-    part_number: '',
-    name: '',
-    part_type: 'manufactured' as PartType,
-    revision: 'A',
-    description: ''
-  });
+  const [newPart, setNewPart] = useState(EMPTY_PART);
+
+  // Snapshots of the values each modal opened with, for unsaved-changes detection.
+  const [initialBOM, setInitialBOM] = useState(EMPTY_BOM);
+  const [initialPart, setInitialPart] = useState(EMPTY_PART);
+
+  const isCreateBOMDirty = useMemo(
+    () => showCreateModal && JSON.stringify(newBOM) !== JSON.stringify(initialBOM),
+    [showCreateModal, newBOM, initialBOM]
+  );
+  const { confirmDiscard: confirmDiscardBOM } = useUnsavedChanges(isCreateBOMDirty);
+
+  const isNewPartDirty = useMemo(
+    () => showNewPartModal && JSON.stringify(newPart) !== JSON.stringify(initialPart),
+    [showNewPartModal, newPart, initialPart]
+  );
+  const { confirmDiscard: confirmDiscardPart } = useUnsavedChanges(isNewPartDirty);
+
+  const openCreateBOMModal = () => {
+    setNewBOM(EMPTY_BOM);
+    setInitialBOM(EMPTY_BOM);
+    setShowCreateModal(true);
+  };
+
+  const requestCloseCreateBOM = () => {
+    if (!confirmDiscardBOM()) return;
+    setShowCreateModal(false);
+    setNewBOM(EMPTY_BOM);
+  };
+
+  const openNewPartModal = () => {
+    setNewPart(EMPTY_PART);
+    setInitialPart(EMPTY_PART);
+    setShowNewPartModal(true);
+  };
+
+  const requestCloseNewPart = () => {
+    if (!confirmDiscardPart()) return;
+    setShowNewPartModal(false);
+    setNewPart(EMPTY_PART);
+  };
 
   useEffect(() => {
     loadData();
@@ -637,7 +681,7 @@ export default function BOMPage() {
             <DocumentDuplicateIcon className="h-5 w-5 mr-2" />
             Import BOM/Drawing
           </button>
-          <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center">
+          <button onClick={openCreateBOMModal} className="btn-primary flex items-center">
             <PlusIcon className="h-5 w-5 mr-2" />
             Create BOM
           </button>
@@ -681,7 +725,7 @@ export default function BOMPage() {
               <EmptyState
                 title="No BOMs created yet"
                 description="Create a bill of materials to define an assembly's components."
-                action={{ label: 'Create your first BOM', onClick: () => setShowCreateModal(true) }}
+                action={{ label: 'Create your first BOM', onClick: openCreateBOMModal }}
               />
             )}
           </div>
@@ -852,67 +896,75 @@ export default function BOMPage() {
       </div>
 
       {/* Create BOM Modal */}
-      <Modal open={showCreateModal} onClose={() => setShowCreateModal(false)} size="md" closeOnBackdrop={false}>
+      <Modal open={showCreateModal} onClose={requestCloseCreateBOM} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create New BOM</h3>
             <form onSubmit={handleCreateBOM} className="space-y-4">
-              <div>
-                <label className="label">Part</label>
-                <select
-                  value={newBOM.part_id}
-                  onChange={(e) => setNewBOM({ ...newBOM, part_id: parseInt(e.target.value) })}
-                  className="input"
-                  required
-                >
-                  <option value={0}>Select a part...</option>
-                  {parts
-                    .filter(p => ['assembly', 'manufactured'].includes(p.part_type))
-                    .map(part => (
-                      <option key={part.id} value={part.id}>
-                        {part.part_number} - {part.name} ({part.part_type})
-                      </option>
-                    ))}
-                </select>
-                {parts.filter(p => ['assembly', 'manufactured'].includes(p.part_type)).length === 0 && (
-                  <p className="text-sm text-orange-500 mt-1">
-                    No assembly or manufactured parts found. Create parts first.
-                  </p>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Revision</label>
-                  <input
-                    type="text"
-                    value={newBOM.revision}
-                    onChange={(e) => setNewBOM({ ...newBOM, revision: e.target.value })}
+              <FormField label="Part" required>
+                {(field) => (
+                  <select
+                    {...field}
+                    value={newBOM.part_id}
+                    onChange={(e) => setNewBOM({ ...newBOM, part_id: parseInt(e.target.value) })}
                     className="input"
                     required
-                  />
-                </div>
-                <div>
-                  <label className="label">Type</label>
-                  <select
-                    value={newBOM.bom_type}
-                    onChange={(e) => setNewBOM({ ...newBOM, bom_type: e.target.value })}
-                    className="input"
                   >
-                    <option value="standard">Standard</option>
-                    <option value="phantom">Phantom</option>
-                    <option value="configurable">Configurable</option>
+                    <option value={0}>Select a part...</option>
+                    {parts
+                      .filter(p => ['assembly', 'manufactured'].includes(p.part_type))
+                      .map(part => (
+                        <option key={part.id} value={part.id}>
+                          {part.part_number} - {part.name} ({part.part_type})
+                        </option>
+                      ))}
                   </select>
-                </div>
+                )}
+              </FormField>
+              {parts.filter(p => ['assembly', 'manufactured'].includes(p.part_type)).length === 0 && (
+                <p className="text-sm text-orange-500 mt-1">
+                  No assembly or manufactured parts found. Create parts first.
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Revision" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={newBOM.revision}
+                      onChange={(e) => setNewBOM({ ...newBOM, revision: e.target.value })}
+                      className="input"
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Type">
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={newBOM.bom_type}
+                      onChange={(e) => setNewBOM({ ...newBOM, bom_type: e.target.value })}
+                      className="input"
+                    >
+                      <option value="standard">Standard</option>
+                      <option value="phantom">Phantom</option>
+                      <option value="configurable">Configurable</option>
+                    </select>
+                  )}
+                </FormField>
               </div>
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={newBOM.description}
-                  onChange={(e) => setNewBOM({ ...newBOM, description: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Description">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={newBOM.description}
+                    onChange={(e) => setNewBOM({ ...newBOM, description: e.target.value })}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary" disabled={creatingBOM}>
+                <button type="button" onClick={requestCloseCreateBOM} className="btn-secondary" disabled={creatingBOM}>
                   Cancel
                 </button>
                 <LoadingButton type="submit" loading={creatingBOM} loadingText="Creating...">Create</LoadingButton>
@@ -1275,7 +1327,7 @@ export default function BOMPage() {
               </div>
               <button
                 type="button"
-                onClick={() => setShowNewPartModal(true)}
+                onClick={openNewPartModal}
                 className="btn-secondary"
                 title="Create a new part"
               >
@@ -1523,71 +1575,81 @@ export default function BOMPage() {
       </Modal>
 
       {/* New Part Modal (nested inside Add Item flow) */}
-      <Modal open={showNewPartModal} onClose={() => setShowNewPartModal(false)} size="md" closeOnBackdrop={false}>
+      <Modal open={showNewPartModal} onClose={requestCloseNewPart} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create New Part</h3>
             <form onSubmit={handleCreateNewPart} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Part Number *</label>
+                <FormField label="Part Number" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={newPart.part_number}
+                      onChange={(e) => setNewPart({ ...newPart, part_number: e.target.value.toUpperCase() })}
+                      className="input"
+                      required
+                      placeholder="e.g., PART-001"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Revision">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={newPart.revision}
+                      onChange={(e) => setNewPart({ ...newPart, revision: e.target.value.toUpperCase() })}
+                      className="input"
+                      placeholder="A"
+                    />
+                  )}
+                </FormField>
+              </div>
+              <FormField label="Name" required>
+                {(field) => (
                   <input
+                    {...field}
                     type="text"
-                    value={newPart.part_number}
-                    onChange={(e) => setNewPart({ ...newPart, part_number: e.target.value.toUpperCase() })}
+                    value={newPart.name}
+                    onChange={(e) => setNewPart({ ...newPart, name: e.target.value })}
                     className="input"
                     required
-                    placeholder="e.g., PART-001"
+                    placeholder="Part name"
                   />
-                </div>
-                <div>
-                  <label className="label">Revision</label>
-                  <input
-                    type="text"
-                    value={newPart.revision}
-                    onChange={(e) => setNewPart({ ...newPart, revision: e.target.value.toUpperCase() })}
+                )}
+              </FormField>
+              <FormField label="Type" required>
+                {(field) => (
+                  <select
+                    {...field}
+                    value={newPart.part_type}
+                    onChange={(e) => setNewPart({ ...newPart, part_type: e.target.value as any })}
                     className="input"
-                    placeholder="A"
+                    required
+                  >
+                    <option value="manufactured">Manufactured</option>
+                    <option value="purchased">Purchased</option>
+                    <option value="assembly">Assembly</option>
+                    <option value="raw_material">Raw Material</option>
+                    <option value="hardware">Hardware</option>
+                    <option value="consumable">Consumable</option>
+                  </select>
+                )}
+              </FormField>
+              <FormField label="Description">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={newPart.description}
+                    onChange={(e) => setNewPart({ ...newPart, description: e.target.value })}
+                    className="input"
+                    rows={2}
+                    placeholder="Optional description"
                   />
-                </div>
-              </div>
-              <div>
-                <label className="label">Name *</label>
-                <input
-                  type="text"
-                  value={newPart.name}
-                  onChange={(e) => setNewPart({ ...newPart, name: e.target.value })}
-                  className="input"
-                  required
-                  placeholder="Part name"
-                />
-              </div>
-              <div>
-                <label className="label">Type *</label>
-                <select
-                  value={newPart.part_type}
-                  onChange={(e) => setNewPart({ ...newPart, part_type: e.target.value as any })}
-                  className="input"
-                  required
-                >
-                  <option value="manufactured">Manufactured</option>
-                  <option value="purchased">Purchased</option>
-                  <option value="assembly">Assembly</option>
-                  <option value="raw_material">Raw Material</option>
-                  <option value="hardware">Hardware</option>
-                  <option value="consumable">Consumable</option>
-                </select>
-              </div>
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={newPart.description}
-                  onChange={(e) => setNewPart({ ...newPart, description: e.target.value })}
-                  className="input"
-                  rows={2}
-                  placeholder="Optional description"
-                />
-              </div>
+                )}
+              </FormField>
               <div className="flex justify-end gap-3 pt-2 border-t">
-                <button type="button" onClick={() => setShowNewPartModal(false)} className="btn-secondary" disabled={creatingPart}>
+                <button type="button" onClick={requestCloseNewPart} className="btn-secondary" disabled={creatingPart}>
                   Cancel
                 </button>
                 <LoadingButton type="submit" loading={creatingPart} loadingText="Creating...">Create &amp; Select</LoadingButton>

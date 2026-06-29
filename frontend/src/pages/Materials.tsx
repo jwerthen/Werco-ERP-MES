@@ -9,8 +9,10 @@ import { Modal } from '../components/ui/Modal';
 import {
   DataTable,
   DataTableColumn,
+  FormField,
   MobileDataCard,
 } from '../components/ui';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import {
   ArrowUpTrayIcon,
   CubeIcon,
@@ -71,6 +73,13 @@ export default function MaterialsPage() {
   const [editingMaterial, setEditingMaterial] = useState<Part | null>(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<MaterialForm>(BLANK_FORM);
+  const [initialForm, setInitialForm] = useState<MaterialForm>(BLANK_FORM);
+
+  const isFormDirty = useMemo(
+    () => showModal && JSON.stringify(form) !== JSON.stringify(initialForm),
+    [showModal, form, initialForm]
+  );
+  const { confirmDiscard } = useUnsavedChanges(isFormDirty);
 
   const loadMaterials = useCallback(async () => {
     try {
@@ -109,12 +118,13 @@ export default function MaterialsPage() {
   const openCreate = () => {
     setEditingMaterial(null);
     setForm(BLANK_FORM);
+    setInitialForm(BLANK_FORM);
     setShowModal(true);
   };
 
   const openEdit = (material: Part) => {
     setEditingMaterial(material);
-    setForm({
+    const next: MaterialForm = {
       part_number: material.part_number,
       name: material.name,
       part_type: material.part_type,
@@ -123,7 +133,9 @@ export default function MaterialsPage() {
       standard_cost: Number(material.standard_cost || 0),
       requires_inspection: material.requires_inspection,
       version: material.version || 0,
-    });
+    };
+    setForm(next);
+    setInitialForm(next);
     setShowModal(true);
   };
 
@@ -132,6 +144,15 @@ export default function MaterialsPage() {
     setShowModal(false);
     setEditingMaterial(null);
     setForm(BLANK_FORM);
+    setInitialForm(BLANK_FORM);
+  };
+
+  // Cancel/Close gate: prompt before discarding unsaved edits. The successful
+  // submit path calls closeModal() directly (never this), so saving never prompts.
+  const requestCloseModal = () => {
+    if (saving) return;
+    if (!confirmDiscard()) return;
+    closeModal();
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -412,87 +433,99 @@ export default function MaterialsPage() {
         }}
       />
 
-      <Modal open={showModal} onClose={closeModal} size="lg">
+      <Modal open={showModal} onClose={requestCloseModal} size="lg">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold">{editingMaterial ? 'Edit Supply Item' : 'New Supply Item'}</h3>
-              <button type="button" onClick={closeModal} className="text-slate-500 hover:text-slate-200">
+              <button type="button" onClick={requestCloseModal} className="text-slate-500 hover:text-slate-200">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Item Number</label>
-                  <input
-                    type="text"
-                    value={form.part_number}
-                    onChange={event => setForm(prev => ({ ...prev, part_number: event.target.value }))}
-                    className="input"
-                    disabled={Boolean(editingMaterial)}
-                    required
-                    autoFocus
-                  />
-                </div>
-                <div>
-                  <label className="label">Type</label>
-                  <select
-                    value={form.part_type}
-                    onChange={event => setForm(prev => ({ ...prev, part_type: event.target.value as PartType }))}
-                    className="input"
-                  >
-                    {MATERIAL_SUPPLY_PART_TYPE_OPTIONS.map(option => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
+                <FormField label="Item Number" required>
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={form.part_number}
+                      onChange={event => setForm(prev => ({ ...prev, part_number: event.target.value }))}
+                      className="input"
+                      disabled={Boolean(editingMaterial)}
+                      required
+                      autoFocus
+                    />
+                  )}
+                </FormField>
+                <FormField label="Type">
+                  {field => (
+                    <select
+                      {...field}
+                      value={form.part_type}
+                      onChange={event => setForm(prev => ({ ...prev, part_type: event.target.value as PartType }))}
+                      className="input"
+                    >
+                      {MATERIAL_SUPPLY_PART_TYPE_OPTIONS.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="label">Name</label>
-                <input
-                  type="text"
-                  value={form.name}
-                  onChange={event => setForm(prev => ({ ...prev, name: event.target.value }))}
-                  className="input"
-                  required
-                />
-              </div>
+              <FormField label="Name" required>
+                {field => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={form.name}
+                    onChange={event => setForm(prev => ({ ...prev, name: event.target.value }))}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Unit of Measure</label>
-                  <select
-                    value={form.unit_of_measure}
-                    onChange={event => setForm(prev => ({ ...prev, unit_of_measure: event.target.value }))}
-                    className="input"
-                  >
-                    {UOM_OPTIONS.map(option => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Standard Cost ($)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={form.standard_cost}
-                    onChange={event => setForm(prev => ({ ...prev, standard_cost: parseFloat(event.target.value) || 0 }))}
-                    className="input"
-                  />
-                </div>
+                <FormField label="Unit of Measure">
+                  {field => (
+                    <select
+                      {...field}
+                      value={form.unit_of_measure}
+                      onChange={event => setForm(prev => ({ ...prev, unit_of_measure: event.target.value }))}
+                      className="input"
+                    >
+                      {UOM_OPTIONS.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Standard Cost ($)">
+                  {field => (
+                    <input
+                      {...field}
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={form.standard_cost}
+                      onChange={event => setForm(prev => ({ ...prev, standard_cost: parseFloat(event.target.value) || 0 }))}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={form.description}
-                  onChange={event => setForm(prev => ({ ...prev, description: event.target.value }))}
-                  className="input"
-                  rows={3}
-                />
-              </div>
+              <FormField label="Description">
+                {field => (
+                  <textarea
+                    {...field}
+                    value={form.description}
+                    onChange={event => setForm(prev => ({ ...prev, description: event.target.value }))}
+                    className="input"
+                    rows={3}
+                  />
+                )}
+              </FormField>
 
               <label className="flex items-center gap-2 text-sm">
                 <input
@@ -505,7 +538,7 @@ export default function MaterialsPage() {
               </label>
 
               <div className="flex justify-end gap-3 pt-2">
-                <button type="button" onClick={closeModal} className="btn-secondary" disabled={saving}>
+                <button type="button" onClick={requestCloseModal} className="btn-secondary" disabled={saving}>
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary" disabled={saving}>

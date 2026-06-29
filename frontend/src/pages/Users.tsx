@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { UserRole } from '../types';
 import { useSearchParams } from 'react-router-dom';
@@ -22,7 +22,9 @@ import {
   DataTable,
   DataTableColumn,
   MobileDataCard,
+  FormField,
 } from '../components/ui';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { importTimeoutMessage } from '../utils/apiError';
 
 interface UserData {
@@ -87,6 +89,19 @@ const passwordRequirements = [
 
 const approvableRoles: UserRole[] = ['operator', 'supervisor', 'quality', 'shipping', 'manager', 'admin', 'viewer'];
 
+const EMPTY_FORM = {
+  email: '',
+  employee_id: '',
+  first_name: '',
+  last_name: '',
+  password: '',
+  role: 'operator' as UserRole,
+  department: '',
+  phone: '',
+};
+
+type UserFormData = typeof EMPTY_FORM;
+
 const getApiErrorMessage = (err: any, fallback: string) => {
   const detail = err.response?.data?.detail;
   if (Array.isArray(detail)) {
@@ -129,18 +144,20 @@ export default function Users() {
   // A0.4: selection for the badge print sheet.
   const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
 
-  const [formData, setFormData] = useState({
-    email: '',
-    employee_id: '',
-    first_name: '',
-    last_name: '',
-    password: '',
-    role: 'operator' as UserRole,
-    department: '',
-    phone: ''
-  });
+  const [formData, setFormData] = useState<UserFormData>(EMPTY_FORM);
+  // Snapshot of the values the Add/Edit form opened with, so an untouched form
+  // (create or edit) is never considered dirty. Mirrors formData on open/edit.
+  const [initialFormData, setInitialFormData] = useState<UserFormData>(EMPTY_FORM);
 
   const [newPassword, setNewPassword] = useState('');
+
+  // Unsaved-changes guard for the Add/Edit User modal: prompts on
+  // refresh/tab-close while dirty, and gates the Cancel/backdrop close.
+  const isFormDirty = useMemo(
+    () => showModal && JSON.stringify(formData) !== JSON.stringify(initialFormData),
+    [showModal, formData, initialFormData]
+  );
+  const { confirmDiscard } = useUnsavedChanges(isFormDirty);
 
   // A0.4: badge-print selection backed by DataTable's selection prop (Set-based).
   const selectedKeySet = React.useMemo(() => new Set<number>(selectedUserIds), [selectedUserIds]);
@@ -347,7 +364,7 @@ export default function Users() {
 
   const handleEdit = (user: UserData) => {
     setEditingUser(user);
-    setFormData({
+    const editValues: UserFormData = {
       email: user.email,
       employee_id: user.employee_id,
       first_name: user.first_name,
@@ -355,8 +372,10 @@ export default function Users() {
       password: '',
       role: user.role,
       department: user.department || '',
-      phone: user.phone || ''
-    });
+      phone: user.phone || '',
+    };
+    setFormData(editValues);
+    setInitialFormData(editValues);
     setShowModal(true);
   };
 
@@ -416,16 +435,17 @@ export default function Users() {
     const nextParams = new URLSearchParams(searchParams);
     nextParams.delete('id');
     setSearchParams(nextParams, { replace: true });
-    setFormData({
-      email: '',
-      employee_id: '',
-      first_name: '',
-      last_name: '',
-      password: '',
-      role: 'operator',
-      department: '',
-      phone: ''
-    });
+    setFormData(EMPTY_FORM);
+    setInitialFormData(EMPTY_FORM);
+  };
+
+  // Gate the Add/Edit modal's Cancel/backdrop close behind the dirty-confirm.
+  // The successful-submit path calls setShowModal(false)/resetForm() directly,
+  // so saving never triggers the discard prompt.
+  const requestCloseModal = () => {
+    if (!confirmDiscard()) return;
+    setShowModal(false);
+    resetForm();
   };
 
   return (
@@ -673,7 +693,7 @@ export default function Users() {
       {/* Add/Edit User Modal */}
       <Modal
         open={showModal}
-        onClose={() => { setShowModal(false); resetForm(); }}
+        onClose={requestCloseModal}
         size="lg"
         closeOnBackdrop={false}
       >
@@ -682,103 +702,119 @@ export default function Users() {
             </h3>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">First Name</label>
-                  <input
-                    type="text"
-                    value={formData.first_name}
-                    onChange={(e) => setFormData({ ...formData, first_name: e.target.value })}
-                    className="input"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Last Name</label>
-                  <input
-                    type="text"
-                    value={formData.last_name}
-                    onChange={(e) => setFormData({ ...formData, last_name: e.target.value })}
-                    className="input"
-                    required
-                  />
-                </div>
+                <FormField label="First Name" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      autoFocus
+                      type="text"
+                      value={formData.first_name}
+                      onChange={(e) => setFormData({ ...formData, first_name: e.target.value })}
+                      className="input"
+                      required
+                    />
+                  )}
+                </FormField>
+                <FormField label="Last Name" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.last_name}
+                      onChange={(e) => setFormData({ ...formData, last_name: e.target.value })}
+                      className="input"
+                      required
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Employee ID</label>
-                  <input
-                    type="text"
-                    value={formData.employee_id}
-                    onChange={(e) => setFormData({ ...formData, employee_id: e.target.value })}
-                    className="input"
-                    required
-                    disabled={!!editingUser}
-                  />
-                </div>
-                <div>
-                  <label className="label">Email</label>
-                  <input
-                    type="email"
-                    value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    className="input"
-                    required
-                  />
-                </div>
+                <FormField label="Employee ID" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.employee_id}
+                      onChange={(e) => setFormData({ ...formData, employee_id: e.target.value })}
+                      className="input"
+                      required
+                      disabled={!!editingUser}
+                    />
+                  )}
+                </FormField>
+                <FormField label="Email" required>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="email"
+                      value={formData.email}
+                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                      className="input"
+                      required
+                    />
+                  )}
+                </FormField>
               </div>
 
               {!editingUser && (
-                <div>
-                  <label className="label">Password</label>
-                  <input
-                    type="password"
-                    value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    className="input"
-                    required
-                    minLength={12}
-                    autoComplete="new-password"
-                  />
-                  <ul className="mt-2 space-y-1 text-xs text-slate-400">
+                <FormField label="Password" required help={
+                  <ul className="space-y-1">
                     {passwordRequirements.map((requirement) => (
                       <li key={requirement}>{requirement}</li>
                     ))}
                   </ul>
-                </div>
+                }>
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="password"
+                      value={formData.password}
+                      onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                      className="input"
+                      required
+                      minLength={12}
+                      autoComplete="new-password"
+                    />
+                  )}
+                </FormField>
               )}
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Role</label>
-                  <select
-                    value={formData.role}
-                    onChange={(e) => setFormData({ ...formData, role: e.target.value as UserRole })}
-                    className="input"
-                    required
-                  >
-                    <option value="operator">Operator</option>
-                    <option value="supervisor">Supervisor</option>
-                    <option value="quality">Quality</option>
-                    <option value="shipping">Shipping</option>
-                    <option value="manager">Manager</option>
-                    <option value="admin">Administrator</option>
-                    <option value="viewer">View Only</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Department</label>
-                  <input
-                    type="text"
-                    value={formData.department}
-                    onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-                    className="input"
-                  />
-                </div>
+                <FormField label="Role" required>
+                  {(field) => (
+                    <select
+                      {...field}
+                      value={formData.role}
+                      onChange={(e) => setFormData({ ...formData, role: e.target.value as UserRole })}
+                      className="input"
+                      required
+                    >
+                      <option value="operator">Operator</option>
+                      <option value="supervisor">Supervisor</option>
+                      <option value="quality">Quality</option>
+                      <option value="shipping">Shipping</option>
+                      <option value="manager">Manager</option>
+                      <option value="admin">Administrator</option>
+                      <option value="viewer">View Only</option>
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Department">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.department}
+                      onChange={(e) => setFormData({ ...formData, department: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
 
               <div className="flex justify-end gap-3 mt-6">
-                <button type="button" onClick={() => { setShowModal(false); resetForm(); }} className="btn-secondary">
+                <button type="button" onClick={requestCloseModal} className="btn-secondary">
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary">
@@ -797,23 +833,26 @@ export default function Users() {
       >
             <h3 className="text-lg font-semibold mb-4">Reset Password</h3>
             <form onSubmit={handleResetPassword} className="space-y-4">
-              <div>
-                <label className="label">New Password</label>
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  className="input"
-                  required
-                  minLength={12}
-                  autoComplete="new-password"
-                />
-                <ul className="mt-2 space-y-1 text-xs text-slate-400">
+              <FormField label="New Password" required help={
+                <ul className="space-y-1">
                   {passwordRequirements.map((requirement) => (
                     <li key={requirement}>{requirement}</li>
                   ))}
                 </ul>
-              </div>
+              }>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="input"
+                    required
+                    minLength={12}
+                    autoComplete="new-password"
+                  />
+                )}
+              </FormField>
               <div className="flex justify-end gap-3">
                 <button type="button" onClick={() => setShowPasswordModal(false)} className="btn-secondary">
                   Cancel
@@ -837,26 +876,30 @@ export default function Users() {
       >
             <h3 className="text-lg font-semibold mb-4">Import Users From CSV</h3>
             <form onSubmit={handleImportCsv} className="space-y-4">
-              <div>
-                <label className="label">CSV File</label>
-                <input
-                  type="file"
-                  accept=".csv,text/csv"
-                  onChange={(e) => setImportFile(e.target.files?.[0] || null)}
-                  className="input"
-                  required
-                />
-              </div>
-              <div>
-                <label className="label">Default Password (optional)</label>
-                <input
-                  type="password"
-                  value={importDefaultPassword}
-                  onChange={(e) => setImportDefaultPassword(e.target.value)}
-                  className="input"
-                  placeholder="Used when a CSV row does not include password"
-                />
-              </div>
+              <FormField label="CSV File" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
+              <FormField label="Default Password (optional)">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="password"
+                    value={importDefaultPassword}
+                    onChange={(e) => setImportDefaultPassword(e.target.value)}
+                    className="input"
+                    placeholder="Used when a CSV row does not include password"
+                  />
+                )}
+              </FormField>
               <div className="text-xs text-slate-400 bg-slate-800 border border-slate-700 rounded p-3">
                 <p className="font-medium text-slate-100 mb-1">CSV columns</p>
                 <p>Required: employee_id, first_name, last_name</p>
