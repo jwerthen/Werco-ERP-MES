@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { RoutingImportWizard } from '../components/routing/RoutingImportWizard';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
@@ -130,6 +131,7 @@ const confidenceBadge: Record<string, string> = {
 
 export default function RoutingPage() {
   const { user } = useAuth();
+  const { showToast } = useToast();
   // Importing routings creates draft records — gate it to the same roles the
   // backend allows (ADMIN / MANAGER / SUPERVISOR all hold routings:create).
   const canImport = hasPermission(user?.role, 'routings:create');
@@ -144,6 +146,7 @@ export default function RoutingPage() {
   const [parts, setParts] = useState<Part[]>([]);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [selectedRouting, setSelectedRouting] = useState<Routing | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -230,6 +233,8 @@ export default function RoutingPage() {
   }, [searchParams, parts, newRouting.part_id]);
 
   const loadData = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [routingsRes, partsRes, wcRes] = await Promise.all([
         api.getRoutings({ include_bom_components: false }),
@@ -242,6 +247,7 @@ export default function RoutingPage() {
 
     } catch (err) {
       console.error('Failed to load data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -254,6 +260,7 @@ export default function RoutingPage() {
       return routing;
     } catch (err) {
       console.error('Failed to load routing:', err);
+      showToast('error', 'Failed to load routing details.');
     }
     return null;
   };
@@ -269,7 +276,7 @@ export default function RoutingPage() {
   const handleCreateRouting = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRouting.part_id) {
-      alert('Select a part before creating a routing.');
+      showToast('error', 'Select a part before creating a routing.');
       return;
     }
     try {
@@ -283,7 +290,7 @@ export default function RoutingPage() {
       nextParams.delete('part_id');
       setSearchParams(nextParams);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create routing');
+      showToast('error', err.response?.data?.detail || 'Failed to create routing');
     }
   };
 
@@ -318,10 +325,10 @@ export default function RoutingPage() {
     } catch (err: any) {
       const status = err.response?.status;
       if (status === 403) {
-        alert("You need the Admin or Manager role to edit a released routing's time standards.");
+        showToast('error', "You need the Admin or Manager role to edit a released routing's time standards.");
       } else {
         // 400 surfaces the server's "only time standards…" message; other codes fall back.
-        alert(err.response?.data?.detail || 'Failed to save operation');
+        showToast('error', err.response?.data?.detail || 'Failed to save operation');
       }
     }
   };
@@ -333,7 +340,7 @@ export default function RoutingPage() {
       await api.deleteRoutingOperation(selectedRouting.id, operationId);
       await loadRouting(selectedRouting.id);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete operation');
+      showToast('error', err.response?.data?.detail || 'Failed to delete operation');
     }
   };
 
@@ -345,7 +352,7 @@ export default function RoutingPage() {
       await loadRouting(selectedRouting.id);
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to release routing');
+      showToast('error', err.response?.data?.detail || 'Failed to release routing');
     }
   };
 
@@ -363,7 +370,7 @@ export default function RoutingPage() {
       }
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete routing');
+      showToast('error', err.response?.data?.detail || 'Failed to delete routing');
     }
   };
 
@@ -430,7 +437,7 @@ export default function RoutingPage() {
       setGenerationResult(result);
       setEditedOperations(result.proposed_operations);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to analyze drawing');
+      showToast('error', err.response?.data?.detail || 'Failed to analyze drawing');
     } finally {
       setGenerating(false);
     }
@@ -442,7 +449,7 @@ export default function RoutingPage() {
     try {
       const invalidOperation = editedOperations.find((op) => !op.work_center_id || !op.operation_name.trim());
       if (invalidOperation) {
-        alert('Every proposed operation needs a name and work center before creating the routing.');
+        showToast('error', 'Every proposed operation needs a name and work center before creating the routing.');
         return;
       }
       const operations = editedOperations
@@ -461,7 +468,7 @@ export default function RoutingPage() {
           queue_hours: 0,
         }));
       if (operations.length === 0) {
-        alert('All operations need a work center assigned before creating the routing.');
+        showToast('error', 'All operations need a work center assigned before creating the routing.');
         return;
       }
       const created = await api.createRoutingFromGeneration({
@@ -477,7 +484,7 @@ export default function RoutingPage() {
       setGenerationResult(null);
       setEditedOperations([]);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create routing');
+      showToast('error', err.response?.data?.detail || 'Failed to create routing');
     } finally {
       setCreatingFromGeneration(false);
     }
@@ -614,6 +621,16 @@ export default function RoutingPage() {
     );
   }
 
+  if (loadError) {
+    return (
+      <ErrorState
+        message="Could not load routings, parts, or work centers."
+        onRetry={loadData}
+        className="h-64"
+      />
+    );
+  }
+
   return (
     <div className="space-y-6" data-tour="eng-routing">
       <div className="flex justify-between items-center">
@@ -692,7 +709,19 @@ export default function RoutingPage() {
               </div>
             ))}
             {routings.length === 0 && (
-              <p className="text-slate-400 text-center py-4">No routings created yet</p>
+              <EmptyState
+                icon={ArrowPathIcon}
+                title="No routings yet"
+                description="Create a routing to define the operations a part moves through."
+                action={{
+                  label: 'New Routing',
+                  onClick: () => {
+                    setNewRouting({ part_id: 0, revision: 'A', description: '' });
+                    setForcedRoutingPart(null);
+                    setShowCreateModal(true);
+                  },
+                }}
+              />
             )}
           </div>
         </div>
@@ -835,14 +864,24 @@ export default function RoutingPage() {
               </div>
 
               {selectedRouting.operations.length === 0 && (
-                <p className="text-slate-400 text-center py-8">No operations defined yet</p>
+                <EmptyState
+                  icon={PlusIcon}
+                  title="No operations defined yet"
+                  description="Add the operations this part moves through to build out the routing."
+                  action={
+                    selectedRouting.status === 'draft'
+                      ? { label: 'Add Operation', onClick: openAddOperationModal }
+                      : undefined
+                  }
+                />
               )}
             </>
           ) : (
-            <div className="text-center py-12 text-slate-400">
-              <ArrowPathIcon className="h-12 w-12 mx-auto mb-4 text-slate-400" />
-              <p>Select a routing to view operations</p>
-            </div>
+            <EmptyState
+              icon={ArrowPathIcon}
+              title="No routing selected"
+              description="Select a routing from the list to view its operations."
+            />
           )}
         </div>
       </div>
@@ -1308,7 +1347,12 @@ export default function RoutingPage() {
                     </table>
                   </div>
                   {editedOperations.length === 0 && (
-                    <p className="text-sm text-slate-400 text-center py-4">No operations proposed. The drawing may not have enough information.</p>
+                    <EmptyState
+                      icon={DocumentArrowUpIcon}
+                      title="No operations proposed"
+                      description="The drawing may not have enough information. Add operations manually to build the routing."
+                      action={{ label: 'Add Operation', onClick: addEditedOperation }}
+                    />
                   )}
                 </div>
 

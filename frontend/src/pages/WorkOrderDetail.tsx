@@ -11,6 +11,7 @@ import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ArrowLeftIcon,
@@ -34,6 +35,8 @@ import {
   HashtagIcon,
   ClockIcon,
   ChartBarIcon,
+  UserGroupIcon,
+  WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
@@ -231,6 +234,7 @@ export default function WorkOrderDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { showToast } = useToast();
   const isAdminView = user?.role === 'admin' || !!user?.is_superuser;
   // Manual laser-nest manage actions are limited to admin/manager/supervisor —
   // the same trio the backend RBAC allows (routings:create maps to exactly that
@@ -552,7 +556,7 @@ export default function WorkOrderDetail() {
       await api.releaseWorkOrder(workOrder!.id);
       loadWorkOrder();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to release work order');
+      showToast('error', err.response?.data?.detail || 'Failed to release work order');
     }
   };
 
@@ -561,7 +565,7 @@ export default function WorkOrderDetail() {
       await api.startWorkOrder(workOrder!.id);
       loadWorkOrder();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to start work order');
+      showToast('error', err.response?.data?.detail || 'Failed to start work order');
     }
   };
 
@@ -578,7 +582,7 @@ export default function WorkOrderDetail() {
       await api.deleteWorkOrder(workOrder.id);
       navigate('/work-orders');
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete work order');
+      showToast('error', err.response?.data?.detail || 'Failed to delete work order');
       setDeleting(false);
     }
   };
@@ -596,11 +600,11 @@ export default function WorkOrderDetail() {
     if (trimmed === '') return null;
     const n = Number(trimmed);
     if (!Number.isFinite(n) || n < 0) {
-      alert(`${label} must be a non-negative number`);
+      showToast('error', `${label} must be a non-negative number`);
       return null;
     }
     if (max !== undefined && n > max) {
-      alert(`${label} cannot exceed ${max}`);
+      showToast('error', `${label} cannot exceed ${max}`);
       return null;
     }
     return n;
@@ -623,7 +627,7 @@ export default function WorkOrderDetail() {
       await api.completeWorkOrder(workOrder!.id, qtyComplete, qtyScrapped);
       loadWorkOrder();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to complete work order');
+      showToast('error', err.response?.data?.detail || 'Failed to complete work order');
     } finally {
       setCompleting(false);
     }
@@ -649,7 +653,7 @@ export default function WorkOrderDetail() {
       await api.completeWOOperation(operation.id, qtyComplete, qtyScrapped);
       loadWorkOrder();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to complete operation');
+      showToast('error', err.response?.data?.detail || 'Failed to complete operation');
     } finally {
       setCompletingOpId(null);
     }
@@ -751,7 +755,7 @@ export default function WorkOrderDetail() {
       setBlockerForm({ operation_id: '', category: 'material_missing', severity: 'high', note: '' });
       await loadWorkOrder();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to report blocker');
+      showToast('error', err.response?.data?.detail || 'Failed to report blocker');
     } finally {
       setSubmittingBlocker(false);
     }
@@ -765,7 +769,7 @@ export default function WorkOrderDetail() {
       await api.resolveWorkOrderBlocker(blocker.id, note.trim() || undefined);
       await loadWorkOrder();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to resolve blocker');
+      showToast('error', err.response?.data?.detail || 'Failed to resolve blocker');
     } finally {
       setResolvingBlockerId(null);
     }
@@ -874,9 +878,14 @@ export default function WorkOrderDetail() {
 
   if (error || !workOrder) {
     return (
-      <div className="bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-3 rounded-lg">
-        {error || 'Work order not found'}
-      </div>
+      <ErrorState
+        title="Couldn't load work order"
+        message={error || 'Work order not found'}
+        onRetry={() => {
+          setLoading(true);
+          loadWorkOrder();
+        }}
+      />
     );
   }
 
@@ -1065,7 +1074,12 @@ export default function WorkOrderDetail() {
               </div>
               <div className="divide-y divide-slate-700">
                 {workOrderDocuments.length === 0 ? (
-                  <div className="px-4 py-5 text-sm text-slate-400">No drawing PDF attached.</div>
+                  <EmptyState
+                    icon={DocumentTextIcon}
+                    title="No drawing PDF attached"
+                    description="Upload a PDF or attach an existing drawing to preview the part here."
+                    className="px-4 py-5"
+                  />
                 ) : (
                   workOrderDocuments.map((document) => (
                     <button
@@ -1419,7 +1433,11 @@ export default function WorkOrderDetail() {
                 </table>
               </div>
             ) : (
-              <p className="text-sm text-slate-400">No one is currently clocked in on this work order.</p>
+              <EmptyState
+                icon={UserGroupIcon}
+                title="No active operators"
+                description="No one is currently clocked in on this work order."
+              />
             )}
           </CockpitPanel>
         )}
@@ -1439,8 +1457,12 @@ export default function WorkOrderDetail() {
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
           <div className="space-y-3 xl:max-h-[440px] xl:overflow-y-auto pr-1">
             {blockers.length === 0 ? (
-              <div className="rounded-sm border border-fd-line bg-slate-900/40 p-4 text-sm text-slate-400">
-                No blockers reported.
+              <div className="rounded-sm border border-fd-line bg-slate-900/40">
+                <EmptyState
+                  icon={CheckCircleIcon}
+                  title="No blockers reported"
+                  description="This work order has no open issues. Use the form to report one if the job is stuck."
+                />
               </div>
             ) : (
               blockers.map((blocker) => (
@@ -1560,7 +1582,11 @@ export default function WorkOrderDetail() {
         <h2 className="card-title mb-3">Operations / Routing</h2>
 
         {workOrder.operations.length === 0 ? (
-          <p className="text-slate-400">No operations defined</p>
+          <EmptyState
+            icon={WrenchScrewdriverIcon}
+            title="No operations defined"
+            description="This work order has no routing operations yet."
+          />
         ) : (
           <div className="overflow-x-auto lg:max-h-[clamp(360px,55vh,640px)] lg:overflow-y-auto">
             <table className="min-w-full divide-y divide-slate-700">
@@ -1808,10 +1834,11 @@ export default function WorkOrderDetail() {
 
       {materialReqs && !materialReqs.has_bom && (
         <div className="card card-compact">
-          <div className="flex items-center gap-2 text-slate-400">
-            <CubeIcon className="h-5 w-5" />
-            <span>No BOM defined for this part</span>
-          </div>
+          <EmptyState
+            icon={CubeIcon}
+            title="No BOM defined for this part"
+            description="Material requirements will appear here once a bill of materials is added."
+          />
         </div>
       )}
 

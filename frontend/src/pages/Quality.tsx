@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
 import {
@@ -98,6 +99,8 @@ export default function QualityPage() {
   const [fais, setFais] = useState<FAI[]>([]);
   const [summary, setSummary] = useState<QualitySummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const { showToast } = useToast();
   const [parts, setParts] = useState<any[]>([]);
   const [ncrStatusFilter, setNcrStatusFilter] = useState<string>(() => {
     const filter = searchParams.get('filter');
@@ -125,6 +128,8 @@ export default function QualityPage() {
   }, []);
 
   const loadData = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [ncrsRes, carsRes, faisRes, summaryRes, partsRes] = await Promise.all([
         api.getNCRs(),
@@ -140,6 +145,7 @@ export default function QualityPage() {
       setParts(partsRes);
     } catch (err) {
       console.error('Failed to load quality data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -157,7 +163,7 @@ export default function QualityPage() {
       setNcrForm({ part_id: 0, title: '', description: '', source: 'in_process', quantity_affected: 1, specification: '', actual_value: '', required_value: '' });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create NCR');
+      showToast('error', err.response?.data?.detail || 'Failed to create NCR');
     }
   };
 
@@ -169,7 +175,7 @@ export default function QualityPage() {
       setCarForm({ title: '', problem_description: '', car_type: 'corrective', priority: 3 });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create CAR');
+      showToast('error', err.response?.data?.detail || 'Failed to create CAR');
     }
   };
 
@@ -181,7 +187,7 @@ export default function QualityPage() {
       setFaiForm({ part_id: 0, fai_type: 'full', reason: 'new_part', customer_approval_required: false });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create FAI');
+      showToast('error', err.response?.data?.detail || 'Failed to create FAI');
     }
   };
 
@@ -189,6 +195,20 @@ export default function QualityPage() {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <h1 className="text-2xl font-bold text-white">Quality Management</h1>
+        </div>
+        <ErrorState
+          message="Could not load quality data (NCRs, CARs, FAIs)."
+          onRetry={loadData}
+        />
       </div>
     );
   }
@@ -343,7 +363,14 @@ export default function QualityPage() {
                   ))}
                 </tbody>
               </table>
-              {ncrs.length === 0 && <p className="text-center text-slate-400 py-8">No NCRs found</p>}
+              {ncrs.length === 0 && (
+                <EmptyState
+                  icon={ExclamationTriangleIcon}
+                  title="No NCRs found"
+                  description="Non-conformance reports will appear here once they are created."
+                  action={{ label: 'New NCR', onClick: () => setShowNCRModal(true) }}
+                />
+              )}
             </div>
           </>
         )}
@@ -394,7 +421,14 @@ export default function QualityPage() {
                   ))}
                 </tbody>
               </table>
-              {cars.length === 0 && <p className="text-center text-slate-400 py-8">No CARs found</p>}
+              {cars.length === 0 && (
+                <EmptyState
+                  icon={ClipboardDocumentCheckIcon}
+                  title="No CARs found"
+                  description="Corrective action requests will appear here once they are created."
+                  action={{ label: 'New CAR', onClick: () => setShowCARModal(true) }}
+                />
+              )}
             </div>
           </>
         )}
@@ -446,7 +480,14 @@ export default function QualityPage() {
                   ))}
                 </tbody>
               </table>
-              {fais.length === 0 && <p className="text-center text-slate-400 py-8">No FAIs found</p>}
+              {fais.length === 0 && (
+                <EmptyState
+                  icon={DocumentMagnifyingGlassIcon}
+                  title="No FAIs found"
+                  description="First article inspections will appear here once they are created."
+                  action={{ label: 'New FAI', onClick: () => setShowFAIModal(true) }}
+                />
+              )}
             </div>
           </>
         )}

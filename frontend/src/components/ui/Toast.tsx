@@ -64,7 +64,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             className={`${colors[toast.type]} text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-slide-up pointer-events-auto max-w-sm`}
           >
             {icons[toast.type]}
-            <span className="text-sm font-medium flex-1">{toast.message}</span>
+            <span className="text-sm font-medium flex-1 whitespace-pre-line">{toast.message}</span>
             <button onClick={() => dismiss(toast.id)} className="hover:opacity-75" aria-label="Dismiss notification">
               <XMarkIcon className="h-4 w-4" />
             </button>

@@ -1,12 +1,14 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   ArrowUpTrayIcon,
   ArrowDownTrayIcon,
   TrashIcon,
   MagnifyingGlassIcon,
+  DocumentTextIcon,
 } from '@heroicons/react/24/outline';
 
 interface Document {
@@ -53,10 +55,12 @@ const typeIcons: Record<string, string> = {
 };
 
 export default function Documents() {
+  const { showToast } = useToast();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [documentTypes, setDocumentTypes] = useState<DocumentType[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState('');
   const [showUploadModal, setShowUploadModal] = useState(false);
@@ -73,6 +77,7 @@ export default function Documents() {
 
   const loadData = useCallback(async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const [docsRes, partsRes, typesRes] = await Promise.all([
         api.getDocuments({ document_type: filterType || undefined }),
@@ -84,6 +89,7 @@ export default function Documents() {
       setDocumentTypes(typesRes);
     } catch (err) {
       console.error('Failed to load documents:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -96,7 +102,7 @@ export default function Documents() {
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!uploadForm.file) {
-      alert('Please select a file');
+      showToast('error', 'Please select a file');
       return;
     }
 
@@ -114,9 +120,10 @@ export default function Documents() {
       await api.uploadDocument(formData);
       setShowUploadModal(false);
       setUploadForm({ title: '', document_type: 'drawing', description: '', part_id: 0, revision: 'A', file: null });
+      showToast('success', 'Document uploaded');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to upload document');
+      showToast('error', err.response?.data?.detail || 'Failed to upload document');
     }
   };
 
@@ -131,7 +138,7 @@ export default function Documents() {
       link.click();
       link.remove();
     } catch {
-      alert('Failed to download document');
+      showToast('error', 'Failed to download document');
     }
   };
 
@@ -139,9 +146,10 @@ export default function Documents() {
     if (!window.confirm('Delete this document?')) return;
     try {
       await api.deleteDocument(docId);
+      showToast('success', 'Document deleted');
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete');
+      showToast('error', err.response?.data?.detail || 'Failed to delete');
     }
   };
 
@@ -273,9 +281,28 @@ export default function Documents() {
               ))}
             </tbody>
           </table>
-          {filteredDocs.length === 0 && (
-            <p className="text-center text-slate-400 py-8">No documents found</p>
-          )}
+          {loadError ? (
+            <ErrorState
+              message="Could not load documents."
+              onRetry={loadData}
+              className="py-8"
+            />
+          ) : filteredDocs.length === 0 ? (
+            <EmptyState
+              icon={DocumentTextIcon}
+              title={search || filterType ? 'No matching documents' : 'No documents'}
+              description={
+                search || filterType
+                  ? 'Try adjusting your search or type filter.'
+                  : 'Upload a document to get started.'
+              }
+              action={
+                search || filterType
+                  ? undefined
+                  : { label: 'Upload Document', onClick: () => setShowUploadModal(true) }
+              }
+            />
+          ) : null}
         </div>
       </div>
 

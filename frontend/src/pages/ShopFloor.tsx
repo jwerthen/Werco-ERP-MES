@@ -13,6 +13,7 @@ import {
   isDateBeforeTodayInCentral,
 } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
+import { EmptyState, ErrorState } from '../components/ui';
 import {
   PlayIcon,
   StopIcon,
@@ -69,6 +70,9 @@ export default function ShopFloor() {
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [initialError, setInitialError] = useState(false);
+  const [queueError, setQueueError] = useState(false);
+  const [detailErrors, setDetailErrors] = useState<Set<number>>(new Set());
   const [clockOutModal, setClockOutModal] = useState(false);
   const [clockOutJob, setClockOutJob] = useState<ActiveJob | null>(null);
   const [clockOutData, setClockOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
@@ -110,6 +114,7 @@ export default function ShopFloor() {
   }, [isKiosk, location.search, navigate]);
 
   const loadInitialData = useCallback(async () => {
+    setInitialError(false);
     try {
       const [wcResponse, activeResponse] = await Promise.all([
         api.getWorkCenters(),
@@ -138,6 +143,7 @@ export default function ShopFloor() {
       }
     } catch (err) {
       console.error('Failed to load data:', err);
+      setInitialError(true);
     } finally {
       setLoading(false);
     }
@@ -153,11 +159,13 @@ export default function ShopFloor() {
   }, []);
 
   const loadQueue = useCallback(async (workCenterId: number) => {
+    setQueueError(false);
     try {
       const response = await api.getWorkCenterQueue(workCenterId);
       setQueue(response.queue);
     } catch (err) {
       console.error('Failed to load queue:', err);
+      setQueueError(true);
     }
   }, []);
 
@@ -236,18 +244,29 @@ export default function ShopFloor() {
       newExpanded.add(workOrderId);
       // Load work order details if not already loaded
       if (!workOrderDetails[workOrderId]) {
-        try {
-          const response = await api.getWorkOrder(workOrderId);
-          setWorkOrderDetails(prev => ({
-            ...prev,
-            [workOrderId]: response
-          }));
-        } catch (err) {
-          console.error('Failed to load work order details:', err);
-        }
+        await loadWorkOrderDetails(workOrderId);
       }
     }
     setExpandedRows(newExpanded);
+  };
+
+  const loadWorkOrderDetails = async (workOrderId: number) => {
+    setDetailErrors((prev) => {
+      if (!prev.has(workOrderId)) return prev;
+      const next = new Set(prev);
+      next.delete(workOrderId);
+      return next;
+    });
+    try {
+      const response = await api.getWorkOrder(workOrderId);
+      setWorkOrderDetails(prev => ({
+        ...prev,
+        [workOrderId]: response
+      }));
+    } catch (err) {
+      console.error('Failed to load work order details:', err);
+      setDetailErrors((prev) => new Set(prev).add(workOrderId));
+    }
   };
 
   const handleClockIn = async (item: QueueItem) => {
@@ -474,6 +493,14 @@ export default function ShopFloor() {
         </div>
       </div>
 
+      {/* Initial load failure */}
+      {initialError && (
+        <ErrorState
+          message="Could not load shop floor data. Check your connection and try again."
+          onRetry={loadInitialData}
+        />
+      )}
+
       {/* Active Job Banner */}
       {activeJobs.length > 0 && (
         <div className="space-y-2">
@@ -602,14 +629,21 @@ export default function ShopFloor() {
           )}
         </div>
 
-        {sortedQueue.length === 0 ? (
-          <div className="text-center py-16">
-            <div className="p-4 rounded-sm bg-fd-sunken w-fit mx-auto mb-4">
-              <QueueListIcon className="h-8 w-8 text-surface-400" />
-            </div>
-            <p className="text-surface-600 font-medium">No jobs in queue</p>
-            <p className="text-sm text-surface-500 mt-1">Select a different work center or check back later</p>
-          </div>
+        {queueError ? (
+          <ErrorState
+            className="py-12"
+            message="Could not load the job queue for this work center."
+            onRetry={() => {
+              if (selectedWorkCenter) loadQueue(selectedWorkCenter);
+            }}
+          />
+        ) : sortedQueue.length === 0 ? (
+          <EmptyState
+            className="py-12"
+            icon={QueueListIcon}
+            title="No jobs in queue"
+            description="Select a different work center or check back later."
+          />
         ) : (
           <div className="overflow-x-auto">
             <table className="table">
@@ -867,6 +901,12 @@ export default function ShopFloor() {
                                     </div>
                                   </div>
                                 </div>
+                              ) : detailErrors.has(item.work_order_id) ? (
+                                <ErrorState
+                                  className="py-8"
+                                  message="Could not load work order details."
+                                  onRetry={() => loadWorkOrderDetails(item.work_order_id)}
+                                />
                               ) : (
                                 <div className="flex items-center justify-center py-8">
                                   <div className="text-center">

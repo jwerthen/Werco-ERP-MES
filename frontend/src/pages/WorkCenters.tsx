@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { WorkCenter, WorkCenterType } from '../types';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import {
@@ -21,8 +22,10 @@ const statusColors: Record<string, string> = {
 };
 
 export default function WorkCenters() {
+  const { showToast } = useToast();
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editingWc, setEditingWc] = useState<WorkCenter | null>(null);
   const [workCenterTypes, setWorkCenterTypes] = useState<string[]>([]);
@@ -44,6 +47,8 @@ export default function WorkCenters() {
   }, []);
 
   const loadWorkCenters = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [wcResult, typesResult] = await Promise.allSettled([
         api.getWorkCenters(false),
@@ -54,6 +59,7 @@ export default function WorkCenters() {
         setWorkCenters(wcResult.value);
       } else {
         console.error('Failed to load work centers:', wcResult.reason);
+        setLoadError(true);
       }
 
       if (typesResult.status === 'fulfilled') {
@@ -63,6 +69,7 @@ export default function WorkCenters() {
       }
     } catch (err) {
       console.error('Failed to load work centers:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -70,6 +77,7 @@ export default function WorkCenters() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const isEditing = !!editingWc;
     try {
       if (editingWc) {
         const updatePayload = {
@@ -101,8 +109,9 @@ export default function WorkCenters() {
       setShowModal(false);
       resetForm();
       loadWorkCenters();
+      showToast('success', isEditing ? 'Work center updated' : 'Work center created');
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save work center');
+      showToast('error', err.response?.data?.detail || 'Failed to save work center');
     }
   };
 
@@ -145,6 +154,7 @@ export default function WorkCenters() {
       loadWorkCenters();
     } catch (err) {
       console.error('Failed to update status:', err);
+      showToast('error', 'Failed to update work center status');
     }
   };
 
@@ -252,7 +262,21 @@ export default function WorkCenters() {
         />
       </MiniStatStrip>
 
-      {/* Per-type panels, side-by-side */}
+      {/* Load error / empty state */}
+      {loadError ? (
+        <ErrorState
+          message="Could not load work centers."
+          onRetry={loadWorkCenters}
+        />
+      ) : workCenters.length === 0 ? (
+        <EmptyState
+          icon={Cog6ToothIcon}
+          title="No work centers"
+          description="Add a work center to start tracking shop-floor capacity and status."
+          action={{ label: 'Add Work Center', onClick: () => { resetForm(); setShowModal(true); } }}
+        />
+      ) : (
+      /* Per-type panels, side-by-side */
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
         {groupedWorkCenters.map((group) => (
           <CockpitPanel
@@ -326,6 +350,7 @@ export default function WorkCenters() {
           </CockpitPanel>
         ))}
       </div>
+      )}
 
       {/* Add/Edit Modal */}
       <Modal

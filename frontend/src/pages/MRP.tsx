@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import {
   PlayIcon,
   ExclamationTriangleIcon,
@@ -152,9 +153,12 @@ function ActionRow({
 }
 
 export default function MRPPage() {
+  const { showToast } = useToast();
   const [runs, setRuns] = useState<MRPRun[]>([]);
   const [shortages, setShortages] = useState<ShortagesSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [actionsError, setActionsError] = useState(false);
   const [runningMRP, setRunningMRP] = useState(false);
   const [selectedRun, setSelectedRun] = useState<MRPRun | null>(null);
   const [runActions, setRunActions] = useState<MRPAction[]>([]);
@@ -168,6 +172,7 @@ export default function MRPPage() {
   }, []);
 
   const loadData = async () => {
+    setLoadError(false);
     try {
       const [runsRes, shortagesRes] = await Promise.all([
         api.getMRPRuns(),
@@ -177,6 +182,7 @@ export default function MRPPage() {
       setShortages(shortagesRes);
     } catch (err) {
       console.error('Failed to load MRP data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -193,7 +199,7 @@ export default function MRPPage() {
       setRuns([result, ...runs]);
       loadData(); // Refresh shortages
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to run MRP');
+      showToast('error', err.response?.data?.detail || 'Failed to run MRP');
     } finally {
       setRunningMRP(false);
     }
@@ -201,11 +207,13 @@ export default function MRPPage() {
 
   const loadRunActions = async (run: MRPRun) => {
     setSelectedRun(run);
+    setActionsError(false);
     try {
       const actions = await api.getMRPActions(run.id);
       setRunActions(actions);
     } catch (err) {
       console.error('Failed to load actions:', err);
+      setActionsError(true);
     }
   };
 
@@ -218,7 +226,7 @@ export default function MRPPage() {
       }
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to process action');
+      showToast('error', err.response?.data?.detail || 'Failed to process action');
     }
   };
 
@@ -322,6 +330,11 @@ export default function MRPPage() {
         />
       </MiniStatStrip>
 
+      {/* Page-level load failure: surface an error + retry instead of a blank cockpit. */}
+      {loadError && (
+        <ErrorState message="Could not load MRP runs and shortages." onRetry={loadData} />
+      )}
+
       {/* Cockpit grid: Shortages (wide) + Recent Runs (narrow), Run Details (wide) */}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
         {/* Shortages */}
@@ -410,7 +423,14 @@ export default function MRPPage() {
                 </div>
               </button>
             ))}
-            {runs.length === 0 && <p className="text-slate-400 text-center py-4">No MRP runs yet</p>}
+            {runs.length === 0 && (
+              <EmptyState
+                icon={BoltIcon}
+                title="No MRP runs yet"
+                description="Run MRP to analyze requirements and surface shortages."
+                action={{ label: 'Run MRP', onClick: runMRP }}
+              />
+            )}
           </div>
         </CockpitPanel>
 
@@ -421,7 +441,18 @@ export default function MRPPage() {
           className="xl:col-span-12"
           footer={selectedRun ? `${runActions.length} actions` : undefined}
         >
-          {selectedRun ? (
+          {!selectedRun ? (
+            <EmptyState
+              icon={ClipboardDocumentListIcon}
+              title="No run selected"
+              description="Select a run from Recent MRP Runs to view its actions."
+            />
+          ) : actionsError ? (
+            <ErrorState
+              message="Could not load actions for this run."
+              onRetry={() => loadRunActions(selectedRun)}
+            />
+          ) : (
             <div className="divide-y divide-fd-line">
               {runActions.map((action) => (
                 <ActionRow
@@ -441,10 +472,14 @@ export default function MRPPage() {
                   highlight={shortageActionIds.has(action.id)}
                 />
               ))}
-              {runActions.length === 0 && <p className="text-slate-400 text-center py-4">No actions in this run</p>}
+              {runActions.length === 0 && (
+                <EmptyState
+                  icon={CheckCircleIcon}
+                  title="No actions in this run"
+                  description="This MRP run produced no planning actions."
+                />
+              )}
             </div>
-          ) : (
-            <p className="text-slate-400 text-center py-8">Select a run to view details</p>
           )}
         </CockpitPanel>
       </div>

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 import {
@@ -56,9 +57,11 @@ const equipmentTypes = [
 ];
 
 export default function Calibration() {
+  const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [equipment, setEquipment] = useState<Equipment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [showCalibrationModal, setShowCalibrationModal] = useState(false);
   const [editingEquipment, setEditingEquipment] = useState<Equipment | null>(null);
@@ -102,11 +105,14 @@ export default function Calibration() {
   });
 
   const loadEquipment = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const response = await api.getEquipment(statusFilter || undefined);
       setEquipment(response);
     } catch (err) {
       console.error('Failed to load equipment:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -128,7 +134,7 @@ export default function Calibration() {
       resetForm();
       loadEquipment();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save equipment');
+      showToast('error', err.response?.data?.detail || 'Failed to save equipment');
     }
   };
 
@@ -144,7 +150,7 @@ export default function Calibration() {
       setSelectedEquipmentId(null);
       loadEquipment();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to record calibration');
+      showToast('error', err.response?.data?.detail || 'Failed to record calibration');
     }
   };
 
@@ -312,6 +318,12 @@ export default function Calibration() {
       </div>
 
       {/* Equipment Table */}
+      {loadError ? (
+        <ErrorState
+          message="Could not load calibration equipment."
+          onRetry={loadEquipment}
+        />
+      ) : (
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-700">
@@ -386,9 +398,19 @@ export default function Calibration() {
           </table>
         </div>
         {equipment.length === 0 && (
-          <div className="text-center py-8 text-slate-400">No equipment found</div>
+          <EmptyState
+            icon={WrenchIcon}
+            title="No equipment found"
+            description={
+              statusFilter
+                ? 'No equipment matches the current filter.'
+                : 'Add measurement equipment to start tracking calibration.'
+            }
+            action={{ label: 'Add Equipment', onClick: () => { resetForm(); setShowModal(true); } }}
+          />
         )}
       </div>
+      )}
 
       {/* Add/Edit Equipment Modal */}
       <Modal open={showModal} onClose={() => { setShowModal(false); resetForm(); }} size="2xl" closeOnBackdrop={false}>

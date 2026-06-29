@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../services/api';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
+import { ErrorState } from '../components/ui';
 
 interface ShipmentDetail {
   id: number;
@@ -30,13 +31,17 @@ export default function PrintPackingSlip() {
   const { id } = useParams();
   const [shipment, setShipment] = useState<ShipmentDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   const loadShipment = useCallback(async () => {
+    setLoadError(false);
+    setLoading(true);
     try {
       const response = await api.getShipment(parseInt(id!));
       setShipment(response);
     } catch (err) {
       console.error('Failed to load shipment:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -51,6 +56,17 @@ export default function PrintPackingSlip() {
       setTimeout(() => window.print(), 500);
     }
   }, [shipment, loading]);
+
+  if (loadError && !loading) {
+    return (
+      <div className="p-8 max-w-4xl mx-auto">
+        <ErrorState
+          message="Could not load this shipment."
+          onRetry={loadShipment}
+        />
+      </div>
+    );
+  }
 
   if (loading || !shipment) {
     return <div className="p-8">Loading...</div>;

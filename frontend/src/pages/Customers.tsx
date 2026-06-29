@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
-import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon, UserGroupIcon } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
 import { LoadingButton } from '../components/ui/LoadingButton';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
 interface Customer {
@@ -86,9 +87,12 @@ const statusColors: Record<string, string> = {
 
 export default function Customers() {
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [statsError, setStatsError] = useState(false);
   const [search, setSearch] = useState('');
   const [showInactive, setShowInactive] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -122,11 +126,14 @@ export default function Customers() {
   });
 
   const loadCustomers = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const response = await api.getCustomers(!showInactive);
       setCustomers(response);
     } catch (err) {
       console.error('Failed to load customers:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -159,12 +166,14 @@ export default function Customers() {
   const viewCustomerDetails = async (customer: Customer) => {
     setSelectedCustomer(customer);
     setLoadingStats(true);
+    setStatsError(false);
     try {
       const stats = await api.getCustomerStats(customer.id);
       setCustomerStats(stats);
     } catch (err) {
       console.error('Failed to load customer stats:', err);
       setCustomerStats(null);
+      setStatsError(true);
     } finally {
       setLoadingStats(false);
     }
@@ -185,14 +194,16 @@ export default function Customers() {
     try {
       if (editingCustomer) {
         await api.updateCustomer(editingCustomer.id, formData);
+        showToast('success', 'Customer updated');
       } else {
         await api.createCustomer(formData);
+        showToast('success', 'Customer created');
       }
       setShowModal(false);
       resetForm();
       loadCustomers();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save customer');
+      showToast('error', err.response?.data?.detail || 'Failed to save customer');
     } finally {
       setSaving(false);
     }
@@ -368,8 +379,15 @@ export default function Customers() {
             </tbody>
           </table>
         </div>
-        {filteredCustomers.length === 0 && (
-          <div className="text-center py-8 text-slate-400">No customers found</div>
+        {loadError ? (
+          <ErrorState message="Could not load customers." onRetry={loadCustomers} />
+        ) : filteredCustomers.length === 0 && (
+          <EmptyState
+            icon={UserGroupIcon}
+            title="No customers found"
+            description={search ? 'No customers match your search.' : 'Add your first customer to get started.'}
+            action={search ? undefined : { label: 'Add your first customer', onClick: () => { resetForm(); setShowModal(true); } }}
+          />
         )}
       </div>
 
@@ -740,16 +758,18 @@ export default function Customers() {
                   </div>
 
                   {customerStats.work_order_counts.total === 0 && customerStats.part_count === 0 && (
-                    <div className="text-center text-slate-400 py-4">
-                      No parts, assemblies, or work orders found for this customer
-                    </div>
+                    <EmptyState
+                      title="Nothing on file yet"
+                      description="No parts, assemblies, or work orders found for this customer."
+                    />
                   )}
                 </div>
-              ) : (
-                <div className="text-center text-slate-400 py-8">
-                  Failed to load customer statistics
-                </div>
-              )}
+              ) : statsError ? (
+                <ErrorState
+                  message="Could not load customer statistics."
+                  onRetry={() => viewCustomerDetails(selectedCustomer)}
+                />
+              ) : null}
             </div>
 
             {/* Footer */}

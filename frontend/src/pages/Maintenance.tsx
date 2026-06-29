@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   PlusIcon,
@@ -78,6 +79,7 @@ const priorityColors: Record<string, { bg: string; text: string }> = {
 };
 
 export default function Maintenance() {
+  const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [schedules, setSchedules] = useState<MaintenanceSchedule[]>([]);
@@ -144,7 +146,7 @@ export default function Maintenance() {
       setShowCreateScheduleModal(false);
       setScheduleForm({ work_center_id: '', maintenance_type: 'preventive', frequency: 'monthly', frequency_value: '1', description: '', checklist: '', estimated_duration_hours: '1' });
       loadData();
-    } catch (err: any) { alert(err.response?.data?.detail || 'Failed to create schedule'); }
+    } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to create schedule'); }
   };
 
   const handleCreateWO = async () => {
@@ -156,14 +158,14 @@ export default function Maintenance() {
       setShowCreateWOModal(false);
       setWoForm({ work_center_id: '', maintenance_type: 'preventive', priority: 'medium', title: '', description: '', scheduled_date: '' });
       loadData();
-    } catch (err: any) { alert(err.response?.data?.detail || 'Failed to create work order'); }
+    } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to create work order'); }
   };
 
   const handleStart = async (wo: MaintenanceWorkOrder) => {
     try {
       await api.startMaintenanceWorkOrder(wo.id);
       loadData();
-    } catch (err: any) { alert(err.response?.data?.detail || 'Failed to start'); }
+    } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to start'); }
   };
 
   const handleComplete = async () => {
@@ -178,7 +180,7 @@ export default function Maintenance() {
       setShowCompleteModal(false);
       setCompleteForm({ notes: '', parts_used: '', labor_cost: '', parts_cost: '' });
       loadData();
-    } catch (err: any) { alert(err.response?.data?.detail || 'Failed to complete'); }
+    } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to complete'); }
   };
 
   if (loading) {
@@ -186,7 +188,11 @@ export default function Maintenance() {
   }
 
   if (error) {
-    return <div className="p-6"><div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 flex items-center gap-3"><ExclamationTriangleIcon className="w-5 h-5 text-red-500" /><span className="text-red-400">{error}</span><button onClick={loadData} className="ml-auto text-red-600 hover:text-red-300">Retry</button></div></div>;
+    return (
+      <div className="p-6">
+        <ErrorState message={error} onRetry={loadData} />
+      </div>
+    );
   }
 
   return (
@@ -270,7 +276,11 @@ export default function Maintenance() {
               ))}
             </div>
           ) : (
-            <p className="text-slate-400">No upcoming maintenance scheduled</p>
+            <EmptyState
+              icon={CalendarDaysIcon}
+              title="No upcoming maintenance"
+              description="Scheduled and upcoming maintenance will appear here."
+            />
           )}
 
           <h3 className="text-lg font-semibold mt-6">Recent Work Orders</h3>
@@ -329,7 +339,16 @@ export default function Maintenance() {
             </thead>
             <tbody className="divide-y divide-slate-700">
               {schedules.length === 0 ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-400">No schedules configured</td></tr>
+                <tr>
+                  <td colSpan={8} className="px-4 py-8">
+                    <EmptyState
+                      icon={CalendarDaysIcon}
+                      title="No schedules configured"
+                      description="Create a maintenance schedule to track recurring upkeep."
+                      action={{ label: 'New Schedule', onClick: () => setShowCreateScheduleModal(true) }}
+                    />
+                  </td>
+                </tr>
               ) : schedules.map(s => (
                 <tr key={s.id} className="hover:bg-slate-800">
                   <td className="px-4 py-3 font-medium">{s.work_center_name || `WC #${s.work_center_id}`}</td>
@@ -388,7 +407,24 @@ export default function Maintenance() {
               </thead>
               <tbody className="divide-y divide-slate-700">
                 {filteredWOs.length === 0 ? (
-                  <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-400">No work orders found</td></tr>
+                  <tr>
+                    <td colSpan={7} className="px-4 py-8">
+                      <EmptyState
+                        icon={PlusIcon}
+                        title="No work orders found"
+                        description={
+                          search || statusFilter
+                            ? 'No maintenance work orders match your search or filter.'
+                            : 'Create a maintenance work order to get started.'
+                        }
+                        action={
+                          search || statusFilter
+                            ? undefined
+                            : { label: 'New Work Order', onClick: () => setShowCreateWOModal(true) }
+                        }
+                      />
+                    </td>
+                  </tr>
                 ) : filteredWOs.map(wo => (
                   <tr key={wo.id} className="hover:bg-slate-800">
                     <td className="px-4 py-3 font-medium">{wo.title}</td>

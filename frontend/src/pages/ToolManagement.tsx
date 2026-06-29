@@ -5,11 +5,12 @@ import {
   MagnifyingGlassIcon,
   ArrowPathIcon,
   XMarkIcon,
-  ExclamationTriangleIcon,
   ArrowRightOnRectangleIcon,
   ArrowLeftOnRectangleIcon,
+  WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 interface Tool {
   id: number;
@@ -60,10 +61,12 @@ const statusColors: Record<string, { bg: string; text: string }> = {
 };
 
 export default function ToolManagement() {
+  const { showToast } = useToast();
   const [tools, setTools] = useState<Tool[]>([]);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [tabError, setTabError] = useState(false);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
@@ -104,6 +107,7 @@ export default function ToolManagement() {
 
   const loadTabData = useCallback(async (tab: Tab) => {
     try {
+      setTabError(false);
       let data: Tool[] = [];
       if (tab === 'checked_out') data = await api.getToolsCheckedOut();
       else if (tab === 'replacement') data = await api.getToolsReplacementDue();
@@ -112,6 +116,7 @@ export default function ToolManagement() {
       setTools(data || []);
     } catch (err) {
       console.error('Failed to load tab data:', err);
+      setTabError(true);
     }
   }, []);
 
@@ -146,7 +151,7 @@ export default function ToolManagement() {
       setCreateForm({ tool_number: '', name: '', description: '', tool_type: 'cutting_tool', location: '', manufacturer: '', model_number: '', serial_number: '', purchase_cost: '', max_uses: '', max_life_hours: '' });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create tool');
+      showToast('error', err.response?.data?.detail || 'Failed to create tool');
     }
   };
 
@@ -161,7 +166,7 @@ export default function ToolManagement() {
       setCheckoutForm({ checked_out_to: '', work_order_id: '', notes: '' });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to checkout tool');
+      showToast('error', err.response?.data?.detail || 'Failed to checkout tool');
     }
   };
 
@@ -176,7 +181,7 @@ export default function ToolManagement() {
       setCheckinForm({ condition: 'good', notes: '', uses_this_session: '' });
       loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to checkin tool');
+      showToast('error', err.response?.data?.detail || 'Failed to checkin tool');
     }
   };
 
@@ -197,7 +202,11 @@ export default function ToolManagement() {
   }
 
   if (error) {
-    return <div className="p-6"><div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 flex items-center gap-3"><ExclamationTriangleIcon className="w-5 h-5 text-red-500" /><span className="text-red-400">{error}</span><button onClick={loadData} className="ml-auto text-red-600 hover:text-red-300">Retry</button></div></div>;
+    return (
+      <div className="p-6">
+        <ErrorState message={error} onRetry={loadData} />
+      </div>
+    );
   }
 
   const tabs: { key: Tab; label: string; count?: number }[] = [
@@ -272,8 +281,30 @@ export default function ToolManagement() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-700">
-            {filteredTools.length === 0 ? (
-              <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-400">No tools found</td></tr>
+            {tabError ? (
+              <tr>
+                <td colSpan={7} className="px-4 py-8">
+                  <ErrorState
+                    message="Could not load tools for this view."
+                    onRetry={() => loadTabData(activeTab)}
+                  />
+                </td>
+              </tr>
+            ) : filteredTools.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="px-4 py-8">
+                  <EmptyState
+                    icon={WrenchScrewdriverIcon}
+                    title="No tools found"
+                    description={
+                      search || statusFilter || typeFilter
+                        ? 'No tools match the current filters.'
+                        : 'Tools and fixtures you add will appear here.'
+                    }
+                    action={{ label: 'New Tool', onClick: () => setShowCreateModal(true) }}
+                  />
+                </td>
+              </tr>
             ) : filteredTools.map(tool => (
               <React.Fragment key={tool.id}>
                 <tr className="hover:bg-slate-800 cursor-pointer" onClick={() => toggleExpand(tool.id)}>

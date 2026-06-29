@@ -16,6 +16,7 @@ import {
   SparklesIcon,
   BoltIcon,
 } from '@heroicons/react/24/outline';
+import { EmptyState, ErrorState } from '../components/ui';
 
 interface Material {
   id: number;
@@ -103,6 +104,7 @@ export default function QuoteCalculator() {
   const [calculating, setCalculating] = useState(false);
   const [result, setResult] = useState<QuoteResult | null>(null);
   const [error, setError] = useState('');
+  const [loadError, setLoadError] = useState(false);
   const [dxfFile, setDxfFile] = useState<File | null>(null);
   const [dxfAnalysis, setDxfAnalysis] = useState<DXFAnalysis | null>(null);
   const [analyzingDxf, setAnalyzingDxf] = useState(false);
@@ -145,6 +147,8 @@ export default function QuoteCalculator() {
   });
 
   const loadData = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const [materialsRes, finishesRes] = await Promise.all([
         api.getQuoteMaterials(),
@@ -152,7 +156,7 @@ export default function QuoteCalculator() {
       ]);
       setMaterials(materialsRes);
       setFinishes(finishesRes);
-      
+
       if (materialsRes.length > 0) {
         setCncForm(f => ({ ...f, material_id: materialsRes[0].id }));
         setSheetForm(f => ({ ...f, material_id: materialsRes[0].id }));
@@ -173,7 +177,7 @@ export default function QuoteCalculator() {
           console.error('Failed to seed defaults:', e);
         }
       }
-      setError('Failed to load configuration. Please seed default data.');
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -269,6 +273,16 @@ export default function QuoteCalculator() {
           <p className="text-slate-500">Loading calculator...</p>
         </div>
       </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <ErrorState
+        title="Couldn't load the calculator"
+        message="Failed to load pricing configuration. Please seed default data, then retry."
+        onRetry={loadData}
+      />
     );
   }
 
@@ -828,11 +842,11 @@ export default function QuoteCalculator() {
           </h2>
           
           {!result ? (
-            <div className="text-center py-10">
-              <CalculatorIcon className="h-10 w-10 mx-auto mb-3 text-slate-600" />
-              <p className="text-slate-500 font-medium">Enter part details and click Calculate</p>
-              <p className="text-slate-400 text-sm mt-1">Your instant quote will appear here</p>
-            </div>
+            <EmptyState
+              icon={CalculatorIcon}
+              title="Enter part details and click Calculate"
+              description="Your instant quote will appear here."
+            />
           ) : (
             <div className="space-y-5">
               {/* Big Price Card */}

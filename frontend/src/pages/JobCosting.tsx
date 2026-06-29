@@ -23,6 +23,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -123,10 +124,14 @@ const todayISO = () => new Date().toISOString().split('T')[0];
 // ── Component ────────────────────────────────────────────────────
 
 export default function JobCosting() {
+  const { showToast } = useToast();
+
   // Data
   const [jobCosts, setJobCosts] = useState<JobCostRecord[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [entriesError, setEntriesError] = useState(false);
 
   // Filters
   const [activeTab, setActiveTab] = useState<'active' | 'completed'>('active');
@@ -168,12 +173,14 @@ export default function JobCosting() {
   const loadJobCosts = useCallback(async () => {
     try {
       setLoading(true);
+      setLoadError(false);
       const params: Record<string, string> = {};
       if (statusFilter) params.status = statusFilter;
       const response = await api.get<JobCostRecord[]>('/job-costs/', { params });
       setJobCosts(response.data);
     } catch (err) {
       console.error('Failed to load job costs:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -191,10 +198,12 @@ export default function JobCosting() {
   const loadEntries = useCallback(async (jobCostId: number) => {
     try {
       setEntriesLoading(true);
+      setEntriesError(false);
       const response = await api.get<CostEntry[]>(`/job-costs/${jobCostId}/entries`);
       setEntries(response.data);
     } catch (err) {
       console.error('Failed to load entries:', err);
+      setEntriesError(true);
     } finally {
       setEntriesLoading(false);
     }
@@ -285,7 +294,7 @@ export default function JobCosting() {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!createForm.work_order_id) {
-      alert('Please select a work order');
+      showToast('error', 'Please select a work order');
       return;
     }
     try {
@@ -294,10 +303,11 @@ export default function JobCosting() {
         throw new Error('Failed to create job cost');
       }
       setShowCreateModal(false);
+      showToast('success', 'Job cost created');
       loadJobCosts();
       loadSummary();
     } catch (err: any) {
-      alert(err.message || 'Failed to create job cost');
+      showToast('error', err.message || 'Failed to create job cost');
     }
   };
 
@@ -323,11 +333,12 @@ export default function JobCosting() {
     try {
       await api.post(`/job-costs/${entryJobCostId}/entries`, entryForm);
       setShowEntryModal(false);
+      showToast('success', 'Cost entry added');
       loadEntries(entryJobCostId);
       loadJobCosts();
       loadSummary();
     } catch (err: any) {
-      alert(err.message || 'Failed to add entry');
+      showToast('error', err.message || 'Failed to add entry');
     }
   };
 
@@ -337,11 +348,12 @@ export default function JobCosting() {
     if (!window.confirm('Are you sure you want to delete this cost entry?')) return;
     try {
       await api.delete(`/job-costs/${jobCostId}/entries/${entryId}`);
+      showToast('success', 'Cost entry deleted');
       loadEntries(jobCostId);
       loadJobCosts();
       loadSummary();
     } catch (err: any) {
-      alert(err.message || 'Failed to delete entry');
+      showToast('error', err.message || 'Failed to delete entry');
     }
   };
 
@@ -350,13 +362,14 @@ export default function JobCosting() {
   const handleRecalculate = async (jobCostId: number) => {
     try {
       await api.post(`/job-costs/${jobCostId}/calculate`, {});
+      showToast('success', 'Costs recalculated');
       loadJobCosts();
       loadSummary();
       if (expandedId === jobCostId) {
         loadEntries(jobCostId);
       }
     } catch (err: any) {
-      alert(err.message || 'Failed to recalculate');
+      showToast('error', err.message || 'Failed to recalculate');
     }
   };
 
@@ -509,10 +522,24 @@ export default function JobCosting() {
                   Loading...
                 </td>
               </tr>
+            ) : loadError ? (
+              <tr>
+                <td colSpan={10} className="p-0">
+                  <ErrorState
+                    message="Could not load job costs."
+                    onRetry={loadJobCosts}
+                  />
+                </td>
+              </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={10} className="text-center py-8 text-slate-400">
-                  No job costs found. Click "New Job Cost" to create one.
+                <td colSpan={10} className="p-0">
+                  <EmptyState
+                    icon={CurrencyDollarIcon}
+                    title="No job costs found"
+                    description="Track estimated vs. actual costs by creating a job cost for a work order."
+                    action={{ label: 'New Job Cost', onClick: openCreateModal }}
+                  />
                 </td>
               </tr>
             ) : (
@@ -636,10 +663,17 @@ export default function JobCosting() {
 
                             {entriesLoading ? (
                               <p className="text-sm text-slate-400 py-2">Loading entries...</p>
+                            ) : entriesError ? (
+                              <ErrorState
+                                message="Could not load cost entries."
+                                onRetry={() => loadEntries(jc.id)}
+                              />
                             ) : entries.length === 0 ? (
-                              <p className="text-sm text-slate-400 py-2">
-                                No cost entries yet. Add one manually or recalculate from time entries.
-                              </p>
+                              <EmptyState
+                                title="No cost entries yet"
+                                description="Add one manually or recalculate from time entries."
+                                action={{ label: 'Add Entry', onClick: () => openEntryModal(jc.id) }}
+                              />
                             ) : (
                               <div className="overflow-x-auto">
                                 <table className="du-table du-table-xs w-full">

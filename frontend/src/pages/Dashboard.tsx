@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { addDays } from 'date-fns';
 import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
+import { EmptyState, ErrorState } from '../components/ui';
 import { MiniStat, CockpitPanel } from '../components/cockpit';
 import { ActiveAssignment, DashboardData, SignedInUserStatus, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -30,7 +31,6 @@ import {
   UsersIcon,
 } from '@heroicons/react/24/outline';
 import {
-  ExclamationTriangleIcon as ExclamationTriangleSolid,
   CheckCircleIcon as CheckCircleSolid
 } from '@heroicons/react/24/solid';
 
@@ -373,13 +373,11 @@ export default function Dashboard() {
 
   if (error) {
     return (
-      <div className="alert-danger">
-        <ExclamationTriangleSolid className="h-5 w-5 flex-shrink-0" />
-        <div>
-          <p className="font-medium">Error loading dashboard</p>
-          <p className="text-sm opacity-80">{error}</p>
-        </div>
-      </div>
+      <ErrorState
+        title="Error loading dashboard"
+        message={error}
+        onRetry={() => loadDashboard(true)}
+      />
     );
   }
 
@@ -583,7 +581,11 @@ export default function Dashboard() {
               ))}
             </div>
           ) : (
-            <p className="text-sm text-slate-400">No machine capacity data available.</p>
+            <EmptyState
+              icon={WrenchScrewdriverIcon}
+              title="No machine capacity data"
+              description="Scheduled work across your machines will show up here."
+            />
           )}
         </CockpitPanel>
 
@@ -619,13 +621,11 @@ export default function Dashboard() {
               })}
             </div>
           ) : (
-            <div className="py-10 text-center">
-              <UserGroupIcon className="mx-auto h-9 w-9 text-slate-500" />
-              <p className="mt-3 text-sm font-medium text-slate-300">No one is clocked into a job right now</p>
-              <p className="mt-1 text-xs text-slate-400">
-                Signed-in users still appear in the presence panel.
-              </p>
-            </div>
+            <EmptyState
+              icon={UserGroupIcon}
+              title="No one is clocked into a job right now"
+              description="Signed-in users still appear in the presence panel."
+            />
           )}
         </CockpitPanel>
 
@@ -648,7 +648,11 @@ export default function Dashboard() {
               ))}
             </div>
           ) : (
-            <p className="text-sm text-slate-400">No work centers configured.</p>
+            <EmptyState
+              icon={WrenchScrewdriverIcon}
+              title="No work centers configured"
+              description="Configure work centers to monitor station status here."
+            />
           )}
         </CockpitPanel>
 
@@ -721,7 +725,11 @@ export default function Dashboard() {
               )}
             </div>
           ) : (
-            <p className="text-sm text-slate-400">No active signed-in sessions detected.</p>
+            <EmptyState
+              icon={UsersIcon}
+              title="No active signed-in sessions"
+              description="Users currently signed into the ERP will appear here."
+            />
           )}
         </CockpitPanel>
       </div>
@@ -768,12 +776,11 @@ export default function Dashboard() {
             ))}
           </div>
         ) : (
-          <div className="py-8 text-center">
-            <div className="mx-auto mb-3 w-fit rounded-sm bg-slate-800/60 p-3">
-              <ClipboardDocumentListIcon className="h-7 w-7 text-slate-500" />
-            </div>
-            <p className="text-sm text-slate-400">No recent completions</p>
-          </div>
+          <EmptyState
+            icon={ClipboardDocumentListIcon}
+            title="No recent completions"
+            description="Completed operations will appear here as work finishes."
+          />
         )}
       </div>
     </div>

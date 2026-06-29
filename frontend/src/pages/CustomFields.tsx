@@ -1,12 +1,14 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import {
   PlusIcon,
   PencilIcon,
   TrashIcon,
   CheckIcon,
-  XMarkIcon
+  XMarkIcon,
+  Squares2X2Icon
 } from '@heroicons/react/24/outline';
 
 type EntityType = 'part' | 'work_order' | 'work_center' | 'customer' | 'supplier' | 'inventory' | 'bom';
@@ -56,8 +58,10 @@ const fieldTypes: { value: FieldType; label: string }[] = [
 ];
 
 export default function CustomFieldsPage() {
+  const { showToast } = useToast();
   const [fields, setFields] = useState<FieldDefinition[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [selectedEntityType, setSelectedEntityType] = useState<EntityType | ''>('');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingField, setEditingField] = useState<FieldDefinition | null>(null);
@@ -80,11 +84,14 @@ export default function CustomFieldsPage() {
   });
 
   const loadFields = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const data = await api.getCustomFieldDefinitions(selectedEntityType || undefined);
       setFields(data);
     } catch (err) {
       console.error('Failed to load fields:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -149,13 +156,15 @@ export default function CustomFieldsPage() {
     try {
       if (editingField) {
         await api.updateCustomFieldDefinition(editingField.id, payload);
+        showToast('success', 'Field updated');
       } else {
         await api.createCustomFieldDefinition(payload);
+        showToast('success', 'Field created');
       }
       setShowCreateModal(false);
       loadFields();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save field');
+      showToast('error', err.response?.data?.detail || 'Failed to save field');
     }
   };
 
@@ -164,9 +173,10 @@ export default function CustomFieldsPage() {
     
     try {
       await api.deleteCustomFieldDefinition(field.id);
+      showToast('success', 'Field deactivated');
       loadFields();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete field');
+      showToast('error', err.response?.data?.detail || 'Failed to delete field');
     }
   };
 
@@ -225,7 +235,14 @@ export default function CustomFieldsPage() {
       </div>
 
       {/* Fields List */}
-      {Object.entries(groupedFields).length > 0 ? (
+      {loadError ? (
+        <div className="card">
+          <ErrorState
+            message="Could not load custom field definitions."
+            onRetry={loadFields}
+          />
+        </div>
+      ) : Object.entries(groupedFields).length > 0 ? (
         Object.entries(groupedFields).map(([group, groupFields]) => (
           <div key={group} className="card">
             <h2 className="text-lg font-semibold mb-4">{group}</h2>
@@ -294,11 +311,13 @@ export default function CustomFieldsPage() {
           </div>
         ))
       ) : (
-        <div className="card text-center py-12">
-          <p className="text-slate-400 mb-4">No custom fields defined yet</p>
-          <button onClick={openCreateModal} className="btn-primary">
-            Create Your First Custom Field
-          </button>
+        <div className="card">
+          <EmptyState
+            icon={Squares2X2Icon}
+            title="No custom fields defined yet"
+            description="Custom fields let you capture extra data on parts, work orders, and more."
+            action={{ label: 'Create Your First Custom Field', onClick: openCreateModal }}
+          />
         </div>
       )}
 

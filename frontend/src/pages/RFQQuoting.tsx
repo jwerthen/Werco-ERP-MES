@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { ArrowDownTrayIcon, CheckCircleIcon, DocumentArrowUpIcon, SparklesIcon } from '@heroicons/react/24/outline';
+import { ErrorState, useToast } from '../components/ui';
 
 interface CustomerOption {
   id: number;
@@ -131,7 +132,9 @@ function lineTypeClass(type?: string) {
 
 export default function RFQQuoting() {
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const [customers, setCustomers] = useState<CustomerOption[]>([]);
+  const [customersError, setCustomersError] = useState(false);
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | ''>('');
   const [customerName, setCustomerName] = useState('');
   const [rfqReference, setRfqReference] = useState('');
@@ -142,27 +145,28 @@ export default function RFQQuoting() {
   const [packageData, setPackageData] = useState<RfqPackageResponse | null>(null);
   const [estimate, setEstimate] = useState<EstimateResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+
+  const loadCustomers = useCallback(async () => {
+    try {
+      setCustomersError(false);
+      const data = await api.getCustomers(true);
+      setCustomers(data || []);
+    } catch (err) {
+      console.error('Failed to load customers', err);
+      setCustomersError(true);
+    }
+  }, []);
 
   useEffect(() => {
-    const loadCustomers = async () => {
-      try {
-        const data = await api.getCustomers(true);
-        setCustomers(data || []);
-      } catch (err) {
-        console.error('Failed to load customers', err);
-      }
-    };
     loadCustomers();
-  }, []);
+  }, [loadCustomers]);
 
   const uploadPackage = async () => {
     if (files.length === 0) {
-      setError('Select at least one RFQ file.');
+      showToast('error', 'Select at least one RFQ file.');
       return;
     }
     setLoading(true);
-    setError('');
     try {
       const formData = new FormData();
       if (selectedCustomerId !== '') formData.append('customer_id', String(selectedCustomerId));
@@ -174,7 +178,7 @@ export default function RFQQuoting() {
       setPackageData(response);
       setEstimate(null);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Failed to upload RFQ package.');
+      showToast('error', err?.response?.data?.detail || 'Failed to upload RFQ package.');
     } finally {
       setLoading(false);
     }
@@ -183,7 +187,6 @@ export default function RFQQuoting() {
   const generateEstimate = async () => {
     if (!packageData) return;
     setLoading(true);
-    setError('');
     try {
       const response = await api.generateRfqEstimate(packageData.id, {
         target_margin_pct: targetMargin,
@@ -193,7 +196,7 @@ export default function RFQQuoting() {
       const refreshed = await api.getRfqPackage(packageData.id);
       setPackageData(refreshed);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Estimate generation failed.');
+      showToast('error', err?.response?.data?.detail || 'Estimate generation failed.');
     } finally {
       setLoading(false);
     }
@@ -202,14 +205,13 @@ export default function RFQQuoting() {
   const approveEstimate = async () => {
     if (!packageData) return;
     setLoading(true);
-    setError('');
     try {
       const result = await api.approveRfqEstimate(packageData.id);
       if (result?.quote_id) {
         navigate('/quotes');
       }
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Failed to approve estimate.');
+      showToast('error', err?.response?.data?.detail || 'Failed to approve estimate.');
     } finally {
       setLoading(false);
     }
@@ -222,7 +224,7 @@ export default function RFQQuoting() {
       const fileName = `${packageData.rfq_number || 'rfq'}_internal_estimate.json`;
       downloadBlob(blob, fileName);
     } catch {
-      setError('Failed to export internal estimate.');
+      showToast('error', 'Failed to export internal estimate.');
     }
   };
 
@@ -232,7 +234,7 @@ export default function RFQQuoting() {
       const blob = await api.generateCustomerQuotePdf(estimate.quote_id);
       downloadBlob(blob, `${estimate.quote_number}.pdf`);
     } catch {
-      setError('Failed to generate customer quote PDF.');
+      showToast('error', 'Failed to generate customer quote PDF.');
     }
   };
 
@@ -246,8 +248,6 @@ export default function RFQQuoting() {
           </p>
         </div>
       </div>
-
-      {error && <div className="rounded-sm border border-fd-red/30 bg-fd-red/10 text-fd-red px-4 py-3 text-sm">{error}</div>}
 
       <div className="bg-fd-panel border border-fd-line rounded-sm p-3 space-y-4">
         <h2 className="text-lg font-semibold text-white flex items-center gap-2">
@@ -270,6 +270,13 @@ export default function RFQQuoting() {
                 </option>
               ))}
             </select>
+            {customersError && (
+              <ErrorState
+                className="mt-2"
+                message="Could not load customers. You can still enter a name override below."
+                onRetry={loadCustomers}
+              />
+            )}
           </div>
           <div>
             <label className="label">Customer Name Override</label>

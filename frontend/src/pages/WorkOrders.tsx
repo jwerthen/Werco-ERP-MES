@@ -18,6 +18,7 @@ import {
   CheckCircleIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 const statusConfig: Record<WorkOrderStatus, { bg: string; text: string; dot: string }> = {
@@ -83,9 +84,11 @@ const getWorkOrderProgress = (wo: WorkOrderSummary) => {
 
 export default function WorkOrders() {
   const { user } = useAuth();
+  const { showToast } = useToast();
   const canDeleteWorkOrders = user?.role === 'admin' || !!user?.is_superuser;
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
@@ -116,9 +119,11 @@ export default function WorkOrders() {
       const response = await api.getWorkOrders(params);
       if (requestId !== loadRequestRef.current) return;
       setWorkOrders(response);
+      setLoadError(false);
     } catch (err) {
       if (requestId !== loadRequestRef.current) return;
       console.error('Failed to load work orders:', err);
+      setLoadError(true);
     } finally {
       if (requestId !== loadRequestRef.current) return;
       setLoading(false);
@@ -192,9 +197,9 @@ export default function WorkOrders() {
       await api.deleteWorkOrder(wo.id);
       loadWorkOrders();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete work order');
+      showToast('error', err.response?.data?.detail || 'Failed to delete work order');
     }
-  }, [loadWorkOrders]);
+  }, [loadWorkOrders, showToast]);
 
   const handleRelease = useCallback(async (wo: WorkOrderSummary) => {
     if (wo.status !== 'draft') return;
@@ -203,7 +208,7 @@ export default function WorkOrders() {
       await api.releaseWorkOrder(wo.id);
       loadWorkOrders();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to release work order');
+      showToast('error', err.response?.data?.detail || 'Failed to release work order');
     } finally {
       setReleasingIds((prev) => {
         const next = new Set(prev);
@@ -211,7 +216,7 @@ export default function WorkOrders() {
         return next;
       });
     }
-  }, [loadWorkOrders]);
+  }, [loadWorkOrders, showToast]);
 
   const customers = useMemo(() => {
     const unique = new Set(workOrders.map(wo => wo.customer_name).filter(Boolean));
@@ -416,7 +421,12 @@ export default function WorkOrders() {
       </div>
 
       {/* Work Orders List */}
-      {groupBy !== 'none' && groupedWorkOrders ? (
+      {loadError && workOrders.length === 0 ? (
+        <ErrorState
+          message="Could not load work orders."
+          onRetry={loadWorkOrders}
+        />
+      ) : groupBy !== 'none' && groupedWorkOrders ? (
         // Grouped View
         <div className="space-y-4" data-tour="wo-list">
           {groupedWorkOrders.map(([groupName, orders]) => (
@@ -480,13 +490,17 @@ export default function WorkOrders() {
 
 function WorkOrdersEmptyState() {
   return (
-    <div className="card text-center py-12 sm:py-16">
-      <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
-        <ListBulletIcon className="h-8 w-8 text-surface-400" />
-      </div>
-      <p className="text-surface-600 font-medium">No work orders found</p>
-      <p className="text-sm text-surface-500 mt-1">Try adjusting your filters</p>
-    </div>
+    <EmptyState
+      icon={ListBulletIcon}
+      title="No work orders found"
+      description="Try adjusting your filters, or create a new work order to get started."
+      action={
+        <Link to="/work-orders/new" className="btn-primary">
+          <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
+          New Work Order
+        </Link>
+      }
+    />
   );
 }
 

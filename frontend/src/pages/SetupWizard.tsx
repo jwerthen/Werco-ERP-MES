@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
+import { EmptyState, ErrorState } from '../components/ui';
 import {
   ArrowPathIcon,
   ArrowRightIcon,
@@ -49,15 +50,18 @@ const fallbackSteps: SetupStep[] = [
 export default function SetupWizard() {
   const [health, setHealth] = useState<SetupHealth | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   const loadHealth = async () => {
     setLoading(true);
     try {
       const data = await api.getSetupHealth();
       setHealth(data);
+      setLoadError(false);
     } catch (err) {
       console.error('Failed to load setup health:', err);
       setHealth({ progress: 0, counts: {}, steps: fallbackSteps, issues: [] });
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -120,6 +124,13 @@ export default function SetupWizard() {
           Refresh
         </button>
       </div>
+
+      {loadError && (
+        <ErrorState
+          message="Could not load setup health. Showing default checklist — retry to refresh live data."
+          onRetry={loadHealth}
+        />
+      )}
 
       <div className="bg-[#151b28] border border-slate-700 rounded-lg p-5">
         <div className="flex items-center justify-between gap-4">
@@ -216,7 +227,11 @@ export default function SetupWizard() {
             ))}
           </div>
         ) : (
-          <div className="text-sm text-slate-400">No blocking master-data issues found.</div>
+          <EmptyState
+            icon={CheckCircleIcon}
+            title="No blocking issues"
+            description="No blocking master-data issues found. Your data is ready for production."
+          />
         )}
       </div>
     </div>

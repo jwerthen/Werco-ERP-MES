@@ -5,6 +5,7 @@ import api from '../services/api';
 import { useCompany } from '../context/CompanyContext';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 interface CompanyOverview {
   id: number;
@@ -25,20 +26,25 @@ interface OverviewData {
 export default function PlatformOverview() {
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const { switchCompany } = useCompany();
   const navigate = useNavigate();
+  const { showToast } = useToast();
 
   useEffect(() => {
     loadOverview();
   }, []);
 
   const loadOverview = async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
       const data = await api.getPlatformOverview();
       setOverview(data);
     } catch {
       console.error('Failed to load platform overview');
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -51,6 +57,7 @@ export default function PlatformOverview() {
       window.location.reload();
     } catch {
       console.error('Failed to switch to company');
+      showToast('error', 'Failed to switch to company');
     }
   };
 
@@ -77,6 +84,13 @@ export default function PlatformOverview() {
         </button>
       </div>
 
+      {loadError ? (
+        <ErrorState
+          message="Could not load the platform overview."
+          onRetry={loadOverview}
+        />
+      ) : (
+        <>
       {/* Summary Stats */}
       <MiniStatStrip className="grid grid-cols-1 sm:grid-cols-3 gap-2">
         <MiniStat
@@ -107,6 +121,14 @@ export default function PlatformOverview() {
 
       {/* Companies */}
       <CockpitPanel title="Companies" subtitle={`${overview?.companies.length || 0} total`}>
+        {overview && overview.companies.length === 0 ? (
+          <EmptyState
+            icon={BuildingOffice2Icon}
+            title="No companies yet"
+            description="Companies you create will appear here."
+            action={{ label: 'Add Company', onClick: () => setShowCreateModal(true) }}
+          />
+        ) : (
         <div className="divide-y divide-fd-line">
           {overview?.companies.map((company) => (
             <button
@@ -132,7 +154,10 @@ export default function PlatformOverview() {
             </button>
           ))}
         </div>
+        )}
       </CockpitPanel>
+        </>
+      )}
 
       {/* Create Company Modal */}
       <CreateCompanyModal

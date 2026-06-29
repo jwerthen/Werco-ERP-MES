@@ -31,6 +31,7 @@ import PrintIntegrationsTab from '../components/admin/PrintIntegrationsTab';
 import AIUsageTab from '../components/admin/AIUsageTab';
 import AIEgressTab from '../components/admin/AIEgressTab';
 import DisplayTokensTab from '../components/admin/DisplayTokensTab';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 
 type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'carriers' | 'printing' | 'aiusage' | 'aiprivacy' | 'displays' | 'audit';
 
@@ -101,8 +102,10 @@ export default function AdminSettings() {
     const requested = searchParams.get('tab');
     return tabs.some((t) => t.key === requested) ? (requested as TabKey) : 'materials';
   })();
+  const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
 
   // Data states
@@ -133,6 +136,7 @@ export default function AdminSettings() {
 
   const loadTabData = useCallback(async (tab: TabKey) => {
     setLoading(true);
+    setLoadError(false);
     try {
       switch (tab) {
         case 'materials':
@@ -177,6 +181,7 @@ export default function AdminSettings() {
       }
     } catch (err) {
       console.error('Failed to load data:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -211,7 +216,7 @@ export default function AdminSettings() {
       setEditModal(null);
       loadTabData(activeTab);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save');
+      showToast('error', err.response?.data?.detail || 'Failed to save');
     }
   };
 
@@ -227,7 +232,7 @@ export default function AdminSettings() {
       setDeleteConfirm(null);
       loadTabData(activeTab);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to delete');
+      showToast('error', err.response?.data?.detail || 'Failed to delete');
     }
   };
 
@@ -239,6 +244,7 @@ export default function AdminSettings() {
       loadTabData(activeTab);
     } catch (err) {
       console.error('Failed to seed defaults:', err);
+      showToast('error', 'Failed to seed defaults');
     }
   };
 
@@ -247,7 +253,7 @@ export default function AdminSettings() {
       await api.updateAdminOverhead(key, value, type);
       loadTabData('overhead');
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to update setting');
+      showToast('error', err.response?.data?.detail || 'Failed to update setting');
     }
   };
 
@@ -278,7 +284,7 @@ export default function AdminSettings() {
       setWorkCenterTypesInUse(response?.in_use || workCenterTypesInUse);
       setWorkCenterTypeInput('');
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to update work center types');
+      showToast('error', err.response?.data?.detail || 'Failed to update work center types');
     }
   };
 
@@ -307,7 +313,7 @@ export default function AdminSettings() {
       setEditingEmployee(null);
       loadTabData('employees');
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save employee');
+      showToast('error', err.response?.data?.detail || 'Failed to save employee');
     }
   };
 
@@ -320,7 +326,7 @@ export default function AdminSettings() {
       }
       loadTabData('employees');
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to update employee status');
+      showToast('error', err.response?.data?.detail || 'Failed to update employee status');
     }
   };
 
@@ -411,6 +417,11 @@ export default function AdminSettings() {
           <div className="flex items-center justify-center py-12">
             <div className="spinner h-8 w-8"></div>
           </div>
+        ) : loadError && !['carriers', 'printing', 'aiusage', 'aiprivacy', 'displays'].includes(activeTab) ? (
+          <ErrorState
+            message="Could not load this settings tab."
+            onRetry={() => loadTabData(activeTab)}
+          />
         ) : (
           <>
             {activeTab === 'materials' && <MaterialsTable data={materials} onEdit={(item) => setEditModal({ type: 'material', item })} onDelete={(item) => setDeleteConfirm({ type: 'material', item })} />}
@@ -436,6 +447,7 @@ export default function AdminSettings() {
                 data={filteredEmployees}
                 onEdit={(employee) => { setEditingEmployee(employee); setEmployeeModalOpen(true); }}
                 onToggleActive={handleEmployeeToggleActive}
+                onAdd={() => { setEditingEmployee(null); setEmployeeModalOpen(true); }}
               />
             )}
             {activeTab === 'roles' && rolePermissions && <RolePermissionsManager data={rolePermissions} onUpdate={() => loadTabData('roles')} />}
@@ -497,7 +509,7 @@ export default function AdminSettings() {
 // ============ TABLE COMPONENTS ============
 
 function MaterialsTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (item: any) => void; onDelete: (item: any) => void }) {
-  if (data.length === 0) return <EmptyState message="No materials configured" />;
+  if (data.length === 0) return <EmptyState icon={CubeIcon} title="No materials configured" description="Add materials to make them available for quoting." />;
   return (
     <div className="table-container border-0">
       <table className="table">
@@ -535,7 +547,7 @@ function MaterialsTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (item
 }
 
 function MachinesTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (item: any) => void; onDelete: (item: any) => void }) {
-  if (data.length === 0) return <EmptyState message="No machines configured" />;
+  if (data.length === 0) return <EmptyState icon={WrenchScrewdriverIcon} title="No machines configured" description="Add machines to set hourly and setup rates for quoting." />;
   return (
     <div className="table-container border-0">
       <table className="table">
@@ -569,7 +581,7 @@ function MachinesTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (item:
 }
 
 function FinishesTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (item: any) => void; onDelete: (item: any) => void }) {
-  if (data.length === 0) return <EmptyState message="No finishes configured" />;
+  if (data.length === 0) return <EmptyState icon={SparklesIcon} title="No finishes configured" description="Add finishes to price coatings, plating, and treatments." />;
   return (
     <div className="table-container border-0">
       <table className="table">
@@ -605,7 +617,7 @@ function FinishesTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (item:
 }
 
 function LaborRatesTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (item: any) => void; onDelete: (item: any) => void }) {
-  if (data.length === 0) return <EmptyState message="No labor rates configured" />;
+  if (data.length === 0) return <EmptyState icon={CurrencyDollarIcon} title="No labor rates configured" description="Add labor rates by role, or use Seed Defaults to start." />;
   return (
     <div className="table-container border-0">
       <table className="table">
@@ -635,7 +647,7 @@ function LaborRatesTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (ite
 }
 
 function WorkCenterRatesTable({ data, onEdit }: { data: any[]; onEdit: (item: any) => void }) {
-  if (data.length === 0) return <EmptyState message="No work centers found" />;
+  if (data.length === 0) return <EmptyState icon={BuildingOfficeIcon} title="No work centers found" description="Work centers created on the Work Centers page will appear here for rate editing." />;
   return (
     <div className="table-container border-0">
       <table className="table">
@@ -736,7 +748,13 @@ function WorkCenterTypesPanel({
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         {types.length === 0 && (
-          <EmptyState message="No work center types configured yet" />
+          <div className="md:col-span-2 lg:col-span-3">
+            <EmptyState
+              icon={BuildingOfficeIcon}
+              title="No work center types configured yet"
+              description="Add a type above to populate the Work Center dropdowns."
+            />
+          </div>
         )}
         {types.map((type) => (
           <div key={type} className="flex items-center justify-between border border-surface-200 rounded-lg px-3 py-2 bg-[#151b28]">
@@ -764,7 +782,7 @@ function WorkCenterTypesPanel({
 }
 
 function OutsideServicesTable({ data, onEdit, onDelete }: { data: any[]; onEdit: (item: any) => void; onDelete: (item: any) => void }) {
-  if (data.length === 0) return <EmptyState message="No outside services configured" />;
+  if (data.length === 0) return <EmptyState icon={TruckIcon} title="No outside services configured" description="Add outside processing services, or use Seed Defaults to start." />;
   return (
     <div className="table-container border-0">
       <table className="table">
@@ -870,7 +888,7 @@ function OverheadSettings({ data, onUpdate }: { data: Record<string, any>; onUpd
 }
 
 function AuditLogTable({ data }: { data: any[] }) {
-  if (data.length === 0) return <EmptyState message="No audit entries" icon={DocumentTextIcon} />;
+  if (data.length === 0) return <EmptyState icon={DocumentTextIcon} title="No audit entries" description="Changes to settings will be recorded here." />;
   return (
     <div className="table-container border-0">
       <table className="table table-compact">
@@ -935,13 +953,22 @@ function EmployeesTable({
   data,
   onEdit,
   onToggleActive,
+  onAdd,
 }: {
   data: EmployeeUser[];
   onEdit: (employee: EmployeeUser) => void;
   onToggleActive: (employee: EmployeeUser) => void;
+  onAdd: () => void;
 }) {
   if (data.length === 0) {
-    return <EmptyState message="No employees configured yet" icon={UsersIcon} />;
+    return (
+      <EmptyState
+        icon={UsersIcon}
+        title="No employees configured yet"
+        description="Add operator accounts tied to a 4-digit ID for kiosk sign-in."
+        action={{ label: 'Add Employee', onClick: onAdd }}
+      />
+    );
   }
 
   return (
@@ -1098,6 +1125,7 @@ interface RolePermissionsData {
 }
 
 function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData; onUpdate: () => void }) {
+  const { showToast } = useToast();
   const [selectedRole, setSelectedRole] = useState<string>(data.roles[0]?.value || 'admin');
   const [permissions, setPermissions] = useState<string[]>(data.role_permissions[selectedRole] || []);
   const [saving, setSaving] = useState(false);
@@ -1138,7 +1166,7 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
       setHasChanges(false);
       onUpdate();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to save permissions');
+      showToast('error', err.response?.data?.detail || 'Failed to save permissions');
     } finally {
       setSaving(false);
     }
@@ -1151,7 +1179,7 @@ function RolePermissionsManager({ data, onUpdate }: { data: RolePermissionsData;
       await api.resetRolePermissions(selectedRole);
       onUpdate();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to reset permissions');
+      showToast('error', err.response?.data?.detail || 'Failed to reset permissions');
     } finally {
       setSaving(false);
     }
@@ -1295,15 +1323,6 @@ function ActionButtons({ onEdit, onDelete }: { onEdit: () => void; onDelete?: ()
           <TrashIcon className="h-4 w-4" />
         </button>
       )}
-    </div>
-  );
-}
-
-function EmptyState({ message, icon: Icon = CubeIcon }: { message: string; icon?: React.ComponentType<any> }) {
-  return (
-    <div className="text-center py-12">
-      <Icon className="h-12 w-12 text-surface-300 mx-auto mb-3" />
-      <p className="text-surface-500">{message}</p>
     </div>
   );
 }

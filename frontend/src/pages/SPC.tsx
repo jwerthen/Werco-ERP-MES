@@ -21,6 +21,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { Modal } from '../components/ui/Modal';
+import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 
 interface DashboardStats {
@@ -88,6 +89,7 @@ const capabilityBg = (val: number): string => {
 };
 
 const SPC = () => {
+  const { showToast } = useToast();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [characteristics, setCharacteristics] = useState<Characteristic[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -98,6 +100,8 @@ const SPC = () => {
   const [violations, setViolations] = useState<Violation[]>([]);
   const [outOfControl, setOutOfControl] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState(false);
+  const [detailsError, setDetailsError] = useState(false);
   const [showAddMeasurement, setShowAddMeasurement] = useState(false);
   const [showCreateChar, setShowCreateChar] = useState(false);
   const [measurementForm, setMeasurementForm] = useState({ value: '', measured_by: '', notes: '' });
@@ -106,6 +110,7 @@ const SPC = () => {
   });
 
   const fetchDashboard = useCallback(async () => {
+    setDashboardError(false);
     try {
       const [dashRes, charRes, oocRes] = await Promise.all([
         api.getSPCDashboard(),
@@ -117,6 +122,7 @@ const SPC = () => {
       setOutOfControl(oocRes.data?.results || oocRes.data || []);
     } catch (err) {
       console.error('Failed to load SPC dashboard', err);
+      setDashboardError(true);
     } finally {
       setLoading(false);
     }
@@ -127,6 +133,7 @@ const SPC = () => {
   }, [fetchDashboard]);
 
   const fetchCharacteristicDetails = useCallback(async (id: number) => {
+    setDetailsError(false);
     try {
       const [limitsRes, capRes, measRes, chartRes, violRes] = await Promise.all([
         api.getSPCControlLimits(id),
@@ -142,6 +149,7 @@ const SPC = () => {
       setViolations(violRes.data?.results || violRes.data || []);
     } catch (err) {
       console.error('Failed to load characteristic details', err);
+      setDetailsError(true);
     }
   }, []);
 
@@ -169,10 +177,12 @@ const SPC = () => {
       setShowAddMeasurement(false);
       fetchCharacteristicDetails(selectedId);
       fetchDashboard();
+      showToast('success', 'Measurement added.');
     } catch (err) {
       console.error('Failed to add measurement', err);
+      showToast('error', 'Failed to add measurement.');
     }
-  }, [selectedId, measurementForm, fetchCharacteristicDetails, fetchDashboard]);
+  }, [selectedId, measurementForm, fetchCharacteristicDetails, fetchDashboard, showToast]);
 
   const handleCreateCharacteristic = useCallback(async () => {
     if (!charForm.name) return;
@@ -188,10 +198,12 @@ const SPC = () => {
       setCharForm({ name: '', part_id: '', nominal: '', usl: '', lsl: '', chart_type: 'xbar_r' });
       setShowCreateChar(false);
       fetchDashboard();
+      showToast('success', 'Characteristic created.');
     } catch (err) {
       console.error('Failed to create characteristic', err);
+      showToast('error', 'Failed to create characteristic.');
     }
-  }, [charForm, fetchDashboard]);
+  }, [charForm, fetchDashboard, showToast]);
 
   const handleRecalculate = useCallback(async () => {
     if (!selectedId) return;
@@ -199,10 +211,12 @@ const SPC = () => {
       await api.calculateSPCControlLimits(selectedId);
       await api.runSPCCapabilityStudy(selectedId);
       fetchCharacteristicDetails(selectedId);
+      showToast('success', 'Control limits and capability recalculated.');
     } catch (err) {
       console.error('Failed to recalculate', err);
+      showToast('error', 'Failed to recalculate control limits.');
     }
-  }, [selectedId, fetchCharacteristicDetails]);
+  }, [selectedId, fetchCharacteristicDetails, showToast]);
 
   if (loading) {
     return (
@@ -224,6 +238,13 @@ const SPC = () => {
           New Characteristic
         </button>
       </div>
+
+      {dashboardError && (
+        <ErrorState
+          message="Could not load SPC dashboard data."
+          onRetry={fetchDashboard}
+        />
+      )}
 
       {/* Summary Cards */}
       <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
@@ -281,14 +302,25 @@ const SPC = () => {
               </button>
             ))}
             {characteristics.length === 0 && (
-              <p className="text-sm text-slate-500 py-2">No characteristics defined.</p>
+              <EmptyState
+                icon={BeakerIcon}
+                title="No characteristics"
+                description="Define a characteristic to start monitoring it."
+                action={{ label: 'New Characteristic', onClick: () => setShowCreateChar(true) }}
+                className="px-3 py-8"
+              />
             )}
           </div>
         </CockpitPanel>
 
         {/* Main Content */}
         <div className="lg:col-span-3 space-y-4">
-          {selectedChar ? (
+          {selectedChar && detailsError ? (
+            <ErrorState
+              message={`Could not load details for ${selectedChar.name}.`}
+              onRetry={() => fetchCharacteristicDetails(selectedChar.id)}
+            />
+          ) : selectedChar ? (
             <>
               {/* Control Chart + Process Capability side-by-side */}
               <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
@@ -455,13 +487,12 @@ const SPC = () => {
               </div>
             </>
           ) : (
-            <div className="card card-compact border-fd-line p-12 text-center">
-              <ChartBarIcon className="h-16 w-16 text-slate-400 mx-auto mb-4" />
-              <p className="text-slate-400 text-lg">Select a characteristic to view control charts</p>
-              <p className="text-slate-500 text-sm mt-1">
-                Choose from the list on the left or create a new one.
-              </p>
-            </div>
+            <EmptyState
+              icon={ChartBarIcon}
+              title="Select a characteristic to view control charts"
+              description="Choose from the list on the left or create a new one."
+              action={{ label: 'New Characteristic', onClick: () => setShowCreateChar(true) }}
+            />
           )}
         </div>
       </div>
