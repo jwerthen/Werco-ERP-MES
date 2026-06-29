@@ -7,7 +7,9 @@ import { partTypeColors } from '../types/engineering';
 import { ENGINEERING_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { Modal } from '../components/ui/Modal';
+import { FormField } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import {
@@ -102,6 +104,16 @@ export default function PartsPage() {
 
   // Create form
   const [createForm, setCreateForm] = useState(INITIAL_CREATE_FORM);
+  // Snapshot of the form values the modal opened with, for unsaved-changes detection.
+  const [initialCreateForm, setInitialCreateForm] = useState(INITIAL_CREATE_FORM);
+
+  const isCreateFormDirty = useMemo(
+    () =>
+      showCreateModal &&
+      (JSON.stringify(createForm) !== JSON.stringify(initialCreateForm) || createDrawingPdf !== null),
+    [showCreateModal, createForm, initialCreateForm, createDrawingPdf]
+  );
+  const { confirmDiscard } = useUnsavedChanges(isCreateFormDirty);
 
   const loadParts = useCallback(async () => {
     try {
@@ -420,8 +432,16 @@ export default function PartsPage() {
     }
   };
 
+  const openCreateModal = () => {
+    setCreateForm(INITIAL_CREATE_FORM);
+    setInitialCreateForm(INITIAL_CREATE_FORM);
+    setCreateDrawingPdf(null);
+    setShowCreateModal(true);
+  };
+
   const closeCreateModal = () => {
     if (creatingPart) return;
+    if (!confirmDiscard()) return;
     setShowCreateModal(false);
     setCreateDrawingPdf(null);
     setCreateDrawingInputKey(key => key + 1);
@@ -547,7 +567,7 @@ export default function PartsPage() {
             <ArrowUpTrayIcon className="h-4 w-4" />
             Import
           </button>
-          <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center gap-2">
+          <button onClick={openCreateModal} className="btn-primary flex items-center gap-2">
             <PlusIcon className="h-4 w-4" />
             New Part
           </button>
@@ -914,190 +934,214 @@ export default function PartsPage() {
         <h3 className="text-lg font-semibold mb-4">New Part</h3>
         <form onSubmit={handleCreate} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Part Number</label>
-                  <input
-                    type="text"
-                    value={createForm.part_number}
-                    onChange={e => setCreateForm(p => ({ ...p, part_number: e.target.value }))}
-                    className="input"
-                    required
-                    autoFocus
-                  />
-                </div>
-                <div>
-                  <label className="label">Revision</label>
-                  <input
-                    type="text"
-                    value={createForm.revision}
-                    onChange={e => setCreateForm(p => ({ ...p, revision: e.target.value }))}
-                    className="input"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="label">Name</label>
-                <input
-                  type="text"
-                  value={createForm.name}
-                  onChange={e => setCreateForm(p => ({ ...p, name: e.target.value }))}
-                  className="input"
-                  required
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Type</label>
-                  <select
-                    value={createForm.part_type}
-                    onChange={e => setCreateForm(p => ({ ...p, part_type: e.target.value as PartType }))}
-                    className="input"
-                  >
-                    {ENGINEERING_PART_TYPE_OPTIONS.map(option => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Standard Cost ($)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={createForm.standard_cost}
-                    onChange={e => setCreateForm(p => ({ ...p, standard_cost: parseFloat(e.target.value) || 0 }))}
-                    className="input"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="label">Description</label>
-                <textarea
-                  value={createForm.description}
-                  onChange={e => setCreateForm(p => ({ ...p, description: e.target.value }))}
-                  className="input"
-                  rows={2}
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div className="relative">
-                  <label className="label">Customer</label>
-                  <div className="relative">
+                <FormField label="Part Number" required>
+                  {field => (
                     <input
+                      {...field}
                       type="text"
-                      value={createForm.customer_name}
-                      onChange={e => {
-                        setCreateForm(p => ({ ...p, customer_name: e.target.value }));
-                        setShowCustomerDropdown(true);
-                      }}
-                      onFocus={() => setShowCustomerDropdown(true)}
-                      onBlur={() => setTimeout(() => setShowCustomerDropdown(false), 200)}
-                      onKeyDown={handleCustomerKeyDown}
-                      className="input pr-8"
-                      placeholder="Select or type customer"
-                      role="combobox"
-                      aria-expanded={showCustomerDropdown}
-                      aria-controls="new-part-customer-results"
-                      aria-autocomplete="list"
+                      value={createForm.part_number}
+                      onChange={e => setCreateForm(p => ({ ...p, part_number: e.target.value }))}
+                      className="input"
+                      required
+                      autoFocus
                     />
-                    <ChevronDownIcon
-                      className="h-5 w-5 absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 cursor-pointer"
-                      onClick={() => setShowCustomerDropdown(!showCustomerDropdown)}
+                  )}
+                </FormField>
+                <FormField label="Revision" required>
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={createForm.revision}
+                      onChange={e => setCreateForm(p => ({ ...p, revision: e.target.value }))}
+                      className="input"
+                      required
                     />
-                  </div>
-                  {showCustomerDropdown && (
-                    <div
-                      id="new-part-customer-results"
-                      className="absolute z-20 w-full mt-1 bg-[#151b28] border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto"
-                      role="listbox"
+                  )}
+                </FormField>
+              </div>
+
+              <FormField label="Name" required>
+                {field => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={createForm.name}
+                    onChange={e => setCreateForm(p => ({ ...p, name: e.target.value }))}
+                    className="input"
+                    required
+                  />
+                )}
+              </FormField>
+
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Type">
+                  {field => (
+                    <select
+                      {...field}
+                      value={createForm.part_type}
+                      onChange={e => setCreateForm(p => ({ ...p, part_type: e.target.value as PartType }))}
+                      className="input"
                     >
-                      {filteredCustomers.length > 0 ? (
-                        <>
-                          {filteredCustomers.map((customer, index) => (
-                            <button
-                              key={customer.id}
-                              type="button"
-                              className={`w-full text-left px-3 py-2 text-sm ${
-                                highlightedCustomerIndex === index ? 'bg-cyan-500/10 text-cyan-100' : 'hover:bg-slate-800'
-                              }`}
-                              onMouseEnter={() => setHighlightedCustomerIndex(index)}
-                              onMouseDown={event => {
-                                event.preventDefault();
-                                selectCustomer(customer.name);
-                              }}
-                              role="option"
-                              aria-selected={createForm.customer_name === customer.name}
-                            >
-                              {customer.name}
-                            </button>
-                          ))}
-                          {matchingCustomers.length > filteredCustomers.length && (
-                            <div className="px-3 py-2 text-xs text-slate-400 border-t border-slate-700/30">
-                              Showing {filteredCustomers.length} of {matchingCustomers.length}. Keep typing to narrow results.
+                      {ENGINEERING_PART_TYPE_OPTIONS.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  )}
+                </FormField>
+                <FormField label="Standard Cost ($)">
+                  {field => (
+                    <input
+                      {...field}
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={createForm.standard_cost}
+                      onChange={e => setCreateForm(p => ({ ...p, standard_cost: parseFloat(e.target.value) || 0 }))}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+              </div>
+
+              <FormField label="Description">
+                {field => (
+                  <textarea
+                    {...field}
+                    value={createForm.description}
+                    onChange={e => setCreateForm(p => ({ ...p, description: e.target.value }))}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
+
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Customer" className="relative">
+                  {field => (
+                    <>
+                      <div className="relative">
+                        <input
+                          {...field}
+                          type="text"
+                          value={createForm.customer_name}
+                          onChange={e => {
+                            setCreateForm(p => ({ ...p, customer_name: e.target.value }));
+                            setShowCustomerDropdown(true);
+                          }}
+                          onFocus={() => setShowCustomerDropdown(true)}
+                          onBlur={() => setTimeout(() => setShowCustomerDropdown(false), 200)}
+                          onKeyDown={handleCustomerKeyDown}
+                          className="input pr-8"
+                          placeholder="Select or type customer"
+                          role="combobox"
+                          aria-expanded={showCustomerDropdown}
+                          aria-controls="new-part-customer-results"
+                          aria-autocomplete="list"
+                        />
+                        <ChevronDownIcon
+                          className="h-5 w-5 absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 cursor-pointer"
+                          onClick={() => setShowCustomerDropdown(!showCustomerDropdown)}
+                        />
+                      </div>
+                      {showCustomerDropdown && (
+                        <div
+                          id="new-part-customer-results"
+                          className="absolute z-20 w-full mt-1 bg-[#151b28] border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto"
+                          role="listbox"
+                        >
+                          {filteredCustomers.length > 0 ? (
+                            <>
+                              {filteredCustomers.map((customer, index) => (
+                                <button
+                                  key={customer.id}
+                                  type="button"
+                                  className={`w-full text-left px-3 py-2 text-sm ${
+                                    highlightedCustomerIndex === index ? 'bg-cyan-500/10 text-cyan-100' : 'hover:bg-slate-800'
+                                  }`}
+                                  onMouseEnter={() => setHighlightedCustomerIndex(index)}
+                                  onMouseDown={event => {
+                                    event.preventDefault();
+                                    selectCustomer(customer.name);
+                                  }}
+                                  role="option"
+                                  aria-selected={createForm.customer_name === customer.name}
+                                >
+                                  {customer.name}
+                                </button>
+                              ))}
+                              {matchingCustomers.length > filteredCustomers.length && (
+                                <div className="px-3 py-2 text-xs text-slate-400 border-t border-slate-700/30">
+                                  Showing {filteredCustomers.length} of {matchingCustomers.length}. Keep typing to narrow results.
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <div className="px-3 py-2 text-sm text-slate-400">
+                              {customerOptions.length === 0 ? 'No customers loaded' : 'No matching customers'}
                             </div>
                           )}
-                        </>
-                      ) : (
-                        <div className="px-3 py-2 text-sm text-slate-400">
-                          {customerOptions.length === 0 ? 'No customers loaded' : 'No matching customers'}
                         </div>
                       )}
-                    </div>
+                    </>
                   )}
-                </div>
-                <div>
-                  <label className="label">Drawing #</label>
-                  <input
-                    type="text"
-                    value={createForm.drawing_number}
-                    onChange={e => setCreateForm(p => ({ ...p, drawing_number: e.target.value }))}
-                    className="input"
-                    placeholder="Optional"
-                  />
-                </div>
+                </FormField>
+                <FormField label="Drawing #">
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={createForm.drawing_number}
+                      onChange={e => setCreateForm(p => ({ ...p, drawing_number: e.target.value }))}
+                      className="input"
+                      placeholder="Optional"
+                    />
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="label">Drawing PDF</label>
-                <input
-                  key={createDrawingInputKey}
-                  type="file"
-                  accept=".pdf,application/pdf"
-                  onChange={e => setCreateDrawingPdf(e.target.files?.[0] || null)}
-                  className="block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
-                />
-                {createDrawingPdf && (
-                  <p className="mt-1 text-xs text-slate-400">
-                    {createDrawingPdf.name}
-                  </p>
+              <FormField label="Drawing PDF">
+                {field => (
+                  <>
+                    <input
+                      {...field}
+                      key={createDrawingInputKey}
+                      type="file"
+                      accept=".pdf,application/pdf"
+                      onChange={e => setCreateDrawingPdf(e.target.files?.[0] || null)}
+                      className="block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
+                    />
+                    {createDrawingPdf && (
+                      <p className="mt-1 text-xs text-slate-400">
+                        {createDrawingPdf.name}
+                      </p>
+                    )}
+                  </>
                 )}
-              </div>
+              </FormField>
 
-              <div className="flex gap-4">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={createForm.is_critical}
-                    onChange={e => setCreateForm(p => ({ ...p, is_critical: e.target.checked }))}
-                    className="rounded border-slate-600 text-werco-navy-600"
-                  />
-                  <span className="text-sm">Critical Characteristic</span>
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={createForm.requires_inspection}
-                    onChange={e => setCreateForm(p => ({ ...p, requires_inspection: e.target.checked }))}
-                    className="rounded border-slate-600 text-werco-navy-600"
-                  />
-                  <span className="text-sm">Requires Inspection</span>
-                </label>
-              </div>
+              <FormField label="Flags">
+                <div className="flex gap-4">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={createForm.is_critical}
+                      onChange={e => setCreateForm(p => ({ ...p, is_critical: e.target.checked }))}
+                      className="rounded border-slate-600 text-werco-navy-600"
+                    />
+                    <span className="text-sm">Critical Characteristic</span>
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={createForm.requires_inspection}
+                      onChange={e => setCreateForm(p => ({ ...p, requires_inspection: e.target.checked }))}
+                      className="rounded border-slate-600 text-werco-navy-600"
+                    />
+                    <span className="text-sm">Requires Inspection</span>
+                  </label>
+                </div>
+              </FormField>
 
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" onClick={closeCreateModal} className="btn-secondary" disabled={creatingPart}>

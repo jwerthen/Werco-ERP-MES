@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import api from '../services/api';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon, UserGroupIcon } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { FormField } from '../components/ui/FormField';
 import { LoadingButton } from '../components/ui/LoadingButton';
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import {
   EmptyState,
   ErrorState,
@@ -82,6 +84,33 @@ interface CustomerStats {
   }>;
 }
 
+// Default/empty values for the create form. Shared by resetForm() and the
+// unsaved-changes dirty check so "pristine" is defined in exactly one place.
+const EMPTY_CUSTOMER_FORM = {
+  name: '',
+  contact_name: '',
+  email: '',
+  phone: '',
+  address_line1: '',
+  address_line2: '',
+  city: '',
+  state: '',
+  zip_code: '',
+  country: 'USA',
+  ship_to_name: '',
+  ship_address_line1: '',
+  ship_city: '',
+  ship_state: '',
+  ship_zip_code: '',
+  payment_terms: 'Net 30',
+  requires_coc: true,
+  requires_fai: false,
+  special_requirements: '',
+  notes: '',
+};
+
+type CustomerFormData = typeof EMPTY_CUSTOMER_FORM;
+
 const statusColors: Record<string, string> = {
   draft: 'bg-slate-800 text-slate-100',
   released: 'bg-blue-500/20 text-blue-300',
@@ -109,28 +138,25 @@ export default function Customers() {
   const [customerStats, setCustomerStats] = useState<CustomerStats | null>(null);
   const [loadingStats, setLoadingStats] = useState(false);
 
-  const [formData, setFormData] = useState({
-    name: '',
-    contact_name: '',
-    email: '',
-    phone: '',
-    address_line1: '',
-    address_line2: '',
-    city: '',
-    state: '',
-    zip_code: '',
-    country: 'USA',
-    ship_to_name: '',
-    ship_address_line1: '',
-    ship_city: '',
-    ship_state: '',
-    ship_zip_code: '',
-    payment_terms: 'Net 30',
-    requires_coc: true,
-    requires_fai: false,
-    special_requirements: '',
-    notes: ''
-  });
+  const [formData, setFormData] = useState<CustomerFormData>(EMPTY_CUSTOMER_FORM);
+  // Snapshot of the values the modal opened with (empty for create, the
+  // customer's values for edit). The form is "dirty" when the live formData
+  // diverges from this baseline.
+  const [initialFormData, setInitialFormData] = useState<CustomerFormData>(EMPTY_CUSTOMER_FORM);
+
+  const isFormDirty = useMemo(
+    () => showModal && JSON.stringify(formData) !== JSON.stringify(initialFormData),
+    [showModal, formData, initialFormData]
+  );
+
+  const { confirmDiscard } = useUnsavedChanges(isFormDirty);
+
+  // Close the create/edit modal, prompting first if there are unsaved edits.
+  const requestCloseModal = () => {
+    if (!confirmDiscard()) return;
+    setShowModal(false);
+    resetForm();
+  };
 
   const loadCustomers = useCallback(async () => {
     setLoading(true);
@@ -218,55 +244,29 @@ export default function Customers() {
 
   const handleEdit = (customer: Customer) => {
     setEditingCustomer(customer);
-    setFormData({
+    const editValues: CustomerFormData = {
+      ...EMPTY_CUSTOMER_FORM,
       name: customer.name,
       contact_name: customer.contact_name || '',
       email: customer.email || '',
       phone: customer.phone || '',
       address_line1: customer.address_line1 || '',
-      address_line2: '',
       city: customer.city || '',
       state: customer.state || '',
       zip_code: customer.zip_code || '',
-      country: 'USA',
-      ship_to_name: '',
-      ship_address_line1: '',
-      ship_city: '',
-      ship_state: '',
-      ship_zip_code: '',
       payment_terms: customer.payment_terms || 'Net 30',
       requires_coc: customer.requires_coc,
       requires_fai: customer.requires_fai,
-      special_requirements: '',
-      notes: ''
-    });
+    };
+    setFormData(editValues);
+    setInitialFormData(editValues);
     setShowModal(true);
   };
 
   const resetForm = () => {
     setEditingCustomer(null);
-    setFormData({
-      name: '',
-      contact_name: '',
-      email: '',
-      phone: '',
-      address_line1: '',
-      address_line2: '',
-      city: '',
-      state: '',
-      zip_code: '',
-      country: 'USA',
-      ship_to_name: '',
-      ship_address_line1: '',
-      ship_city: '',
-      ship_state: '',
-      ship_zip_code: '',
-      payment_terms: 'Net 30',
-      requires_coc: true,
-      requires_fai: false,
-      special_requirements: '',
-      notes: ''
-    });
+    setFormData(EMPTY_CUSTOMER_FORM);
+    setInitialFormData(EMPTY_CUSTOMER_FORM);
   };
 
   const statusColorMap = useMemo(
@@ -453,7 +453,7 @@ export default function Customers() {
       {/* Add/Edit Modal */}
       <Modal
         open={showModal}
-        onClose={() => { setShowModal(false); resetForm(); }}
+        onClose={requestCloseModal}
         size="2xl"
         closeOnBackdrop={false}
       >
@@ -461,87 +461,121 @@ export default function Customers() {
               {editingCustomer ? 'Edit Customer' : 'Add Customer'}
             </h3>
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label className="label">Customer Name *</label>
-                <input
-                  type="text"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="input"
-                  required
-                />
-              </div>
+              <FormField label="Customer Name" required>
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    className="input"
+                    required
+                    autoFocus
+                  />
+                )}
+              </FormField>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="label">Contact Name</label>
-                  <input
-                    type="text"
-                    value={formData.contact_name}
-                    onChange={(e) => setFormData({ ...formData, contact_name: e.target.value })}
-                    className="input"
-                  />
-                </div>
-                <div>
-                  <label className="label">Email</label>
-                  <input
-                    type="email"
-                    value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    className="input"
-                  />
-                </div>
+                <FormField label="Contact Name">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.contact_name}
+                      onChange={(e) => setFormData({ ...formData, contact_name: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
+                <FormField label="Email">
+                  {(field) => (
+                    <input
+                      {...field}
+                      type="email"
+                      value={formData.email}
+                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                      className="input"
+                    />
+                  )}
+                </FormField>
               </div>
 
-              <div>
-                <label className="label">Phone</label>
-                <input
-                  type="text"
-                  value={formData.phone}
-                  onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                  className="input"
-                />
-              </div>
+              <FormField label="Phone">
+                {(field) => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={formData.phone}
+                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                    className="input"
+                  />
+                )}
+              </FormField>
 
               <div className="border-t pt-4">
                 <h4 className="font-medium mb-2">Billing Address</h4>
                 <div className="space-y-2">
-                  <input
-                    type="text"
-                    value={formData.address_line1}
-                    onChange={(e) => setFormData({ ...formData, address_line1: e.target.value })}
-                    className="input"
-                    placeholder="Address Line 1"
-                  />
-                  <input
-                    type="text"
-                    value={formData.address_line2}
-                    onChange={(e) => setFormData({ ...formData, address_line2: e.target.value })}
-                    className="input"
-                    placeholder="Address Line 2"
-                  />
+                  <FormField label="Address Line 1">
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={formData.address_line1}
+                        onChange={(e) => setFormData({ ...formData, address_line1: e.target.value })}
+                        className="input"
+                        placeholder="Address Line 1"
+                      />
+                    )}
+                  </FormField>
+                  <FormField label="Address Line 2">
+                    {(field) => (
+                      <input
+                        {...field}
+                        type="text"
+                        value={formData.address_line2}
+                        onChange={(e) => setFormData({ ...formData, address_line2: e.target.value })}
+                        className="input"
+                        placeholder="Address Line 2"
+                      />
+                    )}
+                  </FormField>
                   <div className="grid grid-cols-3 gap-2">
-                    <input
-                      type="text"
-                      value={formData.city}
-                      onChange={(e) => setFormData({ ...formData, city: e.target.value })}
-                      className="input"
-                      placeholder="City"
-                    />
-                    <input
-                      type="text"
-                      value={formData.state}
-                      onChange={(e) => setFormData({ ...formData, state: e.target.value })}
-                      className="input"
-                      placeholder="State"
-                    />
-                    <input
-                      type="text"
-                      value={formData.zip_code}
-                      onChange={(e) => setFormData({ ...formData, zip_code: e.target.value })}
-                      className="input"
-                      placeholder="ZIP"
-                    />
+                    <FormField label="City">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={formData.city}
+                          onChange={(e) => setFormData({ ...formData, city: e.target.value })}
+                          className="input"
+                          placeholder="City"
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="State">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={formData.state}
+                          onChange={(e) => setFormData({ ...formData, state: e.target.value })}
+                          className="input"
+                          placeholder="State"
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="ZIP">
+                      {(field) => (
+                        <input
+                          {...field}
+                          type="text"
+                          value={formData.zip_code}
+                          onChange={(e) => setFormData({ ...formData, zip_code: e.target.value })}
+                          className="input"
+                          placeholder="ZIP"
+                        />
+                      )}
+                    </FormField>
                   </div>
                 </div>
               </div>
@@ -549,21 +583,23 @@ export default function Customers() {
               <div className="border-t pt-4">
                 <h4 className="font-medium mb-2">Terms & Requirements</h4>
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="label">Payment Terms</label>
-                    <select
-                      value={formData.payment_terms}
-                      onChange={(e) => setFormData({ ...formData, payment_terms: e.target.value })}
-                      className="input"
-                    >
-                      <option value="Net 30">Net 30</option>
-                      <option value="Net 15">Net 15</option>
-                      <option value="Net 45">Net 45</option>
-                      <option value="Net 60">Net 60</option>
-                      <option value="Due on Receipt">Due on Receipt</option>
-                      <option value="COD">COD</option>
-                    </select>
-                  </div>
+                  <FormField label="Payment Terms">
+                    {(field) => (
+                      <select
+                        {...field}
+                        value={formData.payment_terms}
+                        onChange={(e) => setFormData({ ...formData, payment_terms: e.target.value })}
+                        className="input"
+                      >
+                        <option value="Net 30">Net 30</option>
+                        <option value="Net 15">Net 15</option>
+                        <option value="Net 45">Net 45</option>
+                        <option value="Net 60">Net 60</option>
+                        <option value="Due on Receipt">Due on Receipt</option>
+                        <option value="COD">COD</option>
+                      </select>
+                    )}
+                  </FormField>
                 </div>
                 <div className="flex gap-6 mt-3">
                   <label className="flex items-center">
@@ -587,28 +623,32 @@ export default function Customers() {
                 </div>
               </div>
 
-              <div>
-                <label className="label">Special Requirements</label>
-                <textarea
-                  value={formData.special_requirements}
-                  onChange={(e) => setFormData({ ...formData, special_requirements: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Special Requirements">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={formData.special_requirements}
+                    onChange={(e) => setFormData({ ...formData, special_requirements: e.target.value })}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
 
-              <div>
-                <label className="label">Notes</label>
-                <textarea
-                  value={formData.notes}
-                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-              </div>
+              <FormField label="Notes">
+                {(field) => (
+                  <textarea
+                    {...field}
+                    value={formData.notes}
+                    onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                    className="input"
+                    rows={2}
+                  />
+                )}
+              </FormField>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <button type="button" onClick={() => { setShowModal(false); resetForm(); }} className="btn-secondary" disabled={saving}>
+                <button type="button" onClick={requestCloseModal} className="btn-secondary" disabled={saving}>
                   Cancel
                 </button>
                 <LoadingButton type="submit" loading={saving} loadingText="Saving...">

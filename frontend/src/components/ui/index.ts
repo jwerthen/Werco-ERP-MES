@@ -2,6 +2,7 @@
 export * from './Skeleton';
 export * from './LoadingButton';
 export * from './SelectField';
+export * from './FormField';
 export * from './Modal';
 export { EmptyState } from './EmptyState';
 export { ErrorState } from './ErrorState';

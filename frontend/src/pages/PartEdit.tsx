@@ -1,10 +1,26 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { Part, PartType } from '../types';
 import { Breadcrumbs } from '../components/ui/Breadcrumbs';
+import { FormField } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
+import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { ENGINEERING_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
+
+const EMPTY_FORM = {
+  name: '',
+  description: '',
+  part_type: 'manufactured' as PartType,
+  revision: '',
+  standard_cost: 0,
+  is_critical: false,
+  requires_inspection: true,
+  customer_name: '',
+  customer_part_number: '',
+  drawing_number: '',
+  version: 0,
+};
 
 export default function PartEdit() {
   const { id } = useParams<{ id: string }>();
@@ -15,25 +31,15 @@ export default function PartEdit() {
   const [part, setPart] = useState<Part | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
-    name: '',
-    description: '',
-    part_type: 'manufactured' as PartType,
-    revision: '',
-    standard_cost: 0,
-    is_critical: false,
-    requires_inspection: true,
-    customer_name: '',
-    customer_part_number: '',
-    drawing_number: '',
-    version: 0,
-  });
+  const [form, setForm] = useState(EMPTY_FORM);
+  // Snapshot of the values the form opened with, so an untouched edit form is not "dirty".
+  const [initialForm, setInitialForm] = useState(EMPTY_FORM);
 
   useEffect(() => {
     api.getPart(partId)
       .then(data => {
         setPart(data);
-        setForm({
+        const loaded = {
           name: data.name,
           description: data.description || '',
           part_type: data.part_type,
@@ -45,7 +51,9 @@ export default function PartEdit() {
           customer_part_number: data.customer_part_number || '',
           drawing_number: data.drawing_number || '',
           version: data.version,
-        });
+        };
+        setForm(loaded);
+        setInitialForm(loaded);
         setLoading(false);
       })
       .catch(() => {
@@ -53,6 +61,17 @@ export default function PartEdit() {
         navigate('/parts');
       });
   }, [partId, navigate, showToast]);
+
+  const isFormDirty = useMemo(
+    () => !loading && JSON.stringify(form) !== JSON.stringify(initialForm),
+    [loading, form, initialForm]
+  );
+  const { confirmDiscard } = useUnsavedChanges(isFormDirty);
+
+  const handleCancel = () => {
+    if (!confirmDiscard()) return;
+    navigate(`/parts/${part?.id}`);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,62 +112,80 @@ export default function PartEdit() {
         <div className="card">
           <h2 className="text-base font-semibold text-white mb-4">Basic Information</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="label">Part Number</label>
-              <input type="text" value={part.part_number} disabled className="input bg-slate-800 text-slate-400" />
-            </div>
-            <div>
-              <label className="label">Revision</label>
-              <input
-                type="text"
-                value={form.revision}
-                onChange={e => setForm(p => ({ ...p, revision: e.target.value }))}
-                className="input"
-                required
-              />
-            </div>
-            <div className="sm:col-span-2">
-              <label className="label">Name</label>
-              <input
-                type="text"
-                value={form.name}
-                onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
-                className="input"
-                required
-              />
-            </div>
-            <div className="sm:col-span-2">
-              <label className="label">Description</label>
-              <textarea
-                value={form.description}
-                onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
-                className="input"
-                rows={3}
-              />
-            </div>
-            <div>
-              <label className="label">Type</label>
-              <select
-                value={form.part_type}
-                onChange={e => setForm(p => ({ ...p, part_type: e.target.value as PartType }))}
-                className="input"
-              >
-                {ENGINEERING_PART_TYPE_OPTIONS.map(option => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label">Standard Cost ($)</label>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={form.standard_cost}
-                onChange={e => setForm(p => ({ ...p, standard_cost: parseFloat(e.target.value) || 0 }))}
-                className="input"
-              />
-            </div>
+            <FormField label="Part Number">
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  value={part.part_number}
+                  disabled
+                  className="input bg-slate-800 text-slate-400"
+                />
+              )}
+            </FormField>
+            <FormField label="Revision" required>
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  autoFocus
+                  value={form.revision}
+                  onChange={e => setForm(p => ({ ...p, revision: e.target.value }))}
+                  className="input"
+                  required
+                />
+              )}
+            </FormField>
+            <FormField label="Name" required className="sm:col-span-2">
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  value={form.name}
+                  onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
+                  className="input"
+                  required
+                />
+              )}
+            </FormField>
+            <FormField label="Description" className="sm:col-span-2">
+              {(field) => (
+                <textarea
+                  {...field}
+                  value={form.description}
+                  onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
+                  className="input"
+                  rows={3}
+                />
+              )}
+            </FormField>
+            <FormField label="Type">
+              {(field) => (
+                <select
+                  {...field}
+                  value={form.part_type}
+                  onChange={e => setForm(p => ({ ...p, part_type: e.target.value as PartType }))}
+                  className="input"
+                >
+                  {ENGINEERING_PART_TYPE_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+            <FormField label="Standard Cost ($)">
+              {(field) => (
+                <input
+                  {...field}
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={form.standard_cost}
+                  onChange={e => setForm(p => ({ ...p, standard_cost: parseFloat(e.target.value) || 0 }))}
+                  className="input"
+                />
+              )}
+            </FormField>
           </div>
         </div>
 
@@ -156,33 +193,39 @@ export default function PartEdit() {
         <div className="card">
           <h2 className="text-base font-semibold text-white mb-4">Customer Information</h2>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              <label className="label">Customer</label>
-              <input
-                type="text"
-                value={form.customer_name}
-                onChange={e => setForm(p => ({ ...p, customer_name: e.target.value }))}
-                className="input"
-              />
-            </div>
-            <div>
-              <label className="label">Customer Part #</label>
-              <input
-                type="text"
-                value={form.customer_part_number}
-                onChange={e => setForm(p => ({ ...p, customer_part_number: e.target.value }))}
-                className="input"
-              />
-            </div>
-            <div>
-              <label className="label">Drawing #</label>
-              <input
-                type="text"
-                value={form.drawing_number}
-                onChange={e => setForm(p => ({ ...p, drawing_number: e.target.value }))}
-                className="input"
-              />
-            </div>
+            <FormField label="Customer">
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  value={form.customer_name}
+                  onChange={e => setForm(p => ({ ...p, customer_name: e.target.value }))}
+                  className="input"
+                />
+              )}
+            </FormField>
+            <FormField label="Customer Part #">
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  value={form.customer_part_number}
+                  onChange={e => setForm(p => ({ ...p, customer_part_number: e.target.value }))}
+                  className="input"
+                />
+              )}
+            </FormField>
+            <FormField label="Drawing #">
+              {(field) => (
+                <input
+                  {...field}
+                  type="text"
+                  value={form.drawing_number}
+                  onChange={e => setForm(p => ({ ...p, drawing_number: e.target.value }))}
+                  className="input"
+                />
+              )}
+            </FormField>
           </div>
         </div>
 
@@ -215,7 +258,7 @@ export default function PartEdit() {
         <div className="flex items-center justify-between pt-2">
           <button
             type="button"
-            onClick={() => navigate(`/parts/${part.id}`)}
+            onClick={handleCancel}
             className="btn-secondary"
           >
             Cancel
