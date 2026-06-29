@@ -69,6 +69,9 @@ npm test -- path/to/File.test.tsx     # single test file
 npm run test:coverage
 npm run test:e2e       # Playwright E2E (test:e2e:ui / test:e2e:headed for debugging)
 npm run lint           # eslint src --ext .ts,.tsx  (lint:fix to autofix)
+                       # jsx-a11y is enforced: the clean recommended rules are `error` (new a11y
+                       # regressions FAIL CI); known label-association/clickable-div debt is `warn`
+                       # (tracked, non-blocking); no-autofocus is intentionally off.
 npm run type-check     # tsc --noEmit
 npm run format         # prettier
 
@@ -153,3 +156,4 @@ There are 37+ Alembic versions over live, multi-tenant data. When adding a migra
 - Backend line length is 120 (flake8/black configured to it). Status/priority/role values are `str`-backed `enum.Enum` classes co-located with their model.
 - Keep routers thin and push logic into `services/`; keep query scoping in `db/tenant_filter` helpers.
 - Frontend: typed API responses, forms via RHF+Zod, brand palette + instrument-panel styling.
+- Accessibility: icon-only buttons need an `aria-label`. The `jsx-a11y/control-has-associated-label` and `label-has-associated-control` debt is `warn`-tracked, not yet `error` — burn it down by giving form inputs a real associated `<label>` (the shared FormField pattern), not by suppressing the rule. The Getting-Started tour **auto-starts once per user on first login** (per-user localStorage flag; skip/dismiss is respected and does not re-trigger) — see `src/data/tours.ts` (`shouldAutoStartGettingStarted`) wired in `Layout.tsx`.

@@ -224,25 +224,28 @@ export default function Users() {
               onClick={() => handleEdit(u)}
               className="text-slate-400 hover:text-slate-400"
               title="Edit"
+              aria-label="Edit user"
             >
-              <PencilIcon className="h-5 w-5" />
+              <PencilIcon className="h-5 w-5" aria-hidden="true" />
             </button>
             <button
               onClick={() => openPasswordReset(u.id)}
               className="text-slate-400 hover:text-blue-600"
               title="Reset Password"
+              aria-label="Reset Password"
             >
-              <KeyIcon className="h-5 w-5" />
+              <KeyIcon className="h-5 w-5" aria-hidden="true" />
             </button>
             <button
               onClick={() => handleToggleActive(u)}
               className={u.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
               title={u.is_active ? 'Deactivate' : 'Activate'}
+              aria-label={u.is_active ? 'Deactivate user' : 'Activate user'}
             >
               {u.is_active ? (
-                <UserMinusIcon className="h-5 w-5" />
+                <UserMinusIcon className="h-5 w-5" aria-hidden="true" />
               ) : (
-                <UserPlusIcon className="h-5 w-5" />
+                <UserPlusIcon className="h-5 w-5" aria-hidden="true" />
               )}
             </button>
           </div>
@@ -663,25 +666,28 @@ export default function Users() {
                   onClick={() => handleEdit(user)}
                   className="text-slate-400 hover:text-slate-200"
                   title="Edit"
+                  aria-label="Edit user"
                 >
-                  <PencilIcon className="h-5 w-5" />
+                  <PencilIcon className="h-5 w-5" aria-hidden="true" />
                 </button>
                 <button
                   onClick={() => openPasswordReset(user.id)}
                   className="text-slate-400 hover:text-blue-600"
                   title="Reset Password"
+                  aria-label="Reset Password"
                 >
-                  <KeyIcon className="h-5 w-5" />
+                  <KeyIcon className="h-5 w-5" aria-hidden="true" />
                 </button>
                 <button
                   onClick={() => handleToggleActive(user)}
                   className={user.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
                   title={user.is_active ? 'Deactivate' : 'Activate'}
+                  aria-label={user.is_active ? 'Deactivate user' : 'Activate user'}
                 >
                   {user.is_active ? (
-                    <UserMinusIcon className="h-5 w-5" />
+                    <UserMinusIcon className="h-5 w-5" aria-hidden="true" />
                   ) : (
-                    <UserPlusIcon className="h-5 w-5" />
+                    <UserPlusIcon className="h-5 w-5" aria-hidden="true" />
                   )}
                 </button>
               </>

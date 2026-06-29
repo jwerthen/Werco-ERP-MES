@@ -207,8 +207,9 @@ export default function Quotes() {
           }}
           className="text-blue-600 hover:text-blue-300"
           title="Send to Customer"
+          aria-label="Send to Customer"
         >
-          <PaperAirplaneIcon className="h-5 w-5" />
+          <PaperAirplaneIcon className="h-5 w-5" aria-hidden="true" />
         </button>
       )}
       {(q.status === 'sent' || q.status === 'accepted') && !q.work_order_id && (
@@ -219,8 +220,9 @@ export default function Quotes() {
           }}
           className="text-green-600 hover:text-green-300"
           title="Convert to Work Order"
+          aria-label="Convert to Work Order"
         >
-          <ArrowRightIcon className="h-5 w-5" />
+          <ArrowRightIcon className="h-5 w-5" aria-hidden="true" />
         </button>
       )}
       {q.work_order_id && <span className="text-xs text-slate-400">WO Created</span>}

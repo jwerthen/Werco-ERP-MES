@@ -244,15 +244,17 @@ export default function Documents() {
             onClick={(e) => { e.stopPropagation(); handleDownload(doc); }}
             className="text-werco-primary hover:text-blue-400"
             title="Download"
+            aria-label="Download document"
           >
-            <ArrowDownTrayIcon className="h-5 w-5" />
+            <ArrowDownTrayIcon className="h-5 w-5" aria-hidden="true" />
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); handleDelete(doc.id); }}
             className="text-red-500 hover:text-red-400"
             title="Delete"
+            aria-label="Delete document"
           >
-            <TrashIcon className="h-5 w-5" />
+            <TrashIcon className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>
       ),

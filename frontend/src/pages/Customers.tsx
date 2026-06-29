@@ -342,7 +342,7 @@ export default function Customers() {
           className="text-slate-500 hover:text-slate-400"
           aria-label={`Edit ${c.name}`}
         >
-          <PencilIcon className="h-5 w-5" />
+          <PencilIcon className="h-5 w-5" aria-hidden="true" />
         </button>
       ),
     },
@@ -370,7 +370,7 @@ export default function Customers() {
           onClick={(e) => { e.stopPropagation(); handleEdit(customer); }}
           className="inline-flex items-center gap-1 text-sm text-slate-300 hover:text-slate-100"
         >
-          <PencilIcon className="h-4 w-4" />
+          <PencilIcon className="h-4 w-4" aria-hidden="true" />
           Edit
         </button>
       }
@@ -656,16 +656,16 @@ export default function Customers() {
             {/* Header */}
             <div className="px-6 py-4 border-b flex items-center justify-between bg-slate-800/50">
               <div className="flex items-center gap-3">
-                <button onClick={closeDetails} className="text-slate-400 hover:text-slate-300">
-                  <ArrowLeftIcon className="h-5 w-5" />
+                <button onClick={closeDetails} className="text-slate-400 hover:text-slate-300" aria-label="Back to customers">
+                  <ArrowLeftIcon className="h-5 w-5" aria-hidden="true" />
                 </button>
                 <div>
                   <h2 className="text-xl font-semibold">{selectedCustomer.name}</h2>
                   <p className="text-sm text-slate-400">Code: {selectedCustomer.code}</p>
                 </div>
               </div>
-              <button onClick={closeDetails} className="text-slate-500 hover:text-slate-400">
-                <XMarkIcon className="h-6 w-6" />
+              <button onClick={closeDetails} className="text-slate-500 hover:text-slate-400" aria-label="Close details">
+                <XMarkIcon className="h-6 w-6" aria-hidden="true" />
               </button>
             </div>
 

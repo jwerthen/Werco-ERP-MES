@@ -70,6 +70,13 @@ jest.mock('../context/AuthContext', () => ({
   useAuth: () => ({ user: mockUser.value }),
 }));
 
+// Tour auto-start (added with the onboarding triggers) pulls TourContext into
+// Layout. Stub it so the sidebar renders without a TourProvider wrapper.
+jest.mock('../context/TourContext', () => ({
+  __esModule: true,
+  useTour: () => ({ startTour: jest.fn(), isTourComplete: () => true }),
+}));
+
 import Layout from './Layout';
 
 function renderLayout(initialPath = '/dashboard') {

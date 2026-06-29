@@ -139,10 +139,11 @@ The handy ones:
 
 You're not on your own. The system has built-in help:
 
+- The **Getting Started tour starts automatically the first time you sign in** — a short, role-aware walk-through of the navigation, Dashboard, and search. You can skip it at any point; once skipped or finished it won't pop up again on its own.
 - **Guided tours** walk you through a screen step by step, pointing out the important buttons. The tours adjust to your role, so you only see what's relevant to your job.
-- A **Help & Tours menu** near the top-right of the screen lets you start a tour or find help whenever you want.
+- A **Help & Tours menu** near the top-right of the screen lets you re-start a tour or find help whenever you want.
 
-> Tip: If a screen looks unfamiliar, look for the help menu in the top bar and start the tour for that page.
+> Tip: If you skipped the first-time tour or a screen looks unfamiliar, look for the help menu in the top bar and start the tour for that page.
 
 ---
 

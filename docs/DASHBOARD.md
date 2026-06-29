@@ -13,11 +13,14 @@ This is the interactive manager view. It is **not** the unattended TV board (`/w
 Top to bottom, all in one tight vertical stack:
 
 1. **Header** — title, live "Updated" pulse, manual refresh, Shop Floor link.
-2. **Alert chips** — up to four clickable chips (overdue WOs, open NCRs, calibration due, low stock).
+2. **Setup nudge** (`SetupNudge`) — **admins only**, dismissible "Finish setup — N% complete" banner
+   that deep-links to `/setup`. Reads `GET /setup/health` for the live progress; hidden once setup is
+   100% complete or the admin dismisses it (persisted in `localStorage`). Renders for no other role.
+3. **Alert chips** — up to four clickable chips (overdue WOs, open NCRs, calibration due, low stock).
    Hidden when there are none.
-3. **KPI strip** — one compact 10-tile row (Active WO, Signed In, Checked In, Due Today, Overdue,
+4. **KPI strip** — one compact 10-tile row (Active WO, Signed In, Checked In, Due Today, Overdue,
    Idle, Calibration Due, Low Stock, Done Today, Open NCRs).
-4. **Cockpit grid** — the four live panels, co-visible at once. On wide screens they sit in a 12-col
+5. **Cockpit grid** — the four live panels, co-visible at once. On wide screens they sit in a 12-col
    grid as two rows (Capacity + Live Activity, then Work Center Status + Presence); each panel caps
    its height and scrolls internally so the page doesn't grow:
    - **Capacity Overview** — per-work-center rows: utilization bar + a 7-day load heatmap (cells link
@@ -26,7 +29,7 @@ Top to bottom, all in one tight vertical stack:
      center; the WO links to the work order.
    - **Work Center Status** — one row per station (status, active/queue counts, People count).
    - **Signed In Right Now** — live presence (on-the-job users as chips, idle users as rows).
-5. **Recent Completions** — latest completed operations.
+6. **Recent Completions** — latest completed operations.
 
 ## Operator de-duplication (deliberate)
 

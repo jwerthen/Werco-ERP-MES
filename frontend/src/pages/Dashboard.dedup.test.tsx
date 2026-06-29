@@ -29,6 +29,14 @@ jest.mock('../services/api', () => ({
 }));
 
 jest.mock('../hooks/useWebSocket', () => ({ useWebSocket: jest.fn() }));
+
+// SetupNudge (onboarding trigger) pulls usePermissions -> useAuth and the
+// setup-health endpoint, neither of which this de-dup test provides. It's
+// unrelated to presence de-duplication, so stub it inert.
+jest.mock('../components/cockpit', () => {
+  const actual = jest.requireActual('../components/cockpit');
+  return { __esModule: true, ...actual, SetupNudge: () => null };
+});
 jest.mock('../services/realtime', () => ({
   getAccessToken: () => 'test-token',
   buildWsUrl: () => 'ws://localhost/ws/test',

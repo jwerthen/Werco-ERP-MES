@@ -388,7 +388,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           className="text-werco-primary hover:text-blue-400"
           aria-label="Transfer inventory"
         >
-          <ArrowsRightLeftIcon className="h-5 w-5" />
+          <ArrowsRightLeftIcon className="h-5 w-5" aria-hidden="true" />
         </button>
       ),
     },
@@ -583,7 +583,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-400"
                 aria-label="Clear filter"
               >
-                <XMarkIcon className="h-4 w-4" />
+                <XMarkIcon className="h-4 w-4" aria-hidden="true" />
               </button>
             )}
           </div>
@@ -643,7 +643,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 className="-mr-0.5 ml-0.5 rounded-sm hover:bg-fd-amber/20"
                 aria-label="Clear low stock filter"
               >
-                <XMarkIcon className="h-3.5 w-3.5" />
+                <XMarkIcon className="h-3.5 w-3.5" aria-hidden="true" />
               </button>
             </span>
           ) : (
@@ -728,7 +728,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       <Modal open={showReceiveModal} onClose={() => setShowReceiveModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">Receive Inventory</h3>
-              <button onClick={() => setShowReceiveModal(false)}><XMarkIcon className="h-6 w-6" /></button>
+              <button onClick={() => setShowReceiveModal(false)} aria-label="Close"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleReceive} className="space-y-4">
               <div>
@@ -785,7 +785,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           <>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">Transfer Inventory</h3>
-              <button onClick={() => setShowTransferModal(false)}><XMarkIcon className="h-6 w-6" /></button>
+              <button onClick={() => setShowTransferModal(false)} aria-label="Close"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <div className="mb-4 p-3 bg-slate-800 rounded">
               <div className="font-medium">{selectedItem.part?.part_number}</div>
