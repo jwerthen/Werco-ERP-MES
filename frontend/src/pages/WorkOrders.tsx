@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrderSummary, WorkOrderStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -18,7 +18,7 @@ import {
   CheckCircleIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, useToast, DataTable, DataTableColumn } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 const statusConfig: Record<WorkOrderStatus, { bg: string; text: string; dot: string }> = {
@@ -82,8 +82,204 @@ const getWorkOrderProgress = (wo: WorkOrderSummary) => {
   };
 };
 
+// Cell renderers — shared by the flat and grouped DataTable views.
+function StatusCell({ status }: { status: WorkOrderStatus }) {
+  const cfg = statusConfig[status] || statusConfig.draft;
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${cfg.bg} ${cfg.text}`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`}></span>
+      {formatStatusLabel(status)}
+    </span>
+  );
+}
+
+function PriorityCell({ priority }: { priority: number }) {
+  const cfg = priorityConfig[priority] || priorityConfig[4];
+  return <span className={`badge ${cfg.bg} ${cfg.text}`}>P{priority}</span>;
+}
+
+function ProgressCell({ wo }: { wo: WorkOrderSummary }) {
+  const progress = getWorkOrderProgress(wo);
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex-1 h-2 bg-surface-200 rounded-full overflow-hidden w-20">
+        <div
+          className="h-full bg-werco-500 rounded-full transition-all"
+          style={{ width: `${progress.percent}%` }}
+        />
+      </div>
+      <span className="text-sm font-medium text-surface-700 tabular-nums">{progress.label}</span>
+    </div>
+  );
+}
+
+function DueDateCell({ wo }: { wo: WorkOrderSummary }) {
+  const overdue = isWorkOrderOverdue(wo);
+  return (
+    <>
+      <span className={`text-sm font-medium ${overdue ? 'text-red-600' : 'text-surface-700'}`}>
+        {wo.due_date ? formatCentralDate(wo.due_date) : '—'}
+      </span>
+      {overdue && <span className="ml-2 badge badge-danger text-[10px] py-0.5">OVERDUE</span>}
+    </>
+  );
+}
+
+function RowActionsCell({
+  wo,
+  onDelete,
+  onRelease,
+  isReleasing,
+}: {
+  wo: WorkOrderSummary;
+  onDelete?: (wo: WorkOrderSummary) => void;
+  onRelease?: (wo: WorkOrderSummary) => void;
+  isReleasing: boolean;
+}) {
+  // Stop propagation so action clicks don't trigger the row click-through.
+  return (
+    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+      {onRelease && wo.status === 'draft' && (
+        <button
+          onClick={() => onRelease(wo)}
+          disabled={isReleasing}
+          className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Release"
+        >
+          <CheckCircleIcon className="h-4 w-4" />
+        </button>
+      )}
+      {onDelete && (
+        <button
+          onClick={() => onDelete(wo)}
+          className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors"
+          title="Delete"
+        >
+          <TrashIcon className="h-4 w-4" />
+        </button>
+      )}
+      <Link
+        to={`/work-orders/${wo.id}`}
+        className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
+        aria-label={`View ${wo.work_order_number}`}
+      >
+        <ChevronRightIcon className="h-5 w-5" />
+      </Link>
+    </div>
+  );
+}
+
+interface WorkOrderColumnOptions {
+  hideColumn?: 'customer' | 'part';
+  onDelete?: (wo: WorkOrderSummary) => void;
+  onRelease?: (wo: WorkOrderSummary) => void;
+  releasingIds?: Set<number>;
+}
+
+function buildWorkOrderColumns({
+  hideColumn,
+  onDelete,
+  onRelease,
+  releasingIds,
+}: WorkOrderColumnOptions): Array<DataTableColumn<WorkOrderSummary>> {
+  const cols: Array<DataTableColumn<WorkOrderSummary>> = [
+    {
+      key: 'work_order_number',
+      header: 'Work Order',
+      sortable: true,
+      accessor: (wo) => wo.work_order_number,
+      render: (wo) => (
+        <Link
+          to={`/work-orders/${wo.id}`}
+          onClick={(e) => e.stopPropagation()}
+          className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
+        >
+          {wo.work_order_number}
+        </Link>
+      ),
+    },
+  ];
+
+  if (hideColumn !== 'part') {
+    cols.push({
+      key: 'part',
+      header: 'Part',
+      sortable: true,
+      accessor: (wo) => wo.part_number ?? '',
+      csv: (wo) => wo.part_number ?? '',
+      render: (wo) => (
+        <div>
+          <p className="font-medium text-surface-900">{wo.part_number}</p>
+          <p className="text-sm text-surface-500 line-clamp-1">{wo.part_name}</p>
+        </div>
+      ),
+    });
+  }
+
+  if (hideColumn !== 'customer') {
+    cols.push({
+      key: 'customer',
+      header: 'Customer',
+      sortable: true,
+      accessor: (wo) => wo.customer_name ?? '',
+      className: 'text-surface-600',
+      render: (wo) => wo.customer_name || '—',
+    });
+  }
+
+  cols.push(
+    {
+      key: 'progress',
+      header: 'Progress',
+      accessor: (wo) => getWorkOrderProgress(wo).percent,
+      csv: (wo) => getWorkOrderProgress(wo).label,
+      render: (wo) => <ProgressCell wo={wo} />,
+    },
+    {
+      key: 'due_date',
+      header: 'Due Date',
+      sortable: true,
+      accessor: (wo) => wo.due_date ?? '',
+      csv: (wo) => (wo.due_date ? formatCentralDate(wo.due_date) : ''),
+      render: (wo) => <DueDateCell wo={wo} />,
+    },
+    {
+      key: 'priority',
+      header: 'Priority',
+      sortable: true,
+      accessor: (wo) => wo.priority,
+      render: (wo) => <PriorityCell priority={wo.priority} />,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (wo) => wo.status,
+      render: (wo) => <StatusCell status={wo.status} />,
+    },
+    {
+      key: 'actions',
+      header: '',
+      className: 'w-28',
+      render: (wo) => (
+        <RowActionsCell
+          wo={wo}
+          onDelete={onDelete}
+          onRelease={onRelease}
+          isReleasing={Boolean(releasingIds?.has(wo.id))}
+        />
+      ),
+    }
+  );
+
+  return cols;
+}
+
 export default function WorkOrders() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const { showToast } = useToast();
   const canDeleteWorkOrders = user?.role === 'admin' || !!user?.is_superuser;
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
@@ -217,6 +413,16 @@ export default function WorkOrders() {
       });
     }
   }, [loadWorkOrders, showToast]);
+
+  const workOrderColumns = useMemo(
+    () =>
+      buildWorkOrderColumns({
+        onDelete: canDeleteWorkOrders ? handleDelete : undefined,
+        onRelease: handleRelease,
+        releasingIds,
+      }),
+    [canDeleteWorkOrders, handleDelete, handleRelease, releasingIds]
+  );
 
   const customers = useMemo(() => {
     const unique = new Set(workOrders.map(wo => wo.customer_name).filter(Boolean));
@@ -442,12 +648,17 @@ export default function WorkOrders() {
                 </div>
               </div>
               <div className="hidden lg:block">
-                <WorkOrderTable
-                  workOrders={orders}
-                  hideColumn={groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined}
-                  onDelete={canDeleteWorkOrders ? handleDelete : undefined}
-                  onRelease={handleRelease}
-                  releasingIds={releasingIds}
+                <DataTable
+                  columns={buildWorkOrderColumns({
+                    hideColumn: groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined,
+                    onDelete: canDeleteWorkOrders ? handleDelete : undefined,
+                    onRelease: handleRelease,
+                    releasingIds,
+                  })}
+                  data={orders}
+                  rowKey={(wo) => wo.id}
+                  onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
+                  className="border-0"
                 />
               </div>
               <WorkOrderMobileList
@@ -464,24 +675,31 @@ export default function WorkOrders() {
       ) : (
         // Flat Responsive View
         <div data-tour="wo-list">
-          <div className="hidden lg:block card card-flush overflow-hidden">
-            <WorkOrderTable
-              workOrders={filteredWorkOrders}
-              onDelete={canDeleteWorkOrders ? handleDelete : undefined}
-              onRelease={handleRelease}
-              releasingIds={releasingIds}
-            />
-          </div>
+          {filteredWorkOrders.length === 0 ? (
+            <WorkOrdersEmptyState />
+          ) : (
+            <>
+              <div className="hidden lg:block">
+                <DataTable
+                  columns={workOrderColumns}
+                  data={filteredWorkOrders}
+                  rowKey={(wo) => wo.id}
+                  onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
+                  defaultSort={{ key: 'priority', dir: 'asc' }}
+                  pageSize={25}
+                  csvExport={{ filename: 'work-orders' }}
+                />
+              </div>
 
-          <WorkOrderMobileList
-            workOrders={filteredWorkOrders}
-            onDelete={canDeleteWorkOrders ? handleDelete : undefined}
-            onRelease={handleRelease}
-            releasingIds={releasingIds}
-            className="lg:hidden"
-          />
-
-          {filteredWorkOrders.length === 0 && <WorkOrdersEmptyState />}
+              <WorkOrderMobileList
+                workOrders={filteredWorkOrders}
+                onDelete={canDeleteWorkOrders ? handleDelete : undefined}
+                onRelease={handleRelease}
+                releasingIds={releasingIds}
+                className="lg:hidden"
+              />
+            </>
+          )}
         </div>
       )}
     </div>
@@ -643,144 +861,3 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
   );
 });
 
-// Work Order Table Component
-interface WorkOrderTableProps {
-  workOrders: WorkOrderSummary[];
-  hideColumn?: 'customer' | 'part';
-  onDelete?: (wo: WorkOrderSummary) => void;
-  onRelease?: (wo: WorkOrderSummary) => void;
-  releasingIds?: Set<number>;
-}
-
-const WorkOrderTable = React.memo(function WorkOrderTable({ workOrders, hideColumn, onDelete, onRelease, releasingIds }: WorkOrderTableProps) {
-  return (
-    <div className="table-container border-0">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Work Order</th>
-            {hideColumn !== 'part' && <th>Part</th>}
-            {hideColumn !== 'customer' && <th>Customer</th>}
-            <th>Progress</th>
-            <th>Due Date</th>
-            <th>Priority</th>
-            <th>Status</th>
-            <th className="w-28"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {workOrders.map((wo) => (
-            <WorkOrderRow
-              key={wo.id}
-              wo={wo}
-              hideColumn={hideColumn}
-              onDelete={onDelete}
-              onRelease={onRelease}
-              isReleasing={Boolean(releasingIds?.has(wo.id))}
-            />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-});
-
-interface WorkOrderRowProps {
-  wo: WorkOrderSummary;
-  hideColumn?: 'customer' | 'part';
-  onDelete?: (wo: WorkOrderSummary) => void;
-  onRelease?: (wo: WorkOrderSummary) => void;
-  isReleasing: boolean;
-}
-
-const WorkOrderRow = React.memo(function WorkOrderRow({ wo, hideColumn, onDelete, onRelease, isReleasing }: WorkOrderRowProps) {
-  const status = statusConfig[wo.status] || statusConfig.draft;
-  const priority = priorityConfig[wo.priority] || priorityConfig[4];
-  const overdue = isWorkOrderOverdue(wo);
-  const progress = getWorkOrderProgress(wo);
-
-  return (
-    <tr className={overdue ? 'bg-red-500/10' : ''}>
-      <td>
-        <Link
-          to={`/work-orders/${wo.id}`}
-          className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
-        >
-          {wo.work_order_number}
-        </Link>
-      </td>
-      {hideColumn !== 'part' && (
-        <td>
-          <div>
-            <p className="font-medium text-surface-900">{wo.part_number}</p>
-            <p className="text-sm text-surface-500 line-clamp-1">{wo.part_name}</p>
-          </div>
-        </td>
-      )}
-      {hideColumn !== 'customer' && (
-        <td className="text-surface-600">{wo.customer_name || '—'}</td>
-      )}
-      <td>
-        <div className="flex items-center gap-2">
-          <div className="flex-1 h-2 bg-surface-200 rounded-full overflow-hidden w-20">
-            <div
-              className="h-full bg-werco-500 rounded-full transition-all"
-              style={{ width: `${progress.percent}%` }}
-            />
-          </div>
-          <span className="text-sm font-medium text-surface-700 tabular-nums">
-            {progress.label}
-          </span>
-        </div>
-      </td>
-      <td>
-        <span className={`text-sm font-medium ${overdue ? 'text-red-600' : 'text-surface-700'}`}>
-          {wo.due_date ? formatCentralDate(wo.due_date) : '—'}
-        </span>
-        {overdue && (
-          <span className="ml-2 badge badge-danger text-[10px] py-0.5">OVERDUE</span>
-        )}
-      </td>
-      <td>
-        <span className={`badge ${priority.bg} ${priority.text}`}>
-          P{wo.priority}
-        </span>
-      </td>
-      <td>
-        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${status.bg} ${status.text}`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`}></span>
-          {formatStatusLabel(wo.status)}
-        </span>
-      </td>
-      <td>
-        <div className="flex items-center gap-1">
-          {onRelease && wo.status === 'draft' && (
-            <button
-              onClick={() => onRelease(wo)}
-              disabled={isReleasing}
-              className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Release"
-            >
-              <CheckCircleIcon className="h-4 w-4" />
-            </button>
-          )}
-          {onDelete && (
-            <button
-              onClick={() => onDelete(wo)}
-              className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors"
-              title="Delete"
-            >
-              <TrashIcon className="h-4 w-4" />
-            </button>
-          )}
-          <Link
-            to={`/work-orders/${wo.id}`}
-            className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
-          >
-            <ChevronRightIcon className="h-5 w-5" />
-          </Link>
-        </div>
-      </td>
-    </tr>
-  );
-});

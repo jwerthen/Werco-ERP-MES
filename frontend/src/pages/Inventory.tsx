@@ -11,7 +11,12 @@ import {
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface InventoryItem {
@@ -225,6 +230,169 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     }
   };
 
+  const renderTypeBadge = (partType?: string) => (
+    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+      PART_TYPES.has(partType || '')
+        ? 'bg-blue-500/20 text-werco-navy-700'
+        : 'bg-amber-500/20 text-amber-400'
+    }`}>
+      {getPartTypeIcon(partType)}
+      {getPartTypeLabel(partType)}
+    </span>
+  );
+
+  // ---- Summary tab (by part) columns ----
+  const summaryColumns = useMemo<Array<DataTableColumn<InventorySummary>>>(() => [
+    {
+      key: 'part',
+      header: 'Part',
+      sortable: true,
+      accessor: (item) => item.part_number,
+      csv: (item) => `${item.part_number} ${item.part_name}`.trim(),
+      render: (item) => {
+        const isLowStock = lowStockPartIds.has(item.part_id);
+        return (
+          <div>
+            <div className="font-medium">{item.part_number}</div>
+            <div className="text-sm text-slate-400">{item.part_name}</div>
+            {isLowStock && <span className="text-xs text-red-600 font-medium">LOW STOCK</span>}
+          </div>
+        );
+      },
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      sortable: true,
+      accessor: (item) => getPartTypeLabel(getPartType(item.part_id)),
+      render: (item) => renderTypeBadge(getPartType(item.part_id)),
+    },
+    {
+      key: 'on_hand',
+      header: 'On Hand',
+      sortable: true,
+      align: 'right',
+      className: 'font-medium',
+      accessor: (item) => item.total_on_hand,
+    },
+    {
+      key: 'allocated',
+      header: 'Allocated',
+      sortable: true,
+      align: 'right',
+      accessor: (item) => item.total_allocated,
+    },
+    {
+      key: 'available',
+      header: 'Available',
+      sortable: true,
+      align: 'right',
+      className: 'text-green-600 font-medium',
+      accessor: (item) => item.available,
+    },
+    {
+      key: 'locations',
+      header: 'Locations',
+      csv: (item) =>
+        item.locations
+          .map((loc) => `${loc.location} (${loc.quantity})${loc.lot_number ? ` Lot:${loc.lot_number}` : ''}`)
+          .join('; '),
+      render: (item) => (
+        <>
+          {item.locations.map((loc, idx) => (
+            <div key={idx} className="text-sm">
+              <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
+              <span className="text-slate-400 ml-2">({loc.quantity})</span>
+              {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
+            </div>
+          ))}
+        </>
+      ),
+    },
+  ], [lowStockPartIds, getPartType]);
+
+  // ---- Detail tab (by location) columns ----
+  const detailColumns = useMemo<Array<DataTableColumn<InventoryItem>>>(() => [
+    {
+      key: 'part',
+      header: 'Part',
+      sortable: true,
+      accessor: (item) => item.part?.part_number ?? '',
+      csv: (item) => `${item.part?.part_number ?? ''} ${item.part?.name ?? ''}`.trim(),
+      render: (item) => (
+        <div>
+          <div className="font-medium">{item.part?.part_number}</div>
+          <div className="text-xs text-slate-400">{item.part?.name}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      sortable: true,
+      accessor: (item) => getPartTypeLabel(item.part?.part_type),
+      render: (item) => renderTypeBadge(item.part?.part_type),
+    },
+    {
+      key: 'location',
+      header: 'Location',
+      sortable: true,
+      className: 'font-mono text-sm',
+      accessor: (item) => item.location,
+    },
+    {
+      key: 'lot',
+      header: 'Lot #',
+      sortable: true,
+      className: 'text-sm',
+      accessor: (item) => item.lot_number ?? '',
+      render: (item) => item.lot_number || '-',
+    },
+    {
+      key: 'qty',
+      header: 'Qty',
+      sortable: true,
+      align: 'right',
+      className: 'font-medium',
+      accessor: (item) => item.quantity_on_hand,
+    },
+    {
+      key: 'available',
+      header: 'Available',
+      sortable: true,
+      align: 'right',
+      className: 'text-green-600',
+      accessor: (item) => item.quantity_available,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (item) => item.status,
+      render: (item) => (
+        <span className={`px-2 py-1 rounded text-xs ${
+          item.status === 'available' ? 'bg-green-500/20 text-emerald-300' :
+          item.status === 'quarantine' ? 'bg-yellow-500/20 text-yellow-300' :
+          'bg-slate-800/50 text-slate-100'
+        }`}>{item.status}</span>
+      ),
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: (item) => (
+        <button
+          onClick={(e) => { e.stopPropagation(); openTransfer(item); }}
+          className="text-werco-primary hover:text-blue-400"
+          aria-label="Transfer inventory"
+        >
+          <ArrowsRightLeftIcon className="h-5 w-5" />
+        </button>
+      ),
+    },
+  ], []);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -418,130 +586,39 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       </div>
 
       {/* Tab Content */}
-      <div className="card">
+      <div>
         {activeTab === 'summary' && (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-800">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">On Hand</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Allocated</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Available</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Locations</th>
-                </tr>
-              </thead>
-                <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                {filteredSummary.map((item) => {
-                  const isLowStock = lowStockPartIds.has(item.part_id);
-                  const partType = getPartType(item.part_id);
-                  return (
-                    <tr key={item.part_id} className={`hover:bg-slate-800 align-top ${isLowStock ? 'bg-red-500/10' : ''}`}>
-                      <td className="px-4 py-3">
-                        <div className="font-medium">{item.part_number}</div>
-                        <div className="text-sm text-slate-400">{item.part_name}</div>
-                        {isLowStock && <span className="text-xs text-red-600 font-medium">LOW STOCK</span>}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-                          PART_TYPES.has(partType || '')
-                            ? 'bg-blue-500/20 text-werco-navy-700'
-                            : 'bg-amber-500/20 text-amber-400'
-                        }`}>
-                          {getPartTypeIcon(partType)}
-                          {getPartTypeLabel(partType)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right font-medium">{item.total_on_hand}</td>
-                      <td className="px-4 py-3 text-right">{item.total_allocated}</td>
-                      <td className="px-4 py-3 text-right text-green-600 font-medium">{item.available}</td>
-                      <td className="px-4 py-3">
-                        {item.locations.map((loc, idx) => (
-                          <div key={idx} className="text-sm">
-                            <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
-                            <span className="text-slate-400 ml-2">({loc.quantity})</span>
-                            {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
-                          </div>
-                        ))}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {summary.length === 0 && (
-              <EmptyState
-                icon={CubeIcon}
-                title="No inventory on hand"
-                description="Received parts and materials will appear here once you receive stock."
-                action={{ label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) }}
-              />
-            )}
-          </div>
+          <DataTable
+            columns={summaryColumns}
+            data={filteredSummary}
+            rowKey={(item) => item.part_id}
+            defaultSort={{ key: 'part', dir: 'asc' }}
+            pageSize={25}
+            csvExport={{ filename: 'inventory-summary' }}
+            empty={{
+              icon: CubeIcon,
+              title: 'No inventory on hand',
+              description: 'Received parts and materials will appear here once you receive stock.',
+              action: { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) },
+            }}
+          />
         )}
 
         {activeTab === 'details' && (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-800">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Location</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Lot #</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Available</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                {filteredInventory.map((item) => (
-                  <tr key={item.id} className="hover:bg-slate-800">
-                    <td className="px-4 py-3">
-                      <div className="font-medium">{item.part?.part_number}</div>
-                      <div className="text-xs text-slate-400">{item.part?.name}</div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-                        PART_TYPES.has(item.part?.part_type || '')
-                          ? 'bg-blue-500/20 text-werco-navy-700'
-                          : 'bg-amber-500/20 text-amber-400'
-                      }`}>
-                        {getPartTypeIcon(item.part?.part_type)}
-                        {getPartTypeLabel(item.part?.part_type)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 font-mono text-sm">{item.location}</td>
-                    <td className="px-4 py-3 text-sm">{item.lot_number || '-'}</td>
-                    <td className="px-4 py-3 text-right font-medium">{item.quantity_on_hand}</td>
-                    <td className="px-4 py-3 text-right text-green-600">{item.quantity_available}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded text-xs ${
-                        item.status === 'available' ? 'bg-green-500/20 text-emerald-300' :
-                        item.status === 'quarantine' ? 'bg-yellow-500/20 text-yellow-300' :
-                        'bg-slate-800/50 text-slate-100'
-                      }`}>{item.status}</span>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <button onClick={() => openTransfer(item)} className="text-werco-primary hover:text-blue-400">
-                        <ArrowsRightLeftIcon className="h-5 w-5" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {inventory.length === 0 && (
-              <EmptyState
-                icon={CubeIcon}
-                title="No inventory on hand"
-                description="Received parts and materials will appear here once you receive stock."
-                action={{ label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) }}
-              />
-            )}
-          </div>
+          <DataTable
+            columns={detailColumns}
+            data={filteredInventory}
+            rowKey={(item) => item.id}
+            defaultSort={{ key: 'part', dir: 'asc' }}
+            pageSize={25}
+            csvExport={{ filename: 'inventory-detail' }}
+            empty={{
+              icon: CubeIcon,
+              title: 'No inventory on hand',
+              description: 'Received parts and materials will appear here once you receive stock.',
+              action: { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) },
+            }}
+          />
         )}
       </div>
 

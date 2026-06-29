@@ -1734,6 +1734,14 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 | GET | `/audit/integrity/verify-recent` | Verify the N most recent records | Platform Admin |
 | GET | `/audit/integrity/record/{sequence_number}` | Verify a single record | Admin (own company only) |
 
+> **List query params (`GET /audit/`):** `action`, `resource_type`, `user_id`, and `search`
+> (matches description / resource identifier / user name) filter the rows; `limit` (default 100,
+> **max 500**) and `offset` (default 0) page them. Results are ordered `desc(timestamp)` (newest
+> first), so paging with increasing `offset` walks back into older history. The list response
+> carries no total count — clients infer "has next page" by over-fetching one row past the page
+> size. The Audit Log UI uses this offset/limit paging (Prev/Next), so the **full audit history is
+> reachable in the UI**, not just the most recent page.
+>
 > **Tenancy:** the four retrieval endpoints filter by the active company (`get_current_company_id`),
 > returning only that tenant's audit data. `/integrity/record/{sequence_number}` lets a
 > company-scoped Admin verify one record **belonging to their active company**; a record from

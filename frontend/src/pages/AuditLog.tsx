@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState } from '../components/ui';
+import { DataTable, DataTableColumn } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDateTime } from '../utils/centralTime';
 import {
@@ -40,6 +40,19 @@ interface AuditSummary {
   top_users: Array<{ name: string; count: number }>;
 }
 
+const PAGE_SIZE = 50;
+
+const formatTimestamp = (ts: string) =>
+  formatCentralDateTime(ts, {
+    month: '2-digit',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+
 const actionColors: Record<string, string> = {
   CREATE: 'bg-fd-green/20 text-emerald-300',
   UPDATE: 'bg-fd-blue/20 text-blue-300',
@@ -56,7 +69,15 @@ export default function AuditLog() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [selectedLog, setSelectedLog] = useState<AuditEntry | null>(null);
-  
+
+  // Server pagination — the audit endpoint is offset/limit paged and ordered
+  // desc(timestamp). `page` is 0-based here; older rows are reached via Next.
+  // The list endpoint returns no total count, so we over-fetch one extra row
+  // to detect whether a next page exists. This is the compliance-sensitive
+  // change: it makes older, previously-unreachable audit rows navigable.
+  const [page, setPage] = useState(0);
+  const [hasNext, setHasNext] = useState(false);
+
   // Filters
   const [search, setSearch] = useState('');
   const [actionFilter, setActionFilter] = useState('');
@@ -64,68 +85,168 @@ export default function AuditLog() {
   const [actions, setActions] = useState<string[]>([]);
   const [resourceTypes, setResourceTypes] = useState<string[]>([]);
 
-  useEffect(() => {
-    loadData();
-    loadFilters();
-  }, []);
+  // The filters that are actually applied to the current query. Editing the
+  // inputs above does not refetch until "Apply Filters" is pressed.
+  const [appliedFilters, setAppliedFilters] = useState<{
+    search: string;
+    action: string;
+    resource_type: string;
+  }>({ search: '', action: '', resource_type: '' });
 
-  const loadData = async () => {
-    setLoading(true);
-    setLoadError(false);
+  const loadLogs = useCallback(
+    async (targetPage: number, filters: { search: string; action: string; resource_type: string }) => {
+      setLoading(true);
+      setLoadError(false);
+      try {
+        const params: {
+          limit: number;
+          offset: number;
+          search?: string;
+          action?: string;
+          resource_type?: string;
+        } = {
+          // Over-fetch one row to infer whether a next page exists, without
+          // reordering or hiding rows beyond the page boundary.
+          limit: PAGE_SIZE + 1,
+          offset: targetPage * PAGE_SIZE,
+        };
+        if (filters.search) params.search = filters.search;
+        if (filters.action) params.action = filters.action;
+        if (filters.resource_type) params.resource_type = filters.resource_type;
+
+        const logsRes: AuditEntry[] = await api.getAuditLogs(params);
+        setHasNext(logsRes.length > PAGE_SIZE);
+        setLogs(logsRes.slice(0, PAGE_SIZE));
+      } catch (err) {
+        console.error('Failed to load audit logs:', err);
+        setLoadError(true);
+      } finally {
+        setLoading(false);
+      }
+    },
+    []
+  );
+
+  const loadSummary = useCallback(async () => {
     try {
-      const [logsRes, summaryRes] = await Promise.all([
-        api.getAuditLogs({ limit: 100 }),
-        api.getAuditSummary(30)
-      ]);
-      setLogs(logsRes);
+      const summaryRes = await api.getAuditSummary(30);
       setSummary(summaryRes);
     } catch (err) {
-      console.error('Failed to load audit logs:', err);
-      setLoadError(true);
-    } finally {
-      setLoading(false);
+      console.error('Failed to load audit summary:', err);
     }
-  };
+  }, []);
 
-  const loadFilters = async () => {
+  const loadFilters = useCallback(async () => {
     try {
       const [actionsRes, typesRes] = await Promise.all([
         api.getAuditActions(),
-        api.getAuditResourceTypes()
+        api.getAuditResourceTypes(),
       ]);
       setActions(actionsRes);
       setResourceTypes(typesRes);
     } catch (err) {
       console.error('Failed to load filters:', err);
     }
+  }, []);
+
+  useEffect(() => {
+    // Mount-only initial load with no filters. Subsequent loads are driven
+    // explicitly by applyFilters / page changes, so appliedFilters is
+    // intentionally not a dependency (it would trigger a redundant refetch).
+    loadLogs(0, { search: '', action: '', resource_type: '' });
+    loadSummary();
+    loadFilters();
+  }, [loadLogs, loadSummary, loadFilters]);
+
+  const applyFilters = () => {
+    const next = { search, action: actionFilter, resource_type: resourceFilter };
+    setAppliedFilters(next);
+    // Changing a filter resets to the first (newest) page.
+    setPage(0);
+    loadLogs(0, next);
   };
 
-  const applyFilters = async () => {
-    setLoading(true);
-    setLoadError(false);
-    try {
-      const params: any = { limit: 200 };
-      if (search) params.search = search;
-      if (actionFilter) params.action = actionFilter;
-      if (resourceFilter) params.resource_type = resourceFilter;
-
-      const logsRes = await api.getAuditLogs(params);
-      setLogs(logsRes);
-    } catch (err) {
-      console.error('Failed to filter:', err);
-      setLoadError(true);
-    } finally {
-      setLoading(false);
-    }
+  const handlePageChange = (nextPage1Based: number) => {
+    const target = nextPage1Based - 1; // DataTable is 1-based; offset math is 0-based.
+    setPage(target);
+    loadLogs(target, appliedFilters);
   };
 
-  if (loading && logs.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
-  }
+  const retry = () => loadLogs(page, appliedFilters);
+
+  const columns = useMemo<Array<DataTableColumn<AuditEntry>>>(
+    () => [
+      {
+        key: 'timestamp',
+        header: 'Timestamp',
+        className: 'whitespace-nowrap',
+        accessor: (log) => log.timestamp,
+        render: (log) => formatTimestamp(log.timestamp),
+        csv: (log) => formatTimestamp(log.timestamp),
+      },
+      {
+        key: 'user',
+        header: 'User',
+        accessor: (log) => log.user_name || log.user_email || 'System',
+        render: (log) => (
+          <div className="flex items-center">
+            <UserIcon className="h-4 w-4 text-slate-400 mr-2" />
+            {log.user_name || log.user_email || 'System'}
+          </div>
+        ),
+      },
+      {
+        key: 'action',
+        header: 'Action',
+        accessor: (log) => log.action,
+        render: (log) => (
+          <span
+            className={`px-2 py-1 rounded-full text-xs font-medium ${
+              actionColors[log.action] || 'bg-slate-800/50 text-slate-100'
+            }`}
+          >
+            {log.action}
+          </span>
+        ),
+      },
+      {
+        key: 'resource',
+        header: 'Resource',
+        accessor: (log) =>
+          log.resource_identifier
+            ? `${log.resource_type} ${log.resource_identifier}`
+            : log.resource_type,
+        render: (log) => (
+          <>
+            <div className="font-medium">{log.resource_type}</div>
+            {log.resource_identifier && (
+              <div className="text-xs text-slate-400 font-mono">{log.resource_identifier}</div>
+            )}
+          </>
+        ),
+      },
+      {
+        key: 'description',
+        header: 'Description',
+        className: 'text-slate-400 max-w-xs truncate',
+        accessor: (log) => log.description || '',
+        render: (log) => log.description || '-',
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        align: 'center',
+        accessor: (log) => (log.success === 'true' ? 'Success' : 'Failed'),
+        render: (log) =>
+          log.success === 'true' ? (
+            <span className="text-green-600">&#10003;</span>
+          ) : (
+            <span className="text-red-600">&#10007;</span>
+          ),
+      },
+    ],
+    []
+  );
 
   return (
     <div className="space-y-4">
@@ -223,88 +344,30 @@ export default function AuditLog() {
         </div>
       </div>
 
-      {/* Log Table */}
-      <div className="card overflow-hidden">
-        {loadError ? (
-          <ErrorState
-            className="py-12"
-            message="Could not load audit logs."
-            onRetry={() => (search || actionFilter || resourceFilter ? applyFilters() : loadData())}
-          />
-        ) : (
-        <>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Timestamp</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">User</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Action</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Resource</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Description</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700">
-              {logs.map((log) => (
-                <tr 
-                  key={log.id} 
-                  className="hover:bg-slate-800 cursor-pointer"
-                  onClick={() => setSelectedLog(log)}
-                >
-                  <td className="px-4 py-3 text-sm whitespace-nowrap">
-                    {formatCentralDateTime(log.timestamp, {
-                      month: '2-digit',
-                      day: '2-digit',
-                      year: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                      hour12: false,
-                    })}
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    <div className="flex items-center">
-                      <UserIcon className="h-4 w-4 text-slate-400 mr-2" />
-                      {log.user_name || log.user_email || 'System'}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${actionColors[log.action] || 'bg-slate-800/50 text-slate-100'}`}>
-                      {log.action}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    <div className="font-medium">{log.resource_type}</div>
-                    {log.resource_identifier && (
-                      <div className="text-xs text-slate-400 font-mono">{log.resource_identifier}</div>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-slate-400 max-w-xs truncate">
-                    {log.description || '-'}
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    {log.success === 'true' ? (
-                      <span className="text-green-600">&#10003;</span>
-                    ) : (
-                      <span className="text-red-600">&#10007;</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {logs.length === 0 && (
-          <EmptyState
-            icon={ShieldCheckIcon}
-            title="No audit logs found"
-            description="Audit events will appear here as users create, update, and delete records. Try adjusting your filters."
-          />
-        )}
-        </>
-        )}
-      </div>
+      {/* Log Table — server-paged (offset/limit), desc(timestamp). Older rows
+          are reachable via Prev/Next; rows are never reordered/hidden client-side. */}
+      <DataTable<AuditEntry>
+        columns={columns}
+        data={logs}
+        rowKey={(log) => log.id}
+        onRowClick={(log) => setSelectedLog(log)}
+        loading={loading}
+        error={loadError ? 'Could not load audit logs.' : false}
+        onRetry={retry}
+        serverPagination={{
+          page: page + 1,
+          pageSize: PAGE_SIZE,
+          hasNext,
+          onPageChange: handlePageChange,
+        }}
+        csvExport={{ filename: 'audit-log' }}
+        empty={{
+          icon: ShieldCheckIcon,
+          title: 'No audit logs found',
+          description:
+            'Audit events will appear here as users create, update, and delete records. Try adjusting your filters.',
+        }}
+      />
 
       {/* Detail Modal */}
       <Modal
@@ -326,17 +389,7 @@ export default function AuditLog() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-sm text-slate-400">Timestamp</label>
-                  <p className="font-medium">
-                    {formatCentralDateTime(selectedLog.timestamp, {
-                      month: '2-digit',
-                      day: '2-digit',
-                      year: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                      hour12: false,
-                    })}
-                  </p>
+                  <p className="font-medium">{formatTimestamp(selectedLog.timestamp)}</p>
                 </div>
                 <div>
                   <label className="text-sm text-slate-400">User</label>

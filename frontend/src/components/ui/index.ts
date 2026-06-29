@@ -16,6 +16,18 @@ export { ConfirmDialog } from './ConfirmDialog';
 export { Breadcrumbs } from './Breadcrumbs';
 export type { Crumb } from './Breadcrumbs';
 
+// Generic data table (sort / paginate / select / CSV / responsive)
+export { DataTable, buildCsv } from './DataTable';
+export type {
+  DataTableProps,
+  DataTableColumn,
+  DataTableEmpty,
+  DataTableSelection,
+  DataTableServerPagination,
+  SortDir,
+  ColumnAlign,
+} from './DataTable';
+
 // Mobile-responsive components
 export { MobileDataCard, MobileDataList, ResponsiveDataView } from './MobileDataCard';
 export { default as BottomNav } from './BottomNav';

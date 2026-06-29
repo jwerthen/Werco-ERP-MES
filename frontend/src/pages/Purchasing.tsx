@@ -10,7 +10,7 @@ import {
   ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import { EmptyState, ErrorState, useToast, DataTable, DataTableColumn } from '../components/ui';
 
 interface Vendor {
   id: number;
@@ -446,6 +446,100 @@ export default function Purchasing() {
     setNewPO({ ...newPO, lines: newPO.lines.filter((_, i) => i !== index) });
   };
 
+  const filteredPOs = purchaseOrders.filter((po) => {
+    const term = poSearch.trim().toLowerCase();
+    if (!term) return true;
+    return (
+      po.po_number.toLowerCase().includes(term) ||
+      (po.vendor_name || '').toLowerCase().includes(term)
+    );
+  });
+
+  const poColumns: Array<DataTableColumn<PurchaseOrder>> = [
+    {
+      key: 'po_number',
+      header: 'PO #',
+      sortable: true,
+      accessor: (po) => po.po_number,
+      render: (po) => <span className="font-medium text-werco-primary">{po.po_number}</span>,
+    },
+    {
+      key: 'vendor_name',
+      header: 'Vendor',
+      sortable: true,
+      accessor: (po) => po.vendor_name ?? '',
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (po) => po.status,
+      render: (po) => (
+        <span
+          className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[po.status] || 'bg-slate-800/50'}`}
+        >
+          {po.status.replace('_', ' ')}
+        </span>
+      ),
+      csv: (po) => po.status.replace('_', ' '),
+    },
+    {
+      key: 'order_date',
+      header: 'Order Date',
+      sortable: true,
+      accessor: (po) => po.order_date ?? '',
+      render: (po) => (po.order_date ? formatCentralDate(po.order_date) : '-'),
+      csv: (po) => (po.order_date ? formatCentralDate(po.order_date) : ''),
+    },
+    {
+      key: 'required_date',
+      header: 'Due Date',
+      sortable: true,
+      accessor: (po) => po.required_date ?? '',
+      render: (po) => (po.required_date ? formatCentralDate(po.required_date) : '-'),
+      csv: (po) => (po.required_date ? formatCentralDate(po.required_date) : ''),
+    },
+    {
+      key: 'total',
+      header: 'Total',
+      sortable: true,
+      align: 'right',
+      accessor: (po) => Number(po.total || 0),
+      render: (po) => <span className="font-medium">${Number(po.total || 0).toFixed(2)}</span>,
+      csv: (po) => Number(po.total || 0).toFixed(2),
+    },
+    {
+      key: 'line_count',
+      header: 'Lines',
+      sortable: true,
+      align: 'center',
+      accessor: (po) => po.line_count,
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: (po) => (
+        <div className="flex items-center justify-center gap-3" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => handlePrintPO(po.id)}
+            className="text-surface-600 hover:text-werco-primary text-sm"
+          >
+            Print
+          </button>
+          {po.status === 'draft' && (
+            <button
+              onClick={() => handleSendPO(po.id)}
+              className="text-werco-primary hover:underline text-sm"
+            >
+              Send
+            </button>
+          )}
+        </div>
+      ),
+    },
+  ];
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -545,80 +639,23 @@ export default function Purchasing() {
               placeholder="Search by PO # or vendor..."
             />
           </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-800">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Order Date</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due Date</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Total</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Lines</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                  {purchaseOrders
-                    .filter((po) => {
-                      const term = poSearch.trim().toLowerCase();
-                      if (!term) return true;
-                      return (
-                        po.po_number.toLowerCase().includes(term) ||
-                        (po.vendor_name || '').toLowerCase().includes(term)
-                      );
-                    })
-                    .map((po) => (
-                  <tr key={po.id} className="hover:bg-slate-800">
-                    <td className="px-4 py-3 font-medium text-werco-primary">{po.po_number}</td>
-                    <td className="px-4 py-3">{po.vendor_name}</td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[po.status] || 'bg-slate-800/50'}`}>
-                        {po.status.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-sm">
-                      {po.order_date ? formatCentralDate(po.order_date) : '-'}
-                    </td>
-                    <td className="px-4 py-3 text-sm">
-                      {po.required_date ? formatCentralDate(po.required_date) : '-'}
-                    </td>
-                    <td className="px-4 py-3 text-right font-medium">
-                      ${Number(po.total || 0).toFixed(2)}
-                    </td>
-                    <td className="px-4 py-3 text-center">{po.line_count}</td>
-                    <td className="px-4 py-3 text-center">
-                      <div className="flex items-center justify-center gap-3">
-                        <button
-                          onClick={() => handlePrintPO(po.id)}
-                          className="text-surface-600 hover:text-werco-primary text-sm"
-                        >
-                          Print
-                        </button>
-                        {po.status === 'draft' && (
-                          <button
-                            onClick={() => handleSendPO(po.id)}
-                            className="text-werco-primary hover:underline text-sm"
-                          >
-                            Send
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {purchaseOrders.length === 0 && (
-              <EmptyState
-                icon={ClipboardDocumentListIcon}
-                title="No purchase orders"
-                description="Purchase orders you create will appear here."
-                action={{ label: 'New PO', onClick: () => setShowPOModal(true) }}
-              />
-            )}
-          </div>
+          <DataTable
+            columns={poColumns}
+            data={filteredPOs}
+            rowKey={(po) => po.id}
+            onRowClick={(po) => handlePrintPO(po.id)}
+            defaultSort={{ key: 'po_number', dir: 'asc' }}
+            pageSize={25}
+            csvExport={{ filename: 'purchase-orders' }}
+            empty={{
+              icon: ClipboardDocumentListIcon,
+              title: poSearch.trim() ? 'No matching purchase orders' : 'No purchase orders',
+              description: poSearch.trim()
+                ? 'No purchase orders match your search. Adjust the term above.'
+                : 'Purchase orders you create will appear here.',
+              action: poSearch.trim() ? undefined : { label: 'New PO', onClick: () => setShowPOModal(true) },
+            }}
+          />
         </div>
       )}
 

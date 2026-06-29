@@ -1,12 +1,10 @@
 /**
  * FEPERF-5 — WorkOrders list render-correctness regression.
  *
- * The list rows were refactored into a React.memo'd WorkOrderRow, and
- * WorkOrderTable / WorkOrderMobileList / WorkOrderMobileCard were memoized,
- * with handleDelete / handleRelease moved to useCallback. This is a pure
- * render-perf refactor with zero intended visible change. Memoization itself is
- * not meaningfully assertable in a unit test, so this guards the thing that
- * matters: the rows still render the same content and controls as before.
+ * The desktop list now renders through the shared <DataTable> primitive
+ * (Batch 4), with WorkOrderMobileList still handling the small-screen layout.
+ * This guards the thing that matters across that refactor: the rows still
+ * render the same content and controls (WO#, part, status, actions) as before.
  *
  * The desktop table (`hidden lg:block`) and the mobile list (`lg:hidden`) BOTH
  * mount in jsdom (CSS visibility classes don't prune the DOM), so each work
