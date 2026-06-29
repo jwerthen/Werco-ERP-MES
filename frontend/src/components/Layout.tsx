@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useTour } from '../context/TourContext';
+import { getTour, shouldAutoStartGettingStarted } from '../data/tours';
 import CompanySwitcher from './CompanySwitcher';
 import ReadOnlyBanner from './ReadOnlyBanner';
 import { TourMenu } from './Tour';
@@ -424,6 +426,7 @@ export default function Layout({ children }: LayoutProps) {
   const [copilotOpen, setCopilotOpen] = useState(false);
   const globalSearch = useGlobalSearch();
   const keyboardShortcuts = useKeyboardShortcutsContext();
+  const { startTour, isTourComplete } = useTour();
   const isKiosk = isKioskMode(location.pathname, location.search) && user?.role === 'operator';
   const presenceUrl = useMemo(() => {
     if (!user) return null;
@@ -457,6 +460,23 @@ export default function Layout({ children }: LayoutProps) {
   useEffect(() => {
     setSidebarOpen(false);
   }, [location.pathname]);
+
+  // Auto-start the Getting-Started tour once per user on first login.
+  // Fires only when authenticated, on a normal app route (not kiosk —
+  // login/print/wallboard bypass Layout entirely), and only if the tour
+  // hasn't been completed. A per-user "auto-start attempted" flag ensures
+  // it never re-triggers after the user dismisses (skips) the tour, since
+  // skipping does not mark the tour complete.
+  useEffect(() => {
+    const shouldStart = shouldAutoStartGettingStarted({
+      userKey: user?.id ?? user?.email,
+      isKiosk,
+      isTourComplete,
+    });
+    if (!shouldStart) return;
+    const tour = getTour('getting-started');
+    if (tour) startTour(tour);
+  }, [user, isKiosk, isTourComplete, startTour]);
 
   // Get current page title from the shared route-title source so it resolves on
   // detail routes too (not just nav entries) and stays in sync with breadcrumbs.

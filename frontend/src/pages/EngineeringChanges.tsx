@@ -717,8 +717,8 @@ export default function EngineeringChanges() {
       <Modal open={showCreateModal} onClose={() => setShowCreateModal(false)} size="lg" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex items-center justify-between border-b px-6 py-4">
               <h2 className="text-lg font-semibold text-white">New Engineering Change Order</h2>
-              <button onClick={() => setShowCreateModal(false)}>
-                <XMarkIcon className="h-5 w-5 text-slate-500 hover:text-slate-400" />
+              <button onClick={() => setShowCreateModal(false)} aria-label="Close dialog">
+                <XMarkIcon aria-hidden="true" className="h-5 w-5 text-slate-500 hover:text-slate-400" />
               </button>
             </div>
             <form onSubmit={handleCreate} className="space-y-4 px-6 py-4 max-h-[70vh] overflow-y-auto">
@@ -858,8 +858,8 @@ export default function EngineeringChanges() {
                     actionLoading,
                   }}
                 />
-                <button onClick={() => setDetailEco(null)}>
-                  <XMarkIcon className="h-5 w-5 text-slate-500 hover:text-slate-400" />
+                <button onClick={() => setDetailEco(null)} aria-label="Close dialog">
+                  <XMarkIcon aria-hidden="true" className="h-5 w-5 text-slate-500 hover:text-slate-400" />
                 </button>
               </div>
             </div>
@@ -943,8 +943,8 @@ export default function EngineeringChanges() {
       <Modal open={showRejectModal} onClose={() => setShowRejectModal(false)} size="md" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex items-center justify-between border-b px-6 py-4">
               <h2 className="text-lg font-semibold text-white">Reject ECO</h2>
-              <button onClick={() => setShowRejectModal(false)}>
-                <XMarkIcon className="h-5 w-5 text-slate-500 hover:text-slate-400" />
+              <button onClick={() => setShowRejectModal(false)} aria-label="Close dialog">
+                <XMarkIcon aria-hidden="true" className="h-5 w-5 text-slate-500 hover:text-slate-400" />
               </button>
             </div>
             <div className="space-y-4 px-6 py-4">

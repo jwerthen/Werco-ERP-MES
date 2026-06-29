@@ -203,7 +203,7 @@ export default function ToolManagement() {
           title="Checkout"
           aria-label="Checkout tool"
         >
-          <ArrowRightOnRectangleIcon className="w-4 h-4" />
+          <ArrowRightOnRectangleIcon className="w-4 h-4" aria-hidden="true" />
         </button>
       )}
       {(tool.status === 'checked_out' || tool.status === 'in_use') && (
@@ -213,7 +213,7 @@ export default function ToolManagement() {
           title="Check In"
           aria-label="Check in tool"
         >
-          <ArrowLeftOnRectangleIcon className="w-4 h-4" />
+          <ArrowLeftOnRectangleIcon className="w-4 h-4" aria-hidden="true" />
         </button>
       )}
     </div>
@@ -352,7 +352,7 @@ export default function ToolManagement() {
           <option value="mold">Mold</option>
           <option value="other">Other</option>
         </select>
-        <button onClick={loadData} className="p-2 text-slate-400 hover:text-slate-300"><ArrowPathIcon className="w-5 h-5" /></button>
+        <button onClick={loadData} className="p-2 text-slate-400 hover:text-slate-300" title="Refresh" aria-label="Refresh tools"><ArrowPathIcon className="w-5 h-5" aria-hidden="true" /></button>
       </div>
 
       {/* Table */}
@@ -392,7 +392,7 @@ export default function ToolManagement() {
                 <h3 className="text-lg font-semibold">{detailTool.tool_number} — {detailTool.name}</h3>
                 <StatusBadge status={detailTool.status} />
               </div>
-              <button onClick={() => setShowDetailModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" /></button>
+              <button onClick={() => setShowDetailModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
@@ -460,7 +460,7 @@ export default function ToolManagement() {
       >
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">New Tool</h3>
-              <button onClick={() => setShowCreateModal(false)}><XMarkIcon className="w-5 h-5" /></button>
+              <button onClick={() => setShowCreateModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="p-4 space-y-3">
               <div className="grid grid-cols-2 gap-3">
@@ -534,7 +534,7 @@ export default function ToolManagement() {
           <>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">Checkout: {selectedTool.tool_number}</h3>
-              <button onClick={() => setShowCheckoutModal(false)}><XMarkIcon className="w-5 h-5" /></button>
+              <button onClick={() => setShowCheckoutModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="p-4 space-y-3">
               <div>
@@ -570,7 +570,7 @@ export default function ToolManagement() {
           <>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">Check In: {selectedTool.tool_number}</h3>
-              <button onClick={() => setShowCheckinModal(false)}><XMarkIcon className="w-5 h-5" /></button>
+              <button onClick={() => setShowCheckinModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="p-4 space-y-3">
               <div>

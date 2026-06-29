@@ -332,8 +332,9 @@ export default function Calibration() {
             }}
             className="text-green-600 hover:text-green-300 text-sm font-medium"
             title="Record Calibration"
+            aria-label="Record Calibration"
           >
-            <WrenchIcon className="h-5 w-5" />
+            <WrenchIcon className="h-5 w-5" aria-hidden="true" />
           </button>
           <button
             onClick={(e) => {

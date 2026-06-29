@@ -639,7 +639,7 @@ export default function QualityPage() {
       <Modal open={showNCRModal} onClose={() => setShowNCRModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New Non-Conformance Report</h3>
-              <button onClick={() => setShowNCRModal(false)}><XMarkIcon className="h-6 w-6" /></button>
+              <button onClick={() => setShowNCRModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateNCR} className="space-y-4">
               <div>
@@ -697,7 +697,7 @@ export default function QualityPage() {
       <Modal open={showCARModal} onClose={() => setShowCARModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New Corrective Action Request</h3>
-              <button onClick={() => setShowCARModal(false)}><XMarkIcon className="h-6 w-6" /></button>
+              <button onClick={() => setShowCARModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateCAR} className="space-y-4">
               <div>
@@ -737,7 +737,7 @@ export default function QualityPage() {
       <Modal open={showFAIModal} onClose={() => setShowFAIModal(false)} size="lg" closeOnBackdrop={false}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">New First Article Inspection</h3>
-              <button onClick={() => setShowFAIModal(false)}><XMarkIcon className="h-6 w-6" /></button>
+              <button onClick={() => setShowFAIModal(false)} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
             </div>
             <form onSubmit={handleCreateFAI} className="space-y-4">
               <div>

@@ -194,13 +194,13 @@ export default function Maintenance() {
   const woRowActions = useCallback((wo: MaintenanceWorkOrder) => (
     <div className="flex gap-1">
       {wo.status === 'open' && (
-        <button onClick={(e) => { e.stopPropagation(); handleStart(wo); }} className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600" title="Start">
-          <PlayIcon className="w-4 h-4" />
+        <button onClick={(e) => { e.stopPropagation(); handleStart(wo); }} className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600" title="Start" aria-label="Start work order">
+          <PlayIcon className="w-4 h-4" aria-hidden="true" />
         </button>
       )}
       {wo.status === 'in_progress' && (
-        <button onClick={(e) => { e.stopPropagation(); setSelectedWO(wo); setShowCompleteModal(true); }} className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600" title="Complete">
-          <CheckCircleIcon className="w-4 h-4" />
+        <button onClick={(e) => { e.stopPropagation(); setSelectedWO(wo); setShowCompleteModal(true); }} className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600" title="Complete" aria-label="Complete work order">
+          <CheckCircleIcon className="w-4 h-4" aria-hidden="true" />
         </button>
       )}
     </div>
@@ -584,7 +584,7 @@ export default function Maintenance() {
       <Modal open={showCreateScheduleModal} onClose={() => setShowCreateScheduleModal(false)} size="lg" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">New Maintenance Schedule</h3>
-              <button onClick={() => setShowCreateScheduleModal(false)}><XMarkIcon className="w-5 h-5" /></button>
+              <button onClick={() => setShowCreateScheduleModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
               <div>
@@ -639,7 +639,7 @@ export default function Maintenance() {
       <Modal open={showCreateWOModal} onClose={() => setShowCreateWOModal(false)} size="lg" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">New Maintenance Work Order</h3>
-              <button onClick={() => setShowCreateWOModal(false)}><XMarkIcon className="w-5 h-5" /></button>
+              <button onClick={() => setShowCreateWOModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
               <div>
@@ -690,7 +690,7 @@ export default function Maintenance() {
       <Modal open={showCompleteModal && !!selectedWO} onClose={() => setShowCompleteModal(false)} size="md" scroll={false} padded={false} closeOnBackdrop={false}>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">Complete: {selectedWO?.title}</h3>
-              <button onClick={() => setShowCompleteModal(false)}><XMarkIcon className="w-5 h-5" /></button>
+              <button onClick={() => setShowCompleteModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
               <div>

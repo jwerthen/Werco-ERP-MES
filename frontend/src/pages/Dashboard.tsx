@@ -4,7 +4,7 @@ import { addDays } from 'date-fns';
 import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { EmptyState, ErrorState } from '../components/ui';
-import { MiniStat, CockpitPanel } from '../components/cockpit';
+import { MiniStat, CockpitPanel, SetupNudge } from '../components/cockpit';
 import { statusVariant, type StatusVariant } from '../components/ui';
 import { ActiveAssignment, DashboardData, SignedInUserStatus, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -429,6 +429,9 @@ export default function Dashboard() {
           </Link>
         </div>
       </div>
+
+      {/* Setup nudge — admins only, dismissible, deep-links to /setup */}
+      <SetupNudge />
 
       {/* Alerts — compact chip row */}
       {alerts.length > 0 && (

@@ -129,8 +129,9 @@ function RowActionsCell({
           disabled={isReleasing}
           className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           title="Release"
+          aria-label={`Release ${wo.work_order_number}`}
         >
-          <CheckCircleIcon className="h-4 w-4" />
+          <CheckCircleIcon className="h-4 w-4" aria-hidden="true" />
         </button>
       )}
       {onDelete && (
@@ -138,8 +139,9 @@ function RowActionsCell({
           onClick={() => onDelete(wo)}
           className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors"
           title="Delete"
+          aria-label={`Delete ${wo.work_order_number}`}
         >
-          <TrashIcon className="h-4 w-4" />
+          <TrashIcon className="h-4 w-4" aria-hidden="true" />
         </button>
       )}
       <Link
@@ -147,7 +149,7 @@ function RowActionsCell({
         className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
         aria-label={`View ${wo.work_order_number}`}
       >
-        <ChevronRightIcon className="h-5 w-5" />
+        <ChevronRightIcon className="h-5 w-5" aria-hidden="true" />
       </Link>
     </div>
   );

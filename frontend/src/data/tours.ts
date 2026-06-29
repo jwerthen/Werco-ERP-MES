@@ -539,3 +539,41 @@ export const getTour = (tourId: string): Tour | undefined => {
   return tours[tourId];
 };
 
+/** localStorage key for the per-user "Getting-Started auto-start attempted" flag. */
+export const gettingStartedAutostartKey = (userKey: string | number): string =>
+  `werco-gs-tour-autostart:${userKey}`;
+
+/**
+ * Decide whether the Getting-Started tour should auto-start for this user on
+ * mount. Pure + storage-aware so the Layout effect stays trivial and the
+ * gating is unit-testable. Returns true only when the user is authenticated,
+ * not in kiosk mode, the tour hasn't been completed, and it hasn't already
+ * been auto-started for this user (so dismissing/skipping does NOT re-trigger).
+ *
+ * When it returns true it also records the attempt, so a caller that acts on
+ * a `true` result won't fire again on the next render or session.
+ */
+export function shouldAutoStartGettingStarted(opts: {
+  userKey: string | number | null | undefined;
+  isKiosk: boolean;
+  isTourComplete: (tourId: string) => boolean;
+  storage?: Pick<Storage, 'getItem' | 'setItem'>;
+}): boolean {
+  const { userKey, isKiosk, isTourComplete } = opts;
+  if (userKey == null || isKiosk) return false;
+  if (isTourComplete('getting-started')) return false;
+  if (!getTour('getting-started')) return false;
+
+  const store =
+    opts.storage ?? (typeof localStorage !== 'undefined' ? localStorage : undefined);
+  const key = gettingStartedAutostartKey(userKey);
+  try {
+    if (store?.getItem(key) === '1') return false;
+    store?.setItem(key, '1');
+  } catch {
+    // Storage unavailable (private mode, etc.) — still allow the tour to
+    // start this session rather than block onboarding.
+  }
+  return true;
+}
+

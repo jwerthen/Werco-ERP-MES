@@ -145,7 +145,7 @@ Most tabs work the same way: a **Show inactive** checkbox, an **Add New** button
 ## First-time setup & bulk import
 
 ### Setup Wizard
-Go to **Setup Wizard** (under **Administration**) to load the minimum data needed to run a clean first job.
+Go to **Setup Wizard** (under **Administration**) to load the minimum data needed to run a clean first job. While setup is incomplete, a dismissible **"Finish setup — N% complete"** banner also appears on your **Dashboard** (admins only) and links straight here; it disappears once setup reaches 100%.
 - An **Onboarding Progress** bar and **Continue Setup** button walk you to the next missing step.
 - The numbered steps cover: Employees, Work Centers, Parts, BOMs, Routings, and your first Work Order. Each step links straight to where you do it.
 - **Master Data Health** flags blocking issues (like assemblies missing a released BOM) so you can fix them before release.
