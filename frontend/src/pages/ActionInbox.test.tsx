@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import ActionInbox from './ActionInbox';
 import api from '../services/api';
@@ -150,5 +150,51 @@ describe('ActionInbox Top 3 hero', () => {
       expect(mockApi.snoozeAIRecommendation).toHaveBeenCalledWith(21, 3, 'Snoozed from Action Inbox')
     );
     await waitFor(() => expect(screen.queryByText('Snooze me')).not.toBeInTheDocument());
+  });
+
+  it('optimistically removes a dismissed recommendation before the API resolves', async () => {
+    mockApi.getAIRecommendations.mockResolvedValue([
+      makeRecommendation({ id: 51, title: 'Dismiss me', score: 0.9 }),
+    ]);
+    // A pending promise that never resolves during the assertion window: the card
+    // must disappear from the optimistic update alone, not from the server response.
+    let resolveDismiss: (value: unknown) => void = () => {};
+    mockApi.dismissAIRecommendation.mockReturnValue(
+      new Promise((resolve) => {
+        resolveDismiss = resolve;
+      }) as ReturnType<typeof api.dismissAIRecommendation>
+    );
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    fireEvent.click(within(hero).getByRole('button', { name: 'Dismiss' }));
+
+    // Gone immediately, while the API call is still in flight.
+    await waitFor(() => expect(screen.queryByText('Dismiss me')).not.toBeInTheDocument());
+    expect(mockApi.dismissAIRecommendation).toHaveBeenCalledWith(51, 'Dismissed from Action Inbox');
+
+    // Resolve inside act so the trailing in-flight-state update is flushed cleanly.
+    await act(async () => {
+      resolveDismiss(makeRecommendation({ id: 51, status: 'dismissed' }));
+    });
+  });
+
+  it('rolls the recommendation back into the queue when the dismiss API fails', async () => {
+    mockApi.getAIRecommendations.mockResolvedValue([
+      makeRecommendation({ id: 61, title: 'Sticky action', score: 0.9 }),
+    ]);
+    mockApi.dismissAIRecommendation.mockRejectedValue({
+      response: { data: { detail: 'Server refused the dismissal.' } },
+    });
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    fireEvent.click(within(hero).getByRole('button', { name: 'Dismiss' }));
+
+    await waitFor(() => expect(mockApi.dismissAIRecommendation).toHaveBeenCalled());
+    // The optimistic removal is undone — the card is restored to the view.
+    await waitFor(() => expect(screen.getByText('Sticky action')).toBeInTheDocument());
   });
 });

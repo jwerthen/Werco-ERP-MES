@@ -16,6 +16,7 @@ import api from '../services/api';
 import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
 import { useKeyboardShortcutsContext } from '../context/KeyboardShortcutsContext';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { isKioskMode } from '../utils/kiosk';
 import { getCurrentShift } from '../utils/shifts';
@@ -439,6 +440,11 @@ export default function Layout({ children }: LayoutProps) {
     url: presenceUrl,
     enabled: Boolean(presenceUrl),
   });
+
+  // Manual window-scroll restoration: this app uses a plain <BrowserRouter>, so
+  // react-router's <ScrollRestoration> (data-router only) is unavailable. Called
+  // once here in the shell; saves/restores window scroll per route via sessionStorage.
+  useScrollRestoration();
 
   // Global keyboard shortcuts for layout
   useKeyboardShortcuts([

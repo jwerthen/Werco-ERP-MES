@@ -13,6 +13,7 @@ import {
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
 import { AIRecommendation } from '../types/aiLearning';
@@ -274,40 +275,63 @@ export default function ActionInbox() {
     persistDismissed(next);
   };
 
-  const acceptAIRecommendation = async (recommendation: AIRecommendation) => {
+  // Accept / dismiss / snooze all optimistically REMOVE the recommendation from the
+  // queue the moment the operator acts, then call the server. These actions are
+  // effectively never server-rejected (they record a decision on a pending row), so
+  // the snappy removal is safe; on the rare failure the hook re-inserts the card at
+  // its original position and toasts the verbatim server error — it never reports
+  // success for a failed call. The per-call removal descriptor is threaded through
+  // run(ctx), so each card's rollback restores THAT card even when two cards are
+  // actioned in quick succession (per-card disabled lets two be in flight).
+  type RemovalCtx = { recommendation: AIRecommendation; index: number; mutate: () => Promise<unknown> };
+
+  const removalMutation = useOptimisticMutation<unknown, RemovalCtx>({
+    applyOptimistic: ({ recommendation }) => {
+      setAiRecommendations((current) => current.filter((item) => item.id !== recommendation.id));
+    },
+    rollback: ({ recommendation, index }) => {
+      // Re-insert the card at its original index so the queue order is preserved.
+      setAiRecommendations((current) => {
+        if (current.some((item) => item.id === recommendation.id)) return current;
+        const next = [...current];
+        next.splice(Math.min(index, next.length), 0, recommendation);
+        return next;
+      });
+    },
+    mutate: ({ mutate }) => mutate(),
+    errorFallback: 'Action failed. Please try again.',
+  });
+
+  const runRemoval = async (
+    recommendation: AIRecommendation,
+    mutate: () => Promise<unknown>
+  ) => {
+    const index = aiRecommendations.findIndex((item) => item.id === recommendation.id);
     setActioningId(recommendation.id);
     try {
-      await api.acceptAIRecommendation(recommendation.id, 'Accepted from Action Inbox');
-      setAiRecommendations((current) => current.filter((item) => item.id !== recommendation.id));
+      await removalMutation.run({ recommendation, index: index < 0 ? aiRecommendations.length : index, mutate });
     } finally {
       setActioningId(null);
     }
   };
 
-  const dismissAIRecommendation = async (recommendation: AIRecommendation) => {
-    setActioningId(recommendation.id);
-    try {
-      await api.dismissAIRecommendation(recommendation.id, 'Dismissed from Action Inbox');
-      setAiRecommendations((current) => current.filter((item) => item.id !== recommendation.id));
-    } finally {
-      setActioningId(null);
-    }
-  };
+  const acceptAIRecommendation = (recommendation: AIRecommendation) =>
+    runRemoval(recommendation, () => api.acceptAIRecommendation(recommendation.id, 'Accepted from Action Inbox'));
 
+  const dismissAIRecommendation = (recommendation: AIRecommendation) =>
+    runRemoval(recommendation, () => api.dismissAIRecommendation(recommendation.id, 'Dismissed from Action Inbox'));
+
+  const snoozeAIRecommendation = (recommendation: AIRecommendation, days: number) =>
+    runRemoval(recommendation, () =>
+      api.snoozeAIRecommendation(recommendation.id, days, 'Snoozed from Action Inbox')
+    );
+
+  // Feedback does not remove the card from the queue, so it keeps its own simple
+  // in-flight state rather than the optimistic-removal path.
   const sendAIFeedback = async (recommendation: AIRecommendation, feedback: string) => {
     setActioningId(recommendation.id);
     try {
       await api.sendAIRecommendationFeedback(recommendation.id, { feedback });
-    } finally {
-      setActioningId(null);
-    }
-  };
-
-  const snoozeAIRecommendation = async (recommendation: AIRecommendation, days: number) => {
-    setActioningId(recommendation.id);
-    try {
-      await api.snoozeAIRecommendation(recommendation.id, days, 'Snoozed from Action Inbox');
-      setAiRecommendations((current) => current.filter((item) => item.id !== recommendation.id));
     } finally {
       setActioningId(null);
     }

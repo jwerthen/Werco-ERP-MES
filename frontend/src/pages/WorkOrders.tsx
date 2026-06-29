@@ -20,6 +20,7 @@ import {
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 import { EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 
 const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
   1: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Critical' },
@@ -114,11 +115,13 @@ function RowActionsCell({
   onDelete,
   onRelease,
   isReleasing,
+  isDeleting,
 }: {
   wo: WorkOrderSummary;
   onDelete?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   isReleasing: boolean;
+  isDeleting: boolean;
 }) {
   // Stop propagation so action clicks don't trigger the row click-through.
   return (
@@ -137,7 +140,8 @@ function RowActionsCell({
       {onDelete && (
         <button
           onClick={() => onDelete(wo)}
-          className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors"
+          disabled={isDeleting}
+          className="p-2 rounded-lg text-surface-400 hover:text-red-600 hover:bg-red-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           title="Delete"
           aria-label={`Delete ${wo.work_order_number}`}
         >
@@ -160,6 +164,7 @@ interface WorkOrderColumnOptions {
   onDelete?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
+  deletePending?: boolean;
 }
 
 function buildWorkOrderColumns({
@@ -167,6 +172,7 @@ function buildWorkOrderColumns({
   onDelete,
   onRelease,
   releasingIds,
+  deletePending,
 }: WorkOrderColumnOptions): Array<DataTableColumn<WorkOrderSummary>> {
   const cols: Array<DataTableColumn<WorkOrderSummary>> = [
     {
@@ -253,6 +259,7 @@ function buildWorkOrderColumns({
           onDelete={onDelete}
           onRelease={onRelease}
           isReleasing={Boolean(releasingIds?.has(wo.id))}
+          isDeleting={Boolean(deletePending)}
         />
       ),
     }
@@ -367,19 +374,47 @@ export default function WorkOrders() {
     };
   }, [loadWorkOrders]);
 
-  const handleDelete = useCallback(async (wo: WorkOrderSummary) => {
+  // Optimistic delete. Deleting a work order is a soft-delete that simply removes
+  // an already-loaded row from active lists — the SAFE "record a decision on a
+  // loaded row" shape, so we drop the row from the table synchronously and only
+  // roll it back (re-inserting at its original index) on the rare server refusal,
+  // surfacing the verbatim server detail via the hook's default error toast. The
+  // per-call target (which row + where it sat) is threaded through run(ctx), so each
+  // delete's rollback restores the row IT removed even if two rows are deleted in
+  // quick succession (one hook instance serves every row's Delete control). (WO
+  // *release* stays non-optimistic below — it is server-gated by readiness checks.)
+  // Mirror the latest list so handleDelete can read the row's current index
+  // without depending on (and re-creating) the callback on every list change.
+  const workOrdersRef = useRef(workOrders);
+  workOrdersRef.current = workOrders;
+
+  const { run: runDelete, pending: deletePending } = useOptimisticMutation<unknown, { wo: WorkOrderSummary; index: number }>({
+    applyOptimistic: ({ wo }) => {
+      setWorkOrders((prev) => prev.filter((w) => w.id !== wo.id));
+    },
+    rollback: ({ wo, index }) => {
+      setWorkOrders((prev) => {
+        if (prev.some((w) => w.id === wo.id)) return prev;
+        const next = [...prev];
+        next.splice(Math.min(index, next.length), 0, wo);
+        return next;
+      });
+    },
+    mutate: ({ wo }) => api.deleteWorkOrder(wo.id),
+    errorFallback: 'Failed to delete work order',
+  });
+
+  const handleDelete = useCallback((wo: WorkOrderSummary) => {
     const isCurrent = CURRENT_WORK_ORDER_STATUSES.includes(wo.status);
     const message = isCurrent
       ? `Delete current work order ${wo.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
       : `Delete work order ${wo.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`;
     if (!window.confirm(message)) return;
-    try {
-      await api.deleteWorkOrder(wo.id);
-      loadWorkOrders();
-    } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to delete work order');
-    }
-  }, [loadWorkOrders, showToast]);
+    // Capture the row's current position; run(ctx) closes over it so the rollback
+    // (on the rare server refusal) restores THIS row at its original index.
+    const index = workOrdersRef.current.findIndex((w) => w.id === wo.id);
+    runDelete({ wo, index: index === -1 ? workOrdersRef.current.length : index });
+  }, [runDelete]);
 
   const handleRelease = useCallback(async (wo: WorkOrderSummary) => {
     if (wo.status !== 'draft') return;
@@ -404,8 +439,9 @@ export default function WorkOrders() {
         onDelete: canDeleteWorkOrders ? handleDelete : undefined,
         onRelease: handleRelease,
         releasingIds,
+        deletePending,
       }),
-    [canDeleteWorkOrders, handleDelete, handleRelease, releasingIds]
+    [canDeleteWorkOrders, handleDelete, handleRelease, releasingIds, deletePending]
   );
 
   const customers = useMemo(() => {
@@ -638,6 +674,7 @@ export default function WorkOrders() {
                     onDelete: canDeleteWorkOrders ? handleDelete : undefined,
                     onRelease: handleRelease,
                     releasingIds,
+                    deletePending,
                   })}
                   data={orders}
                   rowKey={(wo) => wo.id}
@@ -650,6 +687,7 @@ export default function WorkOrders() {
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onRelease={handleRelease}
                 releasingIds={releasingIds}
+                deletePending={deletePending}
                 className="lg:hidden p-3"
               />
             </div>
@@ -680,6 +718,7 @@ export default function WorkOrders() {
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onRelease={handleRelease}
                 releasingIds={releasingIds}
+                deletePending={deletePending}
                 className="lg:hidden"
               />
             </>
@@ -719,10 +758,11 @@ interface WorkOrderMobileListProps {
   onDelete?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
+  deletePending?: boolean;
   className?: string;
 }
 
-const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onDelete, onRelease, releasingIds, className = '' }: WorkOrderMobileListProps) {
+const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onDelete, onRelease, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
   if (workOrders.length === 0) return null;
 
   return (
@@ -734,6 +774,7 @@ const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders
           onDelete={onDelete}
           onRelease={onRelease}
           isReleasing={Boolean(releasingIds?.has(wo.id))}
+          isDeleting={Boolean(deletePending)}
         />
       ))}
     </div>
@@ -745,9 +786,10 @@ interface WorkOrderMobileCardProps {
   onDelete?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   isReleasing?: boolean;
+  isDeleting?: boolean;
 }
 
-const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }: WorkOrderMobileCardProps) {
+const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
   const priority = priorityConfig[wo.priority] || priorityConfig[4];
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
@@ -824,6 +866,7 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
               variant="ghost"
               size="sm"
               onClick={() => onDelete?.(wo)}
+              disabled={isDeleting}
               className="text-red-300 hover:text-red-200"
             >
               <TrashIcon className="h-4 w-4 mr-1" />
