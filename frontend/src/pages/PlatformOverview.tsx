@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { BuildingOffice2Icon, UsersIcon, ClipboardDocumentListIcon } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { useCompany } from '../context/CompanyContext';
+import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import { Modal } from '../components/ui/Modal';
 
 interface CompanyOverview {
   id: number;
@@ -60,97 +63,100 @@ export default function PlatformOverview() {
   }
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-bold text-base-content">Platform Overview</h1>
-          <p className="text-sm text-base-content/60 mt-1">Monitor all companies across the platform</p>
+    <div className="p-4 max-w-7xl mx-auto space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold text-base-content truncate">Platform Overview</h1>
+          <p className="text-xs text-fd-mute mt-0.5">Monitor all companies across the platform</p>
         </div>
         <button
           onClick={() => setShowCreateModal(true)}
-          className="btn btn-primary btn-sm"
+          className="btn btn-primary btn-sm flex-shrink-0"
         >
           Add Company
         </button>
       </div>
 
       {/* Summary Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-        <div className="bg-base-200 rounded-lg p-4 border border-base-300">
-          <div className="text-sm text-base-content/60">Total Companies</div>
-          <div className="text-3xl font-bold text-primary mt-1">{overview?.total_companies || 0}</div>
-        </div>
-        <div className="bg-base-200 rounded-lg p-4 border border-base-300">
-          <div className="text-sm text-base-content/60">Total Active Users</div>
-          <div className="text-3xl font-bold text-success mt-1">{overview?.total_active_users || 0}</div>
-        </div>
-        <div className="bg-base-200 rounded-lg p-4 border border-base-300">
-          <div className="text-sm text-base-content/60">Active Work Orders</div>
-          <div className="text-3xl font-bold text-info mt-1">{overview?.total_active_work_orders || 0}</div>
-        </div>
-      </div>
+      <MiniStatStrip className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <MiniStat
+          icon={BuildingOffice2Icon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Total Companies"
+          value={overview?.total_companies || 0}
+          valueColor="text-fd-blue"
+        />
+        <MiniStat
+          icon={UsersIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Total Active Users"
+          value={overview?.total_active_users || 0}
+          valueColor="text-fd-green"
+        />
+        <MiniStat
+          icon={ClipboardDocumentListIcon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="Active Work Orders"
+          value={overview?.total_active_work_orders || 0}
+          valueColor="text-fd-cyan"
+        />
+      </MiniStatStrip>
 
-      {/* Company Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {overview?.companies.map((company) => (
-          <div key={company.id} className="bg-base-200 rounded-lg border border-base-300 hover:border-primary/30 transition-colors">
-            <div className="p-4">
-              <div className="flex items-center gap-3 mb-3">
-                {company.logo_url ? (
-                  <img src={company.logo_url} alt="" className="h-10 w-10 rounded-lg object-contain bg-base-300" />
-                ) : (
-                  <div className="h-10 w-10 rounded-lg bg-primary/20 flex items-center justify-center">
-                    <span className="text-primary font-bold text-lg">{company.name.charAt(0)}</span>
-                  </div>
-                )}
-                <div>
-                  <h3 className="font-semibold text-base-content">{company.name}</h3>
-                  <p className="text-xs text-base-content/50">{company.slug}</p>
+      {/* Companies */}
+      <CockpitPanel title="Companies" subtitle={`${overview?.companies.length || 0} total`}>
+        <div className="divide-y divide-fd-line">
+          {overview?.companies.map((company) => (
+            <button
+              key={company.id}
+              type="button"
+              onClick={() => handleViewCompany(company.id)}
+              className="w-full flex items-center gap-3 px-1 py-2 text-left transition-colors hover:bg-fd-raised min-w-0"
+            >
+              {company.logo_url ? (
+                <img src={company.logo_url} alt="" className="h-8 w-8 rounded-sm object-contain bg-fd-raised flex-shrink-0" />
+              ) : (
+                <div className="h-8 w-8 rounded-sm bg-fd-blue/20 flex items-center justify-center flex-shrink-0">
+                  <span className="text-fd-blue font-bold text-sm">{company.name.charAt(0)}</span>
                 </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold text-sm text-base-content truncate">{company.name}</p>
+                <p className="text-[11px] text-fd-faint truncate">{company.slug}</p>
               </div>
-
-              <div className="flex items-center gap-4 text-sm text-base-content/60 mb-4">
-                <div className="flex items-center gap-1">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM17 6a3 3 0 11-6 0 3 3 0 016 0zM12.93 17c.046-.327.07-.66.07-1a6.97 6.97 0 00-1.5-4.33A5 5 0 0119 16v1h-6.07zM6 11a5 5 0 015 5v1H1v-1a5 5 0 015-5z" />
-                  </svg>
-                  {company.active_users} users
-                </div>
-                <div className="flex items-center gap-1">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd" />
-                  </svg>
-                  {company.active_work_orders} active WOs
-                </div>
-              </div>
-
-              <button
-                onClick={() => handleViewCompany(company.id)}
-                className="btn btn-outline btn-sm w-full"
-              >
-                View Company
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+              <span className="text-xs text-fd-mute tabular-nums whitespace-nowrap flex-shrink-0">
+                {company.active_users} users &middot; {company.active_work_orders} WOs
+              </span>
+            </button>
+          ))}
+        </div>
+      </CockpitPanel>
 
       {/* Create Company Modal */}
-      {showCreateModal && (
-        <CreateCompanyModal
-          onClose={() => setShowCreateModal(false)}
-          onCreated={() => {
-            setShowCreateModal(false);
-            loadOverview();
-          }}
-        />
-      )}
+      <CreateCompanyModal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        onCreated={() => {
+          setShowCreateModal(false);
+          loadOverview();
+        }}
+      />
     </div>
   );
 }
 
 
-function CreateCompanyModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+function CreateCompanyModal({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
   const [form, setForm] = useState({
     name: '',
     admin_email: '',
@@ -160,6 +166,17 @@ function CreateCompanyModal({ onClose, onCreated }: { onClose: () => void; onCre
   });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  // The shared <Modal> keeps this component mounted while closed, so reset the
+  // form (clearing the typed admin password) and error whenever it closes —
+  // otherwise the next open would prefill the previous credentials/error.
+  useEffect(() => {
+    if (!open) {
+      setForm({ name: '', admin_email: '', admin_first_name: '', admin_last_name: '', admin_password: '' });
+      setError('');
+      setLoading(false);
+    }
+  }, [open]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -177,10 +194,9 @@ function CreateCompanyModal({ onClose, onCreated }: { onClose: () => void; onCre
   };
 
   return (
-    <div className="modal modal-open">
-      <div className="modal-box bg-base-200">
-        <h3 className="font-bold text-lg mb-4">Add New Company</h3>
-        <form onSubmit={handleSubmit} className="space-y-3">
+    <Modal open={open} onClose={onClose} size="md" ariaLabelledBy="create-company-title">
+      <h3 id="create-company-title" className="font-bold text-lg mb-4">Add New Company</h3>
+      <form onSubmit={handleSubmit} className="space-y-3">
           <div>
             <label className="label text-sm">Company Name</label>
             <input
@@ -238,15 +254,13 @@ function CreateCompanyModal({ onClose, onCreated }: { onClose: () => void; onCre
 
           {error && <div className="text-error text-sm">{error}</div>}
 
-          <div className="modal-action">
+          <div className="flex justify-end gap-2 pt-2">
             <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
             <button type="submit" className="btn btn-primary btn-sm" disabled={loading}>
               {loading ? <span className="loading loading-spinner loading-xs"></span> : 'Create Company'}
             </button>
           </div>
-        </form>
-      </div>
-      <div className="modal-backdrop" onClick={onClose}></div>
-    </div>
+      </form>
+    </Modal>
   );
 }

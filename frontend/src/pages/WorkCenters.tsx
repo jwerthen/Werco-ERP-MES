@@ -2,20 +2,16 @@ import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { WorkCenter, WorkCenterType } from '../types';
-import { PlusIcon, PencilIcon } from '@heroicons/react/24/outline';
-
-const typeColors: Record<string, string> = {
-  fabrication: 'bg-blue-500/20 text-blue-300',
-  cnc_machining: 'bg-purple-500/20 text-purple-800',
-  laser: 'bg-blue-500/20 text-blue-300',
-  press_brake: 'bg-indigo-100 text-indigo-800',
-  paint: 'bg-yellow-500/20 text-yellow-300',
-  powder_coating: 'bg-orange-500/20 text-orange-800',
-  assembly: 'bg-green-500/20 text-emerald-300',
-  welding: 'bg-red-500/20 text-red-300',
-  inspection: 'bg-blue-500/20 text-blue-300',
-  shipping: 'bg-slate-800/50 text-slate-100',
-};
+import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
+import {
+  PlusIcon,
+  PencilIcon,
+  Cog6ToothIcon,
+  CheckCircleIcon,
+  BoltIcon,
+  WrenchScrewdriverIcon,
+  NoSymbolIcon,
+} from '@heroicons/react/24/outline';
 
 const statusColors: Record<string, string> = {
   available: 'bg-green-500/100',
@@ -184,6 +180,14 @@ export default function WorkCenters() {
     groupedWorkCenters.push({ type: 'other', items: ungrouped });
   }
 
+  const statusCounts = workCenters.reduce(
+    (acc, wc) => {
+      acc[wc.current_status] = (acc[wc.current_status] || 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>
+  );
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -193,7 +197,7 @@ export default function WorkCenters() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Work Centers</h1>
         <button
@@ -205,75 +209,121 @@ export default function WorkCenters() {
         </button>
       </div>
 
-      {groupedWorkCenters.map((group) => (
-        <div key={group.type} className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">{formatTypeLabel(group.type)}</h2>
-            <span className="text-sm text-slate-400">{group.items.length} center{group.items.length !== 1 ? 's' : ''}</span>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {group.items.map((wc) => (
-              <div key={wc.id} className={`card ${!wc.is_active ? 'opacity-60' : ''}`}>
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center">
-                    <span className={`h-3 w-3 rounded-full mr-2 ${statusColors[wc.current_status]}`} />
-                    <span className="font-bold text-lg">{wc.code}</span>
-                  </div>
-                  <button
-                    onClick={() => handleEdit(wc)}
-                    className="text-slate-400 hover:text-slate-400"
-                  >
-                    <PencilIcon className="h-5 w-5" />
-                  </button>
-                </div>
-                
-                <h3 className="font-medium text-white mb-2">{wc.name}</h3>
-                
-                <span className={`inline-block px-2 py-1 rounded text-xs font-medium mb-3 ${typeColors[wc.work_center_type] || 'bg-slate-800/50 text-slate-100'}`}>
-                  {formatTypeLabel(wc.work_center_type)}
-                </span>
-                
-                {wc.description && (
-                  <p className="text-sm text-slate-400 mb-3">{wc.description}</p>
-                )}
-                
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div>
-                    <span className="text-slate-400">Rate:</span>
-                    <span className="ml-1 font-medium">${wc.hourly_rate}/hr</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-400">Capacity:</span>
-                    <span className="ml-1 font-medium">{wc.capacity_hours_per_day}h/day</span>
-                  </div>
-                </div>
-                
-                {(wc.building || wc.area) && (
-                  <div className="mt-2 text-sm text-slate-400">
-                    {wc.building && <span>Building: {wc.building}</span>}
-                    {wc.building && wc.area && <span> | </span>}
-                    {wc.area && <span>Area: {wc.area}</span>}
-                  </div>
-                )}
-                
-                {/* Status dropdown */}
-                <div className="mt-4">
-                  <select
-                    value={wc.current_status}
-                    onChange={(e) => handleStatusChange(wc.id, e.target.value)}
-                    className="input text-sm"
-                  >
-                    <option value="available">Available</option>
-                    <option value="in_use">In Use</option>
-                    <option value="maintenance">Maintenance</option>
-                    <option value="offline">Offline</option>
-                  </select>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
+      {/* Status KPI strip */}
+      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+        <MiniStat
+          icon={Cog6ToothIcon}
+          iconBg="bg-werco-navy/15"
+          iconColor="text-werco-navy"
+          label="Total"
+          value={workCenters.length}
+        />
+        <MiniStat
+          icon={CheckCircleIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Available"
+          value={statusCounts.available || 0}
+          valueColor="text-fd-green"
+        />
+        <MiniStat
+          icon={BoltIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="In Use"
+          value={statusCounts.in_use || 0}
+          valueColor="text-fd-blue"
+        />
+        <MiniStat
+          icon={WrenchScrewdriverIcon}
+          iconBg="bg-fd-amber/15"
+          iconColor="text-fd-amber"
+          label="Maintenance"
+          value={statusCounts.maintenance || 0}
+          valueColor="text-fd-amber"
+        />
+        <MiniStat
+          icon={NoSymbolIcon}
+          iconBg="bg-fd-red/15"
+          iconColor="text-fd-red"
+          label="Offline"
+          value={statusCounts.offline || 0}
+          valueColor="text-fd-red"
+        />
+      </MiniStatStrip>
+
+      {/* Per-type panels, side-by-side */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        {groupedWorkCenters.map((group) => (
+          <CockpitPanel
+            key={group.type}
+            title={formatTypeLabel(group.type)}
+            className="min-w-0"
+            footer={`${group.items.length} center${group.items.length !== 1 ? 's' : ''}`}
+          >
+            <table className="w-full text-sm tabular-nums">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-wide text-slate-500 border-b border-fd-line">
+                  <th className="text-left font-medium py-1.5 pr-2">Code / Name</th>
+                  <th className="text-right font-medium py-1.5 px-1.5">Rate</th>
+                  <th className="text-right font-medium py-1.5 px-1.5">Cap</th>
+                  <th className="text-right font-medium py-1.5 px-1.5">Eff</th>
+                  <th className="text-left font-medium py-1.5 px-1.5">Status</th>
+                  <th className="py-1.5 pl-1.5" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-fd-line">
+                {group.items.map((wc) => {
+                  const detail = [
+                    wc.description,
+                    wc.building && `Building: ${wc.building}`,
+                    wc.area && `Area: ${wc.area}`,
+                  ]
+                    .filter(Boolean)
+                    .join(' • ');
+                  return (
+                    <tr key={wc.id} className={`align-middle ${!wc.is_active ? 'opacity-50' : ''}`}>
+                      <td className="py-1.5 pr-2 min-w-0" title={detail || undefined}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`h-2 w-2 flex-shrink-0 rounded-full ${statusColors[wc.current_status]}`}
+                          />
+                          <span className="font-semibold text-white flex-shrink-0">{wc.code}</span>
+                          <span className="text-slate-400 truncate">{wc.name}</span>
+                        </div>
+                      </td>
+                      <td className="py-1.5 px-1.5 text-right whitespace-nowrap">${wc.hourly_rate}</td>
+                      <td className="py-1.5 px-1.5 text-right whitespace-nowrap">{wc.capacity_hours_per_day}h</td>
+                      <td className="py-1.5 px-1.5 text-right whitespace-nowrap">{wc.efficiency_factor}</td>
+                      <td className="py-1.5 px-1.5">
+                        <select
+                          value={wc.current_status}
+                          onChange={(e) => handleStatusChange(wc.id, e.target.value)}
+                          className="input !py-0.5 !px-1.5 !text-xs !min-h-0 h-7"
+                        >
+                          <option value="available">Available</option>
+                          <option value="in_use">In Use</option>
+                          <option value="maintenance">Maintenance</option>
+                          <option value="offline">Offline</option>
+                        </select>
+                      </td>
+                      <td className="py-1.5 pl-1.5 text-right">
+                        <button
+                          onClick={() => handleEdit(wc)}
+                          className="text-slate-400 hover:text-white"
+                          title="Edit work center"
+                        >
+                          <PencilIcon className="h-4 w-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </CockpitPanel>
+        ))}
+      </div>
 
       {/* Add/Edit Modal */}
       <Modal

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   PlusIcon,
   MagnifyingGlassIcon,
@@ -202,25 +203,40 @@ export default function Maintenance() {
         </div>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-blue-500">
-          <div className="text-sm text-slate-400">Scheduled This Week</div>
-          <div className="text-2xl font-bold">{dashboard?.scheduled_this_week || 0}</div>
-        </div>
-        <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-red-500">
-          <div className="text-sm text-slate-400">Overdue</div>
-          <div className="text-2xl font-bold text-red-600">{dashboard?.overdue || 0}</div>
-        </div>
-        <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-green-500">
-          <div className="text-sm text-slate-400">Completed This Month</div>
-          <div className="text-2xl font-bold text-green-600">{dashboard?.completed_this_month || 0}</div>
-        </div>
-        <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-orange-500">
-          <div className="text-sm text-slate-400">Open Work Orders</div>
-          <div className="text-2xl font-bold text-orange-600">{dashboard?.open_work_orders || 0}</div>
-        </div>
-      </div>
+      {/* KPI strip — compact instrument-panel tiles */}
+      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+        <MiniStat
+          icon={CalendarDaysIcon}
+          iconBg="bg-blue-500/20"
+          iconColor="text-blue-600"
+          label="Scheduled This Week"
+          value={dashboard?.scheduled_this_week || 0}
+        />
+        <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg={dashboard?.overdue ? 'bg-red-500/20' : 'bg-fd-green/15'}
+          iconColor={dashboard?.overdue ? 'text-red-600' : 'text-fd-green'}
+          label="Overdue"
+          value={dashboard?.overdue || 0}
+          valueColor={dashboard?.overdue ? 'text-red-600' : undefined}
+        />
+        <MiniStat
+          icon={CheckCircleIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Completed This Month"
+          value={dashboard?.completed_this_month || 0}
+          valueColor="text-green-600"
+        />
+        <MiniStat
+          icon={PlayIcon}
+          iconBg="bg-orange-500/20"
+          iconColor="text-orange-600"
+          label="Open Work Orders"
+          value={dashboard?.open_work_orders || 0}
+          valueColor="text-orange-600"
+        />
+      </MiniStatStrip>
 
       {/* Tabs */}
       <div className="border-b border-slate-700">

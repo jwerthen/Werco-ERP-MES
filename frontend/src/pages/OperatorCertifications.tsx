@@ -11,6 +11,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 // ── Types ────────────────────────────────────────────────────────
 type CertStatus = 'active' | 'expired' | 'suspended' | 'revoked' | 'pending';
@@ -380,44 +381,38 @@ export default function OperatorCertifications() {
 
       {/* Dashboard Cards */}
       {dashboard && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-green-500/20 p-2"><CheckCircleIcon className="h-5 w-5 text-green-600" /></div>
-              <div>
-                <p className="text-sm text-slate-400">Certified Operators</p>
-                <p className="text-2xl font-bold text-white">{dashboard.total_certified}</p>
-              </div>
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-yellow-500/20 p-2"><ClockIcon className="h-5 w-5 text-yellow-600" /></div>
-              <div>
-                <p className="text-sm text-slate-400">Expiring Soon</p>
-                <p className="text-2xl font-bold text-yellow-600">{dashboard.expiring_soon}</p>
-              </div>
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-red-500/20 p-2"><ExclamationTriangleIcon className="h-5 w-5 text-red-600" /></div>
-              <div>
-                <p className="text-sm text-slate-400">Expired</p>
-                <p className="text-2xl font-bold text-red-600">{dashboard.expired}</p>
-              </div>
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-700 bg-[#151b28] p-5 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="rounded-lg bg-blue-500/20 p-2"><CalendarDaysIcon className="h-5 w-5 text-blue-600" /></div>
-              <div>
-                <p className="text-sm text-slate-400">Training Scheduled</p>
-                <p className="text-2xl font-bold text-white">{dashboard.training_scheduled}</p>
-              </div>
-            </div>
-          </div>
-        </div>
+        <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <MiniStat
+            icon={CheckCircleIcon}
+            iconBg="bg-fd-green/15"
+            iconColor="text-fd-green"
+            label="Certified Operators"
+            value={dashboard.total_certified}
+          />
+          <MiniStat
+            icon={ClockIcon}
+            iconBg={dashboard.expiring_soon > 0 ? 'bg-fd-amber/15' : 'bg-fd-green/15'}
+            iconColor={dashboard.expiring_soon > 0 ? 'text-fd-amber' : 'text-fd-green'}
+            label="Expiring Soon"
+            value={dashboard.expiring_soon}
+            valueColor={dashboard.expiring_soon > 0 ? 'text-fd-amber' : undefined}
+          />
+          <MiniStat
+            icon={ExclamationTriangleIcon}
+            iconBg={dashboard.expired > 0 ? 'bg-fd-red/15' : 'bg-fd-green/15'}
+            iconColor={dashboard.expired > 0 ? 'text-fd-red' : 'text-fd-green'}
+            label="Expired"
+            value={dashboard.expired}
+            valueColor={dashboard.expired > 0 ? 'text-fd-red' : undefined}
+          />
+          <MiniStat
+            icon={CalendarDaysIcon}
+            iconBg="bg-fd-blue/15"
+            iconColor="text-fd-blue"
+            label="Training Scheduled"
+            value={dashboard.training_scheduled}
+          />
+        </MiniStatStrip>
       )}
 
       {/* Tabs */}
@@ -553,13 +548,13 @@ export default function OperatorCertifications() {
                     <td className="px-4 py-3 text-slate-400 capitalize">{(tr.training_type || '-').replace(/_/g, ' ')}</td>
                     <td className="px-4 py-3 text-slate-400">{tr.trainer || '-'}</td>
                     <td className="px-4 py-3 text-slate-400">{formatDate(tr.training_date)}</td>
-                    <td className="px-4 py-3 text-slate-400">{tr.hours != null ? `${tr.hours}h` : '-'}</td>
+                    <td className="px-4 py-3 text-slate-400 tabular-nums">{tr.hours != null ? `${tr.hours}h` : '-'}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tr.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
                         {tr.passed ? 'Passed' : 'Failed'}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-slate-400">{tr.score != null ? `${tr.score}%` : '-'}</td>
+                    <td className="px-4 py-3 text-slate-400 tabular-nums">{tr.score != null ? `${tr.score}%` : '-'}</td>
                   </tr>
                 ))
               )}
@@ -604,7 +599,7 @@ export default function OperatorCertifications() {
                           <td key={wc.id} className="px-4 py-3 text-center">
                             <div className="flex flex-col items-center gap-0.5" title={`${skillLabel(level)} (Level ${level})`}>
                               <span className={`inline-block h-4 w-4 rounded-full ${skillColor(level)}`} />
-                              <span className="text-[10px] text-slate-400">{level}</span>
+                              <span className="text-[10px] text-slate-400 tabular-nums">{level}</span>
                             </div>
                           </td>
                         );

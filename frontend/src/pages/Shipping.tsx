@@ -42,18 +42,18 @@ interface ReadyToShip {
 }
 
 const statusColors: Record<string, string> = {
-  pending: 'bg-yellow-500/20 text-yellow-300',
-  packed: 'bg-blue-500/20 text-blue-300',
-  shipped: 'bg-green-500/20 text-emerald-300',
-  delivered: 'bg-emerald-500/20 text-emerald-300',
-  cancelled: 'bg-red-500/20 text-red-300',
+  pending: 'bg-fd-amber/15 text-fd-amber',
+  packed: 'bg-fd-blue/15 text-fd-blue',
+  shipped: 'bg-fd-green/15 text-fd-green',
+  delivered: 'bg-fd-green/15 text-fd-green',
+  cancelled: 'bg-fd-red/15 text-fd-red',
 };
 
 const trackingBadge: Record<string, string> = {
-  delivered: 'bg-emerald-500/20 text-emerald-300',
-  out_for_delivery: 'bg-blue-500/20 text-blue-300',
-  in_transit: 'bg-blue-500/20 text-blue-300',
-  pre_transit: 'bg-yellow-500/20 text-yellow-300',
+  delivered: 'bg-fd-green/15 text-fd-green',
+  out_for_delivery: 'bg-fd-blue/15 text-fd-blue',
+  in_transit: 'bg-fd-blue/15 text-fd-blue',
+  pre_transit: 'bg-fd-amber/15 text-fd-amber',
 };
 
 export default function Shipping({ embedded }: { embedded?: boolean }) {
@@ -205,34 +205,34 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       )}
 
       {/* Ready to Ship */}
-      <div className="card">
+      <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
         <h2 className="text-lg font-semibold mb-4">Ready to Ship ({readyToShip.length})</h2>
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800">
+          <table className="min-w-full divide-y divide-fd-line">
+            <thead className="bg-fd-sunken">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
+                <th className="px-4 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Due</th>
+                <th className="px-4 py-2 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-700">
+            <tbody className="divide-y divide-fd-line">
               {readyToShip.map((wo) => (
-                <tr key={wo.work_order_id} className="hover:bg-slate-800">
-                  <td className="px-4 py-3 font-medium text-werco-primary">{wo.work_order_number}</td>
-                  <td className="px-4 py-3">
-                    <div className="font-medium">{wo.part_number}</div>
-                    <div className="text-sm text-slate-400">{wo.part_name}</div>
+                <tr key={wo.work_order_id} className="hover:bg-fd-sunken">
+                  <td className="px-4 py-2 font-medium text-werco-primary">{wo.work_order_number}</td>
+                  <td className="px-4 py-2 min-w-0">
+                    <div className="font-medium truncate">{wo.part_number}</div>
+                    <div className="text-sm text-slate-400 truncate">{wo.part_name}</div>
                   </td>
-                  <td className="px-4 py-3">{wo.customer_name || '-'}</td>
-                  <td className="px-4 py-3 text-right font-medium">{wo.quantity_complete}</td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-2 min-w-0 truncate">{wo.customer_name || '-'}</td>
+                  <td className="px-4 py-2 text-right font-medium tabular-nums">{wo.quantity_complete}</td>
+                  <td className="px-4 py-2 tabular-nums">
                     {wo.due_date ? formatCentralDate(wo.due_date, { year: undefined }) : '-'}
                   </td>
-                  <td className="px-4 py-3 text-center space-x-2 whitespace-nowrap">
+                  <td className="px-4 py-2 text-center space-x-2 whitespace-nowrap">
                     {canSchedule && (
                       <button
                         onClick={() => scheduleForWorkOrder(wo)}
@@ -262,30 +262,30 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       </div>
 
       {/* Recent Shipments */}
-      <div className="card">
+      <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
         <h2 className="text-lg font-semibold mb-4">Recent Shipments</h2>
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800">
+          <table className="min-w-full divide-y divide-fd-line">
+            <thead className="bg-fd-sunken">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase w-8"></th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Shipment #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Carrier</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Tracking</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase w-8"></th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Shipment #</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Customer</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Carrier</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Tracking</th>
+                <th className="px-4 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
+                <th className="px-4 py-2 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-700">
+            <tbody className="divide-y divide-fd-line">
               {shipments.map((s) => {
                 const expanded = !!expandedTracking[s.id];
                 return (
                   <React.Fragment key={s.id}>
-                    <tr className="hover:bg-slate-800">
-                      <td className="px-4 py-3">
+                    <tr className="hover:bg-fd-sunken">
+                      <td className="px-4 py-2">
                         <button
                           onClick={() => toggleTracking(s.id)}
                           className="text-slate-500 hover:text-werco-primary"
@@ -298,22 +298,22 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                           )}
                         </button>
                       </td>
-                      <td className="px-4 py-3 font-mono">{s.shipment_number}</td>
-                      <td className="px-4 py-3 font-medium">{s.work_order_number}</td>
-                      <td className="px-4 py-3">{s.customer_name || s.ship_to_name || '-'}</td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[s.status]}`}>
+                      <td className="px-4 py-2 font-mono">{s.shipment_number}</td>
+                      <td className="px-4 py-2 font-medium">{s.work_order_number}</td>
+                      <td className="px-4 py-2 min-w-0 truncate">{s.customer_name || s.ship_to_name || '-'}</td>
+                      <td className="px-4 py-2">
+                        <span className={`px-2 py-0.5 rounded-sm text-xs font-medium ${statusColors[s.status]}`}>
                           {s.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3">{s.carrier || '-'}</td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-2">{s.carrier || '-'}</td>
+                      <td className="px-4 py-2">
                         {s.tracking_number ? (
                           <div className="flex items-center gap-2">
                             <span className="font-mono text-sm">{s.tracking_number}</span>
                             {s.tracking_status && (
                               <span
-                                className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                className={`px-1.5 py-0.5 rounded-sm text-[10px] font-medium ${
                                   trackingBadge[s.tracking_status.toLowerCase()] || 'bg-slate-500/20 text-slate-300'
                                 }`}
                               >
@@ -325,8 +325,8 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                           '-'
                         )}
                       </td>
-                      <td className="px-4 py-3 text-right">{s.quantity_shipped}</td>
-                      <td className="px-4 py-3 text-center space-x-2 whitespace-nowrap">
+                      <td className="px-4 py-2 text-right tabular-nums">{s.quantity_shipped}</td>
+                      <td className="px-4 py-2 text-center space-x-2 whitespace-nowrap">
                         {canSchedule && s.status !== 'cancelled' && (
                           <button
                             onClick={() => scheduleForShipment(s)}
@@ -391,7 +391,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
         {selectedWO && (
           <>
             <h3 className="text-lg font-semibold mb-4">Create Shipment (Manual)</h3>
-            <div className="bg-slate-800 rounded p-3 mb-4">
+            <div className="bg-fd-sunken border border-fd-line rounded-sm p-3 mb-4">
               <p className="font-medium">{selectedWO.work_order_number}</p>
               <p className="text-sm text-slate-400">{selectedWO.part_number} - {selectedWO.part_name}</p>
             </div>

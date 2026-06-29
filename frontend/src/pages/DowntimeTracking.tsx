@@ -9,6 +9,9 @@ import {
   CheckCircleIcon,
   StopIcon,
   ArrowPathIcon,
+  CalendarDaysIcon,
+  WrenchIcon,
+  ChartBarIcon,
 } from '@heroicons/react/24/outline';
 import {
   BarChart,
@@ -20,6 +23,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from 'recharts';
+import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 
 // ============== Types ==============
 
@@ -285,7 +289,7 @@ export default function DowntimeTracking() {
   const paretoData = summary?.top_reasons?.slice(0, 10) || [];
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -313,159 +317,191 @@ export default function DowntimeTracking() {
         </div>
       </div>
 
-      {/* Summary Stats Cards */}
+      {/* Summary Stats — compact KPI strip */}
       {summary && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-red-500">
-            <div className="text-sm text-slate-400">Total Downtime</div>
-            <div className="text-2xl font-bold text-white">{summary.total_downtime_hours}h</div>
-            <div className="text-xs text-slate-500">{summary.event_count} events</div>
-          </div>
-          <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-blue-500">
-            <div className="text-sm text-slate-400">Planned</div>
-            <div className="text-2xl font-bold text-blue-400">{summary.planned_hours}h</div>
-            <div className="text-xs text-slate-500">{summary.planned_percentage}%</div>
-          </div>
-          <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-orange-500">
-            <div className="text-sm text-slate-400">Unplanned</div>
-            <div className="text-2xl font-bold text-orange-400">{summary.unplanned_hours}h</div>
-            <div className="text-xs text-slate-500">{summary.unplanned_percentage}%</div>
-          </div>
-          <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-purple-500">
-            <div className="text-sm text-slate-400">Top Reason</div>
-            <div className="text-lg font-bold text-white truncate">
-              {summary.top_reasons?.[0]?.reason || 'N/A'}
-            </div>
-            <div className="text-xs text-slate-500">
-              {summary.top_reasons?.[0]?.hours ? `${summary.top_reasons[0].hours}h` : ''}
-            </div>
-          </div>
-        </div>
+        <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <MiniStat
+            icon={ClockIcon}
+            iconBg="bg-red-500/20"
+            iconColor="text-red-600"
+            label="Total Downtime"
+            value={`${summary.total_downtime_hours}h`}
+            subtitle={`${summary.event_count} events`}
+          />
+          <MiniStat
+            icon={CalendarDaysIcon}
+            iconBg="bg-blue-500/20"
+            iconColor="text-blue-600"
+            label="Planned"
+            value={`${summary.planned_hours}h`}
+            valueColor="text-blue-400"
+            subtitle={`${summary.planned_percentage}%`}
+          />
+          <MiniStat
+            icon={WrenchIcon}
+            iconBg="bg-amber-500/20"
+            iconColor="text-amber-600"
+            label="Unplanned"
+            value={`${summary.unplanned_hours}h`}
+            valueColor="text-orange-400"
+            subtitle={`${summary.unplanned_percentage}%`}
+          />
+          <MiniStat
+            icon={ChartBarIcon}
+            iconBg="bg-purple-500/20"
+            iconColor="text-purple-400"
+            label="Top Reason"
+            value={summary.top_reasons?.[0]?.reason || 'N/A'}
+            subtitle={summary.top_reasons?.[0]?.hours ? `${summary.top_reasons[0].hours}h` : undefined}
+          />
+        </MiniStatStrip>
       )}
 
-      {/* Work Center Status Board */}
-      <div className="bg-[#151b28] rounded-lg shadow p-4">
-        <h2 className="text-lg font-semibold text-white mb-3">Work Center Status</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-          {workCenters.map((wc) => {
-            const st = getWcDisplayStatus(wc);
-            return (
-              <div
-                key={wc.id}
-                className={`rounded-lg p-3 text-center border ${
-                  st === 'down' ? 'border-red-300 bg-red-500/10' : st === 'idle' ? 'border-slate-600 bg-slate-800/50' : 'border-green-300 bg-green-500/10'
-                }`}
-              >
-                <div className="flex items-center justify-center gap-1 mb-1">
-                  <span className={`inline-block w-2.5 h-2.5 rounded-full ${wcStatusColor(st)}`}></span>
-                  <span className="text-xs font-medium text-slate-400">{wcStatusLabel(st)}</span>
-                </div>
-                <div className="font-bold text-sm text-white">{wc.code}</div>
-                <div className="text-xs text-slate-400 truncate">{wc.name}</div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Active Downtime Events */}
-      {activeEvents.length > 0 && (
-        <div className="bg-[#151b28] rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-red-400 mb-3 flex items-center gap-2">
-            <ExclamationTriangleIcon className="h-5 w-5 text-red-500" />
-            Active Downtime ({activeEvents.length})
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {activeEvents.map((evt) => {
-              const elapsed = getElapsedMinutes(evt.start_time);
+      {/* COCKPIT GRID — WC status, active downtime, and Pareto side-by-side */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+        {/* Work Center Status Board */}
+        <CockpitPanel
+          className="xl:col-span-4"
+          title="Work Center Status"
+          subtitle="Live machine state"
+          footer={`${workCenters.length} work center${workCenters.length === 1 ? '' : 's'}`}
+          headerExtra={
+            <span className="text-xs tabular-nums text-fd-red font-bold">
+              {activeWcIds.size} down
+            </span>
+          }
+        >
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {workCenters.map((wc) => {
+              const st = getWcDisplayStatus(wc);
               return (
                 <div
-                  key={evt.id}
-                  className={`rounded-lg border-2 p-4 ${
-                    evt.planned_type === 'planned' ? 'border-blue-300 bg-blue-500/10' : 'border-red-300 bg-red-500/10'
+                  key={wc.id}
+                  className={`rounded-sm p-2 text-center border min-w-0 ${
+                    st === 'down'
+                      ? 'border-fd-red/40 bg-red-500/10'
+                      : st === 'idle'
+                      ? 'border-fd-line bg-slate-800/40'
+                      : 'border-fd-green/40 bg-green-500/10'
                   }`}
                 >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <div className="font-bold text-white">
-                        {evt.work_center?.code || `WC-${evt.work_center_id}`}
-                      </div>
-                      <div className="text-xs text-slate-400">
-                        {evt.work_center?.name}
-                      </div>
-                    </div>
-                    <span
-                      className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                        evt.planned_type === 'planned'
-                          ? 'bg-blue-200 text-blue-300'
-                          : 'bg-red-200 text-red-300'
-                      }`}
-                    >
-                      {evt.planned_type === 'planned' ? 'Planned' : 'Unplanned'}
+                  <div className="flex items-center justify-center gap-1 mb-0.5">
+                    <span className={`inline-block w-2 h-2 rounded-full ${wcStatusColor(st)}`}></span>
+                    <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">
+                      {wcStatusLabel(st)}
                     </span>
                   </div>
-                  <div className="mt-2 flex items-center gap-2">
-                    <ClockIcon className="h-4 w-4 text-slate-500" />
-                    <span className="text-lg font-mono font-bold text-white">
-                      {formatDuration(elapsed)}
-                    </span>
-                  </div>
-                  <div className="mt-1 text-sm text-slate-400">
-                    <span className="font-medium">{categoryLabel(evt.category)}</span>
-                    {evt.reason_code && <span className="text-slate-500 ml-1">({evt.reason_code})</span>}
-                  </div>
-                  {evt.description && (
-                    <div className="mt-1 text-xs text-slate-400 truncate">{evt.description}</div>
-                  )}
-                  <div className="mt-1 text-xs text-slate-500">
-                    Started: {formatCentralDate(evt.start_time)}
-                  </div>
-                  <button
-                    onClick={() => openResolveModal(evt)}
-                    className="btn btn-sm btn-success mt-3 w-full"
-                  >
-                    <CheckCircleIcon className="h-4 w-4 mr-1" />
-                    Resolve
-                  </button>
+                  <div className="font-bold text-sm text-white tabular-nums truncate">{wc.code}</div>
+                  <div className="text-[10px] text-slate-400 truncate">{wc.name}</div>
                 </div>
               );
             })}
           </div>
-        </div>
-      )}
+        </CockpitPanel>
 
-      {/* Pareto Chart */}
-      {paretoData.length > 0 && (
-        <div className="bg-[#151b28] rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-white mb-3">Downtime by Reason (Pareto)</h2>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={paretoData} margin={{ top: 5, right: 20, left: 10, bottom: 60 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis
-                dataKey="reason"
-                angle={-35}
-                textAnchor="end"
-                interval={0}
-                height={80}
-                tick={{ fontSize: 11, fill: '#94a3b8' }}
-                stroke="#334155"
-              />
-              <YAxis label={{ value: 'Hours', angle: -90, position: 'insideLeft', fill: '#94a3b8' }} tick={{ fill: '#94a3b8' }} stroke="#334155" />
-              <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} formatter={(value: number | undefined) => [`${value ?? 0}h`, 'Downtime']} />
-              <Bar dataKey="hours" fill="#ef4444" radius={[4, 4, 0, 0]}>
-                {paretoData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={index === 0 ? '#ef4444' : index < 3 ? '#f97316' : '#fbbf24'} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
+        {/* Active Downtime Events — canonical active render, cross-linked to status by work_center_id */}
+        <CockpitPanel
+          className="xl:col-span-4"
+          title="Active Downtime"
+          subtitle="Open events, live elapsed"
+          footer={`${activeEvents.length} active`}
+          headerExtra={
+            activeEvents.length > 0 ? (
+              <ExclamationTriangleIcon className="h-4 w-4 text-red-500" />
+            ) : undefined
+          }
+        >
+          {activeEvents.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-500">No active downtime</div>
+          ) : (
+            <div className="divide-y divide-fd-line">
+              {activeEvents.map((evt) => {
+                const elapsed = getElapsedMinutes(evt.start_time);
+                return (
+                  <div key={evt.id} className="py-2 flex items-center gap-2 min-w-0">
+                    <span
+                      className={`inline-block w-1.5 h-7 rounded-sm flex-shrink-0 ${
+                        evt.planned_type === 'planned' ? 'bg-fd-blue' : 'bg-fd-red'
+                      }`}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-bold text-sm text-white tabular-nums truncate">
+                          {evt.work_center?.code || `WC-${evt.work_center_id}`}
+                        </span>
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded-sm font-medium flex-shrink-0 ${
+                            evt.planned_type === 'planned'
+                              ? 'bg-blue-500/20 text-blue-300'
+                              : 'bg-red-500/20 text-red-300'
+                          }`}
+                        >
+                          {evt.planned_type === 'planned' ? 'Planned' : 'Unplanned'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-400 truncate">
+                        {categoryLabel(evt.category)}
+                        {evt.reason_code && <span className="text-slate-500"> ({evt.reason_code})</span>}
+                        {evt.description && <span className="text-slate-500"> · {evt.description}</span>}
+                      </div>
+                    </div>
+                    <span className="flex items-center gap-1 flex-shrink-0 tabular-nums">
+                      <ClockIcon className="h-3.5 w-3.5 text-slate-500" />
+                      <span className="text-sm font-mono font-bold text-white">{formatDuration(elapsed)}</span>
+                    </span>
+                    <button
+                      onClick={() => openResolveModal(evt)}
+                      className="btn btn-xs btn-success flex-shrink-0"
+                      title="Resolve"
+                    >
+                      <CheckCircleIcon className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </CockpitPanel>
+
+        {/* Pareto Chart */}
+        {paretoData.length > 0 && (
+          <CockpitPanel
+            className="xl:col-span-4"
+            title="Downtime by Reason"
+            subtitle="Pareto, top 10"
+            bodyClassName="lg:max-h-none"
+          >
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart data={paretoData} margin={{ top: 5, right: 20, left: 10, bottom: 60 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis
+                  dataKey="reason"
+                  angle={-35}
+                  textAnchor="end"
+                  interval={0}
+                  height={80}
+                  tick={{ fontSize: 11, fill: '#94a3b8' }}
+                  stroke="#334155"
+                />
+                <YAxis label={{ value: 'Hours', angle: -90, position: 'insideLeft', fill: '#94a3b8' }} tick={{ fill: '#94a3b8' }} stroke="#334155" />
+                <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '3px', color: '#e2e8f0' }} formatter={(value: number | undefined) => [`${value ?? 0}h`, 'Downtime']} />
+                <Bar dataKey="hours" fill="#ef4444" radius={[4, 4, 0, 0]}>
+                  {paretoData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={index === 0 ? '#ef4444' : index < 3 ? '#f97316' : '#fbbf24'} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </CockpitPanel>
+        )}
+      </div>
 
       {/* Filters */}
-      <div className="bg-[#151b28] rounded-lg shadow p-4">
-        <h2 className="text-lg font-semibold text-white mb-3">Downtime Log</h2>
-        <div className="flex flex-wrap gap-3 mb-4">
+      <div className="card card-compact">
+        <div className="card-header !pb-2 !mb-3">
+          <h2 className="card-title">Downtime Log</h2>
+        </div>
+        <div className="flex flex-wrap gap-2 mb-4">
           <select
             className="select select-bordered select-sm"
             value={filterWorkCenter}
@@ -533,7 +569,7 @@ export default function DowntimeTracking() {
         <div className="overflow-x-auto">
           <table className="table table-sm w-full">
             <thead>
-              <tr className="bg-slate-800/50">
+              <tr className="bg-fd-panel">
                 <th>Work Center</th>
                 <th>Start</th>
                 <th>End</th>

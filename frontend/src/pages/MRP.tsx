@@ -1,13 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
+import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import {
   PlayIcon,
   ExclamationTriangleIcon,
   CheckCircleIcon,
   ClockIcon,
   TruckIcon,
-  WrenchScrewdriverIcon
+  WrenchScrewdriverIcon,
+  CubeIcon,
+  ClipboardDocumentListIcon,
+  BoltIcon,
 } from '@heroicons/react/24/outline';
 
 interface MRPRun {
@@ -69,6 +73,83 @@ const actionTypeConfig: Record<string, { label: string; color: string; icon: any
   reschedule_out: { label: 'Reschedule Out', color: 'bg-slate-800/50 text-slate-100', icon: ClockIcon },
   cancel: { label: 'Cancel', color: 'bg-slate-800/50 text-slate-400', icon: ClockIcon },
 };
+
+/** Normalized shape consumed by the shared ActionRow — both the shortages table
+ *  and the run-detail list feed this, so the action data is rendered through one
+ *  dense component and cross-linked by the stable action_id. */
+interface ActionRowData {
+  actionId: number;
+  partId: number;
+  partNumber: string;
+  partName: string;
+  actionType: string;
+  quantity: number;
+  /** "Needed by" date (required_date). */
+  requiredDate?: string;
+  /** "Order by" date (suggested_order_date / order_by_date). */
+  orderByDate?: string;
+  isProcessed: boolean;
+  isExpedite?: boolean;
+}
+
+/**
+ * Dense, single-row renderer for one MRP action. Reused by both the Shortages
+ * panel and the Run Details panel so the action data lives in exactly one
+ * component; rows are keyed/cross-linked by the stable actionId.
+ */
+function ActionRow({
+  data,
+  onProcess,
+  highlight,
+}: {
+  data: ActionRowData;
+  onProcess?: (actionId: number) => void;
+  /** Marks this action as also surfaced in the other panel (same actionId). */
+  highlight?: boolean;
+}) {
+  const config = actionTypeConfig[data.actionType] || actionTypeConfig.order;
+  const Icon = config.icon;
+  return (
+    <div
+      data-action-id={data.actionId}
+      className={`flex items-center gap-2 px-2.5 py-2 min-w-0 ${
+        data.isProcessed ? 'opacity-60' : data.isExpedite ? 'bg-fd-red/10' : highlight ? 'bg-fd-blue/5' : ''
+      }`}
+    >
+      <Icon className="h-4 w-4 flex-shrink-0 text-slate-400" />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium truncate text-sm">{data.partNumber}</div>
+        <div className="text-[11px] text-slate-400 truncate">{data.partName}</div>
+      </div>
+      <span className={`inline-flex flex-shrink-0 px-1.5 py-0.5 rounded-sm text-[10px] font-medium ${config.color}`}>
+        {config.label}
+      </span>
+      <div className="flex-shrink-0 text-right tabular-nums">
+        <div className="text-sm font-medium">{data.quantity}</div>
+        <div className="text-[10px] text-slate-400 leading-tight">
+          {data.requiredDate && <span>need {formatCentralDate(data.requiredDate, { year: undefined })}</span>}
+          {data.requiredDate && data.orderByDate && <span className="mx-1 text-slate-600">·</span>}
+          {data.orderByDate && <span>order {formatCentralDate(data.orderByDate, { year: undefined })}</span>}
+        </div>
+      </div>
+      <div className="flex-shrink-0 w-16 text-right">
+        {!data.isProcessed && onProcess ? (
+          <button
+            onClick={() => onProcess(data.actionId)}
+            className="text-werco-primary hover:text-blue-400 text-xs font-medium"
+          >
+            Process
+          </button>
+        ) : data.isProcessed ? (
+          <span className="inline-flex items-center justify-end text-fd-green text-xs">
+            <CheckCircleIcon className="h-3.5 w-3.5 mr-1" />
+            Done
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 export default function MRPPage() {
   const [runs, setRuns] = useState<MRPRun[]>([]);
@@ -149,43 +230,40 @@ export default function MRPPage() {
     );
   }
 
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-white">Material Requirements Planning</h1>
-      </div>
+  const latestRun = runs[0];
+  const totalShortages = shortages?.total_shortages ?? 0;
+  const expediteCount = shortages?.expedite_count ?? 0;
+  // Stable cross-link: action_ids surfaced in the Shortages panel, so a selected
+  // run's actions can be flagged where they overlap (by id, never by name).
+  const shortageActionIds = new Set((shortages?.shortages ?? []).map((s) => s.action_id));
 
-      {/* Run MRP Panel */}
-      <div className="card">
-        <h2 className="text-lg font-semibold mb-4">Run MRP</h2>
-        <div className="flex flex-wrap items-end gap-4">
+  return (
+    <div className="space-y-4">
+      {/* Header + Run MRP toolbar */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h1 className="text-2xl font-bold text-white">Material Requirements Planning</h1>
+        <div className="flex flex-wrap items-end gap-3">
           <div>
-            <label className="label">Planning Horizon (days)</label>
+            <label className="label !text-[10px] uppercase tracking-wide">Horizon (days)</label>
             <input
               type="number"
               value={horizonDays}
               onChange={(e) => setHorizonDays(parseInt(e.target.value))}
-              className="input w-32"
+              className="input w-24 tabular-nums"
               min={7}
               max={365}
             />
           </div>
-          <div>
-            <label className="flex items-center">
-              <input
-                type="checkbox"
-                checked={includeSafetyStock}
-                onChange={(e) => setIncludeSafetyStock(e.target.checked)}
-                className="mr-2"
-              />
-              <span className="text-sm">Include Safety Stock</span>
-            </label>
-          </div>
-          <button
-            onClick={runMRP}
-            disabled={runningMRP}
-            className="btn-primary flex items-center"
-          >
+          <label className="flex items-center h-9">
+            <input
+              type="checkbox"
+              checked={includeSafetyStock}
+              onChange={(e) => setIncludeSafetyStock(e.target.checked)}
+              className="mr-2"
+            />
+            <span className="text-sm">Safety Stock</span>
+          </label>
+          <button onClick={runMRP} disabled={runningMRP} className="btn-primary btn-sm flex items-center">
             {runningMRP ? (
               <>
                 <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full mr-2" />
@@ -193,7 +271,7 @@ export default function MRPPage() {
               </>
             ) : (
               <>
-                <PlayIcon className="h-5 w-5 mr-2" />
+                <PlayIcon className="h-4 w-4 mr-1.5" />
                 Run MRP
               </>
             )}
@@ -201,188 +279,174 @@ export default function MRPPage() {
         </div>
       </div>
 
-      {/* Shortages Summary */}
-      {shortages && shortages.total_shortages > 0 && (
-        <div className={`card ${shortages.expedite_count > 0 ? 'border-l-4 border-red-500' : 'border-l-4 border-yellow-500'}`}>
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center">
-              <ExclamationTriangleIcon className={`h-6 w-6 mr-2 ${shortages.expedite_count > 0 ? 'text-red-500' : 'text-yellow-500'}`} />
-              <h2 className="text-lg font-semibold">Material Shortages</h2>
-            </div>
-            <div className="text-sm text-slate-400">
-              From run {shortages.mrp_run_number}
-            </div>
-          </div>
-          
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-            <div className="bg-slate-800 rounded-lg p-3">
-              <div className="text-2xl font-bold">{shortages.total_shortages}</div>
-              <div className="text-sm text-slate-400">Total Shortages</div>
-            </div>
-            <div className={`rounded-lg p-3 ${shortages.expedite_count > 0 ? 'bg-red-500/10' : 'bg-slate-800'}`}>
-              <div className={`text-2xl font-bold ${shortages.expedite_count > 0 ? 'text-red-600' : ''}`}>
-                {shortages.expedite_count}
-              </div>
-              <div className="text-sm text-slate-400">Need Expedite</div>
-            </div>
-          </div>
+      {/* KPI strip */}
+      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+        <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg={totalShortages > 0 ? 'bg-amber-500/20' : 'bg-fd-green/15'}
+          iconColor={totalShortages > 0 ? 'text-amber-600' : 'text-fd-green'}
+          label="Total Shortages"
+          value={totalShortages}
+          valueColor={totalShortages > 0 ? 'text-fd-amber' : undefined}
+          subtitle={shortages ? `Run ${shortages.mrp_run_number}` : undefined}
+        />
+        <MiniStat
+          icon={BoltIcon}
+          iconBg={expediteCount > 0 ? 'bg-red-500/20' : 'bg-fd-green/15'}
+          iconColor={expediteCount > 0 ? 'text-red-600' : 'text-fd-green'}
+          label="Need Expedite"
+          value={expediteCount}
+          valueColor={expediteCount > 0 ? 'text-fd-red' : undefined}
+        />
+        <MiniStat
+          icon={CubeIcon}
+          iconBg="bg-blue-500/20"
+          iconColor="text-blue-600"
+          label="Parts Analyzed"
+          value={latestRun?.total_parts_analyzed ?? 0}
+          subtitle={latestRun ? `Run ${latestRun.run_number}` : 'No runs yet'}
+        />
+        <MiniStat
+          icon={ClipboardDocumentListIcon}
+          iconBg="bg-blue-500/20"
+          iconColor="text-werco-navy-600"
+          label="Requirements"
+          value={latestRun?.total_requirements ?? 0}
+        />
+        <MiniStat
+          icon={WrenchScrewdriverIcon}
+          iconBg="bg-blue-500/20"
+          iconColor="text-blue-600"
+          label="Actions"
+          value={latestRun?.total_actions ?? 0}
+        />
+      </MiniStatStrip>
 
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-800">
-                <tr>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Action</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Needed By</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">Order By</th>
-                  <th className="px-4 py-2 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                {shortages.shortages.slice(0, 10).map((shortage) => {
-                  const config = actionTypeConfig[shortage.action_type] || actionTypeConfig.order;
-                  return (
-                    <tr key={shortage.action_id} className={shortage.is_expedite ? 'bg-red-500/10' : ''}>
-                      <td className="px-4 py-2">
-                        <div className="font-medium">{shortage.part_number}</div>
-                        <div className="text-sm text-slate-400">{shortage.part_name}</div>
-                      </td>
-                      <td className="px-4 py-2">
-                        <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${config.color}`}>
-                          {config.label}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2 text-right font-medium">{shortage.quantity}</td>
-                      <td className="px-4 py-2 text-sm">{formatCentralDate(shortage.required_date)}</td>
-                      <td className="px-4 py-2 text-sm">{formatCentralDate(shortage.order_by_date)}</td>
-                      <td className="px-4 py-2 text-center">
-                        <button
-                          onClick={() => processAction(shortage.action_id)}
-                          className="text-werco-primary hover:text-blue-400 text-sm"
-                        >
-                          Process
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          {shortages.shortages.length > 10 && (
-            <p className="text-sm text-slate-400 mt-2">
-              Showing 10 of {shortages.shortages.length} shortages
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Recent Runs */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Recent MRP Runs</h2>
-          <div className="space-y-2">
-            {runs.map((run) => (
-              <div
-                key={run.id}
-                onClick={() => loadRunActions(run)}
-                className={`p-3 rounded-lg border cursor-pointer transition-colors ${
-                  selectedRun?.id === run.id
-                    ? 'border-werco-primary bg-blue-500/10'
-                    : 'border-slate-700 hover:border-slate-600'
+      {/* Cockpit grid: Shortages (wide) + Recent Runs (narrow), Run Details (wide) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+        {/* Shortages */}
+        {shortages && shortages.total_shortages > 0 && (
+          <CockpitPanel
+            title="Material Shortages"
+            subtitle={`From run ${shortages.mrp_run_number}`}
+            className="xl:col-span-7"
+            footer={`${shortages.shortages.length} shortages`}
+            headerExtra={
+              <span
+                className={`inline-flex items-center gap-1 text-xs font-medium ${
+                  shortages.expedite_count > 0 ? 'text-fd-red' : 'text-fd-amber'
                 }`}
               >
-                <div className="flex justify-between items-start">
-                  <div>
-                    <div className="font-medium">{run.run_number}</div>
-                    <div className="text-sm text-slate-400">
-                      {run.completed_at
-                        ? formatCentralDateTime(run.completed_at)
-                        : 'In progress...'}
+                <ExclamationTriangleIcon className="h-4 w-4" />
+                {shortages.expedite_count > 0 ? `${shortages.expedite_count} expedite` : 'review'}
+              </span>
+            }
+          >
+            <div className="divide-y divide-fd-line">
+              {shortages.shortages.map((shortage) => (
+                <ActionRow
+                  key={shortage.action_id}
+                  data={{
+                    actionId: shortage.action_id,
+                    partId: shortage.part_id,
+                    partNumber: shortage.part_number,
+                    partName: shortage.part_name,
+                    actionType: shortage.action_type,
+                    quantity: shortage.quantity,
+                    requiredDate: shortage.required_date,
+                    orderByDate: shortage.order_by_date,
+                    isProcessed: false,
+                    isExpedite: shortage.is_expedite,
+                  }}
+                  onProcess={processAction}
+                />
+              ))}
+            </div>
+          </CockpitPanel>
+        )}
+
+        {/* Recent Runs */}
+        <CockpitPanel
+          title="Recent MRP Runs"
+          className="xl:col-span-5"
+          footer={runs.length ? `${runs.length} runs` : undefined}
+        >
+          <div className="space-y-1.5">
+            {runs.map((run) => (
+              <button
+                key={run.id}
+                onClick={() => loadRunActions(run)}
+                className={`w-full text-left p-2.5 rounded-sm border cursor-pointer transition-colors min-w-0 ${
+                  selectedRun?.id === run.id
+                    ? 'border-werco-primary bg-blue-500/10'
+                    : 'border-fd-line hover:border-fd-line-bright'
+                }`}
+              >
+                <div className="flex justify-between items-start gap-2">
+                  <div className="min-w-0">
+                    <div className="font-medium truncate">{run.run_number}</div>
+                    <div className="text-xs text-slate-400 truncate">
+                      {run.completed_at ? formatCentralDateTime(run.completed_at) : 'In progress...'}
                     </div>
                   </div>
-                  <span className={`text-xs px-2 py-1 rounded ${
-                    run.status === 'complete' ? 'bg-green-500/20 text-emerald-300' :
-                    run.status === 'running' ? 'bg-blue-500/20 text-blue-300' :
-                    run.status === 'error' ? 'bg-red-500/20 text-red-300' :
-                    'bg-slate-800/50 text-slate-100'
-                  }`}>
+                  <span
+                    className={`flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded-sm ${
+                      run.status === 'complete'
+                        ? 'bg-green-500/20 text-emerald-300'
+                        : run.status === 'running'
+                        ? 'bg-blue-500/20 text-blue-300'
+                        : run.status === 'error'
+                        ? 'bg-red-500/20 text-red-300'
+                        : 'bg-slate-800/50 text-slate-100'
+                    }`}
+                  >
                     {run.status}
                   </span>
                 </div>
-                <div className="flex gap-4 mt-2 text-xs text-slate-400">
+                <div className="flex gap-3 mt-1.5 text-[11px] text-slate-400 tabular-nums">
                   <span>{run.total_parts_analyzed} parts</span>
-                  <span>{run.total_requirements} requirements</span>
+                  <span>{run.total_requirements} reqs</span>
                   <span>{run.total_actions} actions</span>
                 </div>
-              </div>
+              </button>
             ))}
-            {runs.length === 0 && (
-              <p className="text-slate-400 text-center py-4">No MRP runs yet</p>
-            )}
+            {runs.length === 0 && <p className="text-slate-400 text-center py-4">No MRP runs yet</p>}
           </div>
-        </div>
+        </CockpitPanel>
 
         {/* Run Details */}
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-4">
-            {selectedRun ? `Actions - ${selectedRun.run_number}` : 'Run Details'}
-          </h2>
+        <CockpitPanel
+          title={selectedRun ? `Actions — ${selectedRun.run_number}` : 'Run Details'}
+          subtitle={selectedRun ? undefined : 'Select a run to view its actions'}
+          className="xl:col-span-12"
+          footer={selectedRun ? `${runActions.length} actions` : undefined}
+        >
           {selectedRun ? (
-            <div className="space-y-2 max-h-96 overflow-y-auto">
-              {runActions.map((action) => {
-                const config = actionTypeConfig[action.action_type] || actionTypeConfig.order;
-                const IconComponent = config.icon;
-                return (
-                  <div
-                    key={action.id}
-                    className={`p-3 rounded-lg border ${action.is_processed ? 'bg-slate-800 opacity-60' : 'bg-[#151b28]'}`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-start">
-                        <IconComponent className="h-5 w-5 mr-2 mt-0.5 text-slate-400" />
-                        <div>
-                          <div className="font-medium">{action.part?.part_number}</div>
-                          <div className="text-sm text-slate-400">{action.part?.name}</div>
-                        </div>
-                      </div>
-                      <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${config.color}`}>
-                        {config.label}
-                      </span>
-                    </div>
-                    <div className="mt-2 flex justify-between items-center text-sm">
-                      <div>
-                        <span className="text-slate-400">Qty:</span>
-                        <span className="font-medium ml-1">{action.quantity}</span>
-                        <span className="text-slate-400 ml-3">Order by:</span>
-                        <span className="ml-1">{formatCentralDate(action.suggested_order_date, { year: undefined })}</span>
-                      </div>
-                      {!action.is_processed ? (
-                        <button
-                          onClick={() => processAction(action.id)}
-                          className="text-werco-primary hover:text-blue-400"
-                        >
-                          Process
-                        </button>
-                      ) : (
-                        <span className="flex items-center text-green-600">
-                          <CheckCircleIcon className="h-4 w-4 mr-1" />
-                          Done
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-              {runActions.length === 0 && (
-                <p className="text-slate-400 text-center py-4">No actions in this run</p>
-              )}
+            <div className="divide-y divide-fd-line">
+              {runActions.map((action) => (
+                <ActionRow
+                  key={action.id}
+                  data={{
+                    actionId: action.id,
+                    partId: action.part_id,
+                    partNumber: action.part?.part_number ?? '',
+                    partName: action.part?.name ?? '',
+                    actionType: action.action_type,
+                    quantity: action.quantity,
+                    requiredDate: action.required_date,
+                    orderByDate: action.suggested_order_date,
+                    isProcessed: action.is_processed,
+                  }}
+                  onProcess={processAction}
+                  highlight={shortageActionIds.has(action.id)}
+                />
+              ))}
+              {runActions.length === 0 && <p className="text-slate-400 text-center py-4">No actions in this run</p>}
             </div>
           ) : (
             <p className="text-slate-400 text-center py-8">Select a run to view details</p>
           )}
-        </div>
+        </CockpitPanel>
       </div>
     </div>
   );

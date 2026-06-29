@@ -1,11 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDateTime } from '../utils/centralTime';
 import {
   MagnifyingGlassIcon,
   ShieldCheckIcon,
   UserIcon,
+  UsersIcon,
+  ExclamationTriangleIcon,
+  RectangleStackIcon,
 } from '@heroicons/react/24/outline';
 
 interface AuditEntry {
@@ -36,13 +40,13 @@ interface AuditSummary {
 }
 
 const actionColors: Record<string, string> = {
-  CREATE: 'bg-green-500/20 text-emerald-300',
-  UPDATE: 'bg-blue-500/20 text-blue-300',
-  DELETE: 'bg-red-500/20 text-red-300',
-  LOGIN: 'bg-purple-500/20 text-purple-800',
+  CREATE: 'bg-fd-green/20 text-emerald-300',
+  UPDATE: 'bg-fd-blue/20 text-blue-300',
+  DELETE: 'bg-fd-red/20 text-red-300',
+  LOGIN: 'bg-werco-navy-600/30 text-blue-200',
   LOGOUT: 'bg-slate-800/50 text-slate-100',
-  VIEW: 'bg-yellow-500/20 text-yellow-300',
-  EXPORT: 'bg-indigo-100 text-indigo-800',
+  VIEW: 'bg-fd-amber/20 text-amber-300',
+  EXPORT: 'bg-werco-navy-500/20 text-blue-300',
 };
 
 export default function AuditLog() {
@@ -117,7 +121,7 @@ export default function AuditLog() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div className="flex justify-between items-center">
         <div className="flex items-center">
           <ShieldCheckIcon className="h-8 w-8 text-werco-primary mr-3" />
@@ -130,31 +134,42 @@ export default function AuditLog() {
 
       {/* Summary Cards */}
       {summary && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="card bg-blue-500/10 border-blue-500/30 text-center">
-            <p className="text-sm text-blue-600">Total Events (30 days)</p>
-            <p className="text-3xl font-bold text-blue-300">{summary.total_events}</p>
-          </div>
-          <div className={`card text-center ${summary.failed_events > 0 ? 'bg-red-500/10 border-red-500/30' : 'bg-green-500/10 border-green-500/30'}`}>
-            <p className="text-sm text-slate-400">Failed Actions</p>
-            <p className={`text-3xl font-bold ${summary.failed_events > 0 ? 'text-red-300' : 'text-emerald-300'}`}>
-              {summary.failed_events}
-            </p>
-          </div>
-          <div className="card bg-purple-500/10 border-purple-500/30 text-center">
-            <p className="text-sm text-purple-600">Resource Types</p>
-            <p className="text-3xl font-bold text-purple-800">{Object.keys(summary.by_resource).length}</p>
-          </div>
-          <div className="card bg-indigo-50 border-indigo-200 text-center">
-            <p className="text-sm text-indigo-600">Active Users</p>
-            <p className="text-3xl font-bold text-indigo-800">{summary.top_users.length}</p>
-          </div>
-        </div>
+        <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <MiniStat
+            icon={ShieldCheckIcon}
+            iconBg="bg-fd-blue/15"
+            iconColor="text-fd-blue"
+            label="Total Events (30 days)"
+            value={summary.total_events}
+          />
+          <MiniStat
+            icon={ExclamationTriangleIcon}
+            iconBg={summary.failed_events > 0 ? 'bg-fd-red/15' : 'bg-fd-green/15'}
+            iconColor={summary.failed_events > 0 ? 'text-fd-red' : 'text-fd-green'}
+            label="Failed Actions"
+            value={summary.failed_events}
+            valueColor={summary.failed_events > 0 ? 'text-fd-red' : 'text-fd-green'}
+          />
+          <MiniStat
+            icon={RectangleStackIcon}
+            iconBg="bg-fd-blue/15"
+            iconColor="text-fd-blue"
+            label="Resource Types"
+            value={Object.keys(summary.by_resource).length}
+          />
+          <MiniStat
+            icon={UsersIcon}
+            iconBg="bg-fd-blue/15"
+            iconColor="text-fd-blue"
+            label="Active Users"
+            value={summary.top_users.length}
+          />
+        </MiniStatStrip>
       )}
 
       {/* Filters */}
-      <div className="card">
-        <div className="flex flex-wrap gap-4 items-end">
+      <div className="rounded-sm border border-fd-line bg-fd-panel p-3">
+        <div className="flex flex-wrap gap-3 items-end">
           <div className="flex-1 min-w-[200px]">
             <label className="label">Search</label>
             <div className="relative">

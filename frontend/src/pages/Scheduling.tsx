@@ -24,8 +24,12 @@ import {
   FunnelIcon,
   ChevronDownIcon,
   XMarkIcon,
+  ClockIcon,
+  CheckCircleIcon,
+  Squares2X2Icon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface WorkCenter {
   id: number;
@@ -195,6 +199,9 @@ export default function Scheduling() {
   const [filterWorkCenter, setFilterWorkCenter] = useState<number | ''>('');
   const [showBulkActions, setShowBulkActions] = useState(false);
 
+  // Collapsible Machine Capacity section
+  const [showMachineCapacity, setShowMachineCapacity] = useState(true);
+
   // Generate days for display: Monday-Saturday only (skip Sundays)
   const days = useMemo(
     () =>
@@ -264,12 +271,6 @@ export default function Scheduling() {
       return new Set(Array.from(previous).filter((id) => activeIds.has(id)));
     });
   }, [dispatchQueue]);
-
-  const heatmapByWorkCenter = useMemo(() => {
-    const map = new Map<number, CapacityHeatmapRow>();
-    (capacityHeatmap?.work_centers || []).forEach((row) => map.set(row.work_center_id, row));
-    return map;
-  }, [capacityHeatmap]);
 
   const stats = useMemo(() => {
     const unscheduledCount = openJobs.filter((j) => !j.scheduled_start).length;
@@ -860,52 +861,82 @@ export default function Scheduling() {
       </div>
 
       {/* Stats Strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        <div className="stat-card !py-2 !px-3">
-          <div className="stat-label">Unscheduled</div>
-          <div className={`stat-value text-lg ${stats.unscheduledCount > 0 ? 'text-orange-600' : 'text-white'}`}>{stats.unscheduledCount}</div>
-        </div>
-        <div className="stat-card !py-2 !px-3">
-          <div className="stat-label">Scheduled</div>
-          <div className="stat-value text-lg text-green-400">{stats.scheduledCount}</div>
-        </div>
-        <div className="stat-card !py-2 !px-3">
-          <div className="stat-label">Overdue</div>
-          <div className={`stat-value text-lg ${stats.overdueCount > 0 ? 'text-red-600' : 'text-white'}`}>{stats.overdueCount}</div>
-        </div>
-        <div className="stat-card !py-2 !px-3">
-          <div className="stat-label">Overloaded WCs</div>
-          <div className={`stat-value text-lg ${stats.overloadedWcCount > 0 ? 'text-red-600' : 'text-white'}`}>{stats.overloadedWcCount}</div>
-        </div>
-        <div className="stat-card !py-2 !px-3">
-          <div className="stat-label">Hours Remaining</div>
-          <div className="stat-value text-lg">{stats.totalHoursRemaining.toFixed(0)}h</div>
-        </div>
-      </div>
+      <MiniStatStrip>
+        <MiniStat
+          icon={CalendarIcon}
+          iconBg="bg-fd-amber/15"
+          iconColor="text-fd-amber"
+          label="Unscheduled"
+          value={stats.unscheduledCount}
+          valueColor={stats.unscheduledCount > 0 ? 'text-fd-amber' : undefined}
+        />
+        <MiniStat
+          icon={CheckCircleIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Scheduled"
+          value={stats.scheduledCount}
+          valueColor="text-fd-green"
+        />
+        <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg="bg-fd-red/15"
+          iconColor="text-fd-red"
+          label="Overdue"
+          value={stats.overdueCount}
+          valueColor={stats.overdueCount > 0 ? 'text-fd-red' : undefined}
+        />
+        <MiniStat
+          icon={Squares2X2Icon}
+          iconBg="bg-fd-red/15"
+          iconColor="text-fd-red"
+          label="Overloaded WCs"
+          value={stats.overloadedWcCount}
+          valueColor={stats.overloadedWcCount > 0 ? 'text-fd-red' : undefined}
+        />
+        <MiniStat
+          icon={ClockIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Hours Remaining"
+          value={`${stats.totalHoursRemaining.toFixed(0)}h`}
+        />
+      </MiniStatStrip>
 
       {/* Machine Capacity Overview */}
       <div className="card">
         <div className="card-header items-start gap-3">
-          <div>
-            <h2 className="card-title">Machine Capacity</h2>
-            <p className="card-subtitle">Weekly total above; Mon-Sat daily load chips below</p>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 text-[11px] text-slate-400">
-            {[
-              { label: 'Open', className: 'bg-slate-700' },
-              { label: 'Scheduled', className: 'bg-emerald-500' },
-              { label: '70%+', className: 'bg-yellow-400' },
-              { label: '90%+', className: 'bg-amber-500' },
-              { label: 'Over', className: 'bg-red-500' },
-            ].map((item) => (
-              <span key={item.label} className="flex items-center gap-1 whitespace-nowrap">
-                <span className={`h-2.5 w-2.5 rounded-sm ${item.className}`} />
-                {item.label}
-              </span>
-            ))}
-          </div>
+          <button
+            type="button"
+            onClick={() => setShowMachineCapacity((prev) => !prev)}
+            className="flex items-center gap-2 text-left"
+            aria-expanded={showMachineCapacity}
+          >
+            <ChevronDownIcon className={`h-4 w-4 text-slate-400 transition-transform ${showMachineCapacity ? '' : '-rotate-90'}`} />
+            <div>
+              <h2 className="card-title">Machine Capacity</h2>
+              <p className="card-subtitle">Weekly total above; Mon-Sat daily load chips below</p>
+            </div>
+          </button>
+          {showMachineCapacity && (
+            <div className="flex flex-wrap items-center justify-end gap-2 text-[11px] text-slate-400">
+              {[
+                { label: 'Open', className: 'bg-slate-700' },
+                { label: 'Scheduled', className: 'bg-emerald-500' },
+                { label: '70%+', className: 'bg-yellow-400' },
+                { label: '90%+', className: 'bg-amber-500' },
+                { label: 'Over', className: 'bg-red-500' },
+              ].map((item) => (
+                <span key={item.label} className="flex items-center gap-1 whitespace-nowrap">
+                  <span className={`h-2.5 w-2.5 rounded-sm ${item.className}`} />
+                  {item.label}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {showMachineCapacity && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[28rem] overflow-y-auto lg:pr-1">
           {machineCapacityOverview.map((machine) => {
             const utilization = machine.utilization_pct;
             const barClass =
@@ -914,7 +945,7 @@ export default function Scheduling() {
               utilization >= 70 ? 'bg-yellow-400' : 'bg-emerald-500/100';
 
             return (
-              <div key={machine.work_center_id} className="rounded-lg border border-slate-700 bg-slate-900/40 p-3">
+              <div key={machine.work_center_id} className="rounded-sm border border-fd-line bg-fd-sunken p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold text-white">{machine.work_center_code}</p>
@@ -973,11 +1004,12 @@ export default function Scheduling() {
             );
           })}
         </div>
+        )}
       </div>
 
       {/* Gantt Chart with Continuous Bars and Drag-Drop */}
       <div ref={scheduleBoardRef} className="card overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto lg:max-h-[32rem] lg:overflow-y-auto">
           <table className="min-w-full border-collapse" style={{ tableLayout: 'fixed' }}>
             <thead>
               <tr className="bg-slate-800/50">
@@ -1028,8 +1060,6 @@ export default function Scheduling() {
               {workCenters.map((wc) => {
                 const unscheduled = getUnscheduledJobs(wc.id);
                 const isRowDropTarget = dropTarget?.wcId === wc.id;
-                const heatmapRow = heatmapByWorkCenter.get(wc.id);
-                const hasOverload = Boolean(heatmapRow?.days.some((day) => day.overloaded));
 
                 return (
                   <tr
@@ -1037,7 +1067,7 @@ export default function Scheduling() {
                     className={`border-b transition-colors hover:bg-slate-800/50`}
                   >
                     <td
-                      className={`sticky left-0 z-10 px-4 py-3 border-r ${isRowDropTarget ? 'bg-blue-500/20' : 'bg-[#151b28]'}`}
+                      className={`sticky left-0 z-10 px-4 py-3 border-r ${isRowDropTarget ? 'bg-blue-500/20' : 'bg-fd-panel'}`}
                       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
                       onDrop={(e) => handleDropOnRow(e, wc.id)}
                     >
@@ -1046,12 +1076,6 @@ export default function Scheduling() {
                       {unscheduled.length > 0 && (
                         <div className="mt-1 text-xs text-orange-600">
                           {unscheduled.length} unscheduled
-                        </div>
-                      )}
-                      {hasOverload && (
-                        <div className="mt-1 text-xs text-red-600 flex items-center gap-1">
-                          <ExclamationTriangleIcon className="h-3.5 w-3.5" />
-                          Overloaded
                         </div>
                       )}
                     </td>
@@ -1301,9 +1325,9 @@ export default function Scheduling() {
           </div>
         </div>
         )}
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto lg:max-h-[32rem] lg:overflow-y-auto">
           <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800/50">
+            <thead className="bg-slate-800/50 lg:sticky lg:top-0 lg:z-10">
               <tr>
                 <th className="px-3 py-2 text-center">
                   <input

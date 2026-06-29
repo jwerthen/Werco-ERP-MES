@@ -28,6 +28,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 import { ScanResolveResult } from '../types/scan';
 
@@ -454,6 +455,22 @@ export default function ShopFloorSimple() {
     [workCenterBuckets]
   );
 
+  // Compact station summary for the cockpit MiniStat strip — derived from the
+  // operations already in view (mirrors the per-bucket counts, aggregated).
+  const stationSummary = useMemo(() => {
+    let active = 0;
+    let queue = 0;
+    let dueToday = 0;
+    let overdue = 0;
+    visibleOperations.forEach((op) => {
+      if (op.status === 'in_progress') active += 1;
+      if (op.status === 'pending' || op.status === 'ready') queue += 1;
+      if (isDueToday(op.due_date)) dueToday += 1;
+      if (isOverdue(op.due_date)) overdue += 1;
+    });
+    return { active, queue, dueToday, overdue };
+  }, [visibleOperations]);
+
   const primaryActiveJob = useMemo(() => activeJobs[0] || null, [activeJobs]);
 
   const getActiveJobForOperation = useCallback(
@@ -875,7 +892,7 @@ export default function ShopFloorSimple() {
           </div>
         </div>
         {primaryActiveJob && (
-          <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-4 shadow-lg shadow-emerald-950/20">
+          <div className="rounded-sm border border-emerald-500/40 bg-emerald-500/10 p-4 shadow-lg shadow-emerald-950/20">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">Checked in</p>
@@ -1026,8 +1043,44 @@ export default function ShopFloorSimple() {
         </div>
       </div>
 
+      {/* Station summary (desktop) — compact KPI strip for the active queue */}
+      <MiniStatStrip className="hidden md:grid grid-cols-2 lg:grid-cols-4 gap-2">
+        <MiniStat
+          icon={PlayIcon}
+          iconBg="bg-fd-amber/15"
+          iconColor="text-fd-amber"
+          label="Active"
+          value={stationSummary.active}
+          subtitle={selectedWorkCenter ? selectedWorkCenter.name : 'All work centers'}
+        />
+        <MiniStat
+          icon={ClockIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Queue"
+          value={stationSummary.queue}
+          subtitle="Pending + ready"
+        />
+        <MiniStat
+          icon={CubeIcon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="Due Today"
+          value={stationSummary.dueToday}
+          valueColor={stationSummary.dueToday > 0 ? 'text-fd-blue' : undefined}
+        />
+        <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg="bg-fd-red/15"
+          iconColor="text-fd-red"
+          label="Overdue"
+          value={stationSummary.overdue}
+          valueColor={stationSummary.overdue > 0 ? 'text-fd-red' : undefined}
+        />
+      </MiniStatStrip>
+
       {primaryActiveJob && (
-        <div className="hidden md:flex items-center justify-between gap-4 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-5 py-4">
+        <div className="hidden md:flex items-center justify-between gap-4 rounded-sm border border-emerald-500/40 bg-emerald-500/10 px-5 py-4">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wider text-emerald-300">You are checked into</p>
             <p className="mt-1 text-lg font-bold text-white">
@@ -1112,7 +1165,7 @@ export default function ShopFloorSimple() {
 
       {/* Work Cell Buckets */}
       <div className="space-y-4">
-        <div className="md:hidden rounded-2xl border border-slate-700 bg-[#151b28] p-4">
+        <div className="md:hidden rounded-sm border border-fd-line bg-fd-panel p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Station</p>
@@ -1225,7 +1278,7 @@ export default function ShopFloorSimple() {
             Due Today
           </button>
         </div>
-        <div className={`${showMobileCenters ? 'grid' : 'hidden'} md:grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4`}>
+        <div className={`${showMobileCenters ? 'grid' : 'hidden'} md:grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 lg:max-h-[19rem] lg:overflow-y-auto lg:pr-1`}>
           {workCenterBuckets.map((bucket) => {
             const isActive = bucket.inProgress > 0;
             const hasQueue = bucket.open > 0;
@@ -1247,10 +1300,10 @@ export default function ShopFloorSimple() {
                 key={bucket.id}
                 type="button"
                 onClick={() => focusOperations(bucket.id)}
-                className={`relative text-left rounded-2xl border px-5 py-4 transition hover:shadow-md ${
+                className={`relative text-left rounded-sm border px-4 py-3 transition hover:shadow-md ${
                   workCenterId === bucket.id
                     ? 'border-werco-500 bg-werco-500/15 shadow-sm shadow-werco-500/20 ring-1 ring-werco-500/40'
-                    : 'border-slate-700 bg-[#0b1118] hover:border-slate-500 hover:bg-slate-900/70'
+                    : 'border-fd-line bg-fd-sunken hover:border-slate-500 hover:bg-slate-900/70'
                 }`}
               >
                 <div className="flex items-center gap-2 text-xs font-semibold">
@@ -1259,11 +1312,11 @@ export default function ShopFloorSimple() {
                     {statusLabel}
                   </span>
                 </div>
-                <div className="mt-3 text-base font-semibold text-white">{bucket.name}</div>
-                <div className="mt-1 text-xs text-slate-400">Work cell queue</div>
-                <div className="mt-4 flex items-center gap-4 text-sm text-slate-400">
-                  <span>Active: <span className="font-semibold text-slate-100">{bucket.inProgress}</span></span>
-                  <span>Queue: <span className="font-semibold text-slate-100">{bucket.open}</span></span>
+                <div className="mt-2 text-base font-semibold text-white truncate">{bucket.name}</div>
+                <div className="mt-0.5 text-xs text-slate-400">Work cell queue</div>
+                <div className="mt-3 flex items-center gap-4 text-sm text-slate-400">
+                  <span>Active: <span className="font-semibold text-slate-100 tabular-nums">{bucket.inProgress}</span></span>
+                  <span>Queue: <span className="font-semibold text-slate-100 tabular-nums">{bucket.open}</span></span>
                 </div>
                 {bucket.dueToday > 0 && (
                   <div className="mt-3 text-xs font-medium text-blue-400">
@@ -1284,7 +1337,7 @@ export default function ShopFloorSimple() {
 
       {/* Mobile Next Job */}
       {priorityFocusQueue[0] && (
-        <div className="md:hidden rounded-2xl border border-werco-500/30 bg-werco-500/10 p-4">
+        <div className="md:hidden rounded-sm border border-werco-500/30 bg-werco-500/10 p-4">
           {(() => {
             const op = priorityFocusQueue[0];
             const activeJob = getActiveJobForOperation(op);
@@ -1337,44 +1390,14 @@ export default function ShopFloorSimple() {
         </div>
       )}
 
-      {/* Priority Focus Queue */}
-      {priorityFocusQueue.length > 0 && (
-        <div className="card hidden md:block">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-lg font-semibold text-white">Most Important Next</h2>
-              <p className="text-sm text-slate-400">Focus list ranked by overdue, priority, and due date</p>
-            </div>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
-            {priorityFocusQueue.map((op, idx) => {
-              const overdue = isOverdue(op.due_date);
-              return (
-                <button
-                  key={`focus-${op.id}`}
-                  type="button"
-                  onClick={() => handleViewDetails(op)}
-                  className={`rounded-xl border p-3 text-left transition ${
-                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/20' : 'border-slate-700 bg-[#151b28] hover:bg-slate-800/50'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-slate-400">#{idx + 1}</span>
-                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getPriorityClasses(op.priority)}`}>
-                      P{op.priority}
-                    </span>
-                  </div>
-                  <div className="text-sm font-semibold text-werco-700">{op.work_order_number}</div>
-                  <div className="text-xs text-slate-400 truncate">{op.operation_number} - {op.operation_name}</div>
-                  <div className={`mt-2 text-xs ${overdue ? 'text-red-600 font-medium' : 'text-slate-400'}`}>
-                    {op.due_date ? `Due ${formatCentralDate(op.due_date, { year: undefined })}` : 'No due date'}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/*
+        De-dup: the desktop "Most Important Next" focus card was the first five
+        rows of the operations grid duplicated. The grid below is already sorted
+        by the same dispatch score (overdue → priority → due date), so the top
+        rows ARE the focus queue — rendering it twice was redundant. The mobile
+        "Next Job" strip stays (it's the single top pick on a small screen where
+        the full grid is far down). priorityFocusQueue still backs that strip.
+      */}
 
       {/* Operations Grid */}
       {sortedVisibleOperations.length === 0 ? (

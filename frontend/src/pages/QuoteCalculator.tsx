@@ -277,10 +277,8 @@ export default function QuoteCalculator() {
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-gradient-to-br from-werco-navy-600 to-blue-700 text-white">
-              <CalculatorIcon className="h-6 w-6" />
-            </div>
+          <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
+            <CalculatorIcon className="h-6 w-6 text-werco-navy-600" />
             Instant Quote Calculator
           </h1>
           <p className="text-slate-500 mt-1">Generate accurate quotes in seconds with AI-powered pricing</p>
@@ -295,67 +293,36 @@ export default function QuoteCalculator() {
       </div>
 
       {/* Calculator Type Selector */}
-      <div className="grid grid-cols-2 gap-4" data-tour="quote-type">
+      <div className="inline-flex rounded-sm border border-fd-line bg-fd-sunken p-0.5" data-tour="quote-type" role="group">
         <button
           onClick={() => { setCalcType('cnc'); setResult(null); }}
-          className={`group relative p-6 rounded-2xl border-2 transition-all duration-300 overflow-hidden ${
+          className={`flex items-center gap-2 px-4 py-2 rounded-sm text-sm font-medium transition-colors ${
             calcType === 'cnc'
-              ? 'border-werco-navy-600 bg-gradient-to-br from-blue-50 to-blue-100'
-              : 'border-slate-700 bg-[#151b28] hover:border-slate-600 hover:shadow-lg'
+              ? 'bg-werco-navy-600 text-white'
+              : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          {calcType === 'cnc' && (
-            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-werco-navy-600 to-blue-700" />
-          )}
-          <div className={`w-14 h-14 mx-auto mb-3 rounded-2xl flex items-center justify-center transition-all duration-300 ${
-            calcType === 'cnc' 
-              ? 'bg-gradient-to-br from-werco-navy-600 to-blue-700 text-white shadow-lg' 
-              : 'bg-slate-800/50 text-slate-400 group-hover:bg-slate-200'
-          }`}>
-            <CubeIcon className="h-7 w-7" />
-          </div>
-          <h3 className={`text-lg font-semibold text-center transition-colors ${
-            calcType === 'cnc' ? 'text-werco-navy-700' : 'text-slate-300'
-          }`}>
-            CNC Machining
-          </h3>
-          <p className="text-sm text-slate-500 text-center mt-1">Mills, Lathes, 3/4/5-axis</p>
+          <CubeIcon className="h-4 w-4" />
+          <span>CNC Machining</span>
         </button>
-
         <button
           onClick={() => { setCalcType('sheet_metal'); setResult(null); }}
-          className={`group relative p-6 rounded-2xl border-2 transition-all duration-300 overflow-hidden ${
+          className={`flex items-center gap-2 px-4 py-2 rounded-sm text-sm font-medium transition-colors ${
             calcType === 'sheet_metal'
-              ? 'border-werco-navy-600 bg-gradient-to-br from-blue-50 to-blue-100'
-              : 'border-slate-700 bg-[#151b28] hover:border-slate-600 hover:shadow-lg'
+              ? 'bg-werco-navy-600 text-white'
+              : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          {calcType === 'sheet_metal' && (
-            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-werco-navy-600 to-blue-700" />
-          )}
-          <div className={`w-14 h-14 mx-auto mb-3 rounded-2xl flex items-center justify-center transition-all duration-300 ${
-            calcType === 'sheet_metal' 
-              ? 'bg-gradient-to-br from-werco-navy-600 to-blue-700 text-white shadow-lg' 
-              : 'bg-slate-800/50 text-slate-400 group-hover:bg-slate-200'
-          }`}>
-            <Square3Stack3DIcon className="h-7 w-7" />
-          </div>
-          <h3 className={`text-lg font-semibold text-center transition-colors ${
-            calcType === 'sheet_metal' ? 'text-werco-navy-700' : 'text-slate-300'
-          }`}>
-            Sheet Metal
-          </h3>
-          <p className="text-sm text-slate-500 text-center mt-1">Laser, Brake, Hardware</p>
+          <Square3Stack3DIcon className="h-4 w-4" />
+          <span>Sheet Metal</span>
         </button>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Input Form */}
         <div className="card" data-tour="quote-inputs">
-          <h2 className="text-lg font-semibold mb-6 flex items-center text-slate-100">
-            <div className="p-1.5 rounded-lg bg-blue-500/20 text-werco-navy-600 mr-2">
-              <CalculatorIcon className="h-5 w-5" />
-            </div>
+          <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-100">
+            <CalculatorIcon className="h-5 w-5 text-werco-navy-600" />
             {calcType === 'cnc' ? 'CNC Part Details' : 'Sheet Metal Details'}
           </h2>
 
@@ -537,7 +504,7 @@ export default function QuoteCalculator() {
                       onChange={(e) => setCncForm({ ...cncForm, rush: e.target.checked })}
                       className="sr-only peer"
                     />
-                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#151b28] after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-amber-500 peer-checked:to-orange-500"></div>
+                    <div className="w-11 h-6 bg-fd-sunken border border-fd-line peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-fd-blue/40 rounded-sm peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[3px] after:left-[3px] after:bg-slate-300 after:rounded-sm after:h-4 after:w-4 after:transition-all peer-checked:bg-fd-amber peer-checked:after:bg-white"></div>
                     <span className="ml-3 text-sm font-medium text-slate-300 flex items-center gap-1.5">
                       <BoltIcon className="h-4 w-4 text-amber-500" />
                       Rush Order (1.5x)
@@ -550,20 +517,18 @@ export default function QuoteCalculator() {
             /* Sheet Metal Form */
             <div className="space-y-5">
               {/* DXF Upload */}
-              <div className={`border-2 border-dashed rounded-2xl p-5 text-center transition-all duration-300 ${
-                dxfFile ? 'border-blue-300 bg-blue-500/10/50' : 'border-slate-600 hover:border-blue-400 hover:bg-blue-500/100/10/30'
+              <div className={`border border-dashed rounded-sm p-3 text-center transition-colors ${
+                dxfFile ? 'border-fd-blue/50 bg-fd-blue/10' : 'border-fd-line hover:border-fd-blue/60 hover:bg-fd-sunken'
               }`}>
                 {!dxfFile ? (
-                  <label className="cursor-pointer block">
+                  <label className="cursor-pointer block py-2">
                     <input
                       type="file"
                       accept=".dxf,.DXF"
                       onChange={handleDxfUpload}
                       className="hidden"
                     />
-                    <div className="w-14 h-14 mx-auto mb-3 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center">
-                      <DocumentArrowUpIcon className="h-7 w-7 text-slate-400" />
-                    </div>
+                    <DocumentArrowUpIcon className="h-7 w-7 mx-auto mb-2 text-slate-400" />
                     <p className="text-sm font-medium text-slate-300">Upload DXF File</p>
                     <p className="text-xs text-slate-500 mt-1">Auto-extract cut length, holes, bends</p>
                   </label>
@@ -594,12 +559,12 @@ export default function QuoteCalculator() {
                         }}
                       />
                     </div>
-                    <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 border border-blue-500/30">
-                      <p className="font-medium text-blue-300 mb-2 flex items-center gap-2">
+                    <div className="bg-fd-sunken rounded-sm p-3 border border-fd-line">
+                      <p className="font-medium text-fd-blue mb-2 flex items-center gap-2">
                         <SparklesIcon className="h-4 w-4" />
                         Extracted from DXF
                       </p>
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm text-werco-navy-700">
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm text-slate-300 tabular-nums">
                         <span>Flat Size: {dxfAnalysis.flat_length}" x {dxfAnalysis.flat_width}"</span>
                         <span>Cut Length: {dxfAnalysis.total_cut_length}"</span>
                         <span>Holes: {dxfAnalysis.num_holes}</span>
@@ -608,7 +573,7 @@ export default function QuoteCalculator() {
                         <span>Layers: {dxfAnalysis.layers.length}</span>
                       </div>
                       {dxfAnalysis.warnings.length > 0 && (
-                        <div className="mt-3 text-amber-600 flex items-start bg-amber-500/10 rounded-lg p-2">
+                        <div className="mt-3 text-fd-amber flex items-start bg-fd-amber/10 rounded-sm p-2">
                           <ExclamationTriangleIcon className="h-4 w-4 mr-1.5 flex-shrink-0 mt-0.5" />
                           <span className="text-xs">{dxfAnalysis.warnings.join('; ')}</span>
                         </div>
@@ -622,7 +587,7 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Flat Pattern Size (inches)
-                  {dxfAnalysis && <span className="text-xs text-werco-navy-600 bg-blue-500/20 px-2 py-0.5 rounded-full">from DXF</span>}
+                  {dxfAnalysis && <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>}
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -680,7 +645,7 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Cutting
-                  {dxfAnalysis && <span className="text-xs text-werco-navy-600 bg-blue-500/20 px-2 py-0.5 rounded-full">from DXF</span>}
+                  {dxfAnalysis && <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>}
                 </label>
                 <div className="grid grid-cols-3 gap-3">
                   <div>
@@ -720,7 +685,7 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Bending
-                  {dxfAnalysis && <span className="text-xs text-werco-navy-600 bg-blue-500/20 px-2 py-0.5 rounded-full">from DXF</span>}
+                  {dxfAnalysis && <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>}
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -793,7 +758,7 @@ export default function QuoteCalculator() {
                       onChange={(e) => setSheetForm({ ...sheetForm, rush: e.target.checked })}
                       className="sr-only peer"
                     />
-                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#151b28] after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-amber-500 peer-checked:to-orange-500"></div>
+                    <div className="w-11 h-6 bg-fd-sunken border border-fd-line peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-fd-blue/40 rounded-sm peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[3px] after:left-[3px] after:bg-slate-300 after:rounded-sm after:h-4 after:w-4 after:transition-all peer-checked:bg-fd-amber peer-checked:after:bg-white"></div>
                     <span className="ml-3 text-sm font-medium text-slate-300 flex items-center gap-1.5">
                       <BoltIcon className="h-4 w-4 text-amber-500" />
                       Rush Order (1.5x)
@@ -805,7 +770,7 @@ export default function QuoteCalculator() {
           )}
 
           {/* Finishes */}
-          <div className="mt-6 pt-6 border-t border-slate-700/30">
+          <div className="mt-5 pt-5 border-t border-fd-line">
             <label className="label">Finishing (optional)</label>
             <div className="flex flex-wrap gap-2">
               {finishes.map(f => {
@@ -815,10 +780,10 @@ export default function QuoteCalculator() {
                     key={f.id}
                     type="button"
                     onClick={() => toggleFinish(f.id)}
-                    className={`px-4 py-2 rounded-xl text-sm font-medium border-2 transition-all duration-200 ${
+                    className={`px-3 py-1.5 rounded-sm text-sm font-medium border transition-colors ${
                       isSelected
-                        ? 'border-werco-navy-600 bg-gradient-to-r from-werco-navy-600 to-blue-700 text-white shadow-md'
-                        : 'border-slate-700 bg-[#151b28] text-slate-400 hover:border-slate-600 hover:bg-slate-800/50'
+                        ? 'border-werco-navy-600 bg-werco-navy-600 text-white'
+                        : 'border-fd-line bg-fd-sunken text-slate-400 hover:border-slate-600 hover:text-slate-200'
                     }`}
                   >
                     {f.name}
@@ -832,7 +797,7 @@ export default function QuoteCalculator() {
           <button
             onClick={calculateQuote}
             disabled={calculating}
-            className="btn-primary w-full mt-6 py-4 text-lg"
+            className="btn-primary w-full mt-5"
           >
             {calculating ? (
               <span className="flex items-center justify-center gap-3">
@@ -848,7 +813,7 @@ export default function QuoteCalculator() {
           </button>
 
           {error && (
-            <div className="mt-4 bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-3 rounded-xl flex items-center gap-2">
+            <div className="mt-4 bg-fd-red/10 border border-fd-red/30 text-fd-red px-3 py-2.5 rounded-sm flex items-center gap-2">
               <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0" />
               {error}
             </div>
@@ -857,125 +822,106 @@ export default function QuoteCalculator() {
 
         {/* Results */}
         <div className="card" data-tour="quote-result">
-          <h2 className="text-lg font-semibold mb-6 flex items-center text-slate-100">
-            <div className="p-1.5 rounded-lg bg-blue-500/20 text-werco-navy-600 mr-2">
-              <CurrencyDollarIcon className="h-5 w-5" />
-            </div>
+          <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-100">
+            <CurrencyDollarIcon className="h-5 w-5 text-werco-navy-600" />
             Quote Result
           </h2>
           
           {!result ? (
-            <div className="text-center py-16">
-              <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center">
-                <CalculatorIcon className="h-10 w-10 text-slate-300" />
-              </div>
+            <div className="text-center py-10">
+              <CalculatorIcon className="h-10 w-10 mx-auto mb-3 text-slate-600" />
               <p className="text-slate-500 font-medium">Enter part details and click Calculate</p>
               <p className="text-slate-400 text-sm mt-1">Your instant quote will appear here</p>
             </div>
           ) : (
             <div className="space-y-5">
               {/* Big Price Card */}
-              <div className="relative overflow-hidden rounded-2xl p-6 text-center">
-                <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-slate-800 to-blue-900"></div>
-                <div className="absolute inset-0 opacity-30">
-                  <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
-                    <defs>
-                      <pattern id="price-pattern" width="40" height="40" patternUnits="userSpaceOnUse">
-                        <path d="M20 0L40 20L20 40L0 20Z" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-blue-400"/>
-                      </pattern>
-                    </defs>
-                    <rect width="100%" height="100%" fill="url(#price-pattern)" />
-                  </svg>
-                </div>
-                <div className="relative z-10">
-                  <p className="text-blue-400 text-sm font-medium">Total Quote</p>
-                  <p className="text-5xl font-bold text-white mt-2">${result.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                  <p className="text-slate-400 mt-3">
-                    <span className="text-blue-400 font-semibold">${result.unit_price.toFixed(2)}</span> per unit x {calcType === 'cnc' ? cncForm.quantity : sheetForm.quantity}
-                  </p>
-                </div>
+              <div className="rounded-sm border border-fd-line bg-fd-sunken p-4 text-center">
+                <p className="text-fd-blue text-sm font-medium">Total Quote</p>
+                <p className="text-3xl font-bold text-white mt-1 tabular-nums">${result.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                <p className="text-slate-400 mt-2 tabular-nums">
+                  <span className="text-fd-blue font-semibold">${result.unit_price.toFixed(2)}</span> per unit x {calcType === 'cnc' ? cncForm.quantity : sheetForm.quantity}
+                </p>
               </div>
 
               {/* Lead Time */}
-              <div className="flex items-center justify-between p-4 bg-gradient-to-r from-slate-800 to-blue-50 rounded-xl border border-slate-700">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-blue-500/20">
-                    <ClockIcon className="h-5 w-5 text-werco-navy-600" />
-                  </div>
+              <div className="flex items-center justify-between p-3 bg-fd-sunken rounded-sm border border-fd-line">
+                <div className="flex items-center gap-2">
+                  <ClockIcon className="h-5 w-5 text-werco-navy-600" />
                   <span className="font-medium text-slate-300">Estimated Lead Time</span>
                 </div>
-                <span className="text-xl font-bold text-werco-navy-600">{result.lead_time_days} days</span>
+                <span className="text-xl font-bold text-werco-navy-600 tabular-nums">{result.lead_time_days} days</span>
               </div>
 
               {/* Cost Breakdown */}
-              <div className="rounded-xl border border-slate-700 overflow-hidden">
-                <div className="bg-gradient-to-r from-slate-100 to-slate-50 px-4 py-3 font-semibold text-slate-300">
+              <div className="rounded-sm border border-fd-line overflow-hidden">
+                <div className="bg-fd-sunken px-3 py-2 font-semibold text-slate-300 border-b border-fd-line">
                   Cost Breakdown
                 </div>
-                <div className="divide-y divide-slate-100">
+                <div className="divide-y divide-fd-line">
                   {result.material_cost > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm">
+                    <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Material</span>
-                      <span className="font-medium text-slate-100">${result.material_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">${result.material_cost.toFixed(2)}</span>
                     </div>
                   )}
                   {result.cutting_cost > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm">
+                    <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Laser Cutting</span>
-                      <span className="font-medium text-slate-100">${result.cutting_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">${result.cutting_cost.toFixed(2)}</span>
                     </div>
                   )}
                   {result.machining_cost > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm">
+                    <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Machining</span>
-                      <span className="font-medium text-slate-100">${result.machining_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">${result.machining_cost.toFixed(2)}</span>
                     </div>
                   )}
                   {result.setup_cost > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm">
+                    <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Setup</span>
-                      <span className="font-medium text-slate-100">${result.setup_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">${result.setup_cost.toFixed(2)}</span>
                     </div>
                   )}
                   {result.bending_cost > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm">
+                    <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Bending</span>
-                      <span className="font-medium text-slate-100">${result.bending_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">${result.bending_cost.toFixed(2)}</span>
                     </div>
                   )}
                   {result.hardware_cost > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm">
+                    <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Hardware</span>
-                      <span className="font-medium text-slate-100">${result.hardware_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">${result.hardware_cost.toFixed(2)}</span>
                     </div>
                   )}
                   {result.finish_cost > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm">
+                    <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Finishing</span>
-                      <span className="font-medium text-slate-100">${result.finish_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">${result.finish_cost.toFixed(2)}</span>
                     </div>
                   )}
-                  <div className="flex justify-between px-4 py-3 bg-slate-800/50">
+                  <div className="flex justify-between px-3 py-2 bg-fd-panel">
                     <span className="font-semibold text-slate-300">Subtotal</span>
-                    <span className="font-semibold text-slate-100">${result.subtotal.toFixed(2)}</span>
+                    <span className="font-semibold text-slate-100 tabular-nums">${result.subtotal.toFixed(2)}</span>
                   </div>
-                  <div className="flex justify-between px-4 py-3 text-sm">
+                  <div className="flex justify-between px-3 py-2 text-sm">
                     <span className="text-slate-400">Markup (25%)</span>
-                    <span className="font-medium text-slate-100">${result.markup_amount.toFixed(2)}</span>
+                    <span className="font-medium text-slate-100 tabular-nums">${result.markup_amount.toFixed(2)}</span>
                   </div>
                   {result.quantity_discount > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm bg-emerald-500/10">
-                      <span className="text-emerald-400">Quantity Discount</span>
-                      <span className="font-medium text-emerald-400">-${result.quantity_discount.toFixed(2)}</span>
+                    <div className="flex justify-between px-3 py-2 text-sm bg-fd-green/10">
+                      <span className="text-fd-green">Quantity Discount</span>
+                      <span className="font-medium text-fd-green tabular-nums">-${result.quantity_discount.toFixed(2)}</span>
                     </div>
                   )}
                   {result.rush_charge > 0 && (
-                    <div className="flex justify-between px-4 py-3 text-sm bg-amber-500/10">
-                      <span className="text-amber-400 flex items-center gap-1">
+                    <div className="flex justify-between px-3 py-2 text-sm bg-fd-amber/10">
+                      <span className="text-fd-amber flex items-center gap-1">
                         <BoltIcon className="h-4 w-4" />
                         Rush Charge
                       </span>
-                      <span className="font-medium text-amber-400">+${result.rush_charge.toFixed(2)}</span>
+                      <span className="font-medium text-fd-amber tabular-nums">+${result.rush_charge.toFixed(2)}</span>
                     </div>
                   )}
                 </div>
@@ -983,19 +929,19 @@ export default function QuoteCalculator() {
 
               {/* Details */}
               {result.details && Object.keys(result.details).length > 0 && (
-                <div className="text-sm text-slate-500 space-y-1.5 bg-slate-800/50 rounded-xl p-4">
+                <div className="text-sm text-slate-500 space-y-1.5 bg-fd-sunken rounded-sm border border-fd-line p-3">
                   <p className="font-medium text-slate-300 mb-2">Calculation Details</p>
                   {Object.entries(result.details).map(([key, value]) => (
                     <p key={key} className="flex justify-between">
                       <span className="capitalize">{key.replace(/_/g, ' ')}</span>
-                      <span className="text-slate-400">{typeof value === 'number' ? value.toFixed(2) : value}</span>
+                      <span className="text-slate-400 tabular-nums">{typeof value === 'number' ? value.toFixed(2) : value}</span>
                     </p>
                   ))}
                 </div>
               )}
 
               {/* Actions */}
-              <div className="flex gap-3 pt-4 border-t border-slate-700/30">
+              <div className="flex gap-3 pt-4 border-t border-fd-line">
                 <button onClick={createQuoteFromResult} className="btn-primary flex-1">
                   <PlusIcon className="h-5 w-5 mr-2" />
                   Create Quote

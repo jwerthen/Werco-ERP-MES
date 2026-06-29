@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { addDays } from 'date-fns';
 import api from '../services/api';
 import { SkeletonDashboard } from '../components/ui/Skeleton';
+import { MiniStat, CockpitPanel } from '../components/cockpit';
 import { ActiveAssignment, DashboardData, SignedInUserStatus, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
@@ -22,7 +23,6 @@ import {
   CubeIcon,
   WrenchScrewdriverIcon,
   ShieldExclamationIcon,
-  ArrowRightIcon,
   ClockIcon,
   ArrowPathIcon,
   SignalIcon,
@@ -320,6 +320,16 @@ export default function Dashboard() {
 
   const signedInUsers = data?.signed_in_users || [];
   const idleSignedInUsers = signedInUsers.filter((user) => !user.has_active_job);
+  const onJobSignedInUsers = signedInUsers.filter((user) => user.has_active_job);
+  const timeEntryByUserId = useMemo(() => {
+    const map = new Map<number, number>();
+    activeAssignments.forEach((assignment) => {
+      if (!map.has(assignment.user.id)) {
+        map.set(assignment.user.id, assignment.time_entry_id);
+      }
+    });
+    return map;
+  }, [activeAssignments]);
   const machineCapacityOverview = useMemo<MachineCapacityOverview[]>(() => {
     return (capacityHeatmap?.work_centers || [])
       .map((row) => {
@@ -374,7 +384,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Page header */}
       <div className="page-header">
         <div>
@@ -417,42 +427,34 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Alerts */}
+      {/* Alerts — compact chip row */}
       {alerts.length > 0 && (
-        <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
           {alerts.map((alert, idx) => {
             const Icon = alert.icon || ExclamationTriangleIcon;
             return (
               <Link
                 key={idx}
                 to={alert.link || '#'}
-                className={`
-                  group flex items-center gap-4 p-4 rounded-xl border transition-all duration-200
-                  ${alert.type === 'error'
+                className={`inline-flex items-center gap-1.5 rounded-sm border px-2.5 py-1 text-xs font-medium transition-colors ${
+                  alert.type === 'error'
                     ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-fd-red/20'
                     : alert.type === 'warning'
                     ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-fd-amber/20'
-                    : 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/100/20'
-                  }
-                `}
+                    : 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20'
+                }`}
               >
-                <div className={`
-                  p-2 rounded-lg
-                  ${alert.type === 'error' ? 'bg-red-500/20' : alert.type === 'warning' ? 'bg-amber-500/20' : 'bg-blue-500/20'}
-                `}>
-                  <Icon className="h-5 w-5" />
-                </div>
-                <span className="flex-1 font-medium">{alert.message}</span>
-                <ArrowRightIcon className="h-5 w-5 opacity-50 group-hover:opacity-100 group-hover:translate-x-1 transition-all" />
+                <Icon className="h-4 w-4 flex-shrink-0" />
+                <span>{alert.message}</span>
               </Link>
             );
           })}
         </div>
       )}
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-2 xl:grid-cols-3 gap-4" data-tour="dashboard-stats">
-        <StatCard
+      {/* KPI strip — one dense row of compact tiles */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2" data-tour="dashboard-stats">
+        <MiniStat
           icon={ClipboardDocumentListIcon}
           iconBg="bg-blue-500/20"
           iconColor="text-blue-600"
@@ -460,7 +462,7 @@ export default function Dashboard() {
           value={data?.summary.active_work_orders || 0}
           href="/work-orders"
         />
-        <StatCard
+        <MiniStat
           icon={SignalIcon}
           iconBg="bg-blue-500/20"
           iconColor="text-werco-navy-600"
@@ -468,7 +470,7 @@ export default function Dashboard() {
           value={data?.summary.signed_in_users || 0}
           subtitle="Live ERP sessions"
         />
-        <StatCard
+        <MiniStat
           icon={UserGroupIcon}
           iconBg="bg-fd-green/15"
           iconColor="text-fd-green"
@@ -477,7 +479,7 @@ export default function Dashboard() {
           subtitle="Active time entries"
           href="/shop-floor"
         />
-        <StatCard
+        <MiniStat
           icon={CalendarIcon}
           iconBg="bg-amber-500/20"
           iconColor="text-amber-600"
@@ -485,7 +487,7 @@ export default function Dashboard() {
           value={data?.summary.due_today || 0}
           href="/work-orders"
         />
-        <StatCard
+        <MiniStat
           icon={ExclamationTriangleIcon}
           iconBg={data?.summary.overdue ? "bg-red-500/20" : "bg-fd-green/15"}
           iconColor={data?.summary.overdue ? "text-red-600" : "text-fd-green"}
@@ -494,7 +496,7 @@ export default function Dashboard() {
           valueColor={data?.summary.overdue ? "text-red-600" : undefined}
           href="/work-orders"
         />
-        <StatCard
+        <MiniStat
           icon={UsersIcon}
           iconBg={(data?.summary.idle_signed_in_users || 0) > 0 ? "bg-amber-500/20" : "bg-slate-800/50"}
           iconColor={(data?.summary.idle_signed_in_users || 0) > 0 ? "text-amber-600" : "text-slate-400"}
@@ -502,11 +504,7 @@ export default function Dashboard() {
           value={data?.summary.idle_signed_in_users || 0}
           subtitle="Not clocked into work"
         />
-      </div>
-
-      {/* Secondary KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard
+        <MiniStat
           icon={WrenchScrewdriverIcon}
           iconBg={equipmentDue > 0 ? "bg-amber-500/20" : "bg-fd-green/15"}
           iconColor={equipmentDue > 0 ? "text-amber-600" : "text-fd-green"}
@@ -515,7 +513,7 @@ export default function Dashboard() {
           subtitle="Within 30 days"
           href="/calibration"
         />
-        <StatCard
+        <MiniStat
           icon={CubeIcon}
           iconBg={lowInventory > 0 ? "bg-red-500/20" : "bg-fd-green/15"}
           iconColor={lowInventory > 0 ? "text-red-600" : "text-fd-green"}
@@ -524,7 +522,7 @@ export default function Dashboard() {
           valueColor={lowInventory > 0 ? "text-red-600" : undefined}
           href="/inventory"
         />
-        <StatCard
+        <MiniStat
           icon={CheckCircleIcon}
           iconBg="bg-fd-green/15"
           iconColor="text-fd-green"
@@ -532,7 +530,7 @@ export default function Dashboard() {
           value={data?.summary.completed_today ?? data?.recent_completions?.length ?? 0}
           href="/work-orders"
         />
-        <StatCard
+        <MiniStat
           icon={ShieldExclamationIcon}
           iconBg={openNCRs > 0 ? "bg-fd-amber/15" : "bg-fd-green/15"}
           iconColor={openNCRs > 0 ? "text-fd-amber" : "text-fd-green"}
@@ -543,286 +541,194 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Capacity Overview */}
-      <div className="card">
-        <div className="card-header items-start gap-3">
-          <div>
-            <h2 className="card-title">Capacity Overview</h2>
-            <p className="card-subtitle">Weekly total above; daily load chips below</p>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-3">
-            <div className="flex flex-wrap items-center justify-end gap-2 text-[11px] text-slate-400">
-              {[
-                { label: 'Open', className: 'bg-slate-700' },
-                { label: 'Scheduled', className: 'bg-emerald-500' },
-                { label: '70%+', className: 'bg-fd-amber' },
-                { label: '90%+', className: 'bg-amber-500' },
-                { label: 'Over', className: 'bg-red-500' },
-              ].map((item) => (
-                <span key={item.label} className="flex items-center gap-1 whitespace-nowrap">
-                  <span className={`h-2.5 w-2.5 rounded-sm ${item.className}`} />
-                  {item.label}
+      {/* COCKPIT GRID — all four panels co-visible */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+        {/* Capacity Overview */}
+        <CockpitPanel
+          className="xl:col-span-7"
+          title="Capacity Overview"
+          subtitle="7-day load per machine"
+          footer={`${machineCapacityOverview.length} machine${machineCapacityOverview.length === 1 ? '' : 's'}`}
+          headerExtra={
+            <div className="flex items-center gap-4 text-xs tabular-nums">
+              <span className="flex flex-col leading-tight">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500">Sched</span>
+                <span className="font-bold text-white">{totalScheduledHours.toFixed(1)}h</span>
+              </span>
+              <span className="flex flex-col leading-tight">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500">Cap</span>
+                <span className="font-bold text-white">{totalCapacityHours.toFixed(1)}h</span>
+              </span>
+              <span className="flex flex-col leading-tight">
+                <span className="text-[10px] uppercase tracking-wide text-slate-500">Util</span>
+                <span className={`font-bold ${totalCapacityUtilization > 100 ? 'text-red-500' : totalCapacityUtilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                  {Math.round(totalCapacityUtilization)}%
                 </span>
+              </span>
+              <Link to="/scheduling" className="btn-ghost btn-sm whitespace-nowrap">
+                Schedule
+              </Link>
+            </div>
+          }
+        >
+          {machineCapacityOverview.length > 0 ? (
+            <div className="divide-y divide-fd-line">
+              {machineCapacityOverview.map((machine) => (
+                <MachineRow
+                  key={machine.work_center_id}
+                  machine={machine}
+                  capacityDayClass={capacityDayClass}
+                  capacityStatusLabel={capacityStatusLabel}
+                />
               ))}
             </div>
-            <Link to="/scheduling" className="btn-ghost btn-sm whitespace-nowrap">
-              Open Schedule
-            </Link>
-          </div>
-        </div>
-        <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-          <div className="rounded-xl border border-fd-line bg-slate-900/40 p-4">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Scheduled</p>
-            <p className="mt-1 text-2xl font-bold text-white">{totalScheduledHours.toFixed(1)}h</p>
-          </div>
-          <div className="rounded-xl border border-fd-line bg-slate-900/40 p-4">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Capacity</p>
-            <p className="mt-1 text-2xl font-bold text-white">{totalCapacityHours.toFixed(1)}h</p>
-          </div>
-          <div className="rounded-xl border border-fd-line bg-slate-900/40 p-4">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Utilization</p>
-            <p className={`mt-1 text-2xl font-bold ${totalCapacityUtilization > 100 ? 'text-red-500' : totalCapacityUtilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
-              {Math.round(totalCapacityUtilization)}%
-            </p>
-          </div>
-        </div>
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
-          {machineCapacityOverview.map((machine) => {
-            const utilization = machine.utilization_pct;
-            const barClass =
-              utilization > 100 ? 'bg-fd-red' :
-              utilization >= 90 ? 'bg-fd-amber' :
-              utilization >= 70 ? 'bg-fd-amber' : 'bg-fd-green';
-
-            return (
-              <div key={machine.work_center_id} className="rounded-xl border border-fd-line bg-fd-panel p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="truncate font-semibold text-white">{machine.work_center_code}</p>
-                    <p className="truncate text-sm text-slate-400">{machine.work_center_name}</p>
-                  </div>
-                  <span className={`text-sm font-bold ${utilization > 100 ? 'text-red-500' : utilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                    {Math.round(utilization)}%
-                  </span>
-                </div>
-                <div className="mt-3 h-2 rounded-full bg-slate-800">
-                  <div className={`h-2 rounded-full ${barClass}`} style={{ width: `${Math.min(100, utilization)}%` }} />
-                </div>
-                <div className="mt-2 flex justify-between text-xs text-slate-400">
-                  <span>{machine.scheduled_hours.toFixed(1)}h scheduled</span>
-                  <span>{machine.capacity_hours.toFixed(1)}h cap</span>
-                </div>
-                <div className="mt-3 flex items-center justify-between text-[11px] font-medium uppercase text-slate-500">
-                  <span>Daily load</span>
-                  <span>{machine.overloaded_days > 0 ? `${machine.overloaded_days} over` : `${machine.available_hours.toFixed(1)}h open`}</span>
-                </div>
-                <div className="mt-1.5 grid grid-cols-7 gap-1">
-                  {machine.days.map((day) => {
-                    const statusLabel = capacityStatusLabel(day);
-                    return (
-                      <Link
-                        to="/scheduling"
-                        key={`${machine.work_center_id}-${day.date}`}
-                        className={`h-12 rounded border px-1 text-center transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-fd-blue ${capacityDayClass(day)}`}
-                        title={`${formatCentralDate(day.date, { year: undefined })} - ${statusLabel}: ${day.scheduled_hours.toFixed(1)}h scheduled of ${day.capacity_hours.toFixed(1)}h capacity (${Math.round(day.utilization_pct)}%)`}
-                        aria-label={`${machine.work_center_code} ${formatCentralDate(day.date, { year: undefined })}: ${statusLabel}, ${day.scheduled_hours.toFixed(1)} scheduled hours of ${day.capacity_hours.toFixed(1)} capacity hours`}
-                      >
-                        <span className="block text-[10px] font-semibold leading-4">
-                          {formatInCentralTime(day.date, { weekday: 'short' })}
-                        </span>
-                        <span className="block text-[11px] font-bold leading-4 tabular-nums">
-                          {Math.round(day.utilization_pct)}%
-                        </span>
-                        <span className="block truncate text-[9px] leading-3 opacity-80">
-                          {day.scheduled_hours > 0 ? `${day.scheduled_hours.toFixed(1)}h` : 'open'}
-                        </span>
-                      </Link>
-                    );
-                  })}
-                </div>
-                {machine.overloaded_days > 0 && (
-                  <p className="mt-2 flex items-center gap-1 text-xs font-medium text-red-500">
-                    <ExclamationTriangleIcon className="h-3.5 w-3.5" />
-                    {machine.overloaded_days} overloaded day{machine.overloaded_days === 1 ? '' : 's'}
-                  </p>
-                )}
-              </div>
-            );
-          })}
-          {machineCapacityOverview.length === 0 && (
+          ) : (
             <p className="text-sm text-slate-400">No machine capacity data available.</p>
           )}
-        </div>
-      </div>
+        </CockpitPanel>
 
-      {/* Live Shop Activity */}
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Live Shop Activity</h2>
-            <p className="card-subtitle">Who is signed in, who is clocked into work, and what each active job is doing now</p>
-          </div>
-        </div>
-
-        <div className="mb-4 flex flex-wrap gap-2 text-xs">
-          <span className="rounded-full bg-slate-800/50 px-3 py-1 font-medium text-slate-300">
-            Signed in = active authenticated ERP session
-          </span>
-          <span className="rounded-full bg-fd-green/15 px-3 py-1 font-medium text-emerald-400">
-            Checked in = active time clock entry
-          </span>
-        </div>
-
-        {activeAssignments.length > 0 ? (
-          <div className="space-y-6">
-            {Object.entries(assignmentsByWorkCenter).map(([workCenterName, assignments]) => (
-              <div key={workCenterName}>
-                <div className="mb-3">
-                  <h3 className="text-lg font-semibold text-white">{workCenterName}</h3>
-                  <p className="text-sm text-slate-400">
-                    {assignments.length} active assignment{assignments.length === 1 ? '' : 's'}
-                  </p>
-                </div>
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                  {assignments.map((assignment) => (
-                    <ActiveAssignmentCard
-                      key={assignment.time_entry_id}
-                      assignment={assignment}
-                      nowMs={nowMs}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="rounded-2xl border border-dashed border-fd-line bg-slate-900/40 px-6 py-12 text-center">
-            <UserGroupIcon className="mx-auto h-10 w-10 text-slate-500" />
-            <p className="mt-4 text-lg font-medium text-slate-300">No one is clocked into a job right now</p>
-            <p className="mt-2 text-sm text-slate-400">
-              Signed-in users still appear in the live presence panel, but there are no active time entries right now.
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* Work Center Status */}
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)] gap-6">
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Work Center Status</h2>
-            <p className="card-subtitle">Real-time equipment and station status</p>
-          </div>
-          <Link to="/work-centers" className="btn-ghost btn-sm">
-            View All
-          </Link>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {data?.work_centers.map((wc: WorkCenterStatus) => {
-            const statusStyle = statusColors[wc.status] || statusColors.offline;
-            const typeColor = workCenterTypeColors[wc.type] || 'bg-slate-800/500';
-
-            return (
-              <div
-                key={wc.id}
-                className={`
-                  rounded-xl border border-fd-line p-4 transition-all duration-200
-                  hover:shadow-card-hover hover:border-fd-line
-                  ${statusStyle.bg}
-                `}
-              >
-                <div className="flex items-start justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <div className={`w-2.5 h-2.5 rounded-full ${statusStyle.dot} animate-pulse`} />
-                    <span className={`text-xs font-semibold uppercase tracking-wide ${statusStyle.text}`}>
-                      {wc.status.replace('_', ' ')}
-                    </span>
-                  </div>
-                  <div className={`w-2 h-8 rounded-full ${typeColor}`} />
-                </div>
-
-                <h3 className="font-semibold text-white mb-1">{wc.name}</h3>
-                <p className="text-xs text-slate-400 capitalize mb-3">
-                  {wc.type.replace('_', ' ')}
-                </p>
-
-                <div className="grid grid-cols-3 gap-3 text-sm">
-                  <div>
-                    <p className="text-slate-400">Active</p>
-                    <p className="font-semibold text-white">{wc.active_operations}</p>
-                  </div>
-                  <div>
-                    <p className="text-slate-400">Queue</p>
-                    <p className="font-semibold text-white">{wc.queued_operations}</p>
-                  </div>
-                  <div>
-                    <p className="text-slate-400">People</p>
-                    <p className="font-semibold text-white">{wc.active_people_count}</p>
-                  </div>
-                </div>
-
-                <div className="mt-4 border-t border-fd-line pt-4">
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                    Active People
-                  </p>
-                  {wc.active_people.length > 0 ? (
-                    <div className="space-y-2">
-                      {wc.active_people.map((person) => (
-                        <div key={`${wc.id}-${person.user_id}-${person.clock_in}`} className="rounded-lg bg-fd-panel/70 p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <p className="font-medium text-slate-200">{person.name}</p>
-                              <p className="text-xs text-slate-400">{person.employee_id}</p>
-                            </div>
-                            <p className="text-xs text-slate-400">{formatElapsed(person.clock_in, nowMs)}</p>
-                          </div>
-                          <p className="mt-2 text-sm text-slate-300">
-                            {person.work_order_number} • {person.operation_name}
-                          </p>
-                        </div>
+        {/* Live Shop Activity */}
+        <CockpitPanel
+          className="xl:col-span-5"
+          title="Live Shop Activity"
+          subtitle="Active jobs by work center"
+          footer={`${activeAssignments.length} active assignment${activeAssignments.length === 1 ? '' : 's'}`}
+        >
+          {activeAssignments.length > 0 ? (
+            <div>
+              {Object.entries(assignmentsByWorkCenter).map(([workCenterName, assignments]) => {
+                const workCenterId = assignments[0]?.work_center.id;
+                return (
+                  <div key={workCenterName} id={`wc-live-${workCenterId}`} className="scroll-mt-2">
+                    <div className="sticky top-0 z-10 bg-fd-panel border-b border-fd-line py-1.5">
+                      <p className="truncate text-xs font-semibold uppercase tracking-wide text-slate-300">
+                        {workCenterName} <span className="text-slate-500">· {assignments.length}</span>
+                      </p>
+                    </div>
+                    <div className="divide-y divide-fd-line">
+                      {assignments.map((assignment) => (
+                        <ActiveAssignmentRow
+                          key={assignment.time_entry_id}
+                          assignment={assignment}
+                          nowMs={nowMs}
+                        />
                       ))}
                     </div>
-                  ) : (
-                    <p className="text-sm text-slate-400">No one is clocked into this work center.</p>
-                  )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="py-10 text-center">
+              <UserGroupIcon className="mx-auto h-9 w-9 text-slate-500" />
+              <p className="mt-3 text-sm font-medium text-slate-300">No one is clocked into a job right now</p>
+              <p className="mt-1 text-xs text-slate-400">
+                Signed-in users still appear in the presence panel.
+              </p>
+            </div>
+          )}
+        </CockpitPanel>
+
+        {/* Work Center Status */}
+        <CockpitPanel
+          className="xl:col-span-7"
+          title="Work Center Status"
+          subtitle="Real-time station status"
+          footer={`${data?.work_centers.length || 0} work center${(data?.work_centers.length || 0) === 1 ? '' : 's'}`}
+          headerExtra={
+            <Link to="/work-centers" className="btn-ghost btn-sm">
+              View All
+            </Link>
+          }
+        >
+          {data?.work_centers.length ? (
+            <div className="divide-y divide-fd-line">
+              {data.work_centers.map((wc: WorkCenterStatus) => (
+                <WorkCenterRow key={wc.id} wc={wc} />
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-slate-400">No work centers configured.</p>
+          )}
+        </CockpitPanel>
+
+        {/* Signed In / Presence */}
+        <CockpitPanel
+          className="xl:col-span-5"
+          title="Signed In Right Now"
+          subtitle="Live user presence"
+          footer={`${signedInUsers.length} signed in`}
+          headerExtra={
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold tabular-nums">
+              <span className="rounded-sm bg-slate-800/60 px-1.5 py-0.5 text-slate-300">
+                {data?.summary.signed_in_users || 0} in
+              </span>
+              <span className="rounded-sm bg-fd-green/15 px-1.5 py-0.5 text-emerald-400">
+                {data?.summary.checked_in_users || 0} job
+              </span>
+              <span className="rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-amber-400">
+                {idleSignedInUsers.length} idle
+              </span>
+            </div>
+          }
+        >
+          {signedInUsers.length ? (
+            <div className="space-y-3">
+              {onJobSignedInUsers.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                    On a job ({onJobSignedInUsers.length})
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {onJobSignedInUsers.map((user) => {
+                      const timeEntryId = timeEntryByUserId.get(user.id);
+                      return (
+                        <button
+                          key={user.id}
+                          type="button"
+                          onClick={() => {
+                            if (timeEntryId != null) {
+                              document
+                                .getElementById(`assign-${timeEntryId}`)
+                                ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }
+                          }}
+                          title={`${user.name} · ${user.role.replace('_', ' ')}${user.active_work_orders.length ? ` · ${user.active_work_orders.join(', ')}` : ''}`}
+                          className="inline-flex items-center gap-1 rounded-sm border border-fd-line bg-fd-panel px-2 py-0.5 text-xs font-medium text-slate-200 transition-colors hover:border-fd-line-bright hover:text-white"
+                        >
+                          <span className="h-1.5 w-1.5 rounded-full bg-fd-green" />
+                          {user.name}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+              )}
 
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h2 className="card-title">Signed In Right Now</h2>
-            <p className="card-subtitle">Live user presence across the ERP</p>
-          </div>
-        </div>
+              {idleSignedInUsers.length > 0 && (
+                <div className="divide-y divide-fd-line border-t border-fd-line">
+                  {idleSignedInUsers.map((user) => (
+                    <IdleUserRow key={user.id} user={user} />
+                  ))}
+                </div>
+              )}
 
-        {signedInUsers.length ? (
-          <div className="space-y-3">
-            {signedInUsers.map((user) => (
-              <SignedInUserRow key={user.id} user={user} />
-            ))}
-            {idleSignedInUsers.length > 0 && (
-              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-300">
-                <p className="font-semibold">Signed in but not on a job</p>
-                <p className="mt-1">{idleSignedInUsers.map((user) => user.name).join(', ')}</p>
-              </div>
-            )}
-          </div>
-        ) : (
-          <p className="text-sm text-slate-400">No active signed-in sessions detected.</p>
-        )}
-      </div>
+              {idleSignedInUsers.length > 0 && (
+                <div className="rounded-sm border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-300">
+                  <p className="font-semibold">Signed in but not on a job</p>
+                  <p className="mt-0.5">{idleSignedInUsers.map((user) => user.name).join(', ')}</p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-slate-400">No active signed-in sessions detected.</p>
+          )}
+        </CockpitPanel>
       </div>
 
       {/* Recent Completions */}
-      <div className="card">
-        <div className="card-header">
+      <div className="card card-compact flex flex-col min-w-0">
+        <div className="card-header !pb-2 !mb-2">
           <div>
             <h2 className="card-title">Recent Completions</h2>
             <p className="card-subtitle">Latest completed operations</p>
@@ -833,55 +739,40 @@ export default function Dashboard() {
         </div>
 
         {data?.recent_completions.length ? (
-          <div className="divide-y divide-slate-700">
+          <div className="lg:max-h-[clamp(200px,28vh,360px)] lg:overflow-y-auto divide-y divide-fd-line">
             {data.recent_completions.map((completion, index) => (
               <div
                 key={index}
-                className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
+                className="flex items-center gap-3 py-2 first:pt-0"
               >
-                <div className="flex items-center gap-4">
-                  <div className="p-2 rounded-lg bg-fd-green/15">
-                    <CheckCircleSolid className="h-5 w-5 text-fd-green" />
-                  </div>
-                  <div>
-                    <p className="font-semibold text-white">{completion.work_order_number || '-'}</p>
-                    <p className="text-sm text-slate-400">
-                      {completion.operation_name || 'Operation completed'}
-                      {completion.operator_name ? ` by ${completion.operator_name}` : ''}
-                    </p>
-                  </div>
+                <CheckCircleSolid className="h-4 w-4 flex-shrink-0 text-fd-green" />
+                <div className="min-w-0 flex-1">
+                  <span className="font-semibold text-white">{completion.work_order_number || '-'}</span>
+                  <span className="ml-2 truncate text-sm text-slate-400">
+                    {completion.operation_name || 'Operation completed'}
+                    {completion.operator_name ? ` · ${completion.operator_name}` : ''}
+                  </span>
                 </div>
-                <div className="grid grid-cols-3 gap-4 pl-14 text-left sm:min-w-[360px] sm:pl-0 sm:text-right">
-                  <div>
-                    <p className="font-semibold text-white tabular-nums">
-                      {completion.completed_at
-                        ? formatCentralDate(completion.completed_at, { year: undefined })
-                        : '-'}
-                    </p>
-                    <p className="text-xs uppercase tracking-wide text-slate-500">Date</p>
-                  </div>
-                  <div>
-                    <p className="font-semibold text-white tabular-nums">
-                      {completion.completed_at ? formatCentralTime(completion.completed_at) : '-'}
-                    </p>
-                    <p className="text-xs uppercase tracking-wide text-slate-500">Time</p>
-                  </div>
-                  <div>
-                    <p className="font-semibold text-white tabular-nums">
-                      {completion.quantity_complete} units
-                    </p>
-                    <p className="text-xs uppercase tracking-wide text-slate-500">Qty Completed</p>
-                  </div>
+                <div className="flex flex-shrink-0 items-center gap-3 text-right text-xs tabular-nums">
+                  <span className="w-16 text-slate-300">
+                    {completion.completed_at ? formatCentralDate(completion.completed_at, { year: undefined }) : '-'}
+                  </span>
+                  <span className="w-16 text-slate-400">
+                    {completion.completed_at ? formatCentralTime(completion.completed_at) : '-'}
+                  </span>
+                  <span className="w-16 font-semibold text-white">
+                    {completion.quantity_complete} units
+                  </span>
                 </div>
               </div>
             ))}
           </div>
         ) : (
-          <div className="text-center py-12">
-            <div className="p-4 rounded-full bg-slate-800/60 w-fit mx-auto mb-4">
-              <ClipboardDocumentListIcon className="h-8 w-8 text-slate-500" />
+          <div className="py-8 text-center">
+            <div className="mx-auto mb-3 w-fit rounded-sm bg-slate-800/60 p-3">
+              <ClipboardDocumentListIcon className="h-7 w-7 text-slate-500" />
             </div>
-            <p className="text-slate-400">No recent completions</p>
+            <p className="text-sm text-slate-400">No recent completions</p>
           </div>
         )}
       </div>
@@ -889,174 +780,182 @@ export default function Dashboard() {
   );
 }
 
-function ActiveAssignmentCard({ assignment, nowMs }: { assignment: ActiveAssignment; nowMs: number }) {
+function MachineRow({
+  machine,
+  capacityDayClass,
+  capacityStatusLabel,
+}: {
+  machine: MachineCapacityOverview;
+  capacityDayClass: (day: CapacityHeatmapDay) => string;
+  capacityStatusLabel: (day: CapacityHeatmapDay) => string;
+}) {
+  const utilization = machine.utilization_pct;
+  const barClass =
+    utilization > 100 ? 'bg-fd-red' :
+    utilization >= 90 ? 'bg-fd-amber' :
+    utilization >= 70 ? 'bg-fd-amber' : 'bg-fd-green';
+
+  return (
+    <div className="py-2 first:pt-0">
+      <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="flex-shrink-0 font-semibold text-white">{machine.work_center_code}</span>
+          <span className="truncate text-xs text-slate-400">{machine.work_center_name}</span>
+          {machine.overloaded_days > 0 && (
+            <span
+              className="flex-shrink-0 text-red-500"
+              title={`${machine.overloaded_days} overloaded day${machine.overloaded_days === 1 ? '' : 's'}`}
+              aria-label={`${machine.overloaded_days} overloaded days`}
+            >
+              ▲
+            </span>
+          )}
+        </div>
+        <div className="flex w-28 flex-shrink-0 items-center gap-2">
+          <div className="h-1.5 flex-1 rounded-sm bg-slate-800">
+            <div className={`h-1.5 rounded-sm ${barClass}`} style={{ width: `${Math.min(100, utilization)}%` }} />
+          </div>
+          <span className={`w-9 text-right text-xs font-bold tabular-nums ${utilization > 100 ? 'text-red-500' : utilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
+            {Math.round(utilization)}%
+          </span>
+        </div>
+      </div>
+      <div className="mt-1.5 grid grid-cols-7 gap-0.5">
+        {machine.days.map((day) => {
+          const statusLabel = capacityStatusLabel(day);
+          return (
+            <Link
+              to="/scheduling"
+              key={`${machine.work_center_id}-${day.date}`}
+              className={`h-9 rounded-sm border px-1 text-center transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-fd-blue ${capacityDayClass(day)}`}
+              title={`${formatCentralDate(day.date, { year: undefined })} - ${statusLabel}: ${day.scheduled_hours.toFixed(1)}h scheduled of ${day.capacity_hours.toFixed(1)}h capacity (${Math.round(day.utilization_pct)}%)`}
+              aria-label={`${machine.work_center_code} ${formatCentralDate(day.date, { year: undefined })}: ${statusLabel}, ${day.scheduled_hours.toFixed(1)} scheduled hours of ${day.capacity_hours.toFixed(1)} capacity hours`}
+            >
+              <span className="block text-[10px] font-semibold leading-4">
+                {formatInCentralTime(day.date, { weekday: 'short' })}
+              </span>
+              <span className="block text-[11px] font-bold leading-4 tabular-nums">
+                {Math.round(day.utilization_pct)}%
+              </span>
+            </Link>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignment; nowMs: number }) {
   const orderedQty = Number(assignment.work_order.quantity_ordered || 0);
   const completeQty = Number(assignment.operation.quantity_complete ?? assignment.work_order.quantity_complete ?? 0);
   const progress = orderedQty > 0 ? Math.min(100, Math.round((completeQty / orderedQty) * 100)) : 0;
   const dueDate = assignment.work_order.due_date;
   const isOverdue = Boolean(dueDate && isDateBeforeTodayInCentral(dueDate));
 
+  // Fields not shown inline are preserved in the row title so no data is lost.
+  const rowTitle = [
+    getEntryTypeLabel(assignment.entry_type),
+    `Started ${formatCentralTime(assignment.clock_in)}`,
+    `Due ${dueDate ? formatCentralDate(dueDate, { year: undefined }) : 'none'}`,
+    assignment.work_order.customer_name || null,
+    assignment.work_order.priority ? `Priority ${assignment.work_order.priority}` : null,
+    assignment.work_order.part_name || null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
-    <div className="rounded-2xl border border-fd-line bg-fd-panel p-5 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-lg font-semibold text-white">{assignment.user.name}</h3>
-            <span className="rounded-full bg-slate-800/60 px-2.5 py-1 text-xs font-medium text-slate-300">
-              {assignment.user.employee_id}
-            </span>
-            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${getRoleBadgeClass(assignment.user.role)}`}>
-              {assignment.user.role.replace('_', ' ')}
-            </span>
-          </div>
-          <p className="mt-1 text-sm text-slate-400">
-            {assignment.work_center.name}
-            {assignment.user.department ? ` • ${assignment.user.department}` : ''}
-          </p>
-        </div>
-        <span className="rounded-full bg-fd-green/15 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-400">
-          {getEntryTypeLabel(assignment.entry_type)}
+    <div id={`assign-${assignment.time_entry_id}`} className="flex items-center gap-2 px-4 py-1.5 scroll-mt-10" title={rowTitle}>
+      {isOverdue && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-fd-red" aria-label="Overdue" />}
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <span className="truncate font-medium text-slate-200">{assignment.user.name}</span>
+        <span className="flex-shrink-0 text-[10px] text-slate-500 tabular-nums">{assignment.user.employee_id}</span>
+        <span className={`flex-shrink-0 rounded-sm px-1 py-0.5 text-[10px] font-medium ${getRoleBadgeClass(assignment.user.role)}`}>
+          {assignment.user.role.replace('_', ' ')}
         </span>
       </div>
-
-      <div className="mt-4 rounded-xl bg-slate-800/50 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-sm text-slate-400">Work order</p>
-            <Link
-              to={`/work-orders/${assignment.work_order.id}`}
-              className="text-lg font-semibold text-werco-700 hover:text-werco-800"
-            >
-              {assignment.work_order.work_order_number}
-            </Link>
-          </div>
-          {assignment.work_order.priority ? (
-            <span className="rounded-full bg-amber-500/20 px-3 py-1 text-xs font-semibold text-amber-400">
-              Priority {assignment.work_order.priority}
-            </span>
-          ) : null}
-        </div>
-        <p className="mt-1 text-sm text-slate-300">
-          {assignment.work_order.part_number}
-          {assignment.work_order.part_name ? ` • ${assignment.work_order.part_name}` : ''}
-        </p>
-        <p className="mt-2 text-sm text-slate-300">
-          {assignment.operation.operation_number ? `${assignment.operation.operation_number} • ` : ''}
-          {assignment.operation.name}
-        </p>
-      </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-        <div className="rounded-xl border border-fd-line p-3">
-          <p className="text-slate-400">Started</p>
-          <p className="mt-1 font-semibold text-white">{formatCentralTime(assignment.clock_in)}</p>
-          <p className="mt-1 text-xs text-slate-400">{formatElapsed(assignment.clock_in, nowMs)} elapsed</p>
-        </div>
-        <div className="rounded-xl border border-fd-line p-3">
-          <p className="text-slate-400">Due</p>
-          <p className={`mt-1 font-semibold ${isOverdue ? 'text-red-600' : 'text-white'}`}>
-            {dueDate ? formatCentralDate(dueDate, { year: undefined }) : 'No due date'}
-          </p>
-          <p className="mt-1 text-xs text-slate-400">{assignment.work_order.customer_name || 'No customer specified'}</p>
-        </div>
-      </div>
-
-      <div className="mt-4">
-        <div className="mb-1 flex items-center justify-between text-sm">
-          <span className="text-slate-400">Progress</span>
-          <span className="font-medium text-slate-300">
-            {completeQty}/{orderedQty || 0} ({progress}%)
-          </span>
-        </div>
-        <div className="h-2 rounded-full bg-slate-800">
-          <div className="h-2 rounded-full bg-werco-500 transition-all" style={{ width: `${progress}%` }} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SignedInUserRow({ user }: { user: SignedInUserStatus }) {
-  return (
-    <div className="rounded-xl border border-fd-line bg-fd-panel p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-semibold text-white">{user.name}</h3>
-            <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-xs font-medium text-slate-300">
-              {user.employee_id}
-            </span>
-          </div>
-          <p className="mt-1 text-sm text-slate-400">
-            {user.role.replace('_', ' ')}
-            {user.department ? ` • ${user.department}` : ''}
-          </p>
-        </div>
-        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${user.has_active_job ? 'bg-fd-green/15 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
-          {user.has_active_job ? 'Checked In' : 'Signed In'}
-        </span>
-      </div>
-
-      <div className="mt-3 space-y-1 text-sm text-slate-300">
-        <p>
-          Active jobs: <span className="font-medium text-slate-200">{user.active_job_count}</span>
-        </p>
-        <p>
-          Work centers:{' '}
-          <span className="font-medium text-slate-200">
-            {user.active_work_centers.length ? user.active_work_centers.join(', ') : 'No active assignment'}
-          </span>
-        </p>
-        <p>
-          Work orders:{' '}
-          <span className="font-medium text-slate-200">
-            {user.active_work_orders.length ? user.active_work_orders.join(', ') : 'No active assignment'}
-          </span>
-        </p>
-        <p>
-          Connected:{' '}
-          <span className="font-medium text-slate-200">
-            {user.connected_since ? formatCentralTime(user.connected_since, { timeZoneName: 'short' }) : 'Unknown'}
-          </span>
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// Stat Card Component
-interface StatCardProps {
-  icon: React.ElementType;
-  iconBg: string;
-  iconColor: string;
-  label: string;
-  value: number | string;
-  valueColor?: string;
-  subtitle?: string;
-  href?: string;
-}
-
-function StatCard({ icon: Icon, iconBg, iconColor, label, value, valueColor, subtitle, href }: StatCardProps) {
-  const content = (
-    <div className="stat-card group">
-      <div className={`stat-icon ${iconBg} transition-transform group-hover:scale-110`}>
-        <Icon className={`h-7 w-7 ${iconColor}`} />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="stat-label">{label}</p>
-        <p className={`stat-value ${valueColor || ''}`}>{value}</p>
-        {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
-      </div>
-    </div>
-  );
-
-  if (href) {
-    return (
-      <Link to={href} className="block hover:shadow-card-hover transition-shadow rounded-xl">
-        {content}
+      <Link
+        to={`/work-orders/${assignment.work_order.id}`}
+        className="flex-shrink-0 text-xs font-semibold text-werco-700 hover:text-werco-800"
+      >
+        {assignment.work_order.work_order_number}
       </Link>
-    );
-  }
-
-  return content;
+      <span className="hidden w-24 flex-shrink-0 truncate text-[11px] text-slate-400 sm:block">
+        {assignment.work_order.part_number}
+        {assignment.operation.operation_number ? ` · ${assignment.operation.operation_number}` : ''}
+      </span>
+      <div className="flex w-16 flex-shrink-0 items-center gap-1">
+        <div className="h-1 flex-1 rounded-sm bg-slate-800">
+          <div className="h-1 rounded-sm bg-werco-500" style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+      <span className="w-14 flex-shrink-0 text-right text-[10px] text-slate-500 tabular-nums">
+        {completeQty}/{orderedQty || 0} ({progress}%)
+      </span>
+      <span className="w-12 flex-shrink-0 text-right text-xs text-slate-400 tabular-nums">
+        {formatElapsed(assignment.clock_in, nowMs)}
+      </span>
+    </div>
+  );
 }
+
+function WorkCenterRow({ wc }: { wc: WorkCenterStatus }) {
+  const statusStyle = statusColors[wc.status] || statusColors.offline;
+  const typeColor = workCenterTypeColors[wc.type] || 'bg-slate-600';
+
+  const scrollToLiveGroup = () => {
+    document.getElementById(`wc-live-${wc.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  return (
+    <div className="flex items-center gap-2 py-2 first:pt-0">
+      <span className={`h-6 w-1 flex-shrink-0 rounded-sm ${typeColor}`} title={wc.type.replace('_', ' ')} />
+      <div
+        className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${statusStyle.dot} animate-pulse`}
+        title={wc.status.replace('_', ' ')}
+        aria-label={`Status: ${wc.status.replace('_', ' ')}`}
+      />
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-medium text-white">{wc.name}</p>
+        <p className="truncate text-[11px] capitalize text-slate-400">{wc.type.replace('_', ' ')}</p>
+      </div>
+      <div className="flex flex-shrink-0 items-center gap-1 text-[10px] tabular-nums">
+        <span className="rounded-sm bg-slate-800/60 px-1.5 py-0.5 text-slate-300" title="Active operations">
+          {wc.active_operations} act
+        </span>
+        <span className="rounded-sm bg-slate-800/60 px-1.5 py-0.5 text-slate-300" title="Queued operations">
+          {wc.queued_operations} qd
+        </span>
+        <button
+          type="button"
+          onClick={scrollToLiveGroup}
+          className="rounded-sm bg-fd-blue/15 px-1.5 py-0.5 font-medium text-fd-blue transition-colors hover:bg-fd-blue/25"
+          title="Jump to live activity for this work center"
+        >
+          {wc.active_people_count} ppl
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function IdleUserRow({ user }: { user: SignedInUserStatus }) {
+  return (
+    <div className="flex items-center gap-2 py-1.5">
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <span className="truncate font-medium text-slate-200">{user.name}</span>
+        <span className="flex-shrink-0 text-[10px] text-slate-500 tabular-nums">{user.employee_id}</span>
+        <span className={`flex-shrink-0 rounded-sm px-1 py-0.5 text-[10px] font-medium ${getRoleBadgeClass(user.role)}`}>
+          {user.role.replace('_', ' ')}
+        </span>
+      </div>
+      <span className="flex-shrink-0 rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400">
+        Signed In
+      </span>
+      <span className="w-16 flex-shrink-0 text-right text-[11px] text-slate-400 tabular-nums">
+        {user.connected_since ? formatCentralTime(user.connected_since) : 'Unknown'}
+      </span>
+    </div>
+  );
+}
+

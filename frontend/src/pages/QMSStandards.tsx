@@ -1,5 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import {
+  RectangleStackIcon,
+  ListBulletIcon,
+  CheckCircleIcon,
+  ExclamationTriangleIcon,
+  XCircleIcon,
+  QuestionMarkCircleIcon,
+} from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   QMSStandardListResponse,
   QMSStandardResponse,
@@ -16,7 +25,7 @@ const STATUS_COLORS: Record<string, string> = {
   partial: 'bg-yellow-500/20 text-yellow-300',
   non_compliant: 'bg-red-500/20 text-red-300',
   not_assessed: 'bg-slate-800/50 text-slate-400',
-  not_applicable: 'bg-blue-500/20 text-blue-600',
+  not_applicable: 'bg-blue-500/20 text-blue-300',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -253,9 +262,9 @@ export default function QMSStandards() {
     return (
       <div className="p-6">
         <div className="animate-pulse space-y-4">
-          <div className="h-8 bg-gray-200 rounded w-1/3"></div>
-          <div className="h-32 bg-gray-200 rounded"></div>
-          <div className="h-64 bg-gray-200 rounded"></div>
+          <div className="h-8 bg-fd-raised rounded-sm w-1/3"></div>
+          <div className="h-32 bg-fd-raised rounded-sm"></div>
+          <div className="h-64 bg-fd-raised rounded-sm"></div>
         </div>
       </div>
     );
@@ -270,7 +279,7 @@ export default function QMSStandards() {
             <div className="flex items-center gap-3">
               <button
                 onClick={() => { setView('overview'); setSelectedStandard(null); fetchData(); }}
-                className="text-sm text-blue-600 hover:text-blue-300"
+                className="text-sm text-fd-blue hover:text-fd-cyan"
               >
                 &larr; Back to Standards
               </button>
@@ -342,35 +351,79 @@ export default function QMSStandards() {
       {/* ===== OVERVIEW VIEW ===== */}
       {view === 'overview' && (
         <>
-          {/* Audit Readiness Dashboard */}
+          {/* Audit Readiness Dashboard — merged KPI strip + compact compliance figure */}
           {auditSummary && (
-            <div className="mb-8">
-              <h2 className="text-lg font-semibold mb-3">Audit Readiness Dashboard</h2>
-              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-4">
-                <StatCard label="Standards" value={auditSummary.total_standards} color="blue" />
-                <StatCard label="Total Clauses" value={auditSummary.total_clauses} color="gray" />
-                <StatCard label="Compliant" value={auditSummary.compliant} color="green" />
-                <StatCard label="Partial" value={auditSummary.partial} color="yellow" />
-                <StatCard label="Non-Compliant" value={auditSummary.non_compliant} color="red" />
-                <StatCard label="Not Assessed" value={auditSummary.not_assessed} color="gray" />
-              </div>
+            <div className="mb-6">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400 mb-2">Audit Readiness</h2>
+              <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2">
+                <MiniStat
+                  icon={RectangleStackIcon}
+                  iconBg="bg-fd-blue/15"
+                  iconColor="text-fd-blue"
+                  label="Standards"
+                  value={auditSummary.total_standards}
+                />
+                <MiniStat
+                  icon={ListBulletIcon}
+                  iconBg="bg-fd-blue/15"
+                  iconColor="text-fd-blue"
+                  label="Total Clauses"
+                  value={auditSummary.total_clauses}
+                />
+                <MiniStat
+                  icon={CheckCircleIcon}
+                  iconBg="bg-fd-green/15"
+                  iconColor="text-fd-green"
+                  label="Compliant"
+                  value={auditSummary.compliant}
+                  valueColor="text-fd-green"
+                />
+                <MiniStat
+                  icon={ExclamationTriangleIcon}
+                  iconBg="bg-fd-amber/15"
+                  iconColor="text-fd-amber"
+                  label="Partial"
+                  value={auditSummary.partial}
+                  valueColor="text-fd-amber"
+                />
+                <MiniStat
+                  icon={XCircleIcon}
+                  iconBg="bg-fd-red/15"
+                  iconColor="text-fd-red"
+                  label="Non-Compliant"
+                  value={auditSummary.non_compliant}
+                  valueColor="text-fd-red"
+                />
+                <MiniStat
+                  icon={QuestionMarkCircleIcon}
+                  iconBg="bg-fd-blue/15"
+                  iconColor="text-fd-mute"
+                  label="Not Assessed"
+                  value={auditSummary.not_assessed}
+                />
+                <MiniStat
+                  icon={CheckCircleIcon}
+                  iconBg="bg-fd-green/15"
+                  iconColor="text-fd-green"
+                  label="Overall Compliance"
+                  value={`${auditSummary.compliance_percentage}%`}
+                  valueColor="text-fd-green"
+                  subtitle={`Evidence ${auditSummary.verified_evidence}/${auditSummary.total_evidence_links} verified`}
+                />
+              </MiniStatStrip>
 
-              {/* Compliance Progress Bar */}
-              <div className="bg-[#151b28] rounded-lg border p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium">Overall Compliance</span>
-                  <span className="text-lg font-bold text-green-600">{auditSummary.compliance_percentage}%</span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-4">
+              {/* Compact compliance bar + review flag */}
+              <div className="card card-compact !p-3 mt-2">
+                <div className="w-full bg-fd-sunken rounded-sm h-2 overflow-hidden">
                   <div
-                    className="bg-green-500/100 h-4 rounded-full transition-all duration-500"
+                    className="bg-fd-green h-2 rounded-sm transition-all duration-500"
                     style={{ width: `${auditSummary.compliance_percentage}%` }}
                   />
                 </div>
-                <div className="flex justify-between mt-3 text-xs text-slate-400">
+                <div className="flex justify-between mt-2 text-xs text-slate-400 tabular-nums">
                   <span>Evidence: {auditSummary.verified_evidence}/{auditSummary.total_evidence_links} verified</span>
                   {auditSummary.clauses_needing_review > 0 && (
-                    <span className="text-amber-600 font-medium">
+                    <span className="text-fd-amber font-medium">
                       {auditSummary.clauses_needing_review} clause(s) overdue for review
                     </span>
                   )}
@@ -380,52 +433,52 @@ export default function QMSStandards() {
           )}
 
           {/* Standards List */}
-          <h2 className="text-lg font-semibold mb-3">Registered Standards</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400 mb-2">Registered Standards</h2>
           {standards.length === 0 ? (
-            <div className="text-center py-12 bg-[#151b28] rounded-lg border">
+            <div className="text-center py-12 card card-compact !p-3">
               <p className="text-slate-400 mb-4">No QMS standards registered yet.</p>
               <button onClick={() => setShowAddStandard(true)} className="btn btn-primary btn-sm">
                 Add Your First Standard
               </button>
             </div>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
               {standards.map(std => (
                 <div
                   key={std.id}
                   onClick={() => loadStandardDetail(std.id)}
-                  className="bg-[#151b28] rounded-lg border p-5 cursor-pointer hover:shadow-md transition-shadow"
+                  className="card card-compact !p-3 min-w-0 cursor-pointer hover:border-fd-line-bright transition-colors"
                 >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h3 className="font-semibold text-white">{std.name}</h3>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="font-semibold text-white truncate">{std.name}</h3>
                       {std.version && <span className="text-xs text-slate-400">{std.version}</span>}
                     </div>
                     <span className={`badge badge-sm ${std.is_active ? 'badge-success' : 'badge-ghost'}`}>
                       {std.is_active ? 'Active' : 'Inactive'}
                     </span>
                   </div>
-                  {std.standard_body && <p className="text-xs text-slate-400 mt-1">{std.standard_body}</p>}
+                  {std.standard_body && <p className="text-xs text-slate-400 mt-1 truncate">{std.standard_body}</p>}
                   {std.description && <p className="text-sm text-slate-400 mt-2 line-clamp-2">{std.description}</p>}
 
                   {/* Mini compliance bar */}
                   {std.total_clauses > 0 && (
-                    <div className="mt-4">
-                      <div className="flex gap-1 h-2 rounded-full overflow-hidden bg-slate-800/50">
+                    <div className="mt-3">
+                      <div className="flex gap-1 h-2 rounded-sm overflow-hidden bg-fd-sunken">
                         {std.compliant_clauses > 0 && (
-                          <div className="bg-green-500/100" style={{ width: `${(std.compliant_clauses / std.total_clauses) * 100}%` }} />
+                          <div className="bg-fd-green" style={{ width: `${(std.compliant_clauses / std.total_clauses) * 100}%` }} />
                         )}
                         {std.partial_clauses > 0 && (
-                          <div className="bg-yellow-400" style={{ width: `${(std.partial_clauses / std.total_clauses) * 100}%` }} />
+                          <div className="bg-fd-amber" style={{ width: `${(std.partial_clauses / std.total_clauses) * 100}%` }} />
                         )}
                         {std.non_compliant_clauses > 0 && (
-                          <div className="bg-red-500/100" style={{ width: `${(std.non_compliant_clauses / std.total_clauses) * 100}%` }} />
+                          <div className="bg-fd-red" style={{ width: `${(std.non_compliant_clauses / std.total_clauses) * 100}%` }} />
                         )}
                         {std.not_assessed_clauses > 0 && (
-                          <div className="bg-gray-300" style={{ width: `${(std.not_assessed_clauses / std.total_clauses) * 100}%` }} />
+                          <div className="bg-fd-line-bright" style={{ width: `${(std.not_assessed_clauses / std.total_clauses) * 100}%` }} />
                         )}
                       </div>
-                      <p className="text-xs text-slate-400 mt-1">{std.total_clauses} clauses</p>
+                      <p className="text-xs text-slate-400 mt-1 tabular-nums">{std.total_clauses} clauses</p>
                     </div>
                   )}
                 </div>
@@ -444,7 +497,7 @@ export default function QMSStandards() {
 
           {/* Clauses Table */}
           {selectedStandard.clauses.length === 0 ? (
-            <div className="text-center py-12 bg-[#151b28] rounded-lg border">
+            <div className="text-center py-12 card card-compact !p-3">
               <p className="text-lg font-medium text-slate-300 mb-2">No clauses added yet</p>
               <p className="text-sm text-slate-400 mb-6">Upload a PDF of your quality manual and clauses will be extracted automatically.</p>
               <div className="flex gap-3 justify-center">
@@ -652,21 +705,21 @@ export default function QMSStandards() {
         <Modal title="Auto-Link Evidence Complete" onClose={() => setShowAutoLinkResult(false)}>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-green-500/10 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-emerald-400">{autoLinkResult.clauses_with_evidence}</p>
-                <p className="text-xs text-green-600">Clauses with Evidence</p>
+              <div className="bg-green-500/10 rounded-sm p-3 text-center">
+                <p className="text-2xl font-bold text-emerald-400 tabular-nums">{autoLinkResult.clauses_with_evidence}</p>
+                <p className="text-xs text-emerald-300">Clauses with Evidence</p>
               </div>
-              <div className="bg-slate-800 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-slate-400">{autoLinkResult.clauses_without_evidence}</p>
+              <div className="bg-fd-raised rounded-sm p-3 text-center">
+                <p className="text-2xl font-bold text-slate-400 tabular-nums">{autoLinkResult.clauses_without_evidence}</p>
                 <p className="text-xs text-slate-400">Clauses without Match</p>
               </div>
-              <div className="bg-blue-500/10 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-blue-400">{autoLinkResult.total_evidence_created}</p>
-                <p className="text-xs text-blue-600">New Evidence Linked</p>
+              <div className="bg-blue-500/10 rounded-sm p-3 text-center">
+                <p className="text-2xl font-bold text-blue-400 tabular-nums">{autoLinkResult.total_evidence_created}</p>
+                <p className="text-xs text-blue-300">New Evidence Linked</p>
               </div>
-              <div className="bg-amber-500/10 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-amber-400">{autoLinkResult.total_evidence_updated}</p>
-                <p className="text-xs text-amber-600">Evidence Updated</p>
+              <div className="bg-amber-500/10 rounded-sm p-3 text-center">
+                <p className="text-2xl font-bold text-amber-400 tabular-nums">{autoLinkResult.total_evidence_updated}</p>
+                <p className="text-xs text-amber-300">Evidence Updated</p>
               </div>
             </div>
 
@@ -740,22 +793,6 @@ export default function QMSStandards() {
 
 // ===== Sub-components =====
 
-function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
-  const colorMap: Record<string, string> = {
-    blue: 'border-blue-500/30 bg-blue-500/10 text-blue-400',
-    green: 'border-green-500/30 bg-green-500/10 text-emerald-400',
-    yellow: 'border-yellow-500/30 bg-yellow-500/10 text-yellow-400',
-    red: 'border-red-500/30 bg-red-500/10 text-red-400',
-    gray: 'border-slate-700 bg-slate-800 text-slate-300',
-  };
-  return (
-    <div className={`rounded-lg border p-3 ${colorMap[color] || colorMap.gray}`}>
-      <p className="text-2xl font-bold">{value}</p>
-      <p className="text-xs opacity-75">{label}</p>
-    </div>
-  );
-}
-
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
     <div className="modal modal-open">
@@ -804,10 +841,10 @@ function ClauseRow({
   const manualCount = clause.evidence_links.length - autoLinkedCount;
 
   return (
-    <div className="bg-[#151b28] rounded-lg border">
+    <div className="card card-compact !p-0 overflow-hidden">
       {/* Clause Header */}
       <div
-        className="flex items-center gap-3 p-4 cursor-pointer hover:bg-slate-800"
+        className="flex items-center gap-3 p-3 cursor-pointer hover:bg-fd-raised"
         onClick={() => setExpanded(!expanded)}
       >
         <span className="text-xs font-mono font-bold text-slate-400 w-16 shrink-0">
@@ -840,7 +877,7 @@ function ClauseRow({
 
       {/* Expanded Details */}
       {expanded && (
-        <div className="border-t px-4 pb-4 pt-3 space-y-3 bg-slate-800">
+        <div className="border-t border-fd-line px-4 pb-4 pt-3 space-y-3 bg-fd-sunken">
           {clause.description && (
             <p className="text-sm text-slate-400 whitespace-pre-wrap">{clause.description}</p>
           )}
@@ -872,7 +909,7 @@ function ClauseRow({
             ) : (
               <div className="space-y-2">
                 {clause.evidence_links.map(ev => (
-                  <div key={ev.id} className={`flex items-center gap-3 rounded border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-[#151b28]'}`}>
+                  <div key={ev.id} className={`flex items-center gap-3 rounded-sm border px-3 py-2 text-sm ${ev.is_auto_linked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-fd-panel border-fd-line'}`}>
                     {ev.is_auto_linked && (
                       <span className="text-amber-500 text-xs font-bold" title="Auto-linked from ERP/MES">{'\u26A1'}</span>
                     )}
@@ -880,13 +917,13 @@ function ClauseRow({
                     <span className="flex-1">
                       {ev.title}
                       {ev.is_auto_linked && ev.live_count != null && (
-                        <span className="ml-2 text-xs text-amber-600 font-medium">
+                        <span className="ml-2 text-xs text-amber-300 font-medium">
                           ({ev.live_count} records{ev.last_refreshed ? ` | Refreshed ${new Date(ev.last_refreshed).toLocaleDateString()}` : ''})
                         </span>
                       )}
                     </span>
                     {ev.module_reference && (
-                      <a href={ev.module_reference} className="text-xs text-blue-500 hover:underline">
+                      <a href={ev.module_reference} className="text-xs text-fd-blue hover:underline">
                         {ev.module_reference}
                       </a>
                     )}
@@ -920,7 +957,7 @@ function ClauseRow({
               </h4>
               <div className="space-y-2">
                 {autoEvidence.discovered_evidence.map((ev, idx) => (
-                  <div key={idx} className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+                  <div key={idx} className="bg-amber-500/10 border border-amber-500/30 rounded-sm p-3">
                     <div className="flex items-center gap-2 mb-1">
                       <HealthDot status={ev.health_status} />
                       <span className="font-medium text-sm">{ev.title}</span>
@@ -934,7 +971,7 @@ function ClauseRow({
                           <a
                             key={exIdx}
                             href={ex.module_link}
-                            className="flex items-center gap-2 text-xs text-blue-600 hover:text-blue-300 hover:underline"
+                            className="flex items-center gap-2 text-xs text-fd-blue hover:text-fd-cyan hover:underline"
                           >
                             <span className="font-mono">{ex.record_identifier}</span>
                             <span className="text-slate-400">{ex.summary}</span>
@@ -973,10 +1010,10 @@ function ClauseRow({
 
 function HealthDot({ status }: { status: string }) {
   const colors: Record<string, string> = {
-    healthy: 'bg-green-500/100',
-    warning: 'bg-yellow-500/100',
-    critical: 'bg-red-500/100',
-    no_data: 'bg-gray-400',
+    healthy: 'bg-fd-green',
+    warning: 'bg-fd-amber',
+    critical: 'bg-fd-red',
+    no_data: 'bg-fd-line-bright',
   };
   return (
     <span
