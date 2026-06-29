@@ -11,6 +11,16 @@ export { useToast, ToastProvider } from './Toast';
 // Previously deep-import-only primitives — surfaced here so callers can import
 // them from '@/components/ui' alongside the rest of the kit.
 export { StatusBadge } from './StatusBadge';
+export { Button } from './Button';
+export type { ButtonProps, ButtonVariant, ButtonSize } from './Button';
+export {
+  statusVariant,
+  statusColor,
+  statusColorMap,
+  variantClass as statusVariantClass,
+  UNKNOWN_STATUS_CLASS,
+} from '../../utils/statusColors';
+export type { StatusVariant } from '../../utils/statusColors';
 export { Tabs } from './Tabs';
 export type { Tab } from './Tabs';
 export { ConfirmDialog } from './ConfirmDialog';

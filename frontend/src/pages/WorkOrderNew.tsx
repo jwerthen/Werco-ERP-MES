@@ -823,7 +823,7 @@ export default function WorkOrderNew() {
                 {showPartDropdown && (
                   <div
                     id="work-order-part-results"
-                    className="absolute z-20 w-full mt-1 bg-[#151b28] border border-slate-700 rounded-xl shadow-xl max-h-96 overflow-y-auto"
+                    className="absolute z-20 w-full mt-1 bg-fd-panel border border-slate-700 rounded-xl shadow-xl max-h-96 overflow-y-auto"
                     role="listbox"
                   >
                     {workOrderPartOptions.length > 0 ? (
@@ -963,7 +963,7 @@ export default function WorkOrderNew() {
                   />
                 </div>
                 {showCustomerDropdown && (
-                  <div className="absolute z-10 w-full mt-1 bg-[#151b28] border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto">
+                  <div className="absolute z-10 w-full mt-1 bg-fd-panel border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto">
                     {filteredCustomers.length > 0 ? (
                       <>
                       {filteredCustomers.map((customer, index) => (
@@ -1069,7 +1069,7 @@ export default function WorkOrderNew() {
         </div>
 
         {partReadiness && (blockingReadinessMessages.length > 0 || informationalReadinessMessages.length > 0) && (
-          <div className="bg-[#151b28] border border-amber-500/30 rounded-lg p-4">
+          <div className="bg-fd-panel border border-amber-500/30 rounded-lg p-4">
             <div className="flex items-start gap-3">
               <ExclamationTriangleIcon className="h-5 w-5 text-amber-300 mt-0.5" />
               <div>

@@ -8,6 +8,7 @@ import {
   QuestionMarkCircleIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { Button, statusColor } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   QMSStandardListResponse,
@@ -19,14 +20,6 @@ import {
 } from '../types/api';
 
 type ComplianceStatus = 'not_assessed' | 'compliant' | 'partial' | 'non_compliant' | 'not_applicable';
-
-const STATUS_COLORS: Record<string, string> = {
-  compliant: 'bg-green-500/20 text-emerald-300',
-  partial: 'bg-yellow-500/20 text-yellow-300',
-  non_compliant: 'bg-red-500/20 text-red-300',
-  not_assessed: 'bg-slate-800/50 text-slate-400',
-  not_applicable: 'bg-blue-500/20 text-blue-300',
-};
 
 const STATUS_LABELS: Record<string, string> = {
   compliant: 'Compliant',
@@ -297,12 +290,9 @@ export default function QMSStandards() {
           )}
         </div>
         {view === 'overview' && (
-          <button
-            onClick={() => setShowAddStandard(true)}
-            className="btn btn-primary btn-sm"
-          >
+          <Button size="sm" onClick={() => setShowAddStandard(true)}>
             + Add Standard
-          </button>
+          </Button>
         )}
         {view === 'detail' && (
           <div className="flex gap-2">
@@ -324,12 +314,12 @@ export default function QMSStandards() {
                 disabled={uploading}
               />
             </label>
-            <button onClick={() => setShowBulkImport(true)} className="btn btn-outline btn-sm">
+            <Button variant="secondary" size="sm" onClick={() => setShowBulkImport(true)}>
               Bulk Import
-            </button>
-            <button onClick={() => setShowAddClause(true)} className="btn btn-primary btn-sm">
+            </Button>
+            <Button size="sm" onClick={() => setShowAddClause(true)}>
               + Add Clause
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -437,9 +427,9 @@ export default function QMSStandards() {
           {standards.length === 0 ? (
             <div className="text-center py-12 card card-compact !p-3">
               <p className="text-slate-400 mb-4">No QMS standards registered yet.</p>
-              <button onClick={() => setShowAddStandard(true)} className="btn btn-primary btn-sm">
+              <Button size="sm" onClick={() => setShowAddStandard(true)}>
                 Add Your First Standard
-              </button>
+              </Button>
             </div>
           ) : (
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
@@ -585,10 +575,10 @@ export default function QMSStandards() {
               />
             </div>
             <div className="flex justify-end gap-2">
-              <button className="btn btn-ghost btn-sm" onClick={() => setShowAddStandard(false)}>Cancel</button>
-              <button className="btn btn-primary btn-sm" onClick={handleCreateStandard} disabled={saving || !standardForm.name}>
+              <Button variant="ghost" size="sm" onClick={() => setShowAddStandard(false)}>Cancel</Button>
+              <Button size="sm" onClick={handleCreateStandard} disabled={saving || !standardForm.name}>
                 {saving ? 'Creating...' : 'Create Standard'}
-              </button>
+              </Button>
             </div>
           </div>
         </Modal>
@@ -629,14 +619,14 @@ export default function QMSStandards() {
               />
             </div>
             <div className="flex justify-end gap-2">
-              <button className="btn btn-ghost btn-sm" onClick={() => setShowAddClause(false)}>Cancel</button>
-              <button
-                className="btn btn-primary btn-sm"
+              <Button variant="ghost" size="sm" onClick={() => setShowAddClause(false)}>Cancel</Button>
+              <Button
+                size="sm"
                 onClick={handleCreateClause}
                 disabled={saving || !clauseForm.clause_number || !clauseForm.title}
               >
                 {saving ? 'Adding...' : 'Add Clause'}
-              </button>
+              </Button>
             </div>
           </div>
         </Modal>
@@ -687,14 +677,14 @@ export default function QMSStandards() {
               />
             </div>
             <div className="flex justify-end gap-2">
-              <button className="btn btn-ghost btn-sm" onClick={() => { setShowAddEvidence(false); setEvidenceClauseId(null); }}>Cancel</button>
-              <button
-                className="btn btn-primary btn-sm"
+              <Button variant="ghost" size="sm" onClick={() => { setShowAddEvidence(false); setEvidenceClauseId(null); }}>Cancel</Button>
+              <Button
+                size="sm"
                 onClick={handleAddEvidence}
                 disabled={saving || !evidenceForm.title}
               >
                 {saving ? 'Linking...' : 'Link Evidence'}
-              </button>
+              </Button>
             </div>
           </div>
         </Modal>
@@ -728,7 +718,7 @@ export default function QMSStandards() {
                 <h4 className="text-sm font-semibold mb-2">Suggested Compliance</h4>
                 <div className="flex gap-2 flex-wrap">
                   {Object.entries(autoLinkResult.compliance_summary).map(([status, count]) => (
-                    <span key={status} className={`badge ${STATUS_COLORS[status] || 'badge-ghost'}`}>
+                    <span key={status} className={`px-2 py-0.5 rounded-sm text-xs font-medium ${statusColor(status)}`}>
                       {STATUS_LABELS[status] || status}: {count}
                     </span>
                   ))}
@@ -741,9 +731,9 @@ export default function QMSStandards() {
             </p>
 
             <div className="flex justify-end">
-              <button className="btn btn-primary btn-sm" onClick={() => setShowAutoLinkResult(false)}>
+              <Button size="sm" onClick={() => setShowAutoLinkResult(false)}>
                 Done
-              </button>
+              </Button>
             </div>
           </div>
         </Modal>
@@ -774,14 +764,14 @@ export default function QMSStandards() {
                 {bulkText.trim() ? bulkText.trim().split('\n').filter(l => l.trim()).length : 0} clauses detected
               </span>
               <div className="flex gap-2">
-                <button className="btn btn-ghost btn-sm" onClick={() => setShowBulkImport(false)}>Cancel</button>
-                <button
-                  className="btn btn-primary btn-sm"
+                <Button variant="ghost" size="sm" onClick={() => setShowBulkImport(false)}>Cancel</Button>
+                <Button
+                  size="sm"
                   onClick={handleBulkImport}
                   disabled={saving || !bulkText.trim()}
                 >
                   {saving ? 'Importing...' : 'Import Clauses'}
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -854,7 +844,7 @@ function ClauseRow({
 
         {/* Compliance Status Dropdown */}
         <select
-          className={`select select-bordered select-xs ${STATUS_COLORS[clause.compliance_status] || ''}`}
+          className={`select select-bordered select-xs ${statusColor(clause.compliance_status)}`}
           value={clause.compliance_status}
           onClick={e => e.stopPropagation()}
           onChange={e => onUpdateCompliance(clause.id, e.target.value as ComplianceStatus)}
@@ -986,7 +976,7 @@ function ClauseRow({
                 ))}
               </div>
               <p className="text-xs text-slate-400 mt-2">
-                Suggested compliance: <span className={`font-medium ${STATUS_COLORS[autoEvidence.overall_suggested_compliance] || ''}`}>
+                Suggested compliance: <span className={`font-medium ${statusColor(autoEvidence.overall_suggested_compliance)}`}>
                   {STATUS_LABELS[autoEvidence.overall_suggested_compliance] || autoEvidence.overall_suggested_compliance}
                 </span>
               </p>

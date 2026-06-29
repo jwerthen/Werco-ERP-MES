@@ -17,6 +17,7 @@ import {
   DataTable,
   DataTableColumn,
   MobileDataCard,
+  Button,
 } from '../components/ui';
 
 interface Tool {
@@ -56,16 +57,6 @@ interface Dashboard {
 }
 
 type Tab = 'all' | 'checked_out' | 'replacement' | 'inspection';
-
-const statusColors: Record<string, string> = {
-  available: 'bg-green-500/20 text-emerald-300',
-  checked_out: 'bg-blue-500/20 text-blue-300',
-  in_use: 'bg-blue-500/20 text-blue-300',
-  maintenance: 'bg-yellow-500/20 text-yellow-300',
-  needs_repair: 'bg-red-500/20 text-red-300',
-  retired: 'bg-slate-800/50 text-slate-100',
-  lost: 'bg-red-500/20 text-red-300',
-};
 
 export default function ToolManagement() {
   const { showToast } = useToast();
@@ -255,7 +246,7 @@ export default function ToolManagement() {
       header: 'Status',
       sortable: true,
       accessor: (t) => t.status,
-      render: (t) => <StatusBadge status={t.status} colorMap={statusColors} />,
+      render: (t) => <StatusBadge status={t.status} />,
     },
     {
       key: 'location',
@@ -284,7 +275,7 @@ export default function ToolManagement() {
     <MobileDataCard
       title={tool.tool_number}
       subtitle={tool.name}
-      badge={<StatusBadge status={tool.status} colorMap={statusColors} />}
+      badge={<StatusBadge status={tool.status} />}
       onClick={() => openDetail(tool)}
       fields={[
         { label: 'Type', value: <span className="capitalize">{tool.tool_type?.replace(/_/g, ' ')}</span> },
@@ -319,9 +310,9 @@ export default function ToolManagement() {
       {/* Header */}
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Tool & Fixture Management</h1>
-        <button onClick={() => setShowCreateModal(true)} className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+        <Button onClick={() => setShowCreateModal(true)} className="inline-flex items-center">
           <PlusIcon className="w-5 h-5 mr-2" />New Tool
-        </button>
+        </Button>
       </div>
 
       {/* Tabs (counts carry the KPI summary — see badges) */}
@@ -399,7 +390,7 @@ export default function ToolManagement() {
             <div className="flex justify-between items-center p-4 border-b">
               <div className="flex items-center gap-3">
                 <h3 className="text-lg font-semibold">{detailTool.tool_number} — {detailTool.name}</h3>
-                <StatusBadge status={detailTool.status} colorMap={statusColors} />
+                <StatusBadge status={detailTool.status} />
               </div>
               <button onClick={() => setShowDetailModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" /></button>
             </div>
@@ -443,10 +434,9 @@ export default function ToolManagement() {
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               {detailTool.status === 'available' && (
-                <button
+                <Button
                   onClick={() => { setSelectedTool(detailTool); setShowDetailModal(false); setShowCheckoutModal(true); }}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                >Checkout</button>
+                >Checkout</Button>
               )}
               {(detailTool.status === 'checked_out' || detailTool.status === 'in_use') && (
                 <button
@@ -454,7 +444,7 @@ export default function ToolManagement() {
                   className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
                 >Check In</button>
               )}
-              <button onClick={() => setShowDetailModal(false)} className="px-4 py-2 border rounded-lg hover:bg-slate-800">Close</button>
+              <Button variant="secondary" onClick={() => setShowDetailModal(false)}>Close</Button>
             </div>
           </>
         )}
@@ -527,9 +517,8 @@ export default function ToolManagement() {
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
-              <button onClick={() => setShowCreateModal(false)} className="px-4 py-2 border rounded-lg hover:bg-slate-800">Cancel</button>
-              <button onClick={handleCreate} disabled={!createForm.tool_number || !createForm.name}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Create</button>
+              <Button variant="secondary" onClick={() => setShowCreateModal(false)}>Cancel</Button>
+              <Button onClick={handleCreate} disabled={!createForm.tool_number || !createForm.name}>Create</Button>
             </div>
       </Modal>
 
@@ -562,8 +551,8 @@ export default function ToolManagement() {
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
-              <button onClick={() => setShowCheckoutModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
-              <button onClick={handleCheckout} disabled={!checkoutForm.checked_out_to} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Checkout</button>
+              <Button variant="secondary" onClick={() => setShowCheckoutModal(false)}>Cancel</Button>
+              <Button onClick={handleCheckout} disabled={!checkoutForm.checked_out_to}>Checkout</Button>
             </div>
           </>
         )}
@@ -603,7 +592,7 @@ export default function ToolManagement() {
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
-              <button onClick={() => setShowCheckinModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
+              <Button variant="secondary" onClick={() => setShowCheckinModal(false)}>Cancel</Button>
               <button onClick={handleCheckin} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Check In</button>
             </div>
           </>

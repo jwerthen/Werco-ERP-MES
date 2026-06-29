@@ -337,7 +337,7 @@ export function RoutingImportWizard({ onComplete, onClose }: Props) {
               <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
             </tr>
           </thead>
-          <tbody className="bg-[#151b28] divide-y divide-slate-700">
+          <tbody className="bg-fd-panel divide-y divide-slate-700">
             {result.results.map((row, idx) => (
               <tr key={`${row.part_number}-${row.routing_revision}-${idx}`}>
                 <td className="px-3 py-2 font-medium text-white whitespace-nowrap">{row.part_number}</td>
@@ -648,7 +648,7 @@ function RoutingAssignmentCard({ routing, assignments, onAssignRow, onApply, ren
               <th className="px-3 py-2 font-medium w-72">Work center</th>
             </tr>
           </thead>
-          <tbody className="bg-[#151b28] divide-y divide-slate-700">
+          <tbody className="bg-fd-panel divide-y divide-slate-700">
             {routing.operations.map((op) => {
               const selected = assignments[op.row] ?? null;
               const isUnassigned = selected == null;

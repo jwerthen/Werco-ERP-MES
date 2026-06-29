@@ -1,5 +1,4 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { createPortal } from 'react-dom';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
@@ -28,7 +27,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
-import { ConfirmDialog, SelectField } from '../components/ui';
+import { Button, ConfirmDialog, Modal, SelectField, statusColor, statusVariant } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { SCRAP_REASONS, HOLD_REASONS } from '../components/kiosk/kioskConstants';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
@@ -76,13 +75,17 @@ interface Toast {
   message: string;
 }
 
-const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
-  pending: { bg: 'bg-slate-800', text: 'text-slate-300', dot: 'bg-slate-500' },
-  ready: { bg: 'bg-blue-500/20', text: 'text-blue-400', dot: 'bg-blue-500/100' },
-  in_progress: { bg: 'bg-amber-500/20', text: 'text-amber-400', dot: 'bg-amber-500/100' },
-  complete: { bg: 'bg-green-500/20', text: 'text-green-400', dot: 'bg-green-500/100' },
-  on_hold: { bg: 'bg-red-500/20', text: 'text-red-400', dot: 'bg-red-500/100' },
+// Status pill colors come from the central statusColors source of truth via
+// statusColor(); the leading status dot derives from the same canonical variant
+// so it can never drift from the pill.
+const STATUS_DOT_BY_VARIANT: Record<ReturnType<typeof statusVariant>, string> = {
+  green: 'bg-emerald-500/100',
+  blue: 'bg-blue-500/100',
+  amber: 'bg-amber-500/100',
+  red: 'bg-red-500/100',
+  slate: 'bg-slate-500',
 };
+const statusDot = (status: string) => STATUS_DOT_BY_VARIANT[statusVariant(status)];
 
 const WORK_CENTER_STORAGE_KEY = 'shop_floor_work_center_id';
 
@@ -1075,14 +1078,14 @@ export default function ShopFloorSimple() {
           <p className="page-subtitle">Check in and out of work order operations</p>
         </div>
         <div className="page-actions">
-          <button 
+          <Button
+            variant="secondary"
             onClick={handleRefresh}
             disabled={refreshing}
-            className="btn-secondary"
           >
             <ArrowPathIcon className={`h-5 w-5 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -1455,20 +1458,19 @@ export default function ShopFloorSimple() {
               : 'Try adjusting your filters'}
           </p>
           {selectedWorkCenter && (
-            <button
-              type="button"
+            <Button
+              variant="secondary"
               onClick={() => focusOperations('')}
-              className="btn-secondary mt-4"
+              className="mt-4"
             >
               View All Operations
-            </button>
+            </Button>
           )}
         </div>
       ) : (
         <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
           {sortedVisibleOperations.map(op => {
-            const colors = STATUS_COLORS[op.status] || STATUS_COLORS.pending;
-            const progress = op.quantity_ordered > 0 
+            const progress = op.quantity_ordered > 0
               ? (op.quantity_complete / op.quantity_ordered) * 100 
               : 0;
             const overdue = isOverdue(op.due_date);
@@ -1499,8 +1501,8 @@ export default function ShopFloorSimple() {
                     </div>
                     <p className="text-sm text-slate-400">{op.part_number}</p>
                   </div>
-                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${colors.bg} ${colors.text}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${colors.dot}`}></span>
+                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold capitalize ${statusColor(op.status)}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${statusDot(op.status)}`}></span>
                     {op.status.replace('_', ' ')}
                   </span>
                 </div>
@@ -1736,9 +1738,15 @@ export default function ShopFloorSimple() {
       />
 
       {/* Add Production Modal */}
-      {productionModal && createPortal((
-        <div className="modal-overlay" onClick={closeProductionModal}>
-          <div className="modal max-w-md" onClick={e => e.stopPropagation()}>
+      <Modal
+        open={productionModal !== null}
+        onClose={closeProductionModal}
+        size="md"
+        padded={false}
+        scroll={false}
+      >
+        {productionModal && (
+          <>
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Add Completed Quantity</h3>
               <button onClick={closeProductionModal} className="p-2 rounded-lg hover:bg-slate-800">
@@ -1843,9 +1851,9 @@ export default function ShopFloorSimple() {
             </div>
 
             <div className="modal-footer">
-              <button onClick={closeProductionModal} className="btn-secondary">
+              <Button variant="secondary" onClick={closeProductionModal}>
                 Cancel
-              </button>
+              </Button>
               <button
                 onClick={handleSaveProduction}
                 disabled={
@@ -1866,21 +1874,27 @@ export default function ShopFloorSimple() {
                 )}
               </button>
             </div>
-          </div>
-        </div>
-      ), document.body)}
+          </>
+        )}
+      </Modal>
 
       {/* Check Out Modal */}
-      {checkOutModal && createPortal((
-        <div className="modal-overlay" onClick={closeCheckOutModal}>
-          <div className="modal max-w-md" onClick={e => e.stopPropagation()}>
+      <Modal
+        open={checkOutModal !== null}
+        onClose={closeCheckOutModal}
+        size="md"
+        padded={false}
+        scroll={false}
+      >
+        {checkOutModal && (
+          <>
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Check Out</h3>
               <button onClick={closeCheckOutModal} className="p-2 rounded-lg hover:bg-slate-800">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
-            
+
             <div className="modal-body space-y-4">
               <div className="bg-slate-800/50 rounded-lg p-4">
                 <p className="text-sm text-slate-400">Operation</p>
@@ -1980,9 +1994,9 @@ export default function ShopFloorSimple() {
             </div>
 
             <div className="modal-footer">
-              <button onClick={closeCheckOutModal} className="btn-secondary">
+              <Button variant="secondary" onClick={closeCheckOutModal}>
                 Cancel
-              </button>
+              </Button>
               <button
                 onClick={handleClockOut}
                 disabled={
@@ -2003,16 +2017,22 @@ export default function ShopFloorSimple() {
                 )}
               </button>
             </div>
-          </div>
-        </div>
-      ), document.body)}
+          </>
+        )}
+      </Modal>
 
       {/* Hold Modal — desktop holds file a structured WorkOrderBlocker
           (category from the shared HOLD_REASONS + optional note), mirroring the
           kiosk so traceability is preserved. */}
-      {holdModal && createPortal((
-        <div className="modal-overlay" onClick={closeHoldModal}>
-          <div className="modal max-w-md" onClick={e => e.stopPropagation()}>
+      <Modal
+        open={holdModal !== null}
+        onClose={closeHoldModal}
+        size="md"
+        padded={false}
+        scroll={false}
+      >
+        {holdModal && (
+          <>
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Place on Hold</h3>
               <button onClick={closeHoldModal} className="p-2 rounded-lg hover:bg-slate-800">
@@ -2060,9 +2080,9 @@ export default function ShopFloorSimple() {
             </div>
 
             <div className="modal-footer">
-              <button onClick={closeHoldModal} className="btn-secondary">
+              <Button variant="secondary" onClick={closeHoldModal}>
                 Cancel
-              </button>
+              </Button>
               <button
                 onClick={handleConfirmHold}
                 disabled={actionLoading === holdModal.id || !holdData.category}
@@ -2078,21 +2098,27 @@ export default function ShopFloorSimple() {
                 )}
               </button>
             </div>
-          </div>
-        </div>
-      ), document.body)}
+          </>
+        )}
+      </Modal>
 
       {/* Operation Details Modal */}
-      {detailsModal && createPortal((
-        <div className="modal-overlay" onClick={() => setDetailsModal(null)}>
-          <div className="modal max-w-2xl" onClick={e => e.stopPropagation()}>
+      <Modal
+        open={detailsModal !== null}
+        onClose={() => setDetailsModal(null)}
+        size="2xl"
+        padded={false}
+        scroll={false}
+      >
+        {detailsModal && (
+          <>
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Operation Details</h3>
               <button onClick={() => setDetailsModal(null)} className="p-2 rounded-lg hover:bg-slate-800">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
-            
+
             <div className="modal-body space-y-6 max-h-[70vh] overflow-y-auto">
               {/* Work Order Info */}
               <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-4">
@@ -2102,15 +2128,16 @@ export default function ShopFloorSimple() {
                     <p className="text-xl font-bold text-white">{detailsModal.work_order.work_order_number}</p>
                     <p className="text-slate-300">{detailsModal.work_order.part?.part_number} - {detailsModal.work_order.part?.name}</p>
                   </div>
-                  <button
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => {
                       setDetailsModal(null);
                       navigate(`/work-orders/${detailsModal.work_order.id}`);
                     }}
-                    className="btn-secondary btn-sm"
                   >
                     Open Full WO
-                  </button>
+                  </Button>
                 </div>
               </div>
               
@@ -2161,7 +2188,6 @@ export default function ShopFloorSimple() {
                 <h4 className="font-semibold text-white mb-3">All Operations</h4>
                 <div className="space-y-2">
                   {detailsModal.all_operations.map((op: any) => {
-                    const opColors = STATUS_COLORS[op.status] || STATUS_COLORS.pending;
                     return (
                       <div 
                         key={op.id} 
@@ -2181,7 +2207,7 @@ export default function ShopFloorSimple() {
                           </span>
                           {op.is_current && <span className="text-xs bg-blue-500/20 text-blue-200 border border-blue-400/30 px-2 py-0.5 rounded-full flex-shrink-0">Current</span>}
                         </div>
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${opColors.bg} ${opColors.text}`}>
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium capitalize flex-shrink-0 ${statusColor(op.status)}`}>
                           {op.status.replace('_', ' ')}
                         </span>
                       </div>
@@ -2209,13 +2235,13 @@ export default function ShopFloorSimple() {
             </div>
             
             <div className="modal-footer">
-              <button onClick={() => setDetailsModal(null)} className="btn-secondary">
+              <Button variant="secondary" onClick={() => setDetailsModal(null)}>
                 Close
-              </button>
+              </Button>
             </div>
-          </div>
-        </div>
-      ), document.body)}
+          </>
+        )}
+      </Modal>
 
       <style>{`
         @keyframes slide-in {

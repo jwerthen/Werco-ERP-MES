@@ -515,7 +515,7 @@ const SupplierScorecards = () => {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 text-sm font-medium ${activeTab === tab ? 'bg-blue-600 text-white' : 'bg-[#151b28] text-slate-300 hover:bg-slate-800'}`}
+              className={`px-4 py-2 text-sm font-medium ${activeTab === tab ? 'bg-blue-600 text-white' : 'bg-fd-panel text-slate-300 hover:bg-slate-800'}`}
             >
               {tab}
             </button>
@@ -547,7 +547,7 @@ const SupplierScorecards = () => {
           />
           {/* Expanded score breakdown (desktop) — preserves the click-to-expand charts. */}
           {expandedScorecard && (
-            <div className="hidden md:block bg-[#151b28] rounded-xl border border-slate-700 px-6 py-4">
+            <div className="hidden md:block bg-fd-panel rounded-xl border border-slate-700 px-6 py-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-white">
                   {expandedScorecard.vendor_name} — {expandedScorecard.period}
@@ -658,7 +658,7 @@ const SupplierScorecards = () => {
                 ))}
               </div>
               <div className="flex justify-end gap-3 pt-2">
-                <button type="button" onClick={() => setShowScorecardModal(false)} className="px-4 py-2 text-sm font-medium text-slate-300 bg-[#151b28] border border-slate-600 rounded-lg hover:bg-slate-800">
+                <button type="button" onClick={() => setShowScorecardModal(false)} className="px-4 py-2 text-sm font-medium text-slate-300 bg-fd-panel border border-slate-600 rounded-lg hover:bg-slate-800">
                   Cancel
                 </button>
                 <button type="submit" className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">
@@ -744,7 +744,7 @@ const SupplierScorecards = () => {
                 />
               </div>
               <div className="flex justify-end gap-3 pt-2">
-                <button type="button" onClick={() => setShowAuditModal(false)} className="px-4 py-2 text-sm font-medium text-slate-300 bg-[#151b28] border border-slate-600 rounded-lg hover:bg-slate-800">
+                <button type="button" onClick={() => setShowAuditModal(false)} className="px-4 py-2 text-sm font-medium text-slate-300 bg-fd-panel border border-slate-600 rounded-lg hover:bg-slate-800">
                   Cancel
                 </button>
                 <button type="submit" className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">

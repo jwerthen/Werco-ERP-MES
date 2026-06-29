@@ -44,7 +44,7 @@ function GlobalErrorFallback({ error, message }: { error: Error; message: ErrorM
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 flex items-center justify-center p-4">
-      <div className="max-w-md w-full bg-[#151b28] rounded-2xl shadow-2xl p-8 text-center">
+      <div className="max-w-md w-full bg-fd-panel rounded-2xl shadow-2xl p-8 text-center">
         {/* Error Icon */}
         <div className="w-20 h-20 bg-gradient-to-br from-werco-navy-600 to-blue-700 rounded-full flex items-center justify-center mx-auto mb-6 shadow-lg">
           <svg className="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">

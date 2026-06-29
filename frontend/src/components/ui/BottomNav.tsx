@@ -93,7 +93,7 @@ export default function BottomNav({ onMenuClick }: BottomNavProps) {
   };
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-[#151b28] border-t border-slate-700 pb-safe lg:hidden">
+    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-fd-panel border-t border-slate-700 pb-safe lg:hidden">
       <div className="flex items-center justify-around h-16">
         {navItems.map((item) => {
           const active = isActive(item.href);

@@ -9,6 +9,9 @@ import {
   DataTableColumn,
   StatusBadge,
   MobileDataCard,
+  Button,
+  statusColorMap,
+  statusVariantClass,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
@@ -73,22 +76,6 @@ interface QualitySummary {
   pending_fais: number;
 }
 
-const statusColors: Record<string, string> = {
-  open: 'bg-red-500/20 text-red-300',
-  under_review: 'bg-yellow-500/20 text-yellow-300',
-  pending_disposition: 'bg-orange-500/20 text-orange-300',
-  closed: 'bg-green-500/20 text-green-300',
-  void: 'bg-slate-800 text-slate-100',
-  root_cause_analysis: 'bg-blue-500/20 text-blue-300',
-  corrective_action: 'bg-purple-500/20 text-purple-300',
-  verification: 'bg-indigo-500/20 text-indigo-800',
-  pending: 'bg-yellow-500/20 text-yellow-300',
-  in_progress: 'bg-blue-500/20 text-blue-300',
-  passed: 'bg-green-500/20 text-green-300',
-  failed: 'bg-red-500/20 text-red-300',
-  conditional: 'bg-orange-500/20 text-orange-300',
-};
-
 const dispositionColors: Record<string, string> = {
   use_as_is: 'bg-green-500/20 text-green-300',
   rework: 'bg-blue-500/20 text-blue-300',
@@ -96,6 +83,15 @@ const dispositionColors: Record<string, string> = {
   scrap: 'bg-red-500/20 text-red-300',
   return_to_vendor: 'bg-purple-500/20 text-purple-300',
   pending: 'bg-slate-800 text-slate-100',
+};
+
+// Domain override: for NCRs/CARs, `closed` means the nonconformance was
+// resolved and corrective action verified — a GOOD terminal, so it reads green
+// here rather than the app-wide neutral `closed`->slate (dormant sales/PO sense).
+// Every other status defers to the central statusColors map.
+const ncrStatusColors: Record<string, string> = {
+  ...statusColorMap,
+  closed: statusVariantClass.green,
 };
 
 export default function QualityPage() {
@@ -239,7 +235,7 @@ export default function QualityPage() {
       sortable: true,
       accessor: (ncr) => ncr.status,
       csv: (ncr) => ncr.status.replace(/_/g, ' '),
-      render: (ncr) => <StatusBadge status={ncr.status} colorMap={statusColors} />,
+      render: (ncr) => <StatusBadge status={ncr.status} colorMap={ncrStatusColors} />,
     },
     {
       key: 'disposition',
@@ -304,7 +300,7 @@ export default function QualityPage() {
       sortable: true,
       accessor: (car) => car.status,
       csv: (car) => car.status.replace(/_/g, ' '),
-      render: (car) => <StatusBadge status={car.status} colorMap={statusColors} />,
+      render: (car) => <StatusBadge status={car.status} colorMap={ncrStatusColors} />,
     },
     {
       key: 'due_date',
@@ -349,7 +345,7 @@ export default function QualityPage() {
       header: 'Status',
       sortable: true,
       accessor: (fai) => fai.status,
-      render: (fai) => <StatusBadge status={fai.status} colorMap={statusColors} />,
+      render: (fai) => <StatusBadge status={fai.status} />,
     },
     {
       key: 'pass_fail',
@@ -503,9 +499,9 @@ export default function QualityPage() {
                   </button>
                 )}
               </div>
-              <button onClick={() => setShowNCRModal(true)} className="btn-primary flex items-center">
+              <Button onClick={() => setShowNCRModal(true)} className="flex items-center">
                 <PlusIcon className="h-5 w-5 mr-1" /> New NCR
-              </button>
+              </Button>
             </div>
             <DataTable
               columns={ncrColumns}
@@ -525,7 +521,7 @@ export default function QualityPage() {
                 <MobileDataCard
                   title={ncr.ncr_number}
                   subtitle={ncr.title}
-                  badge={<StatusBadge status={ncr.status} colorMap={statusColors} />}
+                  badge={<StatusBadge status={ncr.status} colorMap={ncrStatusColors} />}
                   fields={[
                     { label: 'Part', value: ncr.part?.part_number || '-' },
                     { label: 'Source', value: <span className="capitalize">{ncr.source.replace(/_/g, ' ')}</span> },
@@ -543,9 +539,9 @@ export default function QualityPage() {
           <>
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-lg font-semibold">Corrective Action Requests</h2>
-              <button onClick={() => setShowCARModal(true)} className="btn-primary flex items-center">
+              <Button onClick={() => setShowCARModal(true)} className="flex items-center">
                 <PlusIcon className="h-5 w-5 mr-1" /> New CAR
-              </button>
+              </Button>
             </div>
             <DataTable
               columns={carColumns}
@@ -565,7 +561,7 @@ export default function QualityPage() {
                 <MobileDataCard
                   title={car.car_number}
                   subtitle={car.title}
-                  badge={<StatusBadge status={car.status} colorMap={statusColors} />}
+                  badge={<StatusBadge status={car.status} colorMap={ncrStatusColors} />}
                   fields={[
                     { label: 'Type', value: <span className="capitalize">{car.car_type}</span> },
                     {
@@ -593,9 +589,9 @@ export default function QualityPage() {
           <>
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-lg font-semibold">First Article Inspections</h2>
-              <button onClick={() => setShowFAIModal(true)} className="btn-primary flex items-center">
+              <Button onClick={() => setShowFAIModal(true)} className="flex items-center">
                 <PlusIcon className="h-5 w-5 mr-1" /> New FAI
-              </button>
+              </Button>
             </div>
             <DataTable
               columns={faiColumns}
@@ -615,7 +611,7 @@ export default function QualityPage() {
                 <MobileDataCard
                   title={fai.fai_number}
                   subtitle={`${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`}
-                  badge={<StatusBadge status={fai.status} colorMap={statusColors} />}
+                  badge={<StatusBadge status={fai.status} />}
                   fields={[
                     { label: 'Type', value: <span className="capitalize">{fai.fai_type}</span> },
                     {
@@ -691,8 +687,8 @@ export default function QualityPage() {
                 </div>
               </div>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowNCRModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Create NCR</button>
+                <Button type="button" variant="secondary" onClick={() => setShowNCRModal(false)}>Cancel</Button>
+                <Button type="submit">Create NCR</Button>
               </div>
             </form>
       </Modal>
@@ -731,8 +727,8 @@ export default function QualityPage() {
                 <textarea value={carForm.problem_description} onChange={(e) => setCarForm({...carForm, problem_description: e.target.value})} className="input" rows={4} required />
               </div>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowCARModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Create CAR</button>
+                <Button type="button" variant="secondary" onClick={() => setShowCARModal(false)}>Cancel</Button>
+                <Button type="submit">Create CAR</Button>
               </div>
             </form>
       </Modal>
@@ -775,8 +771,8 @@ export default function QualityPage() {
                 <span className="text-sm">Customer Approval Required</span>
               </label>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowFAIModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Create FAI</button>
+                <Button type="button" variant="secondary" onClick={() => setShowFAIModal(false)}>Cancel</Button>
+                <Button type="submit">Create FAI</Button>
               </div>
             </form>
       </Modal>

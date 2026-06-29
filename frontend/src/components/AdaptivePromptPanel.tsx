@@ -102,7 +102,7 @@ export default function AdaptivePromptPanel() {
   };
 
   return (
-    <div className="fixed bottom-20 right-4 z-40 w-[min(360px,calc(100vw-2rem))] rounded-lg border border-cyan-500/30 bg-[#151b28] shadow-2xl">
+    <div className="fixed bottom-20 right-4 z-40 w-[min(360px,calc(100vw-2rem))] rounded-lg border border-cyan-500/30 bg-fd-panel shadow-2xl">
       <div className="flex items-start gap-3 p-4">
         <div className="mt-0.5 rounded-lg bg-cyan-500/20 p-2 text-cyan-300">
           <LightBulbIcon className="h-5 w-5" />

@@ -4,6 +4,7 @@ import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import {
   useToast,
+  Button,
   DataTable,
   DataTableColumn,
   StatusBadge,
@@ -39,14 +40,6 @@ interface Equipment {
   is_active: boolean;
   days_until_due?: number;
 }
-
-const statusColors: Record<string, string> = {
-  active: 'bg-green-500/20 text-green-300',
-  due: 'bg-yellow-500/20 text-yellow-300',
-  overdue: 'bg-red-500/20 text-red-300',
-  out_of_service: 'bg-slate-800 text-slate-100',
-  retired: 'bg-slate-800 text-slate-400',
-};
 
 const equipmentTypes = [
   'Caliper',
@@ -324,7 +317,7 @@ export default function Calibration() {
       sortable: true,
       accessor: (eq) => eq.status,
       csv: (eq) => eq.status.replace('_', ' '),
-      render: (eq) => <StatusBadge status={eq.status} colorMap={statusColors} />,
+      render: (eq) => <StatusBadge status={eq.status} />,
     },
     {
       key: 'actions',
@@ -364,7 +357,7 @@ export default function Calibration() {
           .filter(Boolean)
           .join(' • ') || undefined
       }
-      badge={<StatusBadge status={eq.status} colorMap={statusColors} />}
+      badge={<StatusBadge status={eq.status} />}
       fields={[
         { label: 'Type', value: eq.equipment_type || '-' },
         { label: 'Location', value: eq.location || '-' },
@@ -410,13 +403,13 @@ export default function Calibration() {
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Calibration Tracking</h1>
-        <button
+        <Button
           onClick={() => { resetForm(); setShowModal(true); }}
-          className="btn-primary flex items-center"
+          className="flex items-center"
         >
           <PlusIcon className="h-5 w-5 mr-2" />
           Add Equipment
-        </button>
+        </Button>
       </div>
 
       {/* Summary tiles — click to filter by status */}
@@ -629,12 +622,12 @@ export default function Calibration() {
               </div>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <button type="button" onClick={() => { setShowModal(false); resetForm(); }} className="btn-secondary">
+                <Button type="button" variant="secondary" onClick={() => { setShowModal(false); resetForm(); }}>
                   Cancel
-                </button>
-                <button type="submit" className="btn-primary">
+                </Button>
+                <Button type="submit">
                   {editingEquipment ? 'Update' : 'Create'}
-                </button>
+                </Button>
               </div>
             </form>
       </Modal>
@@ -746,10 +739,10 @@ export default function Calibration() {
               </div>
 
               <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <button type="button" onClick={() => setShowCalibrationModal(false)} className="btn-secondary">
+                <Button type="button" variant="secondary" onClick={() => setShowCalibrationModal(false)}>
                   Cancel
-                </button>
-                <button type="submit" className="btn-primary">Record Calibration</button>
+                </Button>
+                <Button type="submit">Record Calibration</Button>
               </div>
             </form>
       </Modal>

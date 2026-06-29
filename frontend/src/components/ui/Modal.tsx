@@ -164,7 +164,7 @@ export function Modal({
   if (!open || typeof document === 'undefined') return null;
 
   const panelClasses = [
-    'bg-[#151b28] rounded-xl shadow-xl animate-scale-in w-full',
+    'bg-fd-panel rounded-xl shadow-xl animate-scale-in w-full',
     MAX_WIDTH[size],
     'max-h-[90vh]',
     scroll ? 'overflow-y-auto' : 'flex flex-col overflow-hidden',

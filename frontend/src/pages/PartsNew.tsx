@@ -735,7 +735,7 @@ export default function PartsPage() {
                   <th className="px-4 py-3 w-10" />
                 </tr>
               </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
+              <tbody className="bg-fd-panel divide-y divide-slate-700">
                 {filteredParts.map(part => {
                   const bomItems = bomData[part.id] || [];
                   const isExpanded = expandedParts.has(part.id);
@@ -1047,7 +1047,7 @@ export default function PartsPage() {
                       {showCustomerDropdown && (
                         <div
                           id="new-part-customer-results"
-                          className="absolute z-20 w-full mt-1 bg-[#151b28] border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto"
+                          className="absolute z-20 w-full mt-1 bg-fd-panel border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto"
                           role="listbox"
                         >
                           {filteredCustomers.length > 0 ? (

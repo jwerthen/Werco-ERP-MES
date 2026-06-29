@@ -33,7 +33,7 @@ export function AISuggestionCard({
   onSnooze,
 }: AISuggestionCardProps) {
   return (
-    <article className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
+    <article className="rounded-lg border border-slate-700 bg-fd-panel p-4">
       <div className="flex items-start gap-3">
         <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-2 text-cyan-200">
           <SparklesIcon className="h-5 w-5" />

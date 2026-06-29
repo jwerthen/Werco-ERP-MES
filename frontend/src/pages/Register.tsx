@@ -234,15 +234,15 @@ export default function Register() {
 
             {/* Key metrics - matching wercomfg.com */}
             <div className="grid grid-cols-3 gap-4 pt-2">
-              <div className="text-center p-3 rounded-xl bg-[#151b28]/[0.04] border border-white/[0.08]">
+              <div className="text-center p-3 rounded-xl bg-fd-panel/[0.04] border border-white/[0.08]">
                 <div className="text-2xl font-bold text-white">24hr</div>
                 <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">RFQ Response</div>
               </div>
-              <div className="text-center p-3 rounded-xl bg-[#151b28]/[0.04] border border-white/[0.08]">
+              <div className="text-center p-3 rounded-xl bg-fd-panel/[0.04] border border-white/[0.08]">
                 <div className="text-2xl font-bold text-white">95%+</div>
                 <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">On-Time</div>
               </div>
-              <div className="text-center p-3 rounded-xl bg-[#151b28]/[0.04] border border-white/[0.08]">
+              <div className="text-center p-3 rounded-xl bg-fd-panel/[0.04] border border-white/[0.08]">
                 <div className="text-2xl font-bold text-white">99%+</div>
                 <div className="text-xs font-mono uppercase tracking-wider text-blue-300/60 mt-1">First-Pass</div>
               </div>
@@ -250,15 +250,15 @@ export default function Register() {
 
             {/* Certification badges */}
             <div className="flex flex-wrap items-center gap-3 pt-4">
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#151b28]/[0.04] border border-white/[0.08]">
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-fd-panel/[0.04] border border-white/[0.08]">
                 <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
                 <span className="text-sm font-medium text-white/90">AS9100D</span>
               </div>
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#151b28]/[0.04] border border-white/[0.08]">
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-fd-panel/[0.04] border border-white/[0.08]">
                 <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
                 <span className="text-sm font-medium text-white/90">ISO 9001</span>
               </div>
-              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#151b28]/[0.04] border border-white/[0.08]">
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-fd-panel/[0.04] border border-white/[0.08]">
                 <ShieldCheckIcon className="h-4 w-4 text-blue-400" />
                 <span className="text-sm font-medium text-white/90">ITAR</span>
               </div>
@@ -355,7 +355,7 @@ export default function Register() {
                       onChange={e => setFirstName(e.target.value)}
                       onFocus={() => setFocusedField('firstName')}
                       onBlur={() => setFocusedField(null)}
-                      className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-[#151b28]"
+                      className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-fd-panel"
                       placeholder="John"
                       autoComplete="given-name"
                     />
@@ -382,7 +382,7 @@ export default function Register() {
                       onChange={e => setLastName(e.target.value)}
                       onFocus={() => setFocusedField('lastName')}
                       onBlur={() => setFocusedField(null)}
-                      className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-[#151b28]"
+                      className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-fd-panel"
                       placeholder="Doe"
                       autoComplete="family-name"
                     />
@@ -411,7 +411,7 @@ export default function Register() {
                     onChange={e => setEmail(e.target.value)}
                     onFocus={() => setFocusedField('email')}
                     onBlur={() => setFocusedField(null)}
-                    className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-[#151b28]"
+                    className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-fd-panel"
                     placeholder="you@wercomfg.com"
                     autoComplete="email"
                   />
@@ -438,7 +438,7 @@ export default function Register() {
                     onChange={e => setEmployeeId(e.target.value.replace(/[^A-Za-z0-9\-_]/g, '').slice(0, 50))}
                     onFocus={() => setFocusedField('employeeId')}
                     onBlur={() => setFocusedField(null)}
-                    className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-[#151b28]"
+                    className="du-input du-input-bordered w-full h-12 pl-12 pr-4 bg-fd-panel"
                     placeholder="Auto-generated if left blank"
                     autoComplete="off"
                   />
@@ -467,7 +467,7 @@ export default function Register() {
                     onChange={e => setPassword(e.target.value)}
                     onFocus={() => setFocusedField('password')}
                     onBlur={() => setFocusedField(null)}
-                    className="du-input du-input-bordered w-full h-12 pl-12 pr-12 bg-[#151b28]"
+                    className="du-input du-input-bordered w-full h-12 pl-12 pr-12 bg-fd-panel"
                     placeholder="Create a password"
                     autoComplete="new-password"
                   />
@@ -506,7 +506,7 @@ export default function Register() {
                     onChange={e => setConfirmPassword(e.target.value)}
                     onFocus={() => setFocusedField('confirmPassword')}
                     onBlur={() => setFocusedField(null)}
-                    className="du-input du-input-bordered w-full h-12 pl-12 pr-12 bg-[#151b28]"
+                    className="du-input du-input-bordered w-full h-12 pl-12 pr-12 bg-fd-panel"
                     placeholder="Re-enter password"
                     autoComplete="new-password"
                   />
@@ -555,15 +555,15 @@ export default function Register() {
 
           {/* Mobile compliance badges */}
           <div className="lg:hidden flex flex-wrap items-center justify-center gap-3 mt-8">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-fd-panel/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">AS9100D</span>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-fd-panel/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">ISO 9001</span>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#151b28]/80 border border-slate-700 text-slate-400">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-fd-panel/80 border border-slate-700 text-slate-400">
               <ShieldCheckIcon className="h-4 w-4 text-werco-navy-600" />
               <span className="text-xs font-medium">ITAR</span>
             </div>

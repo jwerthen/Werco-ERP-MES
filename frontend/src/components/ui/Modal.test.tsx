@@ -31,7 +31,7 @@ describe('Modal', () => {
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(document.body.contains(dialog)).toBe(true);
-    expect(dialog).toHaveClass('bg-[#151b28]', 'rounded-xl', 'shadow-xl', 'animate-scale-in', 'max-w-lg', 'p-6', 'overflow-y-auto');
+    expect(dialog).toHaveClass('bg-fd-panel', 'rounded-xl', 'shadow-xl', 'animate-scale-in', 'max-w-lg', 'p-6', 'overflow-y-auto');
   });
 
   it('maps each size to its literal max-w class', () => {

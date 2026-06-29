@@ -9,6 +9,8 @@ import {
   DataTableColumn,
   StatusBadge,
   MobileDataCard,
+  Button,
+  statusColor,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
@@ -70,14 +72,8 @@ interface Dashboard {
 
 type Tab = 'dashboard' | 'schedules' | 'work_orders';
 
-const statusColors: Record<string, { bg: string; text: string }> = {
-  open: { bg: 'bg-blue-500/20', text: 'text-blue-300' },
-  in_progress: { bg: 'bg-yellow-500/20', text: 'text-yellow-300' },
-  completed: { bg: 'bg-green-500/20', text: 'text-emerald-300' },
-  cancelled: { bg: 'bg-slate-800/50', text: 'text-slate-100' },
-  overdue: { bg: 'bg-red-500/20', text: 'text-red-300' },
-};
-
+// Priority is a page-specific scale (not a shared status), so it keeps its own
+// colorMap. Status pills route through the central status-color source.
 const priorityColors: Record<string, { bg: string; text: string }> = {
   low: { bg: 'bg-slate-800/50', text: 'text-slate-300' },
   medium: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
@@ -86,11 +82,6 @@ const priorityColors: Record<string, { bg: string; text: string }> = {
   emergency: { bg: 'bg-red-200', text: 'text-red-300' },
 };
 
-// StatusBadge colorMap form (single class string per key) derived from the
-// {bg,text} maps above, so the badge palette stays identical after migration.
-const statusBadgeColors: Record<string, string> = Object.fromEntries(
-  Object.entries(statusColors).map(([k, v]) => [k, `${v.bg} ${v.text}`]),
-);
 const priorityBadgeColors: Record<string, string> = Object.fromEntries(
   Object.entries(priorityColors).map(([k, v]) => [k, `${v.bg} ${v.text}`]),
 );
@@ -250,7 +241,7 @@ export default function Maintenance() {
       header: 'Status',
       sortable: true,
       accessor: (wo) => wo.status,
-      render: (wo) => <StatusBadge status={wo.status} colorMap={statusBadgeColors} />,
+      render: (wo) => <StatusBadge status={wo.status} />,
     },
     {
       key: 'scheduled',
@@ -271,7 +262,7 @@ export default function Maintenance() {
     <MobileDataCard
       title={wo.title}
       subtitle={wo.work_center_name || undefined}
-      badge={<StatusBadge status={wo.status} colorMap={statusBadgeColors} />}
+      badge={<StatusBadge status={wo.status} />}
       fields={[
         { label: 'Type', value: <span className="capitalize">{wo.maintenance_type}</span> },
         { label: 'Priority', value: <StatusBadge status={wo.priority} colorMap={priorityBadgeColors} /> },
@@ -407,12 +398,12 @@ export default function Maintenance() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Preventive Maintenance</h1>
         <div className="flex gap-2">
-          <button onClick={() => setShowCreateScheduleModal(true)} className="inline-flex items-center px-3 py-2 border border-slate-600 rounded-lg hover:bg-slate-800 text-sm">
+          <Button variant="secondary" onClick={() => setShowCreateScheduleModal(true)} className="inline-flex items-center">
             <CalendarDaysIcon className="w-4 h-4 mr-1" />New Schedule
-          </button>
-          <button onClick={() => setShowCreateWOModal(true)} className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+          </Button>
+          <Button onClick={() => setShowCreateWOModal(true)} className="inline-flex items-center">
             <PlusIcon className="w-5 h-5 mr-2" />New Work Order
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -470,7 +461,7 @@ export default function Maintenance() {
           {dashboard?.upcoming && dashboard.upcoming.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {dashboard.upcoming.map((item: any, i: number) => (
-                <div key={i} className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-blue-400">
+                <div key={i} className="bg-fd-panel rounded-lg shadow p-4 border-l-4 border-blue-400">
                   <div className="font-medium">{item.title || item.description}</div>
                   <div className="text-sm text-slate-400 mt-1">{item.work_center_name}</div>
                   <div className="text-sm text-slate-400 mt-1">Due: {item.next_due_date ? new Date(item.next_due_date).toLocaleDateString() : item.scheduled_date ? new Date(item.scheduled_date).toLocaleDateString() : '-'}</div>
@@ -491,7 +482,7 @@ export default function Maintenance() {
           )}
 
           <h3 className="text-lg font-semibold mt-6">Recent Work Orders</h3>
-          <div className="bg-[#151b28] rounded-lg shadow overflow-x-auto">
+          <div className="bg-fd-panel rounded-lg shadow overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-800 text-left text-xs font-medium text-slate-400 uppercase">
                 <tr>
@@ -515,7 +506,7 @@ export default function Maintenance() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[wo.status]?.bg || 'bg-slate-800/50'} ${statusColors[wo.status]?.text || ''}`}>
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColor(wo.status)}`}>
                         {wo.status?.replace(/_/g, ' ')}
                       </span>
                     </td>
@@ -639,9 +630,8 @@ export default function Maintenance() {
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
-              <button onClick={() => setShowCreateScheduleModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
-              <button onClick={handleCreateSchedule} disabled={!scheduleForm.work_center_id || !scheduleForm.description}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Create</button>
+              <Button variant="secondary" onClick={() => setShowCreateScheduleModal(false)}>Cancel</Button>
+              <Button onClick={handleCreateSchedule} disabled={!scheduleForm.work_center_id || !scheduleForm.description}>Create</Button>
             </div>
       </Modal>
 
@@ -691,9 +681,8 @@ export default function Maintenance() {
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
-              <button onClick={() => setShowCreateWOModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
-              <button onClick={handleCreateWO} disabled={!woForm.title || !woForm.work_center_id}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Create</button>
+              <Button variant="secondary" onClick={() => setShowCreateWOModal(false)}>Cancel</Button>
+              <Button onClick={handleCreateWO} disabled={!woForm.title || !woForm.work_center_id}>Create</Button>
             </div>
       </Modal>
 
@@ -724,8 +713,8 @@ export default function Maintenance() {
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
-              <button onClick={() => setShowCompleteModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
-              <button onClick={handleComplete} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Complete</button>
+              <Button variant="secondary" onClick={() => setShowCompleteModal(false)}>Cancel</Button>
+              <Button onClick={handleComplete}>Complete</Button>
             </div>
       </Modal>
     </div>

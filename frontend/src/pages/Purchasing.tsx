@@ -11,8 +11,10 @@ import {
 } from '@heroicons/react/24/outline';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
+  Button,
   EmptyState,
   ErrorState,
+  StatusBadge,
   useToast,
   DataTable,
   DataTableColumn,
@@ -78,17 +80,6 @@ interface DocumentType {
 }
 
 type TabType = 'orders' | 'vendors';
-
-const statusColors: Record<string, string> = {
-  draft: 'bg-slate-800/50 text-slate-100',
-  pending_approval: 'bg-yellow-500/20 text-yellow-300',
-  approved: 'bg-blue-500/20 text-blue-300',
-  sent: 'bg-indigo-100 text-indigo-800',
-  partial: 'bg-orange-500/20 text-orange-800',
-  received: 'bg-green-500/20 text-emerald-300',
-  closed: 'bg-slate-800/50 text-slate-400',
-  cancelled: 'bg-red-500/20 text-red-300',
-};
 
 export default function Purchasing() {
   const { showToast } = useToast();
@@ -481,13 +472,7 @@ export default function Purchasing() {
       header: 'Status',
       sortable: true,
       accessor: (po) => po.status,
-      render: (po) => (
-        <span
-          className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusColors[po.status] || 'bg-slate-800/50'}`}
-        >
-          {po.status.replace('_', ' ')}
-        </span>
-      ),
+      render: (po) => <StatusBadge status={po.status} />,
       csv: (po) => po.status.replace('_', ' '),
     },
     {
@@ -552,13 +537,7 @@ export default function Purchasing() {
       title={po.po_number}
       subtitle={po.vendor_name || undefined}
       onClick={() => handlePrintPO(po.id)}
-      badge={
-        <span
-          className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[po.status] || 'bg-slate-800/50'}`}
-        >
-          {po.status.replace('_', ' ')}
-        </span>
-      }
+      badge={<StatusBadge status={po.status} />}
       fields={[
         { label: 'Order Date', value: po.order_date ? formatCentralDate(po.order_date) : '-' },
         { label: 'Due Date', value: po.required_date ? formatCentralDate(po.required_date) : '-' },
@@ -616,14 +595,14 @@ export default function Purchasing() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Purchasing & Receiving</h1>
         <div className="flex gap-2">
-          <button onClick={() => setShowVendorModal(true)} className="btn-secondary flex items-center">
+          <Button variant="secondary" onClick={() => setShowVendorModal(true)} className="flex items-center">
             <BuildingOfficeIcon className="h-5 w-5 mr-2" />
             New Vendor
-          </button>
-          <button onClick={() => setShowPOModal(true)} className="btn-primary flex items-center">
+          </Button>
+          <Button onClick={() => setShowPOModal(true)} className="flex items-center">
             <PlusIcon className="h-5 w-5 mr-2" />
             New PO
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -727,7 +706,7 @@ export default function Purchasing() {
                   <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-[#151b28] divide-y divide-slate-700">
+              <tbody className="bg-fd-panel divide-y divide-slate-700">
                 {vendors.map((vendor) => (
                   <tr key={vendor.id} className="hover:bg-slate-800">
                     <td className="px-4 py-3 font-mono">{vendor.code}</td>
@@ -883,8 +862,8 @@ export default function Purchasing() {
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowPOModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Create PO</button>
+                <Button variant="secondary" onClick={() => setShowPOModal(false)}>Cancel</Button>
+                <Button type="submit">Create PO</Button>
               </div>
             </form>
       </Modal>
@@ -967,8 +946,8 @@ export default function Purchasing() {
                 </label>
               </div>
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowVendorModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Create Vendor</button>
+                <Button variant="secondary" onClick={() => setShowVendorModal(false)}>Cancel</Button>
+                <Button type="submit">Create Vendor</Button>
               </div>
             </form>
       </Modal>
@@ -1161,10 +1140,10 @@ export default function Purchasing() {
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowEditVendorModal(false)} className="btn-secondary">
+                <Button variant="secondary" onClick={() => setShowEditVendorModal(false)}>
                   Cancel
-                </button>
-                <button type="submit" className="btn-primary">Save Vendor</button>
+                </Button>
+                <Button type="submit">Save Vendor</Button>
               </div>
             </form>
 
@@ -1206,7 +1185,7 @@ export default function Purchasing() {
                   onChange={(e) => setVendorDocForm({ ...vendorDocForm, file: e.target.files?.[0] || null })}
                   className="input md:col-span-1"
                 />
-                <button type="submit" className="btn-primary md:col-span-1">Upload</button>
+                <Button type="submit" className="md:col-span-1">Upload</Button>
                 <input
                   type="text"
                   value={vendorDocForm.description}
@@ -1235,7 +1214,7 @@ export default function Purchasing() {
                         <th className="px-3 py-2 text-right text-xs font-medium text-slate-400 uppercase">Actions</th>
                       </tr>
                     </thead>
-                    <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                    <tbody className="bg-fd-panel divide-y divide-slate-700">
                       {vendorDocuments.map((doc) => (
                         <tr key={doc.id} className="hover:bg-slate-800">
                           <td className="px-3 py-2 text-sm">
@@ -1364,8 +1343,8 @@ export default function Purchasing() {
                 />
               </div>
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowAddPartModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Create Part</button>
+                <Button variant="secondary" onClick={() => setShowAddPartModal(false)}>Cancel</Button>
+                <Button type="submit">Create Part</Button>
               </div>
             </form>
       </Modal>

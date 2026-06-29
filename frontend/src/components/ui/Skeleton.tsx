@@ -74,7 +74,7 @@ export const SkeletonBadge: React.FC = () => (
 
 // Card skeleton
 export const SkeletonCard: React.FC<{ className?: string }> = ({ className = '' }) => (
-  <div className={`bg-[#151b28] rounded-lg shadow p-6 ${className}`} data-testid="skeleton-card">
+  <div className={`bg-fd-panel rounded-lg shadow p-6 ${className}`} data-testid="skeleton-card">
     <div className="animate-pulse space-y-4">
       <Skeleton className="h-6 w-1/3" />
       <SkeletonText lines={3} />
@@ -116,7 +116,7 @@ export const SkeletonTable: React.FC<{
           </tr>
         </thead>
       )}
-      <tbody className="bg-[#151b28] divide-y divide-slate-700" data-testid="skeleton-table-body">
+      <tbody className="bg-fd-panel divide-y divide-slate-700" data-testid="skeleton-table-body">
         {Array.from({ length: rows }).map((_, i) => (
           <SkeletonTableRow key={i} columns={columns} />
         ))}
@@ -127,7 +127,7 @@ export const SkeletonTable: React.FC<{
 
 // Stats card skeleton (for dashboard)
 export const SkeletonStatCard: React.FC = () => (
-  <div className="bg-[#151b28] rounded-lg shadow p-6 animate-pulse" data-testid="skeleton-stat-card">
+  <div className="bg-fd-panel rounded-lg shadow p-6 animate-pulse" data-testid="skeleton-stat-card">
     <div className="flex items-center justify-between">
       <div className="space-y-2">
         <Skeleton className="h-4 w-24" />
@@ -155,7 +155,7 @@ export const SkeletonDashboard: React.FC = () => (
     </div>
     
     {/* Table */}
-    <div className="bg-[#151b28] rounded-lg shadow">
+    <div className="bg-fd-panel rounded-lg shadow">
       <div className="p-4 border-b">
         <Skeleton className="h-6 w-48" />
       </div>

@@ -3,12 +3,14 @@ import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
 import {
+  Button,
   EmptyState,
   ErrorState,
   DataTable,
   DataTableColumn,
   MobileDataCard,
   MobileDataList,
+  statusColor,
 } from '../components/ui';
 import { Modal } from '../components/ui/Modal';
 import usePermissions from '../hooks/usePermissions';
@@ -48,21 +50,6 @@ interface ReadyToShip {
   quantity_complete: number;
   due_date?: string;
 }
-
-const statusColors: Record<string, string> = {
-  pending: 'bg-fd-amber/15 text-fd-amber',
-  packed: 'bg-fd-blue/15 text-fd-blue',
-  shipped: 'bg-fd-green/15 text-fd-green',
-  delivered: 'bg-fd-green/15 text-fd-green',
-  cancelled: 'bg-fd-red/15 text-fd-red',
-};
-
-const trackingBadge: Record<string, string> = {
-  delivered: 'bg-fd-green/15 text-fd-green',
-  out_for_delivery: 'bg-fd-blue/15 text-fd-blue',
-  in_transit: 'bg-fd-blue/15 text-fd-blue',
-  pre_transit: 'bg-fd-amber/15 text-fd-amber',
-};
 
 export default function Shipping({ embedded }: { embedded?: boolean }) {
   const { showToast } = useToast();
@@ -203,28 +190,29 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
   const renderReadyActions = (wo: ReadyToShip) => (
     <>
       {canSchedule && (
-        <button
+        <Button
+          size="sm"
           onClick={(e) => {
             e.stopPropagation();
             scheduleForWorkOrder(wo);
           }}
           disabled={schedulingWoId === wo.work_order_id}
-          className="btn-primary text-sm px-3 py-1 disabled:opacity-60"
         >
           <PaperAirplaneIcon className="h-4 w-4 inline mr-1" />
           {schedulingWoId === wo.work_order_id ? 'Starting…' : 'Schedule Shipment'}
-        </button>
+        </Button>
       )}
-      <button
+      <Button
+        variant="secondary"
+        size="sm"
         onClick={(e) => {
           e.stopPropagation();
           openCreateModal(wo);
         }}
-        className="btn-secondary text-sm px-3 py-1"
       >
         <TruckIcon className="h-4 w-4 inline mr-1" />
         Manual
-      </button>
+      </Button>
     </>
   );
 
@@ -344,9 +332,9 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
         <span className="font-mono text-sm">{s.tracking_number}</span>
         {s.tracking_status && (
           <span
-            className={`px-1.5 py-0.5 rounded-sm text-[10px] font-medium ${
-              trackingBadge[s.tracking_status.toLowerCase()] || 'bg-slate-500/20 text-slate-300'
-            }`}
+            className={`px-1.5 py-0.5 rounded-sm text-[10px] font-medium ${statusColor(
+              s.tracking_status,
+            )}`}
           >
             {s.tracking_status.replace(/_/g, ' ')}
           </span>
@@ -364,7 +352,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
           title={s.shipment_number}
           subtitle={s.customer_name || s.ship_to_name || undefined}
           badge={
-            <span className={`px-2 py-0.5 rounded-sm text-xs font-medium ${statusColors[s.status]}`}>
+            <span className={`px-2 py-0.5 rounded-sm text-xs font-medium ${statusColor(s.status)}`}>
               {s.status}
             </span>
           }
@@ -477,7 +465,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                       <td className="px-4 py-2 font-medium">{s.work_order_number}</td>
                       <td className="px-4 py-2 min-w-0 truncate">{s.customer_name || s.ship_to_name || '-'}</td>
                       <td className="px-4 py-2">
-                        <span className={`px-2 py-0.5 rounded-sm text-xs font-medium ${statusColors[s.status]}`}>
+                        <span className={`px-2 py-0.5 rounded-sm text-xs font-medium ${statusColor(s.status)}`}>
                           {s.status}
                         </span>
                       </td>
@@ -628,10 +616,10 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                 />
               </div>
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">
+                <Button variant="secondary" onClick={() => setShowCreateModal(false)}>
                   Cancel
-                </button>
-                <button type="submit" className="btn-primary">Create Shipment</button>
+                </Button>
+                <Button type="submit">Create Shipment</Button>
               </div>
             </form>
           </>

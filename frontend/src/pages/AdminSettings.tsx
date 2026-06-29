@@ -757,7 +757,7 @@ function WorkCenterTypesPanel({
           </div>
         )}
         {types.map((type) => (
-          <div key={type} className="flex items-center justify-between border border-surface-200 rounded-lg px-3 py-2 bg-[#151b28]">
+          <div key={type} className="flex items-center justify-between border border-surface-200 rounded-lg px-3 py-2 bg-fd-panel">
             <div>
               <div className="text-sm font-medium text-surface-900">{formatLabel(type)}</div>
               <div className="text-xs text-surface-500 font-mono">{type}</div>
@@ -871,7 +871,7 @@ function OverheadSettings({ data, onUpdate }: { data: Record<string, any>; onUpd
                 </>
               ) : (
                 <>
-                  <code className="px-3 py-1.5 bg-[#151b28] border border-surface-200 rounded-lg text-sm font-mono">
+                  <code className="px-3 py-1.5 bg-fd-panel border border-surface-200 rounded-lg text-sm font-mono">
                     {def.type === 'json' ? (typeof displayValue === 'string' ? displayValue : JSON.stringify(displayValue)) : displayValue}
                   </code>
                   <button onClick={() => startEdit(def.key, displayValue)} className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10">

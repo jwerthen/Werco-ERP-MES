@@ -132,7 +132,7 @@ export default function SetupWizard() {
         />
       )}
 
-      <div className="bg-[#151b28] border border-slate-700 rounded-lg p-5">
+      <div className="bg-fd-panel border border-slate-700 rounded-lg p-5">
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="text-sm text-slate-400 uppercase tracking-wide">Onboarding Progress</div>
@@ -148,7 +148,7 @@ export default function SetupWizard() {
         </div>
       </div>
 
-      <div className="bg-[#151b28] border border-slate-700 rounded-lg p-5">
+      <div className="bg-fd-panel border border-slate-700 rounded-lg p-5">
         <div className="flex items-center gap-2 mb-4">
           <SparklesIcon className="h-5 w-5 text-cyan-300" />
           <h2 className="text-lg font-semibold text-white">Review Queue</h2>
@@ -184,7 +184,7 @@ export default function SetupWizard() {
           <Link
             key={step.key}
             to={step.href}
-            className="bg-[#151b28] border border-slate-700 rounded-lg p-4 hover:border-cyan-500/60 transition-colors"
+            className="bg-fd-panel border border-slate-700 rounded-lg p-4 hover:border-cyan-500/60 transition-colors"
           >
             <div className="flex items-start gap-3">
               <div className={`h-9 w-9 rounded-lg flex items-center justify-center ${
@@ -203,7 +203,7 @@ export default function SetupWizard() {
         ))}
       </div>
 
-      <div className="bg-[#151b28] border border-slate-700 rounded-lg p-5">
+      <div className="bg-fd-panel border border-slate-700 rounded-lg p-5">
         <div className="flex items-center gap-2 mb-4">
           <ExclamationTriangleIcon className="h-5 w-5 text-amber-300" />
           <h2 className="text-lg font-semibold text-white">Master Data Health</h2>

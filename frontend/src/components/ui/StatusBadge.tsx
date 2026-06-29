@@ -1,4 +1,5 @@
 import React from 'react';
+import { statusColor, UNKNOWN_STATUS_CLASS } from '../../utils/statusColors';
 
 interface StatusBadgeProps {
   status: string;
@@ -6,17 +7,11 @@ interface StatusBadgeProps {
   className?: string;
 }
 
-const defaultColors: Record<string, string> = {
-  active: 'bg-green-500/20 text-green-300',
-  draft: 'bg-yellow-500/20 text-yellow-300',
-  released: 'bg-green-500/20 text-green-300',
-  obsolete: 'bg-slate-700 text-slate-400',
-  pending_approval: 'bg-amber-500/20 text-amber-300',
-};
-
 export function StatusBadge({ status, colorMap, className = '' }: StatusBadgeProps) {
-  const colors = colorMap || defaultColors;
-  const colorClass = colors[status] || 'bg-slate-700 text-slate-300';
+  // Default coloring comes from the central statusColors source of truth so a
+  // given status looks identical across every page. An optional `colorMap`
+  // override still wins for genuinely page-specific labels.
+  const colorClass = colorMap ? colorMap[status] || UNKNOWN_STATUS_CLASS : statusColor(status);
 
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium capitalize ${colorClass} ${className}`}>

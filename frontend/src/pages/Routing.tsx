@@ -802,7 +802,7 @@ export default function RoutingPage() {
                       )}
                     </tr>
                   </thead>
-                  <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                  <tbody className="bg-fd-panel divide-y divide-slate-700">
                     {selectedRouting.operations
                       .sort((a, b) => a.sequence - b.sequence)
                       .map((op) => (
@@ -941,7 +941,7 @@ export default function RoutingPage() {
                     <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">v</span>
                   )}
                   {routingPartOpen && (
-                    <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-700 bg-[#151b28] shadow-lg max-h-64 overflow-y-auto">
+                    <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-700 bg-fd-panel shadow-lg max-h-64 overflow-y-auto">
                       {filteredRoutingParts.length === 0 ? (
                         <div className="px-3 py-2 text-sm text-slate-400">No matching parts found.</div>
                       ) : (
@@ -1049,7 +1049,7 @@ export default function RoutingPage() {
                       placeholder="Search by part number or name..."
                     />
                     {generatePartOpen && (
-                      <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-700 bg-[#151b28] shadow-lg max-h-48 overflow-y-auto">
+                      <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-700 bg-fd-panel shadow-lg max-h-48 overflow-y-auto">
                         {filteredGenerateParts.length === 0 ? (
                           <div className="px-3 py-2 text-sm text-slate-400">No matching parts found.</div>
                         ) : (
@@ -1209,7 +1209,7 @@ export default function RoutingPage() {
                           <th className="px-3 py-2 text-center text-xs font-medium text-slate-400 uppercase w-10"></th>
                         </tr>
                       </thead>
-                      <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                      <tbody className="bg-fd-panel divide-y divide-slate-700">
                         {editedOperations.map((op, idx) => (
                           <React.Fragment key={idx}>
                             <tr className="hover:bg-slate-800/50">
@@ -1502,7 +1502,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.setup}
                       onChange={(e) => setTimeUnits({ ...timeUnits, setup: e.target.value as 'hrs' | 'min' })}
-                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-[#151b28] cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-fd-panel cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -1526,7 +1526,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.run}
                       onChange={(e) => setTimeUnits({ ...timeUnits, run: e.target.value as 'hrs' | 'min' })}
-                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-[#151b28] cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-fd-panel cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -1552,7 +1552,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.move}
                       onChange={(e) => setTimeUnits({ ...timeUnits, move: e.target.value as 'hrs' | 'min' })}
-                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-[#151b28] cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-fd-panel cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -1576,7 +1576,7 @@ export default function RoutingPage() {
                     <select
                       value={timeUnits.queue}
                       onChange={(e) => setTimeUnits({ ...timeUnits, queue: e.target.value as 'hrs' | 'min' })}
-                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-[#151b28] cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      className="border border-slate-600 rounded-lg px-3 py-2 w-20 bg-fd-panel cursor-pointer focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     >
                       <option value="min">min</option>
                       <option value="hrs">hrs</option>
@@ -1599,7 +1599,7 @@ export default function RoutingPage() {
                       step={1}
                       min={0}
                     />
-                    <span className="inline-flex items-center px-3 py-2 w-20 text-sm text-slate-400 border border-slate-700 rounded-lg bg-[#151b28]">
+                    <span className="inline-flex items-center px-3 py-2 w-20 text-sm text-slate-400 border border-slate-700 rounded-lg bg-fd-panel">
                       sec
                     </span>
                   </div>

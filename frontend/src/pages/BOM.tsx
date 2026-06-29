@@ -745,13 +745,13 @@ export default function BOMPage() {
                   <div className="flex rounded-lg border border-slate-600 overflow-hidden">
                     <button
                       onClick={() => setViewMode('single')}
-                      className={`px-3 py-1 text-sm ${viewMode === 'single' ? 'bg-werco-primary text-white' : 'bg-[#151b28]'}`}
+                      className={`px-3 py-1 text-sm ${viewMode === 'single' ? 'bg-werco-primary text-white' : 'bg-fd-panel'}`}
                     >
                       Single Level
                     </button>
                     <button
                       onClick={() => setViewMode('exploded')}
-                      className={`px-3 py-1 text-sm ${viewMode === 'exploded' ? 'bg-werco-primary text-white' : 'bg-[#151b28]'}`}
+                      className={`px-3 py-1 text-sm ${viewMode === 'exploded' ? 'bg-werco-primary text-white' : 'bg-fd-panel'}`}
                     >
                       Multi-Level
                     </button>
@@ -808,7 +808,7 @@ export default function BOMPage() {
                       )}
                     </tr>
                   </thead>
-                  <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                  <tbody className="bg-fd-panel divide-y divide-slate-700">
                     {viewMode === 'single' ? (
                       selectedBOM.items.map(item => (
                         <tr key={item.id} className={`hover:bg-slate-800/50 ${item.line_type === 'hardware' ? 'bg-amber-500/10/50' : ''}`}>
@@ -1157,7 +1157,7 @@ export default function BOMPage() {
                       <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Line Type</th>
                     </tr>
                   </thead>
-                  <tbody className="bg-[#151b28] divide-y divide-slate-700">
+                  <tbody className="bg-fd-panel divide-y divide-slate-700">
                     {(importPreview.raw_columns && importPreview.raw_columns.length > 0 ? importDerivedItems : importPreview.items).map((item, index) => (
                       <tr key={index}>
                         <td className="px-3 py-2 text-sm">

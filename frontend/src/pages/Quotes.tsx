@@ -16,6 +16,7 @@ import {
   DataTableColumn,
   StatusBadge,
   MobileDataCard,
+  Button,
 } from '../components/ui';
 
 interface QuoteLine {
@@ -53,16 +54,6 @@ interface Part {
   part_type: string;
   standard_cost: number;
 }
-
-const statusColors: Record<string, string> = {
-  draft: 'bg-slate-800 text-slate-100',
-  pending: 'bg-yellow-500/20 text-yellow-300',
-  sent: 'bg-blue-500/20 text-blue-300',
-  accepted: 'bg-green-500/20 text-green-300',
-  rejected: 'bg-red-500/20 text-red-300',
-  expired: 'bg-slate-800 text-slate-400',
-  converted: 'bg-emerald-500/20 text-emerald-300',
-};
 
 export default function Quotes() {
   const navigate = useNavigate();
@@ -269,7 +260,7 @@ export default function Quotes() {
       header: 'Status',
       sortable: true,
       accessor: (q) => q.status,
-      render: (q) => <StatusBadge status={q.status} colorMap={statusColors} />,
+      render: (q) => <StatusBadge status={q.status} />,
     },
     {
       key: 'quote_date',
@@ -320,7 +311,7 @@ export default function Quotes() {
     <MobileDataCard
       title={`${q.quote_number} Rev ${q.revision}`}
       subtitle={q.customer_contact ? `${q.customer_name} • ${q.customer_contact}` : q.customer_name}
-      badge={<StatusBadge status={q.status} colorMap={statusColors} />}
+      badge={<StatusBadge status={q.status} />}
       highlight={selectedQuote?.id === q.id}
       onClick={() => selectQuote(q)}
       fields={[
@@ -341,14 +332,14 @@ export default function Quotes() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Quotes & Estimates</h1>
         <div className="flex gap-2">
-          <button onClick={() => navigate('/rfq-packages/new')} className="btn-secondary flex items-center">
+          <Button variant="secondary" onClick={() => navigate('/rfq-packages/new')} className="flex items-center">
             <SparklesIcon className="h-5 w-5 mr-2" />
             AI RFQ Quote
-          </button>
-          <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center">
+          </Button>
+          <Button onClick={() => setShowCreateModal(true)} className="flex items-center">
             <PlusIcon className="h-5 w-5 mr-2" />
             New Quote
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -550,10 +541,10 @@ export default function Quotes() {
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">
+                <Button type="button" variant="secondary" onClick={() => setShowCreateModal(false)}>
                   Cancel
-                </button>
-                <button type="submit" className="btn-primary">Create Quote</button>
+                </Button>
+                <Button type="submit">Create Quote</Button>
               </div>
             </form>
       </Modal>

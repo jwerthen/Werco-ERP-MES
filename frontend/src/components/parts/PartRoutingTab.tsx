@@ -248,19 +248,19 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
 
       {/* Summary Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
+        <div className="bg-fd-panel border border-slate-700 rounded-lg p-3">
           <div className="text-xs text-slate-400 uppercase tracking-wide">Total Setup</div>
           <div className="text-lg font-semibold mt-0.5">{formatHours(routing.total_setup_hours)}</div>
         </div>
-        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
+        <div className="bg-fd-panel border border-slate-700 rounded-lg p-3">
           <div className="text-xs text-slate-400 uppercase tracking-wide">Run Time/Unit</div>
           <div className="text-lg font-semibold mt-0.5">{formatHours(routing.total_run_hours_per_unit)}</div>
         </div>
-        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
+        <div className="bg-fd-panel border border-slate-700 rounded-lg p-3">
           <div className="text-xs text-slate-400 uppercase tracking-wide">Labor Cost</div>
           <div className="text-lg font-semibold mt-0.5">${routing.total_labor_cost.toFixed(2)}</div>
         </div>
-        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
+        <div className="bg-fd-panel border border-slate-700 rounded-lg p-3">
           <div className="text-xs text-slate-400 uppercase tracking-wide">Operations</div>
           <div className="text-lg font-semibold mt-0.5">{ops.length}</div>
         </div>
@@ -283,7 +283,7 @@ export function PartRoutingTab({ part, routing, onRoutingChanged }: Props) {
                 )}
               </tr>
             </thead>
-            <tbody className="bg-[#151b28] divide-y divide-slate-700">
+            <tbody className="bg-fd-panel divide-y divide-slate-700">
               {ops.length > 0 ? ops.map(op => (
                 <tr key={op.id} className="hover:bg-slate-800">
                   <td className="px-4 py-3 text-sm font-medium">{op.operation_number}</td>

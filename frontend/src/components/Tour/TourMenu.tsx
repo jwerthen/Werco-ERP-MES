@@ -126,7 +126,7 @@ export default function TourMenu() {
           />
 
           {/* Menu */}
-          <div className="absolute right-0 top-full mt-2 w-96 bg-[#151b28] rounded-2xl shadow-2xl border border-slate-700 overflow-hidden z-50 animate-slide-down">
+          <div className="absolute right-0 top-full mt-2 w-96 bg-fd-panel rounded-2xl shadow-2xl border border-slate-700 overflow-hidden z-50 animate-slide-down">
             {/* Header with role badge */}
             <div className="bg-gradient-to-r from-werco-navy-600 to-blue-700 px-5 py-4">
               <div className="flex items-center justify-between mb-3">

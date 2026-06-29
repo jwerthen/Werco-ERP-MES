@@ -18,18 +18,8 @@ import {
   CheckCircleIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
-import { EmptyState, ErrorState, useToast, DataTable, DataTableColumn } from '../components/ui';
+import { EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
-
-const statusConfig: Record<WorkOrderStatus, { bg: string; text: string; dot: string }> = {
-  draft: { bg: 'bg-surface-100', text: 'text-surface-700', dot: 'bg-surface-400' },
-  released: { bg: 'bg-blue-500/10', text: 'text-blue-400', dot: 'bg-blue-500/100' },
-  in_progress: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', dot: 'bg-emerald-500/100' },
-  on_hold: { bg: 'bg-amber-500/10', text: 'text-amber-400', dot: 'bg-amber-500/100' },
-  complete: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', dot: 'bg-emerald-500/100' },
-  closed: { bg: 'bg-surface-100', text: 'text-surface-500', dot: 'bg-surface-400' },
-  cancelled: { bg: 'bg-red-500/10', text: 'text-red-400', dot: 'bg-red-500/100' },
-};
 
 const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
   1: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Critical' },
@@ -84,15 +74,7 @@ const getWorkOrderProgress = (wo: WorkOrderSummary) => {
 
 // Cell renderers — shared by the flat and grouped DataTable views.
 function StatusCell({ status }: { status: WorkOrderStatus }) {
-  const cfg = statusConfig[status] || statusConfig.draft;
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${cfg.bg} ${cfg.text}`}
-    >
-      <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`}></span>
-      {formatStatusLabel(status)}
-    </span>
-  );
+  return <StatusBadge status={status} />;
 }
 
 function PriorityCell({ priority }: { priority: number }) {
@@ -764,7 +746,6 @@ interface WorkOrderMobileCardProps {
 }
 
 const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onRelease, isReleasing }: WorkOrderMobileCardProps) {
-  const status = statusConfig[wo.status] || statusConfig.draft;
   const priority = priorityConfig[wo.priority] || priorityConfig[4];
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
@@ -783,10 +764,7 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
           </Link>
           <p className="text-sm text-surface-500 truncate mt-0.5">{wo.customer_name || 'No Customer'}</p>
         </div>
-        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold capitalize flex-shrink-0 ${status.bg} ${status.text}`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`}></span>
-          {formatStatusLabel(wo.status)}
-        </span>
+        <StatusBadge status={wo.status} className="flex-shrink-0" />
       </div>
 
       <div className="px-4 py-3 space-y-3">
@@ -840,13 +818,15 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
             </button>
           )}
           {canDelete && (
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => onDelete?.(wo)}
-              className="btn-ghost btn-sm text-red-300 hover:text-red-200"
+              className="text-red-300 hover:text-red-200"
             >
               <TrashIcon className="h-4 w-4 mr-1" />
               Delete
-            </button>
+            </Button>
           )}
           <Link
             to={`/work-orders/${wo.id}`}
