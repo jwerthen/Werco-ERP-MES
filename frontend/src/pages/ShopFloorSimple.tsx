@@ -28,8 +28,9 @@ import {
 } from '@heroicons/react/24/solid';
 import { FunnelIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
-import { ConfirmDialog } from '../components/ui';
+import { ConfirmDialog, SelectField } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { SCRAP_REASONS, HOLD_REASONS } from '../components/kiosk/kioskConstants';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 import { ScanResolveResult } from '../types/scan';
 
@@ -118,8 +119,13 @@ export default function ShopFloorSimple() {
   const [completeConfirm, setCompleteConfirm] = useState<Operation | null>(null);
   const [productionModal, setProductionModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
   const [detailsModal, setDetailsModal] = useState<any | null>(null);
-  const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
-  const [productionData, setProductionData] = useState({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, notes: '' });
+  const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, scrap_reason: '', notes: '' });
+  const [productionData, setProductionData] = useState({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap_reason: '', notes: '' });
+  // Hold picker — desktop holds must file a structured WorkOrderBlocker
+  // (category + optional note), mirroring the kiosk. The Hold button opens this
+  // instead of holding immediately.
+  const [holdModal, setHoldModal] = useState<Operation | null>(null);
+  const [holdData, setHoldData] = useState<{ category: string; note: string }>({ category: '', note: '' });
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [updatingPriorityWorkOrderId, setUpdatingPriorityWorkOrderId] = useState<number | null>(null);
   const [priorityReason, setPriorityReason] = useState('');
@@ -537,12 +543,12 @@ export default function ShopFloorSimple() {
 
   const handleOpenCheckOut = (operation: Operation, job: ActiveJob) => {
     setCheckOutModal({ operation, job });
-    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
+    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap_reason: '', notes: '' });
   };
 
   const handleOpenProductionModal = (operation: Operation, job: ActiveJob) => {
     setProductionModal({ operation, job });
-    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, notes: '' });
+    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap_reason: '', notes: '' });
   };
 
   const getOperationForActiveJob = (job: ActiveJob): Operation => {
@@ -585,12 +591,12 @@ export default function ShopFloorSimple() {
 
   const closeCheckOutModal = () => {
     setCheckOutModal(null);
-    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, notes: '' });
+    setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap_reason: '', notes: '' });
   };
 
   const closeProductionModal = () => {
     setProductionModal(null);
-    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, notes: '' });
+    setProductionData({ quantity_complete_delta: 1, quantity_scrapped_delta: 0, scrap_reason: '', notes: '' });
   };
 
   const adjustGoodQuantity = (delta: number) => {
@@ -612,7 +618,8 @@ export default function ShopFloorSimple() {
     quantityCompleteDelta: number,
     quantityScrappedDelta = 0,
     notes?: string,
-    closeModal = false
+    closeModal = false,
+    scrapReason?: string
   ) => {
     setActionLoading(operation.id);
     try {
@@ -620,6 +627,9 @@ export default function ShopFloorSimple() {
         quantity_complete_delta: quantityCompleteDelta,
         quantity_scrapped_delta: quantityScrappedDelta,
         notes: notes || undefined,
+        // Structured scrap reason required when scrap > 0 (compliance/traceability),
+        // mirroring the kiosk. Omitted entirely when nothing was scrapped.
+        scrap_reason: quantityScrappedDelta > 0 && scrapReason ? scrapReason : undefined,
       });
       const label = quantityCompleteDelta > 0
         ? `Added ${quantityCompleteDelta} complete part${quantityCompleteDelta === 1 ? '' : 's'}`
@@ -641,7 +651,8 @@ export default function ShopFloorSimple() {
       Number(productionData.quantity_complete_delta || 0),
       Number(productionData.quantity_scrapped_delta || 0),
       productionData.notes,
-      true
+      true,
+      productionData.scrap_reason || undefined
     );
   };
 
@@ -670,6 +681,12 @@ export default function ShopFloorSimple() {
         quantity_produced: Number(checkOutData.quantity_produced || 0),
         quantity_scrapped: Number(checkOutData.quantity_scrapped || 0),
         notes: checkOutData.notes || undefined,
+        // Structured scrap reason required when scrap > 0 (compliance/traceability),
+        // mirroring the kiosk. Omitted entirely when nothing was scrapped.
+        scrap_reason:
+          Number(checkOutData.quantity_scrapped || 0) > 0 && checkOutData.scrap_reason
+            ? checkOutData.scrap_reason
+            : undefined,
       });
       showToast('success', `Checked out of ${checkOutModal.operation.work_order_number}`);
       closeCheckOutModal();
@@ -792,11 +809,34 @@ export default function ShopFloorSimple() {
     await openOperationDetails(operation.id);
   };
 
-  const handleHold = async (operationId: number) => {
+  const openHoldModal = (operation: Operation) => {
+    setHoldModal(operation);
+    setHoldData({ category: '', note: '' });
+  };
+
+  const closeHoldModal = () => {
+    setHoldModal(null);
+    setHoldData({ category: '', note: '' });
+  };
+
+  const handleConfirmHold = async () => {
+    if (!holdModal || !holdData.category) return;
+    const operationId = holdModal.id;
+    const category = holdData.category;
+    const note = holdData.note.trim();
     setActionLoading(operationId);
     try {
-      await api.holdOperation(operationId);
+      await api.holdOperation(operationId, {
+        category,
+        severity: 'medium',
+        // The backend only files a WorkOrderBlocker when the hold carries a note
+        // OR a non-OTHER category. Send the operator's note when present; for the
+        // category-only "Other" reason, fall back to a stub note so every hold
+        // still files a structured blocker (mirrors the kiosk).
+        note: note || (category === 'other' ? 'Other (reported on shop floor)' : undefined),
+      });
       showToast('info', 'Operation placed on hold');
+      closeHoldModal();
       await loadOperations();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to hold operation');
@@ -1637,7 +1677,7 @@ export default function ShopFloorSimple() {
                   {/* Hold Button - visible when in progress */}
                   {op.status === 'in_progress' && (
                     <button
-                      onClick={() => handleHold(op.id)}
+                      onClick={() => openHoldModal(op)}
                       disabled={actionLoading === op.id}
                       className="btn-secondary text-sm py-2.5 px-3 w-full sm:w-auto"
                       title="Put on Hold"
@@ -1770,6 +1810,26 @@ export default function ShopFloorSimple() {
                 />
               </div>
 
+              {/* Scrap reason is required for traceability when scrap > 0 (reuses
+                  the shared SCRAP_REASONS — same column the kiosk writes). */}
+              {Number(productionData.quantity_scrapped_delta || 0) > 0 && (
+                <div>
+                  <label className="label">
+                    Scrap reason <span className="text-red-400">*</span>
+                  </label>
+                  <SelectField
+                    value={productionData.scrap_reason}
+                    onChange={(value) => setProductionData({ ...productionData, scrap_reason: String(value) })}
+                    options={SCRAP_REASONS.map((r) => ({ value: r.value, label: r.label }))}
+                    placeholder="Select a scrap reason"
+                    ariaLabel="Scrap reason"
+                  />
+                  {!productionData.scrap_reason && (
+                    <p className="mt-1 text-xs text-red-400">Required when scrap is greater than zero.</p>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="label">Notes (optional)</label>
                 <textarea
@@ -1791,7 +1851,8 @@ export default function ShopFloorSimple() {
                 disabled={
                   actionLoading === productionModal.operation.id ||
                   (Number(productionData.quantity_complete_delta || 0) <= 0 &&
-                    Number(productionData.quantity_scrapped_delta || 0) <= 0)
+                    Number(productionData.quantity_scrapped_delta || 0) <= 0) ||
+                  (Number(productionData.quantity_scrapped_delta || 0) > 0 && !productionData.scrap_reason)
                 }
                 className="btn-success disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -1885,7 +1946,27 @@ export default function ShopFloorSimple() {
                   className="input h-12 text-center text-lg font-semibold"
                 />
               </div>
-              
+
+              {/* Scrap reason is required for traceability when scrap > 0 (reuses
+                  the shared SCRAP_REASONS — same column the kiosk writes). */}
+              {Number(checkOutData.quantity_scrapped || 0) > 0 && (
+                <div>
+                  <label className="label">
+                    Scrap reason <span className="text-red-400">*</span>
+                  </label>
+                  <SelectField
+                    value={checkOutData.scrap_reason}
+                    onChange={(value) => setCheckOutData({ ...checkOutData, scrap_reason: String(value) })}
+                    options={SCRAP_REASONS.map((r) => ({ value: r.value, label: r.label }))}
+                    placeholder="Select a scrap reason"
+                    ariaLabel="Scrap reason"
+                  />
+                  {!checkOutData.scrap_reason && (
+                    <p className="mt-1 text-xs text-red-400">Required when scrap is greater than zero.</p>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="label">Notes (optional)</label>
                 <textarea
@@ -1897,7 +1978,7 @@ export default function ShopFloorSimple() {
                 />
               </div>
             </div>
-            
+
             <div className="modal-footer">
               <button onClick={closeCheckOutModal} className="btn-secondary">
                 Cancel
@@ -1907,9 +1988,10 @@ export default function ShopFloorSimple() {
                 disabled={
                   actionLoading === checkOutModal.operation.id ||
                   checkOutData.quantity_produced < 0 ||
-                  checkOutData.quantity_scrapped < 0
+                  checkOutData.quantity_scrapped < 0 ||
+                  (Number(checkOutData.quantity_scrapped || 0) > 0 && !checkOutData.scrap_reason)
                 }
-                className="btn-success"
+                className="btn-success disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {actionLoading === checkOutModal.operation.id ? (
                   <ArrowPathIcon className="h-5 w-5 animate-spin" />
@@ -1917,6 +1999,81 @@ export default function ShopFloorSimple() {
                   <>
                     <CheckCircleIcon className="h-5 w-5 mr-2" />
                     End time and save
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      ), document.body)}
+
+      {/* Hold Modal — desktop holds file a structured WorkOrderBlocker
+          (category from the shared HOLD_REASONS + optional note), mirroring the
+          kiosk so traceability is preserved. */}
+      {holdModal && createPortal((
+        <div className="modal-overlay" onClick={closeHoldModal}>
+          <div className="modal max-w-md" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="text-lg font-semibold">Place on Hold</h3>
+              <button onClick={closeHoldModal} className="p-2 rounded-lg hover:bg-slate-800">
+                <XMarkIcon className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="modal-body space-y-4">
+              <div className="bg-slate-800/50 rounded-lg p-4">
+                <p className="text-sm text-slate-400">Operation</p>
+                <p className="font-semibold text-white">
+                  {holdModal.operation_number} - {holdModal.operation_name}
+                </p>
+                <p className="text-sm text-slate-400 mt-1">
+                  {holdModal.work_order_number} &middot; {holdModal.part_number}
+                </p>
+              </div>
+
+              <div>
+                <label className="label">
+                  Hold reason <span className="text-red-400">*</span>
+                </label>
+                <SelectField
+                  value={holdData.category}
+                  onChange={(value) => setHoldData({ ...holdData, category: String(value) })}
+                  options={HOLD_REASONS.map((r) => ({ value: r.value, label: r.label }))}
+                  placeholder="Select a hold reason"
+                  ariaLabel="Hold reason"
+                />
+                {!holdData.category && (
+                  <p className="mt-1 text-xs text-red-400">A reason is required to place a hold.</p>
+                )}
+              </div>
+
+              <div>
+                <label className="label">Note (optional)</label>
+                <textarea
+                  value={holdData.note}
+                  onChange={(e) => setHoldData({ ...holdData, note: e.target.value })}
+                  className="input"
+                  rows={3}
+                  placeholder="Add context for the blocker (what's needed, who to notify)..."
+                />
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button onClick={closeHoldModal} className="btn-secondary">
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmHold}
+                disabled={actionLoading === holdModal.id || !holdData.category}
+                className="btn-warning disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {actionLoading === holdModal.id ? (
+                  <ArrowPathIcon className="h-5 w-5 animate-spin" />
+                ) : (
+                  <>
+                    <PauseIcon className="h-5 w-5 mr-2" />
+                    Place on Hold
                   </>
                 )}
               </button>
