@@ -51,11 +51,12 @@ export default function CompanySwitcher() {
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+        className={`flex items-center gap-2 h-[34px] px-3 rounded-[3px] text-xs font-mono tracking-[0.04em] transition-colors ${
           isViewingOtherCompany
-            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-            : 'bg-base-300/50 text-base-content/70 hover:bg-base-300'
+            ? 'bg-fd-amber/15 text-fd-amber border border-fd-amber/40'
+            : 'text-fd-mute hover:text-fd-body border border-fd-line'
         }`}
+        style={isViewingOtherCompany ? undefined : { background: 'var(--fd-sunken)' }}
         disabled={isLoading}
       >
         <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -68,37 +69,40 @@ export default function CompanySwitcher() {
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-64 bg-base-200 border border-base-300 rounded-lg shadow-xl z-50">
+        <div
+          className="absolute right-0 mt-2 w-64 rounded-sm shadow-2xl z-50"
+          style={{ background: 'var(--fd-panel)', border: '1px solid var(--fd-line-bright)' }}
+        >
           <div className="p-2">
-            <p className="text-xs text-base-content/50 px-2 py-1 uppercase tracking-wider">Switch Company</p>
+            <p className="text-[10px] font-mono uppercase tracking-[0.14em] text-fd-faint px-2 py-1.5">Switch Company</p>
             {companies.map((company) => (
               <button
                 key={company.id}
                 onClick={() => handleSwitch(company.id)}
-                className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
+                className={`w-full text-left px-3 py-2 rounded-[3px] text-sm transition-colors ${
                   currentCompany?.id === company.id
-                    ? 'bg-primary/20 text-primary font-medium'
-                    : 'hover:bg-base-300 text-base-content/80'
+                    ? 'bg-[rgba(47,129,247,0.1)] text-fd-ink font-medium shadow-[inset_2px_0_0_#2f81f7]'
+                    : 'text-fd-body hover:bg-white/[0.03]'
                 }`}
                 disabled={isLoading}
               >
                 <div className="flex items-center justify-between">
                   <span className="truncate">{company.name}</span>
                   {currentCompany?.id === company.id && (
-                    <span className="text-xs text-primary ml-2">Active</span>
+                    <span className="text-[10px] font-mono uppercase tracking-wide text-fd-blue ml-2">Active</span>
                   )}
                 </div>
-                <div className="text-xs text-base-content/50 mt-0.5">
+                <div className="text-[11px] font-mono text-fd-mute mt-0.5 tabular-nums">
                   {company.user_count || 0} users · {company.active_work_orders || 0} active WOs
                 </div>
               </button>
             ))}
           </div>
           {isViewingOtherCompany && (
-            <div className="border-t border-base-300 p-2">
+            <div className="p-2" style={{ borderTop: '1px solid var(--fd-line)' }}>
               <button
                 onClick={handleBackToHome}
-                className="w-full text-left px-3 py-2 rounded-md text-sm text-amber-400 hover:bg-base-300 transition-colors"
+                className="w-full text-left px-3 py-2 rounded-[3px] text-sm text-fd-amber hover:bg-white/[0.03] transition-colors"
                 disabled={isLoading}
               >
                 Back to home company

@@ -4,6 +4,7 @@ import api from '../services/api';
 import { Part } from '../types';
 import { BOM, Routing } from '../types/engineering';
 import { Breadcrumbs } from '../components/ui/Breadcrumbs';
+import { getBreadcrumbParent } from '../utils/routeMeta';
 import { Tabs, Tab } from '../components/ui/Tabs';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/Toast';
@@ -145,9 +146,9 @@ export default function PartDetail() {
 
   return (
     <div className="space-y-4">
-      {/* Breadcrumbs */}
+      {/* Breadcrumbs — Parts › {part number} */}
       <Breadcrumbs crumbs={[
-        { label: 'Parts', href: '/parts' },
+        getBreadcrumbParent(`/parts/${part.id}`) ?? { label: 'Parts', href: '/parts' },
         { label: part.part_number },
       ]} />
 

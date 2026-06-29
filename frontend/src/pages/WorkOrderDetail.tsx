@@ -10,6 +10,8 @@ import { hasPermission } from '../utils/permissions';
 import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
+import { Breadcrumbs } from '../components/ui/Breadcrumbs';
+import { getBreadcrumbParent } from '../utils/routeMeta';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { EmptyState, ErrorState, useToast } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
@@ -904,12 +906,24 @@ export default function WorkOrderDetail() {
   // cell keeps the full inline detail since there's nowhere else to show it.
   const nestPanelShown = workOrder.work_order_type !== 'laser_cutting' && laserNests.length > 0;
 
+  // Parent crumb resolved from the shared route source (keeps label/href in sync
+  // with the sidebar + top-bar title); falls back to the Work Orders list.
+  const woParent = getBreadcrumbParent('/work-orders/0') ?? { label: 'Work Orders', href: '/work-orders' };
+
   return (
     <div className="space-y-6">
+      {/* Breadcrumbs — Work Orders › {WO number} */}
+      <Breadcrumbs
+        crumbs={[
+          { label: woParent.label, href: woParent.href },
+          { label: workOrder.work_order_number },
+        ]}
+      />
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center">
-          <button onClick={() => navigate('/work-orders')} className="mr-4 text-slate-400 hover:text-slate-300">
+          <button onClick={() => navigate(woParent.href)} className="mr-4 text-slate-400 hover:text-slate-300">
             <ArrowLeftIcon className="h-6 w-6" />
           </button>
           <div>
