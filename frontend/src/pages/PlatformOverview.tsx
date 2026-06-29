@@ -167,6 +167,17 @@ function CreateCompanyModal({
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // The shared <Modal> keeps this component mounted while closed, so reset the
+  // form (clearing the typed admin password) and error whenever it closes —
+  // otherwise the next open would prefill the previous credentials/error.
+  useEffect(() => {
+    if (!open) {
+      setForm({ name: '', admin_email: '', admin_first_name: '', admin_last_name: '', admin_password: '' });
+      setError('');
+      setLoading(false);
+    }
+  }, [open]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
