@@ -5,6 +5,7 @@ import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
 import { LoadingButton } from '../components/ui/LoadingButton';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import {
   EmptyState,
   ErrorState,
@@ -122,6 +123,8 @@ export default function Customers() {
   const [loadError, setLoadError] = useState(false);
   const [statsError, setStatsError] = useState(false);
   const [search, setSearch] = useState('');
+  // Keep the input responsive but debounce the value the filter runs on.
+  const debouncedSearch = useDebouncedValue(search, 250);
   const [showInactive, setShowInactive] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
@@ -177,16 +180,16 @@ export default function Customers() {
     }
   }, [customers, searchParams, selectedCustomer?.id]);
 
-  const filteredCustomers = customers.filter(c => {
-    if (!search) return true;
-    const searchLower = search.toLowerCase();
+  const filteredCustomers = useMemo(() => customers.filter(c => {
+    if (!debouncedSearch) return true;
+    const searchLower = debouncedSearch.toLowerCase();
     return (
       c.name.toLowerCase().includes(searchLower) ||
       c.code?.toLowerCase().includes(searchLower) ||
       c.contact_name?.toLowerCase().includes(searchLower) ||
       c.city?.toLowerCase().includes(searchLower)
     );
-  });
+  }), [customers, debouncedSearch]);
 
   const viewCustomerDetails = async (customer: Customer) => {
     setSelectedCustomer(customer);

@@ -19,6 +19,7 @@ import {
   MobileDataCard,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 
 interface InventoryItem {
   id: number;
@@ -68,6 +69,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const [locations, setLocations] = useState<any[]>([]);
   const [showLowStockOnly, setShowLowStockOnly] = useState(() => searchParams.get('filter') === 'low_stock');
   const [filterText, setFilterText] = useState('');
+  const debouncedFilterText = useDebouncedValue(filterText, 250);
   
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -99,26 +101,26 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       ? summary.filter((item) => lowStockPartIds.has(item.part_id))
       : summary;
     const grouped = base.filter((item) => filterByGroup(getPartType(item.part_id)));
-    if (!filterText) return grouped;
-    const term = filterText.toLowerCase();
+    if (!debouncedFilterText) return grouped;
+    const term = debouncedFilterText.toLowerCase();
     return grouped.filter((item) => (
       item.part_number?.toLowerCase().includes(term) ||
       item.part_name?.toLowerCase().includes(term)
     ));
-  }, [filterText, filterByGroup, getPartType, lowStockPartIds, showLowStockOnly, summary]);
+  }, [debouncedFilterText, filterByGroup, getPartType, lowStockPartIds, showLowStockOnly, summary]);
   const groupSummary = useMemo(
     () => summary.filter((item) => filterByGroup(getPartType(item.part_id))),
     [filterByGroup, getPartType, summary]
   );
   const filteredInventory = useMemo(() => {
     const grouped = inventory.filter((item) => filterByGroup(item.part?.part_type));
-    if (!filterText) return grouped;
-    const term = filterText.toLowerCase();
+    if (!debouncedFilterText) return grouped;
+    const term = debouncedFilterText.toLowerCase();
     return grouped.filter((item) => (
       item.part?.part_number?.toLowerCase().includes(term) ||
       item.part?.name?.toLowerCase().includes(term)
     ));
-  }, [filterByGroup, filterText, inventory]);
+  }, [filterByGroup, debouncedFilterText, inventory]);
   const groupInventory = useMemo(
     () => inventory.filter((item) => filterByGroup(item.part?.part_type)),
     [filterByGroup, inventory]

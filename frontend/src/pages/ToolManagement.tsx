@@ -10,6 +10,7 @@ import {
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import {
   ErrorState,
   useToast,
@@ -66,6 +67,7 @@ export default function ToolManagement() {
   const [error, setError] = useState('');
   const [tabError, setTabError] = useState(false);
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search, 250);
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('all');
@@ -125,8 +127,8 @@ export default function ToolManagement() {
     return tools.filter(t => {
       if (statusFilter && t.status !== statusFilter) return false;
       if (typeFilter && t.tool_type !== typeFilter) return false;
-      if (search) {
-        const s = search.toLowerCase();
+      if (debouncedSearch) {
+        const s = debouncedSearch.toLowerCase();
         return (
           t.tool_number?.toLowerCase().includes(s) ||
           t.name?.toLowerCase().includes(s) ||
@@ -136,7 +138,7 @@ export default function ToolManagement() {
       }
       return true;
     });
-  }, [tools, statusFilter, typeFilter, search]);
+  }, [tools, statusFilter, typeFilter, debouncedSearch]);
 
   const handleCreate = async () => {
     try {

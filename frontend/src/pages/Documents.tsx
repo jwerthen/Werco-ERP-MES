@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { Modal } from '../components/ui/Modal';
 import {
   useToast,
@@ -74,6 +75,7 @@ export default function Documents() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search, 250);
   const [filterType, setFilterType] = useState('');
   const [showUploadModal, setShowUploadModal] = useState(false);
 
@@ -166,14 +168,14 @@ export default function Documents() {
   }, [showToast, loadData]);
 
   const filteredDocs = useMemo(() => {
-    if (!search) return documents;
-    const searchLower = search.toLowerCase();
+    if (!debouncedSearch) return documents;
+    const searchLower = debouncedSearch.toLowerCase();
     return documents.filter((doc) => (
       doc.document_number.toLowerCase().includes(searchLower) ||
       doc.title.toLowerCase().includes(searchLower) ||
       doc.file_name?.toLowerCase().includes(searchLower)
     ));
-  }, [documents, search]);
+  }, [documents, debouncedSearch]);
   const filteredCount = filteredDocs.length;
 
   const partNumberFor = useCallback(

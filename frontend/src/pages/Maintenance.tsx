@@ -13,6 +13,7 @@ import {
   statusColor,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import {
   PlusIcon,
   MagnifyingGlassIcon,
@@ -95,6 +96,7 @@ export default function Maintenance() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search, 250);
   const [statusFilter, setStatusFilter] = useState('');
   const [showCreateScheduleModal, setShowCreateScheduleModal] = useState(false);
   const [showCreateWOModal, setShowCreateWOModal] = useState(false);
@@ -135,13 +137,13 @@ export default function Maintenance() {
   const filteredWOs = useMemo(() => {
     return workOrders.filter(wo => {
       if (statusFilter && wo.status !== statusFilter) return false;
-      if (search) {
-        const s = search.toLowerCase();
+      if (debouncedSearch) {
+        const s = debouncedSearch.toLowerCase();
         return wo.title?.toLowerCase().includes(s) || wo.work_center_name?.toLowerCase().includes(s);
       }
       return true;
     });
-  }, [workOrders, statusFilter, search]);
+  }, [workOrders, statusFilter, debouncedSearch]);
 
   const handleCreateSchedule = async () => {
     try {

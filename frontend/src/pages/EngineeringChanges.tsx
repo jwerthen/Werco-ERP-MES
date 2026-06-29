@@ -21,6 +21,7 @@ import {
   Button,
 } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -307,6 +308,9 @@ export default function EngineeringChanges() {
 
   // Filters
   const [searchTerm, setSearchTerm] = useState('');
+  // Debounce the text search so the client-side filter doesn't re-run on every
+  // keystroke; the input stays bound to the raw `searchTerm` for responsiveness.
+  const debouncedSearch = useDebouncedValue(searchTerm, 250);
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
@@ -374,15 +378,15 @@ export default function EngineeringChanges() {
   // ── Filtered data ──────────────────────────────────────────────
 
   const filtered = useMemo(() => {
-    if (!searchTerm) return ecos;
-    const term = searchTerm.toLowerCase();
+    if (!debouncedSearch) return ecos;
+    const term = debouncedSearch.toLowerCase();
     return ecos.filter((e) =>
       e.eco_number.toLowerCase().includes(term) ||
       e.title.toLowerCase().includes(term) ||
       e.description.toLowerCase().includes(term) ||
       userName(e.requester).toLowerCase().includes(term)
     );
-  }, [ecos, searchTerm]);
+  }, [ecos, debouncedSearch]);
 
   // ── Detail modal ───────────────────────────────────────────────
 

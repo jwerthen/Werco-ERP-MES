@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
 import { useSearchParams } from 'react-router-dom';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { formatCentralDate } from '../utils/centralTime';
 import { Modal } from '../components/ui/Modal';
 import {
@@ -92,6 +93,7 @@ export default function Purchasing() {
   const [loadError, setLoadError] = useState(false);
   const [vendorDocsError, setVendorDocsError] = useState(false);
   const [poSearch, setPoSearch] = useState('');
+  const debouncedPoSearch = useDebouncedValue(poSearch, 250);
 
   const [showPOModal, setShowPOModal] = useState(false);
   const [showVendorModal, setShowVendorModal] = useState(false);
@@ -445,7 +447,7 @@ export default function Purchasing() {
   };
 
   const filteredPOs = purchaseOrders.filter((po) => {
-    const term = poSearch.trim().toLowerCase();
+    const term = debouncedPoSearch.trim().toLowerCase();
     if (!term) return true;
     return (
       po.po_number.toLowerCase().includes(term) ||
@@ -678,11 +680,11 @@ export default function Purchasing() {
             mobileCards={renderPOCard}
             empty={{
               icon: ClipboardDocumentListIcon,
-              title: poSearch.trim() ? 'No matching purchase orders' : 'No purchase orders',
-              description: poSearch.trim()
+              title: debouncedPoSearch.trim() ? 'No matching purchase orders' : 'No purchase orders',
+              description: debouncedPoSearch.trim()
                 ? 'No purchase orders match your search. Adjust the term above.'
                 : 'Purchase orders you create will appear here.',
-              action: poSearch.trim() ? undefined : { label: 'New PO', onClick: () => setShowPOModal(true) },
+              action: debouncedPoSearch.trim() ? undefined : { label: 'New PO', onClick: () => setShowPOModal(true) },
             }}
           />
         </div>
