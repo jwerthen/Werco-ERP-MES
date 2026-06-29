@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 import {
   PlusIcon,
@@ -213,6 +214,12 @@ export default function Calibration() {
   const dueCount = equipment.filter(e => e.status === 'due').length;
   const activeCount = equipment.filter(e => e.status === 'active').length;
 
+  const applyFilter = (value: string) => {
+    const next = statusFilter === value ? '' : value;
+    setStatusFilter(next);
+    setSearchParams(next ? { filter: next } : {});
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -222,7 +229,7 @@ export default function Calibration() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Calibration Tracking</h1>
         <button
@@ -234,39 +241,44 @@ export default function Calibration() {
         </button>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4" data-tour="qa-calibration">
-        <div className="card flex items-center">
-          <div className="p-3 rounded-full bg-red-500/20 mr-4">
-            <ExclamationTriangleIcon className="h-6 w-6 text-red-600" />
-          </div>
-          <div>
-            <p className="text-sm text-slate-400">Overdue</p>
-            <p className="text-2xl font-bold text-red-600">{overdueCount}</p>
-          </div>
-        </div>
-        <div className="card flex items-center">
-          <div className="p-3 rounded-full bg-yellow-500/20 mr-4">
-            <ClockIcon className="h-6 w-6 text-yellow-600" />
-          </div>
-          <div>
-            <p className="text-sm text-slate-400">Due Soon (30 days)</p>
-            <p className="text-2xl font-bold text-yellow-600">{dueCount}</p>
-          </div>
-        </div>
-        <div className="card flex items-center">
-          <div className="p-3 rounded-full bg-green-500/20 mr-4">
-            <CheckCircleIcon className="h-6 w-6 text-green-600" />
-          </div>
-          <div>
-            <p className="text-sm text-slate-400">Current</p>
-            <p className="text-2xl font-bold text-green-600">{activeCount}</p>
-          </div>
-        </div>
+      {/* Summary tiles — click to filter by status */}
+      <div data-tour="qa-calibration">
+        <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          <MiniStat
+            icon={ExclamationTriangleIcon}
+            iconBg="bg-fd-red/15"
+            iconColor="text-fd-red"
+            label="Overdue"
+            value={overdueCount}
+            valueColor="text-fd-red"
+            onClick={() => applyFilter('overdue')}
+            active={statusFilter === 'overdue'}
+          />
+          <MiniStat
+            icon={ClockIcon}
+            iconBg="bg-fd-amber/15"
+            iconColor="text-fd-amber"
+            label="Due Soon (30 days)"
+            value={dueCount}
+            valueColor="text-fd-amber"
+            onClick={() => applyFilter('due')}
+            active={statusFilter === 'due'}
+          />
+          <MiniStat
+            icon={CheckCircleIcon}
+            iconBg="bg-fd-green/15"
+            iconColor="text-fd-green"
+            label="Current"
+            value={activeCount}
+            valueColor="text-fd-green"
+            onClick={() => applyFilter('active')}
+            active={statusFilter === 'active'}
+          />
+        </MiniStatStrip>
       </div>
 
       {/* Filter */}
-      <div className="flex gap-4 items-center">
+      <div className="flex gap-2 items-center">
         <select
           value={statusFilter}
           onChange={(e) => {
@@ -291,7 +303,7 @@ export default function Calibration() {
               setStatusFilter('');
               setSearchParams({});
             }}
-            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-werco-100 text-werco-700 rounded-full hover:bg-werco-200"
+            className="flex items-center gap-1 rounded-sm border border-fd-line px-2.5 py-1.5 text-sm text-slate-300 hover:border-fd-line-bright"
           >
             <XCircleIcon className="h-4 w-4" />
             Clear filter

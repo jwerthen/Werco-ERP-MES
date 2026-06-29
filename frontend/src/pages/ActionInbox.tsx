@@ -13,6 +13,7 @@ import {
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
 import { AIRecommendation } from '../types/aiLearning';
 
@@ -328,32 +329,46 @@ export default function ActionInbox() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
-          <div className="text-sm uppercase tracking-wide text-slate-400">Open Actions</div>
-          <div className="mt-2 text-3xl font-semibold text-white">{openCount}</div>
-        </div>
-        <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
-          <div className="text-sm uppercase tracking-wide text-slate-400">High Priority</div>
-          <div className="mt-2 text-3xl font-semibold text-red-300">{highCount}</div>
-        </div>
-        <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
-          <div className="text-sm uppercase tracking-wide text-slate-400">AI Suggestions</div>
-          <div className="mt-2 text-3xl font-semibold text-cyan-200">{aiCount}</div>
-        </div>
-        <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
-          <div className="text-sm uppercase tracking-wide text-slate-400">Setup Progress</div>
-          <div className="mt-2 flex items-center gap-3">
-            <span className="text-3xl font-semibold text-white">{setupProgress}%</span>
-            <div className="h-2 flex-1 rounded-full bg-slate-800 overflow-hidden">
-              <div className="h-full rounded-full bg-cyan-500" style={{ width: `${setupProgress}%` }} />
-            </div>
+      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+        <MiniStat
+          icon={InboxIcon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="Open Actions"
+          value={openCount}
+        />
+        <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg={highCount > 0 ? 'bg-fd-red/15' : 'bg-fd-green/15'}
+          iconColor={highCount > 0 ? 'text-fd-red' : 'text-fd-green'}
+          label="High Priority"
+          value={highCount}
+          valueColor={highCount > 0 ? 'text-fd-red' : undefined}
+        />
+        <MiniStat
+          icon={SparklesIcon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="AI Suggestions"
+          value={aiCount}
+          valueColor="text-fd-cyan"
+        />
+        <div className="card card-compact !p-2.5 flex flex-col gap-1 min-w-0 h-full">
+          <div className="flex items-center gap-1.5">
+            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-sm bg-fd-cyan/15">
+              <CheckCircleIcon className="h-3.5 w-3.5 text-fd-cyan" />
+            </span>
+            <p className="stat-label !text-[10px] uppercase tracking-wide truncate">Setup Progress</p>
           </div>
+          <p className="stat-value !text-xl tabular-nums">{setupProgress}%</p>
+          <span className="block h-1.5 w-full rounded-sm bg-fd-line overflow-hidden">
+            <span className="block h-full rounded-sm bg-fd-cyan" style={{ width: `${setupProgress}%` }} />
+          </span>
         </div>
-      </div>
+      </MiniStatStrip>
 
       {error && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-100">
+        <div className="rounded-sm border border-fd-amber/40 bg-fd-amber/10 px-3 py-2.5 text-sm text-fd-amber">
           {error}
         </div>
       )}
@@ -382,7 +397,7 @@ export default function ActionInbox() {
         </section>
       )}
 
-      <div className="rounded-lg border border-slate-700 bg-[#151b28] p-4">
+      <div className="rounded-sm border border-fd-line bg-fd-panel p-3">
         <div className="flex flex-col lg:flex-row gap-3 lg:items-center lg:justify-between">
           <div className="relative flex-1">
             <MagnifyingGlassIcon className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
@@ -390,7 +405,7 @@ export default function ActionInbox() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search actions..."
-              className="w-full rounded-lg border border-slate-700 bg-slate-950/70 py-2 pl-10 pr-3 text-white placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+              className="w-full rounded-sm border border-fd-line bg-slate-950/70 py-2 pl-10 pr-3 text-white placeholder:text-slate-500 focus:border-fd-blue focus:outline-none focus:ring-1 focus:ring-fd-blue"
             />
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -399,10 +414,10 @@ export default function ActionInbox() {
               <button
                 key={key}
                 onClick={() => setFilter(key)}
-                className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                className={`rounded-sm px-3 py-1.5 text-sm font-medium transition-colors ${
                   filter === key
-                    ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-500/40'
-                    : 'bg-slate-900/70 text-slate-300 border border-slate-700 hover:border-slate-500'
+                    ? 'bg-fd-blue/20 text-fd-blue border border-fd-blue/50'
+                    : 'bg-slate-900/70 text-slate-300 border border-fd-line hover:border-fd-line-bright'
                 }`}
               >
                 {filterLabels[key]}
@@ -410,6 +425,24 @@ export default function ActionInbox() {
             ))}
           </div>
         </div>
+        {(!notificationsAvailable || !aiAvailable) && (
+          <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-fd-line pt-2.5 text-[11px] text-slate-500">
+            <span className="uppercase tracking-wide text-[10px] text-slate-600">Unavailable</span>
+            {!notificationsAvailable && (
+              <span className="inline-flex items-center gap-1 rounded-sm border border-fd-line bg-slate-950/60 px-2 py-0.5">
+                <ExclamationTriangleIcon className="h-3 w-3 text-fd-amber" />
+                Notifications
+              </span>
+            )}
+            {!aiAvailable && (
+              <span className="inline-flex items-center gap-1 rounded-sm border border-fd-line bg-slate-950/60 px-2 py-0.5">
+                <ExclamationTriangleIcon className="h-3 w-3 text-fd-amber" />
+                AI recommendations
+              </span>
+            )}
+            <span className="text-slate-600">— this source is hidden from the queue.</span>
+          </div>
+        )}
       </div>
 
       <div className="rounded-lg border border-slate-700 bg-[#151b28] overflow-hidden">
@@ -495,16 +528,6 @@ export default function ActionInbox() {
         )}
       </div>
 
-      {!notificationsAvailable && (
-        <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-500">
-          Notification activity is unavailable, so this inbox is showing setup, master-data, and AI recommendations only.
-        </div>
-      )}
-      {!aiAvailable && (
-        <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-500">
-          AI recommendations are unavailable, so this inbox is showing setup, master-data, and notification activity only.
-        </div>
-      )}
     </div>
   );
 }

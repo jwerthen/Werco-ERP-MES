@@ -15,6 +15,8 @@ import {
   TruckIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
+import { Modal } from '../components/ui/Modal';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -428,75 +430,48 @@ export default function CustomerComplaints() {
 
       {/* Summary Cards */}
       {dashboard && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="du-card bg-base-100 shadow-sm border">
-            <div className="du-card-body p-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-red-500/20">
-                  <ExclamationTriangleIcon className="h-6 w-6 text-red-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wide">Open Complaints</p>
-                  <p className="text-xl font-bold text-white">{dashboard.open_complaints}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="du-card bg-base-100 shadow-sm border">
-            <div className="du-card-body p-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-blue-500/20">
-                  <ClockIcon className="h-6 w-6 text-blue-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wide">Avg Resolution Time</p>
-                  <p className="text-xl font-bold text-white">
-                    {dashboard.avg_resolution_days != null
-                      ? `${dashboard.avg_resolution_days} days`
-                      : 'N/A'}
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="du-card bg-base-100 shadow-sm border">
-            <div className="du-card-body p-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-purple-500/20">
-                  <TruckIcon className="h-6 w-6 text-purple-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wide">Open RMAs</p>
-                  <p className="text-xl font-bold text-white">{dashboard.open_rmas}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="du-card bg-base-100 shadow-sm border">
-            <div className="du-card-body p-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-green-500/20">
-                  <CheckCircleIcon className="h-6 w-6 text-green-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wide">Satisfaction Rate</p>
-                  <p className="text-xl font-bold text-white">
-                    {dashboard.satisfaction_rate != null
-                      ? `${dashboard.satisfaction_rate}%`
-                      : 'N/A'}
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <MiniStat
+            icon={ExclamationTriangleIcon}
+            iconBg="bg-fd-red/15"
+            iconColor="text-fd-red"
+            label="Open Complaints"
+            value={dashboard.open_complaints}
+          />
+          <MiniStat
+            icon={ClockIcon}
+            iconBg="bg-fd-blue/15"
+            iconColor="text-fd-blue"
+            label="Avg Resolution Time"
+            value={
+              dashboard.avg_resolution_days != null
+                ? `${dashboard.avg_resolution_days} days`
+                : 'N/A'
+            }
+          />
+          <MiniStat
+            icon={TruckIcon}
+            iconBg="bg-werco-navy/15"
+            iconColor="text-werco-navy"
+            label="Open RMAs"
+            value={dashboard.open_rmas}
+          />
+          <MiniStat
+            icon={CheckCircleIcon}
+            iconBg="bg-fd-green/15"
+            iconColor="text-fd-green"
+            label="Satisfaction Rate"
+            value={
+              dashboard.satisfaction_rate != null
+                ? `${dashboard.satisfaction_rate}%`
+                : 'N/A'
+            }
+          />
+        </MiniStatStrip>
       )}
 
       {/* Filters */}
-      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3 rounded-sm border border-fd-line bg-fd-panel p-2.5">
         <div className="relative flex-1 max-w-sm">
           <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
           <input
@@ -825,20 +800,18 @@ export default function CustomerComplaints() {
       )}
 
       {/* ── Create Complaint Modal ────────────────────────────────── */}
-      {showCreateModal && (
-        <div className="du-modal du-modal-open">
-          <div className="du-modal-box max-w-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold">New Customer Complaint</h3>
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="du-btn du-btn-sm du-btn-circle du-btn-ghost"
-              >
-                <XMarkIcon className="h-5 w-5" />
-              </button>
-            </div>
+      <Modal open={showCreateModal} onClose={() => setShowCreateModal(false)} size="2xl">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold">New Customer Complaint</h3>
+          <button
+            onClick={() => setShowCreateModal(false)}
+            className="du-btn du-btn-sm du-btn-circle du-btn-ghost"
+          >
+            <XMarkIcon className="h-5 w-5" />
+          </button>
+        </div>
 
-            <form onSubmit={handleCreate} className="space-y-4">
+        <form onSubmit={handleCreate} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="du-label">
@@ -1046,29 +1019,25 @@ export default function CustomerComplaints() {
                   )}
                 </button>
               </div>
-            </form>
-          </div>
-          <div className="du-modal-backdrop" onClick={() => setShowCreateModal(false)} />
-        </div>
-      )}
+        </form>
+      </Modal>
 
       {/* ── Create RMA Modal ──────────────────────────────────────── */}
-      {showRMAModal && rmaComplaint && (
-        <div className="du-modal du-modal-open">
-          <div className="du-modal-box max-w-lg">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold">
-                Create RMA from {rmaComplaint.complaint_number}
-              </h3>
-              <button
-                onClick={() => setShowRMAModal(false)}
-                className="du-btn du-btn-sm du-btn-circle du-btn-ghost"
-              >
-                <XMarkIcon className="h-5 w-5" />
-              </button>
-            </div>
+      {rmaComplaint && (
+        <Modal open={showRMAModal} onClose={() => setShowRMAModal(false)} size="lg">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold">
+              Create RMA from {rmaComplaint.complaint_number}
+            </h3>
+            <button
+              onClick={() => setShowRMAModal(false)}
+              className="du-btn du-btn-sm du-btn-circle du-btn-ghost"
+            >
+              <XMarkIcon className="h-5 w-5" />
+            </button>
+          </div>
 
-            <form onSubmit={handleCreateRMA} className="space-y-4">
+          <form onSubmit={handleCreateRMA} className="space-y-4">
               <div>
                 <label className="du-label">
                   <span className="du-label-text">Customer Name</span>
@@ -1169,10 +1138,8 @@ export default function CustomerComplaints() {
                   )}
                 </button>
               </div>
-            </form>
-          </div>
-          <div className="du-modal-backdrop" onClick={() => setShowRMAModal(false)} />
-        </div>
+          </form>
+        </Modal>
       )}
     </div>
   );

@@ -11,6 +11,7 @@ import { PartOverviewTab } from '../components/parts/PartOverviewTab';
 import { PartBOMTab } from '../components/parts/PartBOMTab';
 import { PartRoutingTab } from '../components/parts/PartRoutingTab';
 import { partTypeColors } from '../types/engineering';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   CubeIcon,
   ListBulletIcon,
@@ -18,6 +19,8 @@ import {
   PencilIcon,
   CheckCircleIcon,
   ExclamationTriangleIcon,
+  CurrencyDollarIcon,
+  ClipboardDocumentCheckIcon,
 } from '@heroicons/react/24/outline';
 
 const TABS: Tab[] = [
@@ -31,6 +34,23 @@ interface PartReadiness {
   blockers: string[];
   warnings: string[];
   checks: Record<string, string>;
+}
+
+// Map a BOM/Routing status to an instrument-panel value color, preserving the
+// active/released-vs-draft-vs-obsolete coloring the StatusBadge used.
+function statusColor(status: string): string {
+  switch (status) {
+    case 'active':
+    case 'released':
+      return 'text-fd-green';
+    case 'draft':
+    case 'pending_approval':
+      return 'text-fd-amber';
+    case 'obsolete':
+      return 'text-slate-400';
+    default:
+      return 'text-slate-300';
+  }
 }
 
 export default function PartDetail() {
@@ -106,11 +126,11 @@ export default function PartDetail() {
 
   if (loading) {
     return (
-      <div className="space-y-6 animate-pulse">
-        <div className="h-6 w-48 bg-slate-700 rounded" />
-        <div className="h-10 w-72 bg-slate-700 rounded" />
-        <div className="h-8 w-full bg-slate-700 rounded" />
-        <div className="h-64 bg-slate-700 rounded-xl" />
+      <div className="space-y-4 animate-pulse">
+        <div className="h-6 w-48 bg-fd-sunken rounded-sm" />
+        <div className="h-10 w-72 bg-fd-sunken rounded-sm" />
+        <div className="h-8 w-full bg-fd-sunken rounded-sm" />
+        <div className="h-64 bg-fd-sunken rounded-sm" />
       </div>
     );
   }
@@ -134,23 +154,23 @@ export default function PartDetail() {
       {/* Part Header */}
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
         <div className="min-w-0">
-          <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="text-2xl font-bold text-white truncate">{part.part_number}</h1>
-            <span className={`inline-flex px-2.5 py-1 rounded-md text-xs font-semibold ${partTypeColors[part.part_type] || 'bg-slate-800 text-slate-100'}`}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="text-2xl font-bold text-white truncate tabular-nums">{part.part_number}</h1>
+            <span className={`inline-flex px-2 py-0.5 rounded-sm text-xs font-semibold ${partTypeColors[part.part_type] || 'bg-fd-sunken text-slate-100'}`}>
               {part.part_type.replace('_', ' ')}
             </span>
             <StatusBadge status={part.status} />
             {part.is_critical && (
-              <span className="inline-flex px-2 py-0.5 rounded bg-red-500/20 text-red-300 text-xs font-medium">
+              <span className="inline-flex px-2 py-0.5 rounded-sm bg-fd-red/15 text-fd-red text-xs font-medium">
                 Critical
               </span>
             )}
           </div>
-          <p className="text-slate-400 mt-1">{part.name}</p>
+          <p className="text-slate-400 mt-1 truncate">{part.name}</p>
           <div className="flex items-center gap-4 text-sm text-slate-400 mt-1">
-            <span>Rev {part.revision}</span>
-            {part.customer_name && <span>Customer: {part.customer_name}</span>}
-            {part.drawing_number && <span>Dwg: {part.drawing_number}</span>}
+            <span className="tabular-nums">Rev {part.revision}</span>
+            {part.customer_name && <span className="min-w-0 truncate">Customer: {part.customer_name}</span>}
+            {part.drawing_number && <span className="min-w-0 truncate tabular-nums">Dwg: {part.drawing_number}</span>}
           </div>
         </div>
         <button
@@ -163,50 +183,57 @@ export default function PartDetail() {
       </div>
 
       {/* Quick Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
-          <div className="text-xs text-slate-400 uppercase tracking-wide">Standard Cost</div>
-          <div className="text-lg font-semibold mt-0.5">${Number(part.standard_cost || 0).toFixed(2)}</div>
-        </div>
-        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
-          <div className="text-xs text-slate-400 uppercase tracking-wide">BOM Status</div>
-          <div className="mt-0.5">
-            {bom ? <StatusBadge status={bom.status} /> : <span className="text-sm text-slate-500">None</span>}
-          </div>
-        </div>
-        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
-          <div className="text-xs text-slate-400 uppercase tracking-wide">Routing Status</div>
-          <div className="mt-0.5">
-            {routing ? <StatusBadge status={routing.status} /> : <span className="text-sm text-slate-500">None</span>}
-          </div>
-        </div>
-        <div className="bg-[#151b28] border border-slate-700 rounded-lg p-3">
-          <div className="text-xs text-slate-400 uppercase tracking-wide">Inspection</div>
-          <div className="text-sm font-medium mt-0.5">
-            {part.requires_inspection ? 'Required' : 'Not required'}
-          </div>
-        </div>
-      </div>
+      <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <MiniStat
+          icon={CurrencyDollarIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Standard Cost"
+          value={`$${Number(part.standard_cost || 0).toFixed(2)}`}
+        />
+        <MiniStat
+          icon={ListBulletIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="BOM Status"
+          value={bom ? bom.status.replace(/_/g, ' ') : 'None'}
+          valueColor={bom ? statusColor(bom.status) : 'text-slate-500'}
+        />
+        <MiniStat
+          icon={WrenchScrewdriverIcon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="Routing Status"
+          value={routing ? routing.status.replace(/_/g, ' ') : 'None'}
+          valueColor={routing ? statusColor(routing.status) : 'text-slate-500'}
+        />
+        <MiniStat
+          icon={ClipboardDocumentCheckIcon}
+          iconBg="bg-fd-amber/15"
+          iconColor="text-fd-amber"
+          label="Inspection"
+          value={part.requires_inspection ? 'Required' : 'Not required'}
+        />
+      </MiniStatStrip>
 
+      {/* Readiness — compact chip row */}
       {readiness && (readiness.blockers.length > 0 || readiness.warnings.length > 0) && (
-        <div className="bg-[#151b28] border border-amber-500/30 rounded-lg p-4">
-          <div className="flex items-start gap-3">
-            <ExclamationTriangleIcon className="h-5 w-5 text-amber-300 mt-0.5" />
-            <div className="min-w-0">
-              <div className="font-semibold text-white">Readiness needs attention</div>
-              <div className="mt-2 space-y-1 text-sm text-slate-300">
-                {[...readiness.blockers, ...readiness.warnings].map((message) => (
-                  <div key={message}>{message}</div>
-                ))}
-              </div>
-            </div>
-          </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {[...readiness.blockers, ...readiness.warnings].map((message) => (
+            <span
+              key={message}
+              className="inline-flex items-center gap-1.5 rounded-sm border border-fd-amber/30 bg-fd-amber/10 px-2 py-1 text-xs text-fd-amber"
+            >
+              <ExclamationTriangleIcon className="h-3.5 w-3.5 flex-shrink-0" />
+              <span className="min-w-0 max-w-xs truncate">{message}</span>
+            </span>
+          ))}
         </div>
       )}
 
       {readiness?.ready && readiness.warnings.length === 0 && (
-        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 flex items-center gap-2 text-sm text-emerald-200">
-          <CheckCircleIcon className="h-5 w-5" />
+        <div className="inline-flex items-center gap-1.5 rounded-sm border border-fd-green/30 bg-fd-green/10 px-2 py-1 text-xs text-fd-green">
+          <CheckCircleIcon className="h-3.5 w-3.5 flex-shrink-0" />
           This part has the required active production data for its type.
         </div>
       )}

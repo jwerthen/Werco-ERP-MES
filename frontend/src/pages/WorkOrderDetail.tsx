@@ -10,6 +10,7 @@ import { hasPermission } from '../utils/permissions';
 import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
+import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import {
   ArrowLeftIcon,
@@ -27,6 +28,12 @@ import {
   PaperClipIcon,
   PlusIcon,
   PencilSquareIcon,
+  CalendarDaysIcon,
+  FlagIcon,
+  BuildingOffice2Icon,
+  HashtagIcon,
+  ClockIcon,
+  ChartBarIcon,
 } from '@heroicons/react/24/outline';
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
@@ -880,6 +887,13 @@ export default function WorkOrderDetail() {
   const laserNests = (workOrder.operations || [])
     .filter((op): op is WorkOrderOperation & { laser_nest: LaserNestInfo } => Boolean(op.laser_nest))
     .map((op) => ({ operation: op, nest: op.laser_nest }));
+  // The Laser Nest Package card renders the full per-nest detail (material,
+  // thickness, sheet, runs, PDF actions) only for non-laser_cutting WOs. When it
+  // is present we de-dup: the Operations table cell collapses to a compact
+  // identifier + cross-link to the panel by stable nest id, rather than
+  // repeating the same fields. For laser_cutting WOs (no package card) the table
+  // cell keeps the full inline detail since there's nowhere else to show it.
+  const nestPanelShown = workOrder.work_order_type !== 'laser_cutting' && laserNests.length > 0;
 
   return (
     <div className="space-y-6">
@@ -944,85 +958,101 @@ export default function WorkOrderDetail() {
         </div>
       </div>
 
-      {/* Details Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Work Order Info */}
-        <div className="card">
-          <h2 className="text-lg font-semibold text-white mb-4">Work Order Information</h2>
-          <dl className="grid grid-cols-2 gap-4">
-            <div>
-              <dt className="text-sm text-slate-400">Quantity Ordered</dt>
-              <dd className="text-lg font-medium">{workOrder.quantity_ordered}</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-slate-400">Quantity Complete</dt>
-              <dd className="text-lg font-medium text-green-600">{workOrder.quantity_complete}</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-slate-400">Operation Progress</dt>
-              <dd className="text-lg font-medium text-werco-400">{operationProgress.label} ({operationProgress.percent}%)</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-slate-400">Due Date</dt>
-              <dd className="text-lg font-medium">
-                {workOrder.due_date ? formatCentralDate(workOrder.due_date) : '-'}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-sm text-slate-400">Priority</dt>
-              <dd className="text-lg font-medium">{workOrder.priority}</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-slate-400">Customer</dt>
-              <dd className="text-lg font-medium">{workOrder.customer_name || '-'}</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-slate-400">Customer PO</dt>
-              <dd className="text-lg font-medium">{workOrder.customer_po || '-'}</dd>
-            </div>
-            <div>
-              <dt className="text-sm text-slate-400">Actual Hours</dt>
-              <dd className="text-lg font-medium">{Number(workOrder.actual_hours || 0).toFixed(2)}</dd>
-            </div>
-          </dl>
-        </div>
+      {/* Work Order Information — compact KPI strip */}
+      <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+        <MiniStat
+          icon={CubeIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Qty Ordered"
+          value={workOrder.quantity_ordered}
+        />
+        <MiniStat
+          icon={CheckCircleIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Qty Complete"
+          value={workOrder.quantity_complete}
+          valueColor="text-green-600"
+        />
+        <MiniStat
+          icon={ChartBarIcon}
+          iconBg="bg-werco-navy-600/20"
+          iconColor="text-werco-400"
+          label="Op Progress"
+          value={`${operationProgress.percent}%`}
+          valueColor="text-werco-400"
+          subtitle={operationProgress.label}
+        />
+        <MiniStat
+          icon={CalendarDaysIcon}
+          iconBg="bg-fd-amber/15"
+          iconColor="text-fd-amber"
+          label="Due Date"
+          value={workOrder.due_date ? formatCentralDate(workOrder.due_date) : '-'}
+        />
+        <MiniStat
+          icon={FlagIcon}
+          iconBg="bg-fd-red/15"
+          iconColor="text-fd-red"
+          label="Priority"
+          value={workOrder.priority}
+        />
+        <MiniStat
+          icon={BuildingOffice2Icon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="Customer"
+          value={workOrder.customer_name || '-'}
+        />
+        <MiniStat
+          icon={HashtagIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Customer PO"
+          value={workOrder.customer_po || '-'}
+        />
+        <MiniStat
+          icon={ClockIcon}
+          iconBg="bg-fd-mute/15"
+          iconColor="text-fd-mute"
+          label="Actual Hours"
+          value={Number(workOrder.actual_hours || 0).toFixed(2)}
+        />
+      </MiniStatStrip>
 
-        {/* Notes */}
-        <div className="card">
-          <h2 className="text-lg font-semibold text-white mb-4">Notes & Instructions</h2>
-          <div className="space-y-4">
-            <div>
-              <label className="text-sm text-slate-400">Notes</label>
-              <p className="mt-1">{workOrder.notes || 'No notes'}</p>
-            </div>
-            <div>
-              <label className="text-sm text-slate-400">Special Instructions</label>
-              <p className="mt-1">{workOrder.special_instructions || 'No special instructions'}</p>
-            </div>
-          </div>
+      {/* Notes & Instructions — folded into a compact panel */}
+      <CockpitPanel title="Notes & Instructions" bodyClassName="space-y-3 text-sm">
+        <div>
+          <p className="text-xs uppercase tracking-wide text-slate-400">Notes</p>
+          <p className="mt-1 text-fd-body">{workOrder.notes || 'No notes'}</p>
         </div>
-      </div>
+        <div>
+          <p className="text-xs uppercase tracking-wide text-slate-400">Special Instructions</p>
+          <p className="mt-1 text-fd-body">{workOrder.special_instructions || 'No special instructions'}</p>
+        </div>
+      </CockpitPanel>
 
-      <div className="card">
-        <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4 mb-4">
-          <div className="flex items-start gap-3">
-            <DocumentTextIcon className="h-6 w-6 text-fd-blue mt-0.5" />
-            <div>
-              <h2 className="text-lg font-semibold text-white">Part Drawing PDF</h2>
-              <p className="text-sm text-slate-400">
+      <div className="card card-compact">
+        <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-3 mb-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <DocumentTextIcon className="h-5 w-5 text-fd-blue mt-0.5 flex-shrink-0" />
+            <div className="min-w-0">
+              <h2 className="card-title">Part Drawing PDF</h2>
+              <p className="card-subtitle truncate">
                 {selectedDocument
                   ? `${selectedDocument.title} • Rev ${selectedDocument.revision || '-'}`
                   : 'Attach a PDF drawing to show the part preview on this work order.'}
               </p>
             </div>
           </div>
-          <span className="text-xs font-semibold px-2 py-1 rounded bg-fd-blue/15 text-fd-blue w-fit">
+          <span className="text-xs font-semibold px-2 py-1 rounded-sm bg-fd-blue/15 text-fd-blue w-fit flex-shrink-0">
             {workOrderDocuments.length} attached
           </span>
         </div>
 
         {documentError && (
-          <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+          <div className="mb-3 rounded-sm border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
             {documentError}
           </div>
         )}
@@ -1129,18 +1159,18 @@ export default function WorkOrderDetail() {
             </form>
           </div>
 
-          <div className="min-h-[520px] rounded-lg border border-fd-line bg-slate-950/60 overflow-hidden">
-            <div className="flex items-center justify-between border-b border-fd-line px-4 py-3">
+          <div className="rounded-sm border border-fd-line bg-slate-950/60 overflow-hidden">
+            <div className="flex items-center justify-between border-b border-fd-line px-4 py-2.5 gap-3">
               <div className="min-w-0">
                 <h3 className="truncate text-sm font-semibold text-white">
                   {selectedDocument?.file_name || selectedDocument?.title || 'Preview'}
                 </h3>
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-slate-400 truncate">
                   {selectedDocument ? `${selectedDocument.document_number} • ${formatCentralDate(selectedDocument.created_at)}` : 'No PDF selected'}
                 </p>
               </div>
               {selectedDocument && (
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-shrink-0">
                   <button
                     type="button"
                     onClick={() => setSelectedDocumentId(selectedDocument.id)}
@@ -1161,18 +1191,18 @@ export default function WorkOrderDetail() {
               )}
             </div>
             {documentPreviewLoading ? (
-              <div className="flex h-[470px] items-center justify-center text-sm text-slate-400">
+              <div className="flex h-72 lg:h-[clamp(320px,46vh,520px)] items-center justify-center text-sm text-slate-400">
                 Loading PDF preview...
               </div>
             ) : documentPreviewUrl ? (
               <iframe
                 title={selectedDocument?.title || 'Work order drawing PDF'}
                 src={documentPreviewUrl}
-                className="h-[470px] w-full bg-white"
+                className="h-72 lg:h-[clamp(320px,46vh,520px)] w-full bg-white"
               />
             ) : (
-              <div className="flex h-[470px] flex-col items-center justify-center px-4 text-center text-slate-400">
-                <DocumentTextIcon className="mb-3 h-12 w-12 text-slate-600" />
+              <div className="flex h-32 flex-col items-center justify-center px-4 text-center text-slate-400">
+                <DocumentTextIcon className="mb-2 h-8 w-8 text-slate-600" />
                 <p className="text-sm">No PDF preview available.</p>
               </div>
             )}
@@ -1181,13 +1211,13 @@ export default function WorkOrderDetail() {
       </div>
 
       {workOrder.work_order_type !== 'laser_cutting' && (
-        <div className="card">
-          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
-            <div className="flex items-start gap-3">
-              <ArrowUpTrayIcon className="h-6 w-6 text-fd-red mt-0.5" />
-              <div>
-                <h2 className="text-lg font-semibold text-white">Laser Nest Package</h2>
-                <p className="text-sm text-slate-400">
+        <div className="card card-compact">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3 mb-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <ArrowUpTrayIcon className="h-5 w-5 text-fd-red mt-0.5 flex-shrink-0" />
+              <div className="min-w-0">
+                <h2 className="card-title">Laser Nest Package</h2>
+                <p className="card-subtitle truncate">
                   Import a zipped Ermaksan folder or a server folder path to create the linked laser cutting work order.
                 </p>
               </div>
@@ -1241,7 +1271,11 @@ export default function WorkOrderDetail() {
                   const acting = nestActionId === nest.id;
                   const showPreview = previewNestId === nest.id;
                   return (
-                    <div key={nest.id} className="rounded border border-fd-line bg-fd-sunken p-3">
+                    <div
+                      key={nest.id}
+                      id={`nest-${nest.id}`}
+                      className="scroll-mt-20 rounded-sm border border-fd-line bg-fd-sunken p-3"
+                    >
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
@@ -1333,7 +1367,7 @@ export default function WorkOrderDetail() {
                           <LaserNestPdfPreview
                             laserNestId={nest.id}
                             fileName={nest.document_file_name}
-                            heightClassName="h-[460px]"
+                            heightClassName="h-72 lg:h-[clamp(320px,42vh,460px)]"
                           />
                         </div>
                       )}
@@ -1346,31 +1380,71 @@ export default function WorkOrderDetail() {
         </div>
       )}
 
-      <div className="card">
-        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
-          <div className="flex items-start gap-3">
-            <ExclamationTriangleIcon className="h-6 w-6 text-amber-300 mt-0.5" />
-            <div>
-              <h2 className="text-lg font-semibold text-white">Blockers</h2>
-              <p className="text-sm text-slate-400">
-                Open issues that can stop this work order from moving cleanly.
-              </p>
-            </div>
-          </div>
-          <span className="text-xs font-semibold px-2 py-1 rounded bg-amber-500/20 text-amber-300 w-fit">
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+        {isAdminView && (
+          <CockpitPanel
+            title="Operator Activity (Admin)"
+            className="xl:col-span-5"
+            headerExtra={
+              <span className="text-xs text-slate-400">Live: {activeUsersOnWorkOrder.length} clocked in</span>
+            }
+          >
+            {activeUsersOnWorkOrder.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-700">
+                  <thead className="bg-slate-800/50">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Operator</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Work Center</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Entry Type</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-slate-400 uppercase">Clocked In (CT)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-fd-panel divide-y divide-slate-700">
+                    {activeUsersOnWorkOrder.map((entry) => (
+                      <tr key={`${entry.user_id}-${entry.clock_in ?? ''}-${entry.operation ?? 'op'}`} className="hover:bg-slate-800/50">
+                        <td className="px-3 py-2 text-sm font-medium text-white truncate">
+                          {entry.user_name || userNameById[entry.user_id] || `User #${entry.user_id}`}
+                        </td>
+                        <td className="px-3 py-2 text-sm text-slate-300 truncate">{entry.operation || '-'}</td>
+                        <td className="px-3 py-2 text-sm text-slate-300 truncate">{entry.work_center || '-'}</td>
+                        <td className="px-3 py-2 text-sm text-slate-300">
+                          {entry.entry_type ? entry.entry_type.toString().replace('_', ' ') : '-'}
+                        </td>
+                        <td className="px-3 py-2 text-sm text-slate-300">{formatDateTimeCT(entry.clock_in)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-sm text-slate-400">No one is currently clocked in on this work order.</p>
+            )}
+          </CockpitPanel>
+        )}
+
+      <CockpitPanel
+        title="Blockers"
+        subtitle="Open issues that can stop this work order from moving cleanly."
+        className={isAdminView ? 'xl:col-span-7' : 'xl:col-span-12'}
+        bodyClassName="lg:max-h-none"
+        headerExtra={
+          <span className="text-xs font-semibold px-2 py-1 rounded-sm bg-amber-500/20 text-amber-300 w-fit flex items-center gap-1">
+            <ExclamationTriangleIcon className="h-3.5 w-3.5" />
             {blockers.filter((item) => item.status === 'open' || item.status === 'acknowledged').length} open
           </span>
-        </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-4">
-          <div className="space-y-3">
+        }
+      >
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
+          <div className="space-y-3 xl:max-h-[440px] xl:overflow-y-auto pr-1">
             {blockers.length === 0 ? (
-              <div className="rounded-lg border border-fd-line bg-slate-900/40 p-4 text-sm text-slate-400">
+              <div className="rounded-sm border border-fd-line bg-slate-900/40 p-4 text-sm text-slate-400">
                 No blockers reported.
               </div>
             ) : (
               blockers.map((blocker) => (
-                <div key={blocker.id} className="rounded-lg border border-fd-line bg-slate-900/40 p-4">
+                <div key={blocker.id} className="rounded-sm border border-fd-line bg-slate-900/40 p-3">
                   <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -1414,7 +1488,7 @@ export default function WorkOrderDetail() {
             )}
           </div>
 
-          <form onSubmit={handleCreateBlocker} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
+          <form onSubmit={handleCreateBlocker} className="rounded-sm border border-fd-line bg-slate-900/40 p-3 space-y-3">
             <h3 className="font-semibold text-white">Report Blocker</h3>
             <div>
               <label className="text-sm text-slate-400 block mb-1">Operation</label>
@@ -1478,59 +1552,17 @@ export default function WorkOrderDetail() {
             </button>
           </form>
         </div>
+      </CockpitPanel>
       </div>
 
-      {isAdminView && (
-        <div className="card">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-white">Operator Activity (Admin)</h2>
-            <span className="text-xs text-slate-400">
-              Live: {activeUsersOnWorkOrder.length} clocked in
-            </span>
-          </div>
-          {activeUsersOnWorkOrder.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800/50">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operator</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Work Center</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Entry Type</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Clocked In (CT)</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-fd-panel divide-y divide-slate-700">
-                  {activeUsersOnWorkOrder.map((entry) => (
-                    <tr key={`${entry.user_id}-${entry.clock_in ?? ''}-${entry.operation ?? 'op'}`} className="hover:bg-slate-800/50">
-                      <td className="px-4 py-3 text-sm font-medium text-white">
-                        {entry.user_name || userNameById[entry.user_id] || `User #${entry.user_id}`}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-slate-300">{entry.operation || '-'}</td>
-                      <td className="px-4 py-3 text-sm text-slate-300">{entry.work_center || '-'}</td>
-                      <td className="px-4 py-3 text-sm text-slate-300">
-                        {entry.entry_type ? entry.entry_type.toString().replace('_', ' ') : '-'}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-slate-300">{formatDateTimeCT(entry.clock_in)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="text-sm text-slate-400">No one is currently clocked in on this work order.</p>
-          )}
-        </div>
-      )}
-
       {/* Operations */}
-      <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Operations / Routing</h2>
-        
+      <div className="card card-compact">
+        <h2 className="card-title mb-3">Operations / Routing</h2>
+
         {workOrder.operations.length === 0 ? (
           <p className="text-slate-400">No operations defined</p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto lg:max-h-[clamp(360px,55vh,640px)] lg:overflow-y-auto">
             <table className="min-w-full divide-y divide-slate-700">
               <thead className="bg-slate-800/50">
                 <tr>
@@ -1589,8 +1621,29 @@ export default function WorkOrderDetail() {
                             {op.description && (
                               <div className="text-xs text-slate-400 mt-0.5">{op.description}</div>
                             )}
-                            {op.laser_nest && (
-                              <div className="mt-2 rounded border border-fd-line bg-slate-900/50 px-2 py-1.5 text-xs text-slate-300">
+                            {op.laser_nest && nestPanelShown ? (
+                              // De-dup: full nest detail lives once in the Laser
+                              // Nest Package card; cross-link here by stable id.
+                              <a
+                                href={`#nest-${op.laser_nest.id}`}
+                                className="mt-2 inline-flex flex-wrap items-center gap-1.5 rounded-sm border border-fd-line bg-slate-900/50 px-2 py-1 text-xs font-medium text-fd-red hover:border-fd-line-bright"
+                                title="View nest detail in Laser Nest Package"
+                              >
+                                <DocumentTextIcon className="h-4 w-4" />
+                                {op.laser_nest.cnc_number ? (
+                                  <span className="font-mono">CNC# {op.laser_nest.cnc_number}</span>
+                                ) : (
+                                  op.laser_nest.nest_name
+                                )}
+                                {op.laser_nest.has_document && (
+                                  <PaperClipIcon className="h-3.5 w-3.5 text-fd-blue" title="Reference PDF attached" />
+                                )}
+                                <span className="tabular-nums text-slate-400">
+                                  {op.laser_nest.completed_runs}/{op.laser_nest.planned_runs}
+                                </span>
+                              </a>
+                            ) : op.laser_nest ? (
+                              <div className="mt-2 rounded-sm border border-fd-line bg-slate-900/50 px-2 py-1.5 text-xs text-slate-300">
                                 <div className="flex flex-wrap items-center gap-1.5 font-medium text-fd-red">
                                   <DocumentTextIcon className="h-4 w-4" />
                                   {op.laser_nest.cnc_number ? (
@@ -1611,7 +1664,7 @@ export default function WorkOrderDetail() {
                                   {op.laser_nest.sheet_size && <span>Sheet: {op.laser_nest.sheet_size}</span>}
                                 </div>
                               </div>
-                            )}
+                            ) : null}
                           </div>
                         </td>
                         <td className="px-4 py-3">
@@ -1692,18 +1745,18 @@ export default function WorkOrderDetail() {
 
       {/* Material Requirements */}
       {materialReqs && materialReqs.has_bom && materialReqs.materials.length > 0 && (
-        <div className="card">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <CubeIcon className="h-5 w-5 text-slate-400" />
-              <h2 className="text-lg font-semibold text-white">Material Requirements</h2>
+        <div className="card card-compact">
+          <div className="flex items-center justify-between mb-3 gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <CubeIcon className="h-5 w-5 text-slate-400 flex-shrink-0" />
+              <h2 className="card-title">Material Requirements</h2>
             </div>
-            <span className="text-sm text-slate-400">
+            <span className="text-sm text-slate-400 truncate">
               BOM Rev {materialReqs.bom_revision} • Qty: {materialReqs.quantity_ordered}
             </span>
           </div>
-          
-          <div className="overflow-x-auto">
+
+          <div className="overflow-x-auto lg:max-h-[clamp(320px,45vh,520px)] lg:overflow-y-auto">
             <table className="min-w-full divide-y divide-slate-700">
               <thead className="bg-slate-800/50">
                 <tr>
@@ -1747,14 +1800,14 @@ export default function WorkOrderDetail() {
             </table>
           </div>
           
-          <div className="mt-4 text-sm text-slate-400">
-            <span className="bg-yellow-500/10 px-2 py-1 rounded">Optional items</span> highlighted in yellow
+          <div className="mt-3 text-sm text-slate-400">
+            <span className="bg-yellow-500/10 px-2 py-1 rounded-sm">Optional items</span> highlighted in yellow
           </div>
         </div>
       )}
-      
+
       {materialReqs && !materialReqs.has_bom && (
-        <div className="card">
+        <div className="card card-compact">
           <div className="flex items-center gap-2 text-slate-400">
             <CubeIcon className="h-5 w-5" />
             <span>No BOM defined for this part</span>

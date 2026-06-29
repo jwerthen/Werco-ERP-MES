@@ -22,6 +22,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
+import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -362,103 +363,77 @@ export default function JobCosting() {
   // ── Render ─────────────────────────────────────────────────────
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 space-y-3">
       {/* Header */}
       <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Job Costing & Financial Integration</h1>
-          <p className="text-sm text-slate-400 mt-1">
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold text-white truncate">Job Costing & Financial Integration</h1>
+          <p className="text-xs text-slate-400 mt-0.5">
             Track estimated vs. actual costs, margins, and variances across work orders
           </p>
         </div>
         <button
           onClick={openCreateModal}
-          className="du-btn du-btn-primary du-btn-sm gap-1"
+          className="du-btn du-btn-primary du-btn-sm gap-1 flex-shrink-0"
         >
           <PlusIcon className="h-4 w-4" />
           New Job Cost
         </button>
       </div>
 
-      {/* Summary Cards */}
-      {summary && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="du-card bg-base-100 shadow-sm border">
-            <div className="du-card-body p-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-blue-500/20">
-                  <CurrencyDollarIcon className="h-6 w-6 text-blue-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wide">Total WIP Value</p>
-                  <p className="text-xl font-bold text-white">{fmt(summary.total_wip_value)}</p>
-                </div>
-              </div>
-            </div>
+      {/* KPI strip + Variance chart, side-by-side */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+        {summary && (
+          <div className="xl:col-span-5 min-w-0">
+            <MiniStatStrip className="grid grid-cols-2 gap-2">
+              <MiniStat
+                icon={CurrencyDollarIcon}
+                iconBg="bg-fd-blue/15"
+                iconColor="text-fd-blue"
+                label="Total WIP Value"
+                value={fmt(summary.total_wip_value)}
+              />
+              <MiniStat
+                icon={ChartBarIcon}
+                iconBg="bg-fd-green/15"
+                iconColor="text-fd-green"
+                label="Average Margin"
+                value={`${summary.average_margin_percent.toFixed(1)}%`}
+              />
+              <MiniStat
+                icon={ExclamationTriangleIcon}
+                iconBg="bg-fd-red/15"
+                iconColor="text-fd-red"
+                label="Over Budget"
+                value={summary.jobs_over_budget}
+                valueColor={summary.jobs_over_budget > 0 ? 'text-fd-red' : undefined}
+              />
+              <MiniStat
+                icon={CheckCircleIcon}
+                iconBg="bg-fd-cyan/15"
+                iconColor="text-fd-cyan"
+                label="Completed This Month"
+                value={summary.jobs_completed_this_month}
+              />
+            </MiniStatStrip>
           </div>
+        )}
 
-          <div className="du-card bg-base-100 shadow-sm border">
-            <div className="du-card-body p-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-green-500/20">
-                  <ChartBarIcon className="h-6 w-6 text-green-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wide">Average Margin</p>
-                  <p className="text-xl font-bold text-white">
-                    {summary.average_margin_percent.toFixed(1)}%
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="du-card bg-base-100 shadow-sm border">
-            <div className="du-card-body p-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-red-500/20">
-                  <ExclamationTriangleIcon className="h-6 w-6 text-red-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wide">Over Budget</p>
-                  <p className="text-xl font-bold text-white">{summary.jobs_over_budget}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="du-card bg-base-100 shadow-sm border">
-            <div className="du-card-body p-4">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-purple-500/20">
-                  <CheckCircleIcon className="h-6 w-6 text-purple-600" />
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wide">
-                    Completed This Month
-                  </p>
-                  <p className="text-xl font-bold text-white">
-                    {summary.jobs_completed_this_month}
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Variance Chart */}
-      {chartData.length > 0 && (
-        <div className="du-card bg-base-100 shadow-sm border">
-          <div className="du-card-body p-4">
-            <h2 className="text-lg font-semibold mb-4">Estimated vs Actual Cost</h2>
+        {/* Variance Chart */}
+        {chartData.length > 0 && (
+          <CockpitPanel
+            title="Estimated vs Actual Cost"
+            subtitle="Top 15 jobs in current view"
+            className="xl:col-span-7"
+            bodyClassName="lg:max-h-none"
+          >
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                 <XAxis dataKey="name" fontSize={12} tick={{ fill: '#94a3b8' }} />
                 <YAxis fontSize={12} tick={{ fill: '#94a3b8' }} tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} />
                 <Tooltip
-                  contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
+                  contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '3px', color: '#e2e8f0' }}
                   formatter={(value: number | undefined) => fmt(value ?? 0)}
                   labelStyle={{ fontWeight: 600 }}
                 />
@@ -467,9 +442,9 @@ export default function JobCosting() {
                 <Bar dataKey="Actual" fill="#f97316" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
-          </div>
-        </div>
-      )}
+          </CockpitPanel>
+        )}
+      </div>
 
       {/* Tabs + Filters */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-4">
@@ -511,7 +486,7 @@ export default function JobCosting() {
       </div>
 
       {/* Job Costs Table */}
-      <div className="du-card bg-base-100 shadow-sm border overflow-x-auto">
+      <div className="card card-compact overflow-x-auto">
         <table className="du-table du-table-sm w-full">
           <thead>
             <tr>
@@ -614,7 +589,7 @@ export default function JobCosting() {
                         <div className="p-4 space-y-4">
                           {/* Cost breakdown cards */}
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                            <div className={`rounded-lg p-3 ${varianceBg(jc.material_variance)}`}>
+                            <div className={`rounded-sm p-3 ${varianceBg(jc.material_variance)}`}>
                               <p className="text-xs font-medium text-slate-400 uppercase">Material</p>
                               <div className="flex justify-between mt-1">
                                 <span className="text-sm">Est: {fmt(jc.estimated_material_cost)}</span>
@@ -624,7 +599,7 @@ export default function JobCosting() {
                                 Variance: {fmt(jc.material_variance)}
                               </p>
                             </div>
-                            <div className={`rounded-lg p-3 ${varianceBg(jc.labor_variance)}`}>
+                            <div className={`rounded-sm p-3 ${varianceBg(jc.labor_variance)}`}>
                               <p className="text-xs font-medium text-slate-400 uppercase">Labor</p>
                               <div className="flex justify-between mt-1">
                                 <span className="text-sm">Est: {fmt(jc.estimated_labor_cost)}</span>
@@ -634,7 +609,7 @@ export default function JobCosting() {
                                 Variance: {fmt(jc.labor_variance)}
                               </p>
                             </div>
-                            <div className={`rounded-lg p-3 ${varianceBg(jc.overhead_variance)}`}>
+                            <div className={`rounded-sm p-3 ${varianceBg(jc.overhead_variance)}`}>
                               <p className="text-xs font-medium text-slate-400 uppercase">Overhead</p>
                               <div className="flex justify-between mt-1">
                                 <span className="text-sm">Est: {fmt(jc.estimated_overhead_cost)}</span>

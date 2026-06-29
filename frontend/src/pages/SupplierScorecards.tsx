@@ -16,6 +16,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface DashboardStats {
   total_rated: number;
@@ -189,14 +190,14 @@ const SupplierScorecards = () => {
   }, []);
 
   const statCards = useMemo(() => [
-    { label: 'Suppliers Rated', value: stats.total_rated, icon: ChartBarIcon, color: 'text-blue-600 bg-blue-500/20' },
-    { label: 'Average Score', value: stats.average_score?.toFixed(1), icon: ShieldCheckIcon, color: 'text-green-600 bg-green-500/20' },
-    { label: 'At-Risk Suppliers', value: stats.at_risk_count, icon: ExclamationTriangleIcon, color: 'text-red-600 bg-red-500/20' },
-    { label: 'Audits Due Soon', value: stats.audits_due_soon, icon: CalendarDaysIcon, color: 'text-amber-600 bg-amber-500/20' },
+    { label: 'Suppliers Rated', value: stats.total_rated, icon: ChartBarIcon, iconBg: 'bg-fd-blue/15', iconColor: 'text-fd-blue' },
+    { label: 'Average Score', value: stats.average_score?.toFixed(1), icon: ShieldCheckIcon, iconBg: 'bg-fd-green/15', iconColor: 'text-fd-green' },
+    { label: 'At-Risk Suppliers', value: stats.at_risk_count, icon: ExclamationTriangleIcon, iconBg: 'bg-fd-red/15', iconColor: 'text-fd-red', valueColor: stats.at_risk_count > 0 ? 'text-fd-red' : undefined },
+    { label: 'Audits Due Soon', value: stats.audits_due_soon, icon: CalendarDaysIcon, iconBg: 'bg-fd-amber/15', iconColor: 'text-fd-amber', valueColor: stats.audits_due_soon > 0 ? 'text-fd-amber' : undefined },
   ], [stats]);
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-white">Supplier Scorecards</h1>
         <div className="flex gap-2">
@@ -214,19 +215,19 @@ const SupplierScorecards = () => {
       </div>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         {statCards.map(card => (
-          <div key={card.label} className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 p-5 flex items-center gap-4">
-            <div className={`p-3 rounded-lg ${card.color}`}>
-              <card.icon className="w-6 h-6" />
-            </div>
-            <div>
-              <p className="text-sm text-slate-400">{card.label}</p>
-              <p className="text-2xl font-bold text-white">{card.value}</p>
-            </div>
-          </div>
+          <MiniStat
+            key={card.label}
+            icon={card.icon}
+            iconBg={card.iconBg}
+            iconColor={card.iconColor}
+            label={card.label}
+            value={card.value}
+            valueColor={card.valueColor}
+          />
         ))}
-      </div>
+      </MiniStatStrip>
 
       {/* Search & Tabs */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-4">

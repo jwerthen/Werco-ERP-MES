@@ -540,7 +540,7 @@ export default function PartsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">Parts</h1>
-          <p className="text-sm text-slate-400 mt-0.5">{stats.total} parts · {stats.active} active · {stats.critical} critical</p>
+          <p className="text-sm text-slate-400 mt-0.5 tabular-nums">{stats.total} parts · {stats.active} active · {stats.manufactured} mfg/assembly · {stats.critical} critical</p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => setShowImport(true)} className="btn-secondary flex items-center gap-2">
@@ -566,7 +566,7 @@ export default function PartsPage() {
             className="input pl-9 py-2 text-sm"
           />
         </div>
-        <div className="flex gap-2 items-center">
+        <div className="flex flex-wrap gap-2 items-center">
           <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} className="input py-2 text-sm w-40">
             <option value="">All Types</option>
             {ENGINEERING_PART_TYPE_OPTIONS.map(option => (
@@ -589,27 +589,22 @@ export default function PartsPage() {
             Show BOM components as top-level parts
           </label>
           {/* View toggle */}
-          <div className="flex rounded-lg border border-slate-600 overflow-hidden">
+          <div className="flex rounded-sm border border-fd-line overflow-hidden">
             <button
               onClick={() => setViewMode('table')}
-              className={`p-2 ${viewMode === 'table' ? 'bg-slate-800' : 'bg-[#151b28] hover:bg-slate-800/50'}`}
+              className={`p-2 ${viewMode === 'table' ? 'bg-slate-800' : 'bg-fd-panel hover:bg-slate-800/50'}`}
               title="Table view"
             >
               <ListIcon className="h-4 w-4 text-slate-400" />
             </button>
             <button
               onClick={() => setViewMode('grid')}
-              className={`p-2 ${viewMode === 'grid' ? 'bg-slate-800' : 'bg-[#151b28] hover:bg-slate-800/50'}`}
+              className={`p-2 ${viewMode === 'grid' ? 'bg-slate-800' : 'bg-fd-panel hover:bg-slate-800/50'}`}
               title="Grid view"
             >
               <Squares2X2Icon className="h-4 w-4 text-slate-400" />
             </button>
           </div>
-        </div>
-      </div>
-
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={saveCurrentFilter}
@@ -625,47 +620,48 @@ export default function PartsPage() {
             </button>
           )}
         </div>
-        {savedFilters.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs uppercase tracking-wide text-slate-500">Saved</span>
-            {savedFilters.map(filter => (
-              <div
-                key={filter.id}
-                className="inline-flex items-center rounded-lg border border-slate-700 bg-slate-900/60 text-sm text-slate-200"
-              >
-                <button
-                  type="button"
-                  onClick={() => applySavedFilter(filter)}
-                  className="px-2.5 py-1.5 hover:text-white"
-                  title={`Apply ${filter.name}`}
-                >
-                  {filter.name}
-                </button>
-                <button
-                  type="button"
-                  onClick={event => deleteSavedFilter(filter.id, event)}
-                  className="mr-1 rounded p-1 text-slate-500 hover:bg-slate-800 hover:text-red-300"
-                  aria-label={`Delete ${filter.name}`}
-                  title={`Delete ${filter.name}`}
-                >
-                  <TrashIcon className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
+      {savedFilters.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs uppercase tracking-wide text-slate-500">Saved</span>
+          {savedFilters.map(filter => (
+            <div
+              key={filter.id}
+              className="inline-flex items-center rounded-sm border border-fd-line bg-fd-sunken text-sm text-slate-200"
+            >
+              <button
+                type="button"
+                onClick={() => applySavedFilter(filter)}
+                className="px-2.5 py-1 hover:text-white"
+                title={`Apply ${filter.name}`}
+              >
+                {filter.name}
+              </button>
+              <button
+                type="button"
+                onClick={event => deleteSavedFilter(filter.id, event)}
+                className="mr-1 rounded-sm p-1 text-slate-500 hover:bg-slate-800 hover:text-red-300"
+                aria-label={`Delete ${filter.name}`}
+                title={`Delete ${filter.name}`}
+              >
+                <TrashIcon className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {!search && !showBOMComponents && componentPartIds.size > 0 && (
-        <div className="text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 px-3 py-2 rounded-lg">
+        <div className="text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 px-3 py-2 rounded-sm tabular-nums">
           {componentPartIds.size} component part{componentPartIds.size !== 1 ? 's are' : ' is'} hidden under assembly rows.
           Check "Show BOM components as top-level parts" to see all parts.
         </div>
       )}
 
       {selectedParts.length > 0 && (
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3">
-          <div className="text-sm text-cyan-100">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-sm border border-cyan-500/30 bg-cyan-500/10 px-3 py-2">
+          <div className="text-sm text-cyan-100 tabular-nums">
             <span className="font-semibold">{selectedParts.length}</span> part{selectedParts.length !== 1 ? 's' : ''} selected
             {visibleSelectedCount !== selectedParts.length && (
               <span className="text-cyan-200/70"> · {visibleSelectedCount} visible in current filter</span>
@@ -769,8 +765,8 @@ export default function PartsPage() {
                             {part.part_type.replace('_', ' ')}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-center text-sm font-medium">{part.revision}</td>
-                        <td className="px-4 py-3 text-right text-sm">${Number(part.standard_cost || 0).toFixed(2)}</td>
+                        <td className="px-4 py-3 text-center text-sm font-medium tabular-nums">{part.revision}</td>
+                        <td className="px-4 py-3 text-right text-sm tabular-nums">${Number(part.standard_cost || 0).toFixed(2)}</td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-1.5">
                             <StatusBadge status={part.status} />
@@ -815,7 +811,7 @@ export default function PartsPage() {
                                 <span className="text-sm font-medium text-werco-navy-400">
                                   {componentPart?.part_number || `Part #${item.component_part_id}`}
                                 </span>
-                                <span className="text-[10px] bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded">
+                                <span className="text-[10px] bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded-sm tabular-nums">
                                   x{item.quantity}
                                 </span>
                               </div>
@@ -829,8 +825,8 @@ export default function PartsPage() {
                                 </span>
                             )}
                           </td>
-                          <td className="px-4 py-2 text-center text-sm">{componentPart?.revision || '-'}</td>
-                            <td className="px-4 py-2 text-right text-sm">${Number(componentCost || 0).toFixed(2)}</td>
+                          <td className="px-4 py-2 text-center text-sm tabular-nums">{componentPart?.revision || '-'}</td>
+                            <td className="px-4 py-2 text-right text-sm tabular-nums">${Number(componentCost || 0).toFixed(2)}</td>
                             <td className="px-4 py-2 text-center text-xs text-slate-500">BOM item</td>
                             <td className="px-4 py-2 text-right">
                               {componentPart && <ChevronRightIcon className="h-4 w-4 text-slate-600" />}

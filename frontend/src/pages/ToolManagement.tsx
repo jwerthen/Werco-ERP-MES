@@ -217,33 +217,13 @@ export default function ToolManagement() {
         </button>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-blue-500">
-          <div className="text-sm text-slate-400">Total Tools</div>
-          <div className="text-2xl font-bold text-white">{dashboard?.total_tools || 0}</div>
-        </div>
-        <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-indigo-500">
-          <div className="text-sm text-slate-400">Checked Out</div>
-          <div className="text-2xl font-bold text-indigo-600">{dashboard?.checked_out || 0}</div>
-        </div>
-        <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-orange-500">
-          <div className="text-sm text-slate-400">Replacement Due</div>
-          <div className="text-2xl font-bold text-orange-600">{dashboard?.replacement_due || 0}</div>
-        </div>
-        <div className="bg-[#151b28] rounded-lg shadow p-4 border-l-4 border-red-500">
-          <div className="text-sm text-slate-400">Inspection Due</div>
-          <div className="text-2xl font-bold text-red-600">{dashboard?.inspection_due || 0}</div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="border-b border-slate-700">
+      {/* Tabs (counts carry the KPI summary — see badges) */}
+      <div className="border-b border-fd-line">
         <nav className="flex -mb-px space-x-6">
           {tabs.map(tab => (
             <button key={tab.key} onClick={() => setActiveTab(tab.key)}
-              className={`py-3 px-1 border-b-2 text-sm font-medium ${activeTab === tab.key ? 'border-blue-500 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-300'}`}>
-              {tab.label}{tab.count !== undefined && <span className="ml-1 text-xs bg-slate-800/50 text-slate-400 rounded-full px-2 py-0.5">{tab.count}</span>}
+              className={`py-3 px-1 border-b-2 text-sm font-medium ${activeTab === tab.key ? 'border-fd-blue text-fd-blue' : 'border-transparent text-slate-400 hover:text-slate-300'}`}>
+              {tab.label}{tab.count !== undefined && <span className="ml-1.5 text-xs tabular-nums bg-fd-panel border border-fd-line text-slate-300 rounded-sm px-1.5 py-0.5">{tab.count}</span>}
             </button>
           ))}
         </nav>

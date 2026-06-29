@@ -346,17 +346,17 @@ export default function ImportCenter() {
   const commitBlocked = preview !== null && preview.created === 0;
 
   const renderCounts = (result: NormalizedResult) => (
-    <div className="flex flex-wrap items-center gap-4 text-sm">
+    <div className="flex flex-wrap items-center gap-4 text-sm tabular-nums">
       <span className="text-slate-300">Rows: {result.totalRows}</span>
-      <span className="text-emerald-300 flex items-center gap-1">
+      <span className="text-fd-green flex items-center gap-1">
         <CheckCircleIcon className="h-4 w-4" />
         {result.dryRun ? 'Would create' : 'Created'}: {result.created}
         {result.createdLineCount !== undefined ? ` POs (${result.createdLineCount} lines)` : ''}
       </span>
-      <span className="text-amber-300 flex items-center gap-1">
+      <span className="text-fd-amber flex items-center gap-1">
         <ExclamationTriangleIcon className="h-4 w-4" /> Skipped: {result.skipped}
       </span>
-      <span className={result.errors.length > 0 ? 'text-red-300' : 'text-slate-400'}>
+      <span className={result.errors.length > 0 ? 'text-fd-red' : 'text-slate-400'}>
         Errors: {result.errors.length}
       </span>
     </div>
@@ -364,10 +364,10 @@ export default function ImportCenter() {
 
   const renderErrorTable = (errors: NormalizedResult['errors']) =>
     errors.length > 0 && (
-      <div className="mt-4 overflow-x-auto border border-red-500/30 rounded-lg max-h-60 overflow-y-auto">
+      <div className="mt-4 overflow-x-auto border border-fd-red/30 rounded-sm max-h-60 overflow-y-auto">
         <table className="min-w-full text-sm">
           <thead>
-            <tr className="bg-red-500/10 text-red-200 text-left">
+            <tr className="bg-fd-red/10 text-red-200 text-left">
               <th className="px-3 py-2 font-medium">Row</th>
               <th className="px-3 py-2 font-medium">Identifier</th>
               <th className="px-3 py-2 font-medium">Problem</th>
@@ -375,8 +375,8 @@ export default function ImportCenter() {
           </thead>
           <tbody>
             {errors.map((error, index) => (
-              <tr key={`${error.row}-${index}`} className="border-t border-slate-700 text-slate-300">
-                <td className="px-3 py-2 whitespace-nowrap">{error.row}</td>
+              <tr key={`${error.row}-${index}`} className="border-t border-fd-line text-slate-300">
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{error.row}</td>
                 <td className="px-3 py-2 whitespace-nowrap">{error.identifier || '-'}</td>
                 <td className="px-3 py-2">{error.reason}</td>
               </tr>
@@ -388,10 +388,10 @@ export default function ImportCenter() {
 
   const renderWorkOrderRows = (rows: WorkOrderImportRowResult[]) =>
     rows.length > 0 && (
-      <div className="mt-4 overflow-x-auto border border-slate-700 rounded-lg max-h-60 overflow-y-auto">
+      <div className="mt-4 overflow-x-auto border border-fd-line rounded-sm max-h-60 overflow-y-auto">
         <table className="min-w-full text-sm">
           <thead>
-            <tr className="bg-slate-800 text-slate-300 text-left">
+            <tr className="bg-fd-sunken text-slate-300 text-left">
               <th className="px-3 py-2 font-medium">Row</th>
               <th className="px-3 py-2 font-medium">WO #</th>
               <th className="px-3 py-2 font-medium">Part</th>
@@ -403,16 +403,16 @@ export default function ImportCenter() {
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.row} className="border-t border-slate-700 text-slate-400">
-                <td className="px-3 py-2 whitespace-nowrap">{row.row}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{row.wo_number || '(generated at commit)'}</td>
+              <tr key={row.row} className="border-t border-fd-line text-slate-400">
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.row}</td>
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.wo_number || '(generated at commit)'}</td>
                 <td className="px-3 py-2 whitespace-nowrap">{row.part_number}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{row.quantity}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{row.due_date || '-'}</td>
-                <td className="px-3 py-2 whitespace-nowrap">
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.quantity}</td>
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.due_date || '-'}</td>
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">
                   {row.completed_operation_count}/{row.operation_count}
                 </td>
-                <td className="px-3 py-2 whitespace-nowrap">
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">
                   {row.next_operation_sequence !== null ? `Seq ${row.next_operation_sequence}` : '-'}
                 </td>
               </tr>
@@ -424,10 +424,10 @@ export default function ImportCenter() {
 
   const renderPurchaseOrderRows = (rows: PurchaseOrderImportRowResult[]) =>
     rows.length > 0 && (
-      <div className="mt-4 overflow-x-auto border border-slate-700 rounded-lg max-h-60 overflow-y-auto">
+      <div className="mt-4 overflow-x-auto border border-fd-line rounded-sm max-h-60 overflow-y-auto">
         <table className="min-w-full text-sm">
           <thead>
-            <tr className="bg-slate-800 text-slate-300 text-left">
+            <tr className="bg-fd-sunken text-slate-300 text-left">
               <th className="px-3 py-2 font-medium">PO #</th>
               <th className="px-3 py-2 font-medium">Vendor</th>
               <th className="px-3 py-2 font-medium">Lines</th>
@@ -437,12 +437,12 @@ export default function ImportCenter() {
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.po_number || 'new'}-${index}`} className="border-t border-slate-700 text-slate-400">
-                <td className="px-3 py-2 whitespace-nowrap">{row.po_number || '(generated at commit)'}</td>
+              <tr key={`${row.po_number || 'new'}-${index}`} className="border-t border-fd-line text-slate-400">
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.po_number || '(generated at commit)'}</td>
                 <td className="px-3 py-2 whitespace-nowrap">{row.vendor_code}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{row.line_count}</td>
-                <td className="px-3 py-2 whitespace-nowrap">${row.total.toFixed(2)}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{row.rows.join(', ')}</td>
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.line_count}</td>
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">${row.total.toFixed(2)}</td>
+                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.rows.join(', ')}</td>
               </tr>
             ))}
           </tbody>
@@ -461,31 +461,29 @@ export default function ImportCenter() {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
-        <div className="xl:col-span-1 bg-[#151b28] border border-slate-700 rounded-lg p-3 space-y-2">
+        <div className="xl:col-span-1 bg-fd-panel border border-fd-line rounded-sm p-2.5 space-y-1.5">
           {Object.entries(importTypes).map(([key, config]) => (
             <button
               key={key}
               onClick={() => handleTypeSelect(key)}
-              className={`w-full text-left rounded-lg px-3 py-3 transition-colors ${
+              title={config.entity ? `werco-import-template-${config.entity}.xlsx` : 'inventory_template.csv'}
+              className={`w-full text-left rounded-sm px-3 py-2 transition-colors ${
                 key === selectedKey
-                  ? 'bg-cyan-500/15 border border-cyan-500/40 text-white'
-                  : 'border border-transparent hover:bg-slate-800 text-slate-300'
+                  ? 'bg-fd-cyan/15 border border-fd-cyan/40 text-white'
+                  : 'border border-transparent hover:bg-fd-sunken text-slate-300'
               }`}
             >
-              <div className="font-medium">{config.label}</div>
-              <div className="text-xs text-slate-500 mt-1">
-                {config.entity ? `werco-import-template-${config.entity}.xlsx` : 'inventory_template.csv'}
-              </div>
+              <div className="font-medium truncate">{config.label}</div>
             </button>
           ))}
         </div>
 
-        <div className="xl:col-span-3 space-y-5">
-          <div className="bg-[#151b28] border border-slate-700 rounded-lg p-5">
+        <div className="xl:col-span-3 space-y-3">
+          <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
             <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
               <div>
                 <div className="flex items-center gap-2">
-                  <DocumentTextIcon className="h-6 w-6 text-cyan-300" />
+                  <DocumentTextIcon className="h-6 w-6 text-fd-cyan" />
                   <h2 className="text-xl font-semibold text-white">{selected.label}</h2>
                 </div>
                 <ul className="mt-3 space-y-1 text-sm text-slate-400">
@@ -516,13 +514,13 @@ export default function ImportCenter() {
             </div>
 
             {templateInfo && (
-              <div className="mt-5 border border-slate-700 rounded-lg p-3">
+              <div className="mt-4 border border-fd-line rounded-sm p-3">
                 <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">Columns</div>
                 <div className="flex flex-wrap gap-1.5">
                   {templateInfo.columns.map((column) => (
                     <code
                       key={column}
-                      className="px-2 py-0.5 text-xs rounded bg-slate-800 border border-slate-700 text-slate-300"
+                      className="px-2 py-0.5 text-xs rounded-sm bg-fd-sunken border border-fd-line text-slate-300"
                     >
                       {column}
                     </code>
@@ -534,9 +532,9 @@ export default function ImportCenter() {
           </div>
 
           {selected.mode === 'direct' ? (
-            <form onSubmit={handleValidate} className="bg-[#151b28] border border-slate-700 rounded-lg p-5 space-y-4">
+            <form onSubmit={handleValidate} className="bg-fd-panel border border-fd-line rounded-sm p-3 space-y-4">
               <div className="flex items-center gap-2">
-                <ArrowUpTrayIcon className="h-5 w-5 text-cyan-300" />
+                <ArrowUpTrayIcon className="h-5 w-5 text-fd-cyan" />
                 <h3 className="font-semibold text-white">Upload {selected.label}</h3>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -579,24 +577,24 @@ export default function ImportCenter() {
               </div>
             </form>
           ) : (
-            <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-4 text-sm text-slate-400">
+            <div className="bg-fd-sunken border border-fd-line rounded-sm p-3 text-sm text-slate-400">
               This template uses a specialized workflow. Use the linked module page for document review, commit, or
               inventory movement tools.
             </div>
           )}
 
           {errorMessage && (
-            <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-4 text-sm text-red-200">
+            <div className="bg-fd-red/10 border border-fd-red/40 rounded-sm p-3 text-sm text-red-200">
               {errorMessage}
             </div>
           )}
 
           {preview && (
-            <div className="bg-[#151b28] border border-cyan-500/40 rounded-lg p-5">
+            <div className="bg-fd-panel border border-fd-cyan/40 rounded-sm p-3">
               <div className="flex items-center gap-2">
-                <DocumentMagnifyingGlassIcon className="h-5 w-5 text-cyan-300" />
+                <DocumentMagnifyingGlassIcon className="h-5 w-5 text-fd-cyan" />
                 <h3 className="font-semibold text-white">Dry run preview</h3>
-                <span className="text-xs px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/40 text-cyan-200">
+                <span className="text-xs px-2 py-0.5 rounded-sm bg-fd-cyan/15 border border-fd-cyan/40 text-cyan-200">
                   Nothing written yet
                 </span>
               </div>
@@ -625,9 +623,9 @@ export default function ImportCenter() {
           )}
 
           {committed && (
-            <div className="bg-[#151b28] border border-emerald-500/40 rounded-lg p-5">
+            <div className="bg-fd-panel border border-fd-green/40 rounded-sm p-3">
               <div className="flex items-center gap-2">
-                <CheckCircleIcon className="h-5 w-5 text-emerald-300" />
+                <CheckCircleIcon className="h-5 w-5 text-fd-green" />
                 <h3 className="font-semibold text-white">Import committed</h3>
               </div>
               <div className="mt-3">{renderCounts(committed)}</div>

@@ -26,6 +26,7 @@ import {
 } from '@heroicons/react/24/solid';
 import { QueueListIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
+import { Modal } from '../components/ui/Modal';
 
 interface WorkOrderDetails {
   id: number;
@@ -428,10 +429,10 @@ export default function ShopFloor() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       {notice && (
         <div
-          className={`rounded-xl border px-4 py-3 flex items-start justify-between gap-4 ${
+          className={`rounded-sm border px-3 py-2.5 flex items-start justify-between gap-4 ${
             notice.type === 'success'
               ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
               : notice.type === 'error'
@@ -444,7 +445,7 @@ export default function ShopFloor() {
           <button
             type="button"
             onClick={() => setNotice(null)}
-            className="rounded-md p-1 text-current opacity-70 hover:opacity-100"
+            className="rounded-sm p-1 text-current opacity-70 hover:opacity-100"
             aria-label="Dismiss notification"
           >
             <XMarkIcon className="h-4 w-4" />
@@ -475,60 +476,44 @@ export default function ShopFloor() {
 
       {/* Active Job Banner */}
       {activeJobs.length > 0 && (
-        <div className="space-y-4">
+        <div className="space-y-2">
           {activeJobs.map((job) => (
             <div
               key={job.time_entry_id}
-              className="relative overflow-hidden bg-gradient-to-r from-emerald-500 to-emerald-600 rounded-2xl p-6 text-white shadow-lg"
+              className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5"
             >
-              {/* Animated background pattern */}
-              <div className="absolute inset-0 opacity-10">
-                <div className="absolute inset-0" style={{
-                  backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,0.1) 10px, rgba(255,255,255,0.1) 20px)'
-                }} />
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+                <span className="text-xs font-medium uppercase tracking-wide text-emerald-300 shrink-0">
+                  Working On
+                </span>
+                <span className="font-semibold text-emerald-100 truncate">
+                  {job.work_order_number} - {job.operation_name}
+                </span>
+                <span className="text-sm text-emerald-300/80 truncate hidden sm:inline">
+                  {job.part_number} - {job.part_name}
+                </span>
               </div>
-
-              <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-                <div className="flex items-start gap-4">
-                  <div className="p-3 bg-fd-panel/20 rounded-xl">
-                    <div className="h-4 w-4 rounded-full bg-fd-panel animate-pulse"></div>
-                  </div>
-                  <div>
-                    <p className="text-emerald-100 text-sm font-medium uppercase tracking-wide mb-1">
-                      Currently Working On
-                    </p>
-                    <h2 className="text-2xl font-bold mb-1">
-                      {job.work_order_number} - {job.operation_name}
-                    </h2>
-                    <p className="text-emerald-100">
-                      {job.part_number} - {job.part_name}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-                  <div className="text-center sm:text-right">
-                    <p className="text-emerald-100 text-sm mb-1">
-                      Started at {formatClockInTime(job.clock_in)}
-                    </p>
-                    <div className="flex items-center gap-2 text-3xl font-bold font-mono">
-                      <ClockIcon className="h-7 w-7" />
-                      {getElapsedTime(job.clock_in)}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      setClockOutJob(job);
-                      const remaining = Math.max(0, (job.quantity_ordered || 0) - (job.quantity_complete || 0));
-                      setClockOutData({ quantity_produced: remaining, quantity_scrapped: 0, notes: '' });
-                      setClockOutModal(true);
-                    }}
-                    className="btn bg-fd-panel text-emerald-400 hover:bg-emerald-500/100/10 shadow-lg"
-                  >
-                    <StopIcon className="h-5 w-5 mr-2" />
-                    Clock Out
-                  </button>
-                </div>
+              <div className="flex items-center gap-3 ml-auto">
+                <span className="text-xs text-emerald-300/80 hidden sm:inline">
+                  Started {formatClockInTime(job.clock_in)}
+                </span>
+                <span className="flex items-center gap-1.5 font-mono font-semibold text-emerald-100 tabular-nums">
+                  <ClockIcon className="h-4 w-4" />
+                  {getElapsedTime(job.clock_in)}
+                </span>
+                <button
+                  onClick={() => {
+                    setClockOutJob(job);
+                    const remaining = Math.max(0, (job.quantity_ordered || 0) - (job.quantity_complete || 0));
+                    setClockOutData({ quantity_produced: remaining, quantity_scrapped: 0, notes: '' });
+                    setClockOutModal(true);
+                  }}
+                  className="btn-secondary btn-sm"
+                >
+                  <StopIcon className="h-4 w-4 mr-1.5" />
+                  Clock Out
+                </button>
               </div>
             </div>
           ))}
@@ -542,9 +527,9 @@ export default function ShopFloor() {
             key={wc.id}
             onClick={() => setSelectedWorkCenter(wc.id)}
             className={`
-              px-5 py-3 rounded-xl font-semibold transition-all duration-200
+              px-3 py-2 rounded-sm font-semibold transition-colors
               ${selectedWorkCenter === wc.id
-                ? 'bg-werco-600 text-white shadow-md shadow-werco-600/30'
+                ? 'bg-werco-600 text-white'
                 : 'bg-fd-panel text-slate-200 border border-fd-line hover:border-werco-400 hover:bg-werco-500/10'
               }
             `}
@@ -554,36 +539,34 @@ export default function ShopFloor() {
         ))}
       </div>
 
-      {/* Priority Focus Queue */}
+      {/* Priority Focus Queue — slim cross-linked strip into the table below */}
       {priorityFocusQueue.length > 0 && (
         <div className="card" data-tour="sf-complete">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold text-surface-900">Priority Focus Queue</h2>
-            <span className="text-sm text-surface-500">Top {priorityFocusQueue.length} to run next</span>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-sm font-semibold text-surface-900">Priority Focus Queue</h2>
+            <span className="text-xs text-surface-500">Top {priorityFocusQueue.length} to run next</span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+          <div className="flex flex-wrap gap-2">
             {priorityFocusQueue.map((item, idx) => {
               const overdue = Boolean(item.due_date && isDateBeforeTodayInCentral(item.due_date));
               return (
                 <button
                   key={`focus-${item.operation_id}`}
                   type="button"
-                  className={`text-left p-3 rounded-xl border transition-colors ${
-                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/100/20' : 'border-surface-200 bg-fd-panel hover:bg-surface-50'
+                  className={`flex items-center gap-2 px-2.5 py-1.5 rounded-sm border min-w-0 transition-colors ${
+                    overdue ? 'border-red-500/30 bg-red-500/10 hover:bg-red-500/20' : 'border-fd-line bg-fd-panel hover:bg-fd-sunken'
                   }`}
                   onClick={() => toggleRowExpansion(item.work_order_id)}
+                  title={`${item.work_order_number} - ${item.operation_name}`}
                 >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-surface-500">#{idx + 1}</span>
-                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getPriorityClasses(item.priority)}`}>
-                      P{item.priority}
-                    </span>
-                  </div>
-                  <div className="text-sm font-semibold text-werco-700">{item.work_order_number}</div>
-                  <div className="text-xs text-surface-600 truncate">{item.operation_name}</div>
-                  <div className={`text-xs mt-2 ${overdue ? 'text-red-600 font-medium' : 'text-surface-500'}`}>
-                    {item.due_date ? `Due ${formatCentralDate(item.due_date, { year: undefined })}` : 'No due date'}
-                  </div>
+                  <span className="text-xs font-semibold text-surface-500 tabular-nums shrink-0">#{idx + 1}</span>
+                  <span className={`px-1.5 py-0.5 rounded-sm text-xs font-semibold tabular-nums shrink-0 ${getPriorityClasses(item.priority)}`}>
+                    P{item.priority}
+                  </span>
+                  <span className="text-sm font-semibold text-werco-700 truncate">{item.work_order_number}</span>
+                  <span className={`text-xs shrink-0 tabular-nums ${overdue ? 'text-red-600 font-medium' : 'text-surface-500'}`}>
+                    {item.due_date ? formatCentralDate(item.due_date, { year: undefined }) : '—'}
+                  </span>
                 </button>
               );
             })}
@@ -593,13 +576,13 @@ export default function ShopFloor() {
 
       {/* Job Queue */}
       <div className="card card-flush" data-tour="sf-operations">
-        <div className="px-6 py-4 border-b border-surface-200 flex items-center justify-between">
+        <div className="px-3 py-3 border-b border-fd-line flex items-center justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-surface-900">
+            <h2 className="text-sm font-semibold text-surface-900">
               Job Queue
             </h2>
-            <p className="text-sm text-surface-500">
-              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} &bull; {sortedQueue.length} job{sortedQueue.length !== 1 ? 's' : ''}
+            <p className="text-xs text-surface-500">
+              {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} &bull; <span className="tabular-nums">{sortedQueue.length}</span> job{sortedQueue.length !== 1 ? 's' : ''}
             </p>
           </div>
           {canEditPriority && (
@@ -621,7 +604,7 @@ export default function ShopFloor() {
 
         {sortedQueue.length === 0 ? (
           <div className="text-center py-16">
-            <div className="p-4 rounded-full bg-surface-100 w-fit mx-auto mb-4">
+            <div className="p-4 rounded-sm bg-fd-sunken w-fit mx-auto mb-4">
               <QueueListIcon className="h-8 w-8 text-surface-400" />
             </div>
             <p className="text-surface-600 font-medium">No jobs in queue</p>
@@ -653,7 +636,7 @@ export default function ShopFloor() {
                   return (
                     <React.Fragment key={item.operation_id}>
                       <tr
-                        className={`${isOverdue ? 'bg-red-500/10/50' : ''} ${isExpanded ? 'bg-werco-50/50' : ''} cursor-pointer hover:bg-surface-50`}
+                        className={`${isOverdue ? 'bg-red-500/10' : ''} ${isExpanded ? 'bg-werco-50/50' : ''} cursor-pointer hover:bg-surface-50`}
                         onClick={() => toggleRowExpansion(item.work_order_id)}
                       >
                         <td className="w-10">
@@ -672,7 +655,7 @@ export default function ShopFloor() {
                               onClick={(e) => e.stopPropagation()}
                               onChange={(e) => handlePriorityChange(item.work_order_id, e.target.value)}
                               disabled={updatingPriorityWorkOrderId !== null}
-                              className={`px-2 py-1 rounded text-xs font-bold border border-transparent ${getPriorityClasses(item.priority)}`}
+                              className={`px-2 py-1 rounded-sm text-xs font-bold border border-transparent tabular-nums ${getPriorityClasses(item.priority)}`}
                               title={updatingPriorityWorkOrderId === item.work_order_id ? 'Updating priority...' : 'Update priority'}
                             >
                               {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
@@ -682,7 +665,7 @@ export default function ShopFloor() {
                               ))}
                             </select>
                           ) : (
-                            <span className={`inline-flex items-center justify-center w-10 h-10 rounded-xl text-sm font-bold ${getPriorityClasses(item.priority)}`}>
+                            <span className={`inline-flex items-center justify-center w-10 h-10 rounded-sm text-sm font-bold tabular-nums ${getPriorityClasses(item.priority)}`}>
                               P{item.priority}
                             </span>
                           )}
@@ -708,7 +691,7 @@ export default function ShopFloor() {
                               <span className="font-medium text-surface-700 tabular-nums">
                                 {item.quantity_complete}/{item.quantity_ordered}
                               </span>
-                              <span className="text-surface-500">{Math.round(progress)}%</span>
+                              <span className="text-surface-500 tabular-nums">{Math.round(progress)}%</span>
                             </div>
                             <div className="h-2 bg-surface-200 rounded-full overflow-hidden">
                               <div
@@ -728,7 +711,7 @@ export default function ShopFloor() {
                         </td>
                         <td>
                           <span className={`
-                            inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold
+                            inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs font-semibold
                             ${item.status === 'in_progress'
                               ? 'bg-emerald-500/20 text-emerald-400'
                               : item.status === 'ready'
@@ -783,14 +766,14 @@ export default function ShopFloor() {
 
                       {/* Expanded Details Row */}
                       {isExpanded && (
-                        <tr className="bg-surface-50">
+                        <tr className="bg-fd-sunken">
                           <td colSpan={9} className="p-0">
-                            <div className="p-6 border-t border-surface-200">
+                            <div className="p-3 border-t border-fd-line">
                               {details ? (
-                                <div className="space-y-4">
+                                <div className="space-y-3">
                                   {/* Header with link */}
                                   <div className="flex items-center justify-between">
-                                    <h3 className="text-lg font-semibold text-surface-900">
+                                    <h3 className="text-sm font-semibold text-surface-900">
                                       Work Order Details
                                     </h3>
                                     <button
@@ -805,33 +788,33 @@ export default function ShopFloor() {
                                     </button>
                                   </div>
 
-                                  {/* Info Cards */}
-                                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="bg-fd-panel rounded-lg p-4 border border-surface-200">
-                                      <p className="text-sm text-surface-500">Customer</p>
-                                      <p className="font-semibold text-surface-900">{details.customer_name || '\u2014'}</p>
+                                  {/* Definition row */}
+                                  <dl className="flex flex-wrap gap-x-8 gap-y-2 rounded-sm border border-fd-line bg-fd-panel p-3">
+                                    <div className="min-w-0">
+                                      <dt className="text-xs text-surface-500">Customer</dt>
+                                      <dd className="font-semibold text-surface-900 truncate">{details.customer_name || '\u2014'}</dd>
                                     </div>
-                                    <div className="bg-fd-panel rounded-lg p-4 border border-surface-200">
-                                      <p className="text-sm text-surface-500">Customer PO</p>
-                                      <p className="font-semibold text-surface-900">{details.customer_po || '\u2014'}</p>
+                                    <div className="min-w-0">
+                                      <dt className="text-xs text-surface-500">Customer PO</dt>
+                                      <dd className="font-semibold text-surface-900 truncate">{details.customer_po || '\u2014'}</dd>
                                     </div>
-                                    <div className="bg-fd-panel rounded-lg p-4 border border-surface-200">
-                                      <p className="text-sm text-surface-500">Qty Complete / Ordered</p>
-                                      <p className="font-semibold text-surface-900">
+                                    <div className="min-w-0">
+                                      <dt className="text-xs text-surface-500">Qty Complete / Ordered</dt>
+                                      <dd className="font-semibold text-surface-900 tabular-nums">
                                         {details.quantity_complete} / {details.quantity_ordered}
-                                      </p>
+                                      </dd>
                                     </div>
-                                    <div className="bg-fd-panel rounded-lg p-4 border border-surface-200">
-                                      <p className="text-sm text-surface-500">Due Date</p>
-                                      <p className="font-semibold text-surface-900">
+                                    <div className="min-w-0">
+                                      <dt className="text-xs text-surface-500">Due Date</dt>
+                                      <dd className="font-semibold text-surface-900 tabular-nums">
                                         {details.due_date ? formatCentralDate(details.due_date) : '\u2014'}
-                                      </p>
+                                      </dd>
                                     </div>
-                                  </div>
+                                  </dl>
 
                                   {/* Notes */}
                                   {details.notes && (
-                                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
+                                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-sm p-3">
                                       <div className="flex items-start gap-2">
                                         <DocumentTextIcon className="h-5 w-5 text-amber-600 mt-0.5" />
                                         <div>
@@ -844,30 +827,30 @@ export default function ShopFloor() {
 
                                   {/* Operations Table */}
                                   <div>
-                                    <h4 className="font-medium text-surface-700 mb-2">All Operations</h4>
-                                    <div className="bg-fd-panel rounded-lg border border-surface-200 overflow-hidden">
+                                    <h4 className="text-xs font-medium text-surface-700 mb-2">All Operations</h4>
+                                    <div className="bg-fd-panel rounded-sm border border-fd-line overflow-hidden">
                                       <table className="w-full text-sm">
-                                        <thead className="bg-surface-100">
+                                        <thead className="bg-fd-sunken">
                                           <tr>
-                                            <th className="px-4 py-2 text-left font-medium text-surface-600">Op #</th>
-                                            <th className="px-4 py-2 text-left font-medium text-surface-600">Operation</th>
-                                            <th className="px-4 py-2 text-left font-medium text-surface-600">Work Center</th>
-                                            <th className="px-4 py-2 text-left font-medium text-surface-600">Status</th>
-                                            <th className="px-4 py-2 text-right font-medium text-surface-600">Est. Hrs</th>
-                                            <th className="px-4 py-2 text-right font-medium text-surface-600">Actual Hrs</th>
+                                            <th className="px-3 py-2 text-left font-medium text-surface-600">Op #</th>
+                                            <th className="px-3 py-2 text-left font-medium text-surface-600">Operation</th>
+                                            <th className="px-3 py-2 text-left font-medium text-surface-600">Work Center</th>
+                                            <th className="px-3 py-2 text-left font-medium text-surface-600">Status</th>
+                                            <th className="px-3 py-2 text-right font-medium text-surface-600">Est. Hrs</th>
+                                            <th className="px-3 py-2 text-right font-medium text-surface-600">Actual Hrs</th>
                                           </tr>
                                         </thead>
                                         <tbody>
                                           {details.operations.map((op) => (
                                             <tr
                                               key={op.id}
-                                              className={`border-t border-surface-100 ${op.id === item.operation_id ? 'bg-werco-50' : ''}`}
+                                              className={`border-t border-fd-line ${op.id === item.operation_id ? 'bg-werco-50' : ''}`}
                                             >
-                                              <td className="px-4 py-2 font-medium">{op.operation_number}</td>
-                                              <td className="px-4 py-2">{op.name}</td>
-                                              <td className="px-4 py-2">{op.work_center_name}</td>
-                                              <td className="px-4 py-2">
-                                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                              <td className="px-3 py-2 font-medium tabular-nums">{op.operation_number}</td>
+                                              <td className="px-3 py-2">{op.name}</td>
+                                              <td className="px-3 py-2">{op.work_center_name}</td>
+                                              <td className="px-3 py-2">
+                                                <span className={`inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium ${
                                                   op.status === 'complete' ? 'bg-green-500/20 text-green-400' :
                                                   op.status === 'in_progress' ? 'bg-blue-500/20 text-blue-400' :
                                                   'bg-surface-100 text-surface-600'
@@ -875,8 +858,8 @@ export default function ShopFloor() {
                                                   {op.status.replace('_', ' ')}
                                                 </span>
                                               </td>
-                                              <td className="px-4 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || '\u2014'}</td>
-                                              <td className="px-4 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || '\u2014'}</td>
+                                              <td className="px-3 py-2 text-right tabular-nums">{op.estimated_hours?.toFixed(1) || '\u2014'}</td>
+                                              <td className="px-3 py-2 text-right tabular-nums">{op.actual_hours?.toFixed(1) || '\u2014'}</td>
                                             </tr>
                                           ))}
                                         </tbody>
@@ -906,103 +889,99 @@ export default function ShopFloor() {
       </div>
 
       {/* Clock Out Modal */}
-      {clockOutModal && (
-        <div className="modal-overlay" onClick={closeClockOutModal}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 className="text-lg font-semibold text-surface-900">Clock Out</h3>
-              <button
-                onClick={closeClockOutModal}
-                disabled={clockingOut}
-                className="p-2 rounded-lg text-surface-400 hover:text-surface-600 hover:bg-surface-100"
-              >
-                <XMarkIcon className="h-5 w-5" />
-              </button>
-            </div>
+      <Modal open={clockOutModal} onClose={closeClockOutModal} size="md" closeOnBackdrop={!clockingOut}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-surface-900">Clock Out</h3>
+          <button
+            onClick={closeClockOutModal}
+            disabled={clockingOut}
+            className="p-2 rounded-sm text-surface-400 hover:text-surface-600 hover:bg-fd-sunken"
+          >
+            <XMarkIcon className="h-5 w-5" />
+          </button>
+        </div>
 
-            <div className="modal-body space-y-4">
-              <div className="bg-surface-50 rounded-xl p-4 mb-4">
-                <p className="text-sm text-surface-500 mb-1">Completing work on</p>
-                <p className="font-semibold text-surface-900">
-                  {clockOutJob?.work_order_number} — {clockOutJob?.operation_name}
-                </p>
-                {clockOutJob?.quantity_ordered ? (
-                  <p className="text-xs text-surface-500 mt-1">
-                    {clockOutJob.quantity_complete || 0} of {clockOutJob.quantity_ordered} previously completed
-                  </p>
-                ) : null}
-              </div>
+        <div className="space-y-4">
+          <div className="bg-fd-sunken rounded-sm p-3 mb-4 border border-fd-line">
+            <p className="text-sm text-surface-500 mb-1">Completing work on</p>
+            <p className="font-semibold text-surface-900">
+              {clockOutJob?.work_order_number} — {clockOutJob?.operation_name}
+            </p>
+            {clockOutJob?.quantity_ordered ? (
+              <p className="text-xs text-surface-500 mt-1 tabular-nums">
+                {clockOutJob.quantity_complete || 0} of {clockOutJob.quantity_ordered} previously completed
+              </p>
+            ) : null}
+          </div>
 
+          <div>
+            <label className="label">Quantity Produced</label>
+            <input
+              type="number"
+              min="0"
+              value={clockOutData.quantity_produced}
+              onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
+              className="input text-center text-2xl font-semibold h-14 tabular-nums"
+              autoFocus
+            />
+          </div>
+
+          {!clockOutShowMore ? (
+            <button
+              type="button"
+              onClick={() => setClockOutShowMore(true)}
+              className="text-sm text-werco-600 hover:text-werco-700 font-medium"
+            >
+              + Add scrap count or notes
+            </button>
+          ) : (
+            <>
               <div>
-                <label className="label">Quantity Produced</label>
+                <label className="label">Quantity Scrapped</label>
                 <input
                   type="number"
                   min="0"
-                  value={clockOutData.quantity_produced}
-                  onChange={(e) => setClockOutData({ ...clockOutData, quantity_produced: parseFloat(e.target.value) || 0 })}
-                  className="input text-center text-2xl font-semibold h-14"
-                  autoFocus
+                  value={clockOutData.quantity_scrapped}
+                  onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
+                  className="input text-center text-lg font-semibold tabular-nums"
                 />
               </div>
-
-              {!clockOutShowMore ? (
-                <button
-                  type="button"
-                  onClick={() => setClockOutShowMore(true)}
-                  className="text-sm text-werco-600 hover:text-werco-700 font-medium"
-                >
-                  + Add scrap count or notes
-                </button>
-              ) : (
-                <>
-                  <div>
-                    <label className="label">Quantity Scrapped</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={clockOutData.quantity_scrapped}
-                      onChange={(e) => setClockOutData({ ...clockOutData, quantity_scrapped: parseFloat(e.target.value) || 0 })}
-                      className="input text-center text-lg font-semibold"
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Notes</label>
-                    <textarea
-                      value={clockOutData.notes}
-                      onChange={(e) => setClockOutData({ ...clockOutData, notes: e.target.value })}
-                      className="input"
-                      rows={2}
-                      placeholder="Any issues, observations, or notes..."
-                    />
-                  </div>
-                </>
-              )}
-            </div>
-
-            <div className="modal-footer">
-              <button
-                onClick={closeClockOutModal}
-                disabled={clockingOut}
-                className="btn-secondary"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleClockOut}
-                disabled={clockingOut}
-                className="btn-primary"
-              >
-                {clockingOut ? (
-                  <ArrowPathIcon className="h-5 w-5 mr-2 animate-spin" />
-                ) : (
-                  <CheckCircleIcon className="h-5 w-5 mr-2" />
-                )}
-                {clockingOut ? 'Saving...' : 'Complete Clock Out'}
-              </button>
-            </div>
-          </div>
+              <div>
+                <label className="label">Notes</label>
+                <textarea
+                  value={clockOutData.notes}
+                  onChange={(e) => setClockOutData({ ...clockOutData, notes: e.target.value })}
+                  className="input"
+                  rows={2}
+                  placeholder="Any issues, observations, or notes..."
+                />
+              </div>
+            </>
+          )}
         </div>
-      )}
+
+        <div className="flex justify-end gap-3 mt-6">
+          <button
+            onClick={closeClockOutModal}
+            disabled={clockingOut}
+            className="btn-secondary"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleClockOut}
+            disabled={clockingOut}
+            className="btn-primary"
+          >
+            {clockingOut ? (
+              <ArrowPathIcon className="h-5 w-5 mr-2 animate-spin" />
+            ) : (
+              <CheckCircleIcon className="h-5 w-5 mr-2" />
+            )}
+            {clockingOut ? 'Saving...' : 'Complete Clock Out'}
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }

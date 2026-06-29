@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
@@ -198,30 +199,45 @@ export default function QualityPage() {
         <h1 className="text-2xl font-bold text-white">Quality Management</h1>
       </div>
 
-      {/* Summary Cards */}
+      {/* Summary strip */}
       {summary && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4" data-tour="qa-ncr">
-          <div className={`card flex items-center ${summary.open_ncrs > 0 ? 'border-l-4 border-red-500' : ''}`}>
-            <ExclamationTriangleIcon className="h-10 w-10 text-red-500 mr-4" />
-            <div>
-              <div className="text-2xl font-bold">{summary.open_ncrs}</div>
-              <div className="text-sm text-slate-400">Open NCRs</div>
-            </div>
-          </div>
-          <div className={`card flex items-center ${summary.open_cars > 0 ? 'border-l-4 border-yellow-500' : ''}`}>
-            <ClipboardDocumentCheckIcon className="h-10 w-10 text-yellow-500 mr-4" />
-            <div>
-              <div className="text-2xl font-bold">{summary.open_cars}</div>
-              <div className="text-sm text-slate-400">Open CARs</div>
-            </div>
-          </div>
-          <div className={`card flex items-center ${summary.pending_fais > 0 ? 'border-l-4 border-blue-500' : ''}`}>
-            <DocumentMagnifyingGlassIcon className="h-10 w-10 text-blue-500 mr-4" />
-            <div>
-              <div className="text-2xl font-bold">{summary.pending_fais}</div>
-              <div className="text-sm text-slate-400">Pending FAIs</div>
-            </div>
-          </div>
+        <div data-tour="qa-ncr">
+        <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          <MiniStat
+            icon={ExclamationTriangleIcon}
+            iconBg="bg-fd-red/15"
+            iconColor="text-fd-red"
+            label="Open NCRs"
+            value={summary.open_ncrs}
+            valueColor={summary.open_ncrs > 0 ? 'text-fd-red' : undefined}
+            active={activeTab === 'ncr' && ncrStatusFilter === 'open'}
+            onClick={() => {
+              setActiveTab('ncr');
+              setNcrStatusFilter('open');
+              setSearchParams({ filter: 'open' });
+            }}
+          />
+          <MiniStat
+            icon={ClipboardDocumentCheckIcon}
+            iconBg="bg-fd-amber/15"
+            iconColor="text-fd-amber"
+            label="Open CARs"
+            value={summary.open_cars}
+            valueColor={summary.open_cars > 0 ? 'text-fd-amber' : undefined}
+            active={activeTab === 'car'}
+            onClick={() => setActiveTab('car')}
+          />
+          <MiniStat
+            icon={DocumentMagnifyingGlassIcon}
+            iconBg="bg-fd-blue/15"
+            iconColor="text-fd-blue"
+            label="Pending FAIs"
+            value={summary.pending_fais}
+            valueColor={summary.pending_fais > 0 ? 'text-fd-blue' : undefined}
+            active={activeTab === 'fai'}
+            onClick={() => setActiveTab('fai')}
+          />
+        </MiniStatStrip>
         </div>
       )}
 

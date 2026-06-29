@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { Part } from '../../types';
-import { partTypeColors, partTypeLabels } from '../../types/engineering';
 import { useToast } from '../ui/Toast';
 import api from '../../services/api';
 import { PencilIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
@@ -48,13 +47,11 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
       {/* Basic Information */}
-      <div className="card">
-        <h3 className="text-base font-semibold text-white mb-4">Basic Information</h3>
-        <dl className="space-y-3">
-          <Field label="Part Number" value={part.part_number} />
-          <Field label="Revision" value={part.revision} />
+      <div className="card !p-3">
+        <h3 className="text-base font-semibold text-white mb-3">Basic Information</h3>
+        <dl className="space-y-2">
           <EditableField
             label="Name"
             field="name"
@@ -80,19 +77,14 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
             onKeyDown={handleKeyDown}
             multiline
           />
-          <Field label="Type">
-            <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${partTypeColors[part.part_type]}`}>
-              {partTypeLabels[part.part_type] || part.part_type}
-            </span>
-          </Field>
           <Field label="Unit of Measure" value={part.unit_of_measure} />
         </dl>
       </div>
 
       {/* Costing */}
-      <div className="card">
-        <h3 className="text-base font-semibold text-white mb-4">Costing</h3>
-        <dl className="space-y-3">
+      <div className="card !p-3">
+        <h3 className="text-base font-semibold text-white mb-3">Costing</h3>
+        <dl className="space-y-2">
           <EditableField
             label="Standard Cost"
             field="standard_cost"
@@ -109,8 +101,8 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
           />
         </dl>
 
-        <h3 className="text-base font-semibold text-white mb-4 mt-6">Customer Information</h3>
-        <dl className="space-y-3">
+        <h3 className="text-base font-semibold text-white mb-3 mt-5">Customer Information</h3>
+        <dl className="space-y-2">
           <EditableField
             label="Customer"
             field="customer_name"
@@ -150,32 +142,10 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
         </dl>
       </div>
 
-      {/* Quality / AS9100D */}
-      <div className="card">
-        <h3 className="text-base font-semibold text-white mb-4">Quality (AS9100D)</h3>
-        <dl className="space-y-3">
-          <Field label="Critical Characteristic">
-            <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${
-              part.is_critical ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-600'
-            }`}>
-              {part.is_critical ? 'Yes - Critical' : 'No'}
-            </span>
-          </Field>
-          <Field label="Requires Inspection">
-            <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${
-              part.requires_inspection ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-600'
-            }`}>
-              {part.requires_inspection ? 'Yes' : 'No'}
-            </span>
-          </Field>
-        </dl>
-      </div>
-
       {/* Metadata */}
-      <div className="card">
-        <h3 className="text-base font-semibold text-white mb-4">Metadata</h3>
-        <dl className="space-y-3">
-          <Field label="Status" value={part.status} />
+      <div className="card !p-3 lg:col-span-2">
+        <h3 className="text-base font-semibold text-white mb-3">Metadata</h3>
+        <dl className="space-y-2">
           <Field label="Active" value={part.is_active ? 'Yes' : 'No'} />
           <Field label="Created" value={new Date(part.created_at).toLocaleDateString()} />
           <Field label="Updated" value={new Date(part.updated_at).toLocaleDateString()} />
@@ -189,9 +159,9 @@ export function PartOverviewTab({ part, onPartUpdated }: Props) {
 
 function Field({ label, value, children }: { label: string; value?: string; children?: React.ReactNode }) {
   return (
-    <div className="flex items-start justify-between gap-4 py-2 border-b border-slate-700/70 last:border-0">
+    <div className="flex items-start justify-between gap-4 py-1.5 border-b border-fd-line last:border-0">
       <dt className="text-sm text-slate-400 min-w-[120px]">{label}</dt>
-      <dd className="text-sm text-slate-100 text-right break-words">{children || value || <span className="text-slate-500">-</span>}</dd>
+      <dd className="text-sm text-slate-100 text-right break-words tabular-nums">{children || value || <span className="text-slate-500">-</span>}</dd>
     </div>
   );
 }
@@ -220,9 +190,9 @@ function EditableField({
   const isEditing = editing === field;
 
   return (
-    <div className="flex items-start justify-between gap-4 py-2 border-b border-slate-700/70 last:border-0 group">
+    <div className="flex items-start justify-between gap-4 py-1.5 border-b border-fd-line last:border-0 group">
       <dt className="text-sm text-slate-400 min-w-[120px]">{label}</dt>
-      <dd className="text-sm text-slate-100 text-right flex items-center justify-end gap-1 min-w-0">
+      <dd className="text-sm text-slate-100 text-right flex items-center justify-end gap-1 min-w-0 tabular-nums">
         {isEditing ? (
           <div className="flex items-center gap-1">
             {prefix && <span className="text-slate-400">{prefix}</span>}

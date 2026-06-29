@@ -7,7 +7,9 @@ import {
   PlusIcon,
   CheckCircleIcon,
   BuildingOfficeIcon,
+  ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface Vendor {
   id: number;
@@ -452,29 +454,24 @@ export default function Purchasing() {
         </div>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="card bg-indigo-50 border-indigo-200">
-          <div className="flex items-center">
-            <div className="h-8 w-8 bg-indigo-600 rounded-full flex items-center justify-center text-white font-bold mr-3">
-              PO
-            </div>
-            <div>
-              <p className="text-sm text-indigo-600">Open POs</p>
-              <p className="text-2xl font-bold text-indigo-800">{purchaseOrders.length}</p>
-            </div>
-          </div>
-        </div>
-        <div className="card bg-green-500/10 border-green-500/30">
-          <div className="flex items-center">
-            <CheckCircleIcon className="h-8 w-8 text-green-600 mr-3" />
-            <div>
-              <p className="text-sm text-green-600">Approved Vendors</p>
-              <p className="text-2xl font-bold text-emerald-300">{vendors.filter(v => v.is_approved).length}</p>
-            </div>
-          </div>
-        </div>
-      </div>
+      {/* KPI strip */}
+      <MiniStatStrip className="grid grid-cols-2 gap-2">
+        <MiniStat
+          icon={ClipboardDocumentListIcon}
+          iconBg="bg-werco-navy-500/15"
+          iconColor="text-werco-navy-400"
+          label="Open POs"
+          value={purchaseOrders.length}
+        />
+        <MiniStat
+          icon={CheckCircleIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Approved Vendors"
+          value={vendors.filter(v => v.is_approved).length}
+          valueColor="text-fd-green"
+        />
+      </MiniStatStrip>
 
       {/* Tabs */}
       <div className="border-b border-slate-700">

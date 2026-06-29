@@ -16,6 +16,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -386,7 +387,7 @@ export default function EngineeringChanges() {
         </div>
         <button
           onClick={openCreateModal}
-          className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500/100"
+          className="inline-flex items-center gap-2 rounded-sm bg-werco-navy-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-werco-navy-700"
         >
           <PlusIcon className="h-5 w-5" />
           New ECO
@@ -395,27 +396,41 @@ export default function EngineeringChanges() {
 
       {/* Dashboard Cards */}
       {dashboard && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {[
-            { label: 'Total Active', value: dashboard.total_active, icon: DocumentTextIcon, bg: 'bg-blue-500/20', fg: 'text-blue-600' },
-            { label: 'Pending Review', value: dashboard.pending_review, icon: ClockIcon, bg: 'bg-yellow-500/20', fg: 'text-yellow-600' },
-            { label: 'In Implementation', value: dashboard.in_implementation, icon: WrenchScrewdriverIcon, bg: 'bg-purple-500/20', fg: 'text-purple-600' },
-            { label: 'Completed This Month', value: dashboard.completed_this_month, icon: CheckCircleIcon, bg: 'bg-green-500/20', fg: 'text-green-600' },
-          ].map((card) => (
-            <div key={card.label} className="rounded-lg border bg-[#151b28] p-4 shadow-sm">
-              <div className="flex items-center gap-3">
-                <div className={`rounded-full ${card.bg} p-2`}><card.icon className={`h-5 w-5 ${card.fg}`} /></div>
-                <div>
-                  <p className="text-sm text-slate-400">{card.label}</p>
-                  <p className="text-2xl font-bold text-white">{card.value}</p>
-                  {card.label === 'Completed This Month' && dashboard.avg_cycle_time_days != null && (
-                    <p className="text-xs text-slate-500 mt-1">Avg cycle: {dashboard.avg_cycle_time_days}d</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
+        <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <MiniStat
+            icon={DocumentTextIcon}
+            iconBg="bg-fd-blue/15"
+            iconColor="text-fd-blue"
+            label="Total Active"
+            value={dashboard.total_active}
+          />
+          <MiniStat
+            icon={ClockIcon}
+            iconBg="bg-fd-amber/15"
+            iconColor="text-fd-amber"
+            label="Pending Review"
+            value={dashboard.pending_review}
+          />
+          <MiniStat
+            icon={WrenchScrewdriverIcon}
+            iconBg="bg-werco-navy-600/15"
+            iconColor="text-werco-navy-600"
+            label="In Implementation"
+            value={dashboard.in_implementation}
+          />
+          <MiniStat
+            icon={CheckCircleIcon}
+            iconBg="bg-fd-green/15"
+            iconColor="text-fd-green"
+            label="Completed This Month"
+            value={dashboard.completed_this_month}
+            subtitle={
+              dashboard.avg_cycle_time_days != null
+                ? `Avg cycle: ${dashboard.avg_cycle_time_days}d`
+                : undefined
+            }
+          />
+        </MiniStatStrip>
       )}
 
       {/* Filters & Search */}
@@ -427,7 +442,7 @@ export default function EngineeringChanges() {
             placeholder="Search ECO number, title, requestor..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full rounded-md border border-slate-600 py-2 pl-10 pr-3 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="w-full rounded-sm border border-fd-line bg-fd-panel py-2 pl-10 pr-3 text-sm focus:border-werco-navy-600 focus:ring-werco-navy-600"
           />
         </div>
         <div className="flex items-center gap-2">
@@ -435,7 +450,7 @@ export default function EngineeringChanges() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="rounded-md border border-slate-600 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="rounded-sm border border-fd-line bg-fd-panel py-2 pl-3 pr-8 text-sm focus:border-werco-navy-600 focus:ring-werco-navy-600"
           >
             <option value="">All Statuses</option>
             {Object.entries(statusLabel).map(([k, v]) => (
@@ -445,7 +460,7 @@ export default function EngineeringChanges() {
           <select
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
-            className="rounded-md border border-slate-600 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="rounded-sm border border-fd-line bg-fd-panel py-2 pl-3 pr-8 text-sm focus:border-werco-navy-600 focus:ring-werco-navy-600"
           >
             <option value="">All Types</option>
             {Object.entries(typeLabel).map(([k, v]) => (
@@ -455,7 +470,7 @@ export default function EngineeringChanges() {
           <select
             value={priorityFilter}
             onChange={(e) => setPriorityFilter(e.target.value)}
-            className="rounded-md border border-slate-600 py-2 pl-3 pr-8 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="rounded-sm border border-fd-line bg-fd-panel py-2 pl-3 pr-8 text-sm focus:border-werco-navy-600 focus:ring-werco-navy-600"
           >
             <option value="">All Priorities</option>
             {Object.entries(priorityLabel).map(([k, v]) => (

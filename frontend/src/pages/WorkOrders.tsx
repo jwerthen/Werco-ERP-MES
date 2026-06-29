@@ -18,6 +18,7 @@ import {
   CheckCircleIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 const statusConfig: Record<WorkOrderStatus, { bg: string; text: string; dot: string }> = {
   draft: { bg: 'bg-surface-100', text: 'text-surface-700', dot: 'bg-surface-400' },
@@ -309,35 +310,35 @@ export default function WorkOrders() {
       </div>
 
       {/* Quick Stats */}
-      <div className="grid grid-cols-3 gap-2 sm:gap-4">
-        <WorkOrderStatCard
+      <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        <MiniStat
           label="Overdue"
           value={stats.overdue}
           icon={ExclamationTriangleIcon}
-          iconClassName={stats.overdue > 0 ? 'text-red-500' : 'text-emerald-400'}
-          iconBgClassName={stats.overdue > 0 ? 'bg-red-500/20' : 'bg-emerald-500/20'}
-          valueClassName={stats.overdue > 0 ? 'text-red-500' : 'text-surface-900'}
+          iconBg={stats.overdue > 0 ? 'bg-red-500/20' : 'bg-fd-green/15'}
+          iconColor={stats.overdue > 0 ? 'text-red-500' : 'text-fd-green'}
+          valueColor={stats.overdue > 0 ? 'text-red-500' : undefined}
         />
-        <WorkOrderStatCard
+        <MiniStat
           label="In Progress"
           value={stats.inProgress}
           icon={Squares2X2Icon}
-          iconClassName="text-blue-400"
-          iconBgClassName="bg-blue-500/20"
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
         />
-        <WorkOrderStatCard
+        <MiniStat
           label="Due Today"
           value={stats.dueToday}
           icon={ClockIcon}
-          iconClassName={stats.dueToday > 0 ? 'text-amber-400' : 'text-surface-500'}
-          iconBgClassName={stats.dueToday > 0 ? 'bg-amber-500/20' : 'bg-surface-100'}
-          valueClassName={stats.dueToday > 0 ? 'text-amber-400' : 'text-surface-900'}
+          iconBg={stats.dueToday > 0 ? 'bg-amber-500/20' : 'bg-slate-800/50'}
+          iconColor={stats.dueToday > 0 ? 'text-fd-amber' : 'text-slate-400'}
+          valueColor={stats.dueToday > 0 ? 'text-fd-amber' : undefined}
         />
-      </div>
+      </MiniStatStrip>
 
       {/* Filters */}
-      <div className="card p-4 sm:p-6" data-tour="wo-filters">
-        <div className="grid grid-cols-1 xs:grid-cols-2 lg:grid-cols-[minmax(18rem,1fr)_11rem_13rem_11rem] gap-3 sm:gap-4">
+      <div className="card rounded-sm border-fd-line p-2.5 sm:p-3" data-tour="wo-filters">
+        <div className="grid grid-cols-1 xs:grid-cols-2 lg:grid-cols-[minmax(18rem,1fr)_11rem_13rem_11rem] gap-2 sm:gap-3">
           {/* Search */}
           <div className="relative min-w-0 xs:col-span-2 lg:col-span-1">
             <MagnifyingGlassIcon className="h-5 w-5 absolute left-4 top-1/2 transform -translate-y-1/2 text-surface-400" />
@@ -349,7 +350,7 @@ export default function WorkOrders() {
               className="input pl-11"
             />
           </div>
-          
+
           {/* Status Filter */}
           <select
             value={statusFilter}
@@ -363,7 +364,7 @@ export default function WorkOrders() {
               </option>
             ))}
           </select>
-          
+
           {/* Customer Filter */}
           <select
             value={customerFilter}
@@ -376,7 +377,7 @@ export default function WorkOrders() {
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
-          
+
           {/* Group By */}
           <select
             value={groupBy}
@@ -391,9 +392,9 @@ export default function WorkOrders() {
             ))}
           </select>
         </div>
-        
-        {/* Toggle Options */}
-        <div className="flex flex-col xs:flex-row xs:items-center xs:justify-between gap-3 mt-4 pt-4 border-t border-surface-200">
+
+        {/* Toggle + count row */}
+        <div className="flex flex-col xs:flex-row xs:items-center xs:justify-between gap-2 mt-2.5 pt-2.5 border-t border-fd-line">
           <label className="flex items-center gap-2 cursor-pointer group">
             <input
               type="checkbox"
@@ -403,7 +404,7 @@ export default function WorkOrders() {
             />
             <span className="text-sm text-surface-600 group-hover:text-surface-900">Hide COTS/Hardware</span>
           </label>
-          <span className="text-sm text-surface-500 xs:text-right">
+          <span className="text-xs text-surface-500 tabular-nums xs:text-right">
             <span className="sm:hidden">
               <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {workOrders.length} shown
             </span>
@@ -473,36 +474,6 @@ export default function WorkOrders() {
           {filteredWorkOrders.length === 0 && <WorkOrdersEmptyState />}
         </div>
       )}
-    </div>
-  );
-}
-
-interface WorkOrderStatCardProps {
-  label: string;
-  value: number;
-  icon: React.ComponentType<{ className?: string }>;
-  iconClassName: string;
-  iconBgClassName: string;
-  valueClassName?: string;
-}
-
-function WorkOrderStatCard({
-  label,
-  value,
-  icon: Icon,
-  iconClassName,
-  iconBgClassName,
-  valueClassName = 'text-surface-900',
-}: WorkOrderStatCardProps) {
-  return (
-    <div className="card-compact min-w-0 p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
-      <div className={`w-10 h-10 sm:w-12 sm:h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${iconBgClassName}`}>
-        <Icon className={`h-5 w-5 sm:h-6 sm:w-6 ${iconClassName}`} />
-      </div>
-      <div className="min-w-0">
-        <p className={`text-xl sm:text-2xl font-bold tabular-nums leading-none ${valueClassName}`}>{value}</p>
-        <p className="text-[11px] sm:text-sm leading-tight text-surface-500 mt-1 break-words">{label}</p>
-      </div>
     </div>
   );
 }

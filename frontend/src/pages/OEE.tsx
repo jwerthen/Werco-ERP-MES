@@ -7,12 +7,13 @@ import {
   ChartBarIcon,
   CogIcon,
   CalendarDaysIcon,
+  ClockIcon,
+  BoltIcon,
+  CheckBadgeIcon,
 } from '@heroicons/react/24/outline';
 import {
   LineChart,
   Line,
-  BarChart,
-  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -21,6 +22,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from 'recharts';
+import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 
 // ============== Types ==============
 
@@ -220,14 +222,6 @@ export default function OEE() {
     ? dashboard?.work_centers?.find((wc) => wc.work_center_id === parseInt(selectedWorkCenter))
     : null;
 
-  const comparisonData = (dashboard?.work_centers || []).map((wc) => ({
-    name: wc.work_center_code,
-    oee: Math.round(wc.oee * 10) / 10,
-    availability: Math.round(wc.availability * 10) / 10,
-    performance: Math.round(wc.performance * 10) / 10,
-    quality: Math.round(wc.quality * 10) / 10,
-  }));
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -242,14 +236,14 @@ export default function OEE() {
   const plantQ = dashboard?.plant_quality ?? 0;
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-3 space-y-3">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">OEE Dashboard</h1>
-          <p className="text-sm text-slate-400 mt-1">Overall Equipment Effectiveness monitoring</p>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold text-fd-ink">OEE Dashboard</h1>
+          <p className="text-xs text-fd-mute mt-0.5">Overall Equipment Effectiveness monitoring</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-shrink-0">
           <button onClick={() => loadData()} className="btn btn-ghost btn-sm" title="Refresh">
             <ArrowPathIcon className="h-5 w-5" />
           </button>
@@ -278,12 +272,12 @@ export default function OEE() {
       </div>
 
       {/* Filters */}
-      <div className="bg-[#151b28] rounded-lg shadow p-4">
+      <div className="card card-compact !p-2.5">
         <div className="flex flex-wrap gap-3 items-end">
           <div>
-            <label className="label"><span className="label-text text-xs font-medium">Work Center</span></label>
+            <label className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">Work Center</span></label>
             <select
-              className="select select-bordered select-sm"
+              className="select select-bordered select-sm rounded-sm"
               value={selectedWorkCenter}
               onChange={(e) => setSelectedWorkCenter(e.target.value)}
             >
@@ -296,19 +290,19 @@ export default function OEE() {
             </select>
           </div>
           <div>
-            <label className="label"><span className="label-text text-xs font-medium">From</span></label>
+            <label className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">From</span></label>
             <input
               type="date"
-              className="input input-bordered input-sm"
+              className="input input-bordered input-sm rounded-sm"
               value={dateFrom}
               onChange={(e) => setDateFrom(e.target.value)}
             />
           </div>
           <div>
-            <label className="label"><span className="label-text text-xs font-medium">To</span></label>
+            <label className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">To</span></label>
             <input
               type="date"
-              className="input input-bordered input-sm"
+              className="input input-bordered input-sm rounded-sm"
               value={dateTo}
               onChange={(e) => setDateTo(e.target.value)}
             />
@@ -328,130 +322,145 @@ export default function OEE() {
         </div>
       </div>
 
-      {/* Plant-wide OEE */}
-      <div className="bg-[#151b28] rounded-lg shadow p-6">
-        <div className="flex flex-col md:flex-row items-center gap-8">
-          <div className="flex flex-col items-center">
-            <div className="text-sm text-slate-400 font-medium mb-1">Plant-wide OEE</div>
-            <div className={`text-6xl font-bold ${oeeColor(plantOEE)}`}>
-              {plantOEE.toFixed(1)}%
-            </div>
-            <div className="flex items-center gap-1 mt-2">
-              <ChartBarIcon className="h-4 w-4 text-slate-400" />
-              <span className="text-xs text-slate-400">Target: 85%</span>
-            </div>
-          </div>
-          <div className="flex-1 grid grid-cols-3 gap-4 w-full">
-            <div className="text-center p-4 rounded-lg bg-blue-500/10 border border-blue-500/30">
-              <div className="text-xs text-blue-600 font-medium mb-1">Availability</div>
-              <div className={`text-2xl font-bold ${oeeColor(plantA)}`}>{plantA.toFixed(1)}%</div>
-            </div>
-            <div className="text-center p-4 rounded-lg bg-purple-500/10 border border-purple-500/30">
-              <div className="text-xs text-purple-600 font-medium mb-1">Performance</div>
-              <div className={`text-2xl font-bold ${oeeColor(plantP)}`}>{plantP.toFixed(1)}%</div>
-            </div>
-            <div className="text-center p-4 rounded-lg bg-teal-500/10 border border-teal-500/30">
-              <div className="text-xs text-teal-600 font-medium mb-1">Quality</div>
-              <div className={`text-2xl font-bold ${oeeColor(plantQ)}`}>{plantQ.toFixed(1)}%</div>
-            </div>
-          </div>
-        </div>
-      </div>
+      {/* Plant-wide OEE — single MiniStat strip (de-duped A/P/Q) */}
+      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+        <MiniStat
+          icon={ChartBarIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Plant-wide OEE"
+          value={`${plantOEE.toFixed(1)}%`}
+          valueColor={oeeColor(plantOEE)}
+          subtitle="Target: 85%"
+        />
+        <MiniStat
+          icon={ClockIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Availability"
+          value={`${plantA.toFixed(1)}%`}
+          valueColor={oeeColor(plantA)}
+        />
+        <MiniStat
+          icon={BoltIcon}
+          iconBg="bg-fd-amber/15"
+          iconColor="text-fd-amber"
+          label="Performance"
+          value={`${plantP.toFixed(1)}%`}
+          valueColor={oeeColor(plantP)}
+        />
+        <MiniStat
+          icon={CheckBadgeIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Quality"
+          value={`${plantQ.toFixed(1)}%`}
+          valueColor={oeeColor(plantQ)}
+        />
+      </MiniStatStrip>
 
-      {/* Work Center OEE Cards */}
-      <div className="bg-[#151b28] rounded-lg shadow p-4">
-        <h2 className="text-lg font-semibold text-white mb-3">Work Center OEE</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-          {(dashboard?.work_centers || []).map((wc) => (
-            <div
-              key={wc.work_center_id}
-              onClick={() => setSelectedWorkCenter(String(wc.work_center_id))}
-              className={`rounded-lg p-3 border-2 cursor-pointer transition-all hover:shadow-md ${oeeBgColor(wc.oee)} ${
-                selectedWorkCenter === String(wc.work_center_id) ? 'ring-2 ring-blue-500' : ''
-              }`}
-            >
-              <div className="font-bold text-sm text-white">{wc.work_center_code}</div>
-              <div className="text-xs text-slate-400 truncate mb-2">{wc.work_center_name}</div>
-              <div className={`text-2xl font-bold ${oeeColor(wc.oee)}`}>
-                {wc.oee.toFixed(1)}%
-              </div>
-              <div className="mt-1 space-y-0.5">
-                <div className="flex justify-between text-xs text-slate-400">
-                  <span>A</span>
-                  <span>{wc.availability.toFixed(0)}%</span>
+      {/* Work Center OEE tiles + selected-WC detail side-by-side */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+        <CockpitPanel
+          title="Work Center OEE"
+          subtitle="Tap a work center to filter and inspect its detail"
+          className={selectedWcData ? 'xl:col-span-7' : 'xl:col-span-12'}
+          footer={`${(dashboard?.work_centers || []).length} work centers`}
+        >
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+            {(dashboard?.work_centers || []).map((wc) => (
+              <button
+                type="button"
+                key={wc.work_center_id}
+                onClick={() => setSelectedWorkCenter(String(wc.work_center_id))}
+                className={`text-left rounded-sm p-2.5 border cursor-pointer transition-colors min-w-0 ${oeeBgColor(wc.oee)} ${
+                  selectedWorkCenter === String(wc.work_center_id) ? 'ring-1 ring-fd-blue' : ''
+                }`}
+              >
+                <div className="font-bold text-sm text-fd-ink truncate">{wc.work_center_code}</div>
+                <div className="text-[10px] text-fd-mute truncate mb-1.5">{wc.work_center_name}</div>
+                <div className={`text-xl font-bold tabular-nums ${oeeColor(wc.oee)}`}>
+                  {wc.oee.toFixed(1)}%
                 </div>
-                <div className="flex justify-between text-xs text-slate-400">
-                  <span>P</span>
-                  <span>{wc.performance.toFixed(0)}%</span>
+                <div className="mt-1 space-y-0.5">
+                  <div className="flex justify-between text-[10px] text-fd-mute tabular-nums">
+                    <span>A</span>
+                    <span>{wc.availability.toFixed(0)}%</span>
+                  </div>
+                  <div className="flex justify-between text-[10px] text-fd-mute tabular-nums">
+                    <span>P</span>
+                    <span>{wc.performance.toFixed(0)}%</span>
+                  </div>
+                  <div className="flex justify-between text-[10px] text-fd-mute tabular-nums">
+                    <span>Q</span>
+                    <span>{wc.quality.toFixed(0)}%</span>
+                  </div>
                 </div>
-                <div className="flex justify-between text-xs text-slate-400">
-                  <span>Q</span>
-                  <span>{wc.quality.toFixed(0)}%</span>
-                </div>
-              </div>
-            </div>
-          ))}
-          {(dashboard?.work_centers || []).length === 0 && (
-            <div className="col-span-full text-center text-slate-400 py-8">
-              No OEE data available for the selected period
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Selected Work Center Detail - Gauge Cards */}
-      {selectedWcData && (
-        <div className="bg-[#151b28] rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-white mb-3">
-            <CogIcon className="h-5 w-5 inline mr-2 text-slate-400" />
-            {selectedWcData.work_center_code} - {selectedWcData.work_center_name}
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {[
-              { label: 'Availability', value: selectedWcData.availability, target: 90 },
-              { label: 'Performance', value: selectedWcData.performance, target: 95 },
-              { label: 'Quality', value: selectedWcData.quality, target: 99 },
-            ].map((metric) => (
-              <div key={metric.label} className="flex flex-col items-center p-4 rounded-lg border">
-                <svg width="140" height="80" viewBox="0 0 140 80">
-                  {/* Background arc */}
-                  <path
-                    d={gaugeArc(100)}
-                    fill="none"
-                    stroke="#334155"
-                    strokeWidth="12"
-                    strokeLinecap="round"
-                  />
-                  {/* Value arc */}
-                  <path
-                    d={gaugeArc(metric.value)}
-                    fill="none"
-                    stroke={gaugeColor(metric.value)}
-                    strokeWidth="12"
-                    strokeLinecap="round"
-                  />
-                  <text x="70" y="70" textAnchor="middle" className="text-xl font-bold" fill={gaugeColor(metric.value)}>
-                    {metric.value.toFixed(1)}%
-                  </text>
-                </svg>
-                <div className="text-sm font-medium text-slate-300 mt-1">{metric.label}</div>
-                <div className="text-xs text-slate-400">Target: {metric.target}%</div>
-                <div className={`text-xs mt-1 font-medium ${metric.value >= metric.target ? 'text-green-600' : 'text-red-600'}`}>
-                  {metric.value >= metric.target ? 'On Target' : `${(metric.target - metric.value).toFixed(1)}% below target`}
-                </div>
-              </div>
+              </button>
             ))}
+            {(dashboard?.work_centers || []).length === 0 && (
+              <div className="col-span-full text-center text-fd-mute py-8 text-sm">
+                No OEE data available for the selected period
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        </CockpitPanel>
+
+        {/* Selected Work Center Detail — Gauge Cards (canonical per-WC A/P/Q view) */}
+        {selectedWcData && (
+          <CockpitPanel
+            title={`${selectedWcData.work_center_code} — ${selectedWcData.work_center_name}`}
+            subtitle="Selected work center detail"
+            headerExtra={<CogIcon className="h-5 w-5 text-fd-mute" />}
+            className="xl:col-span-5"
+          >
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {[
+                { label: 'Availability', value: selectedWcData.availability, target: 90 },
+                { label: 'Performance', value: selectedWcData.performance, target: 95 },
+                { label: 'Quality', value: selectedWcData.quality, target: 99 },
+              ].map((metric) => (
+                <div key={metric.label} className="flex flex-col items-center p-2.5 rounded-sm border border-fd-line min-w-0">
+                  <svg width="140" height="80" viewBox="0 0 140 80">
+                    {/* Background arc */}
+                    <path
+                      d={gaugeArc(100)}
+                      fill="none"
+                      stroke="#334155"
+                      strokeWidth="12"
+                      strokeLinecap="round"
+                    />
+                    {/* Value arc */}
+                    <path
+                      d={gaugeArc(metric.value)}
+                      fill="none"
+                      stroke={gaugeColor(metric.value)}
+                      strokeWidth="12"
+                      strokeLinecap="round"
+                    />
+                    <text x="70" y="70" textAnchor="middle" className="text-xl font-bold" fill={gaugeColor(metric.value)}>
+                      {metric.value.toFixed(1)}%
+                    </text>
+                  </svg>
+                  <div className="text-sm font-medium text-fd-body mt-1">{metric.label}</div>
+                  <div className="text-[10px] text-fd-mute">Target: {metric.target}%</div>
+                  <div className={`text-[10px] mt-1 font-medium ${metric.value >= metric.target ? 'text-green-600' : 'text-red-600'}`}>
+                    {metric.value >= metric.target ? 'On Target' : `${(metric.target - metric.value).toFixed(1)}% below target`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CockpitPanel>
+        )}
+      </div>
 
       {/* Trend Chart */}
       {trends.length > 0 && (
-        <div className="bg-[#151b28] rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-white mb-3">
-            <CalendarDaysIcon className="h-5 w-5 inline mr-2 text-slate-400" />
-            OEE Trends (30 Days)
-          </h2>
+        <CockpitPanel
+          title="OEE Trends (30 Days)"
+          headerExtra={<CalendarDaysIcon className="h-5 w-5 text-fd-mute" />}
+          bodyClassName="lg:max-h-none"
+        >
           <ResponsiveContainer width="100%" height={350}>
             <LineChart data={trends} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
@@ -465,7 +474,7 @@ export default function OEE() {
               />
               <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#94a3b8' }} />
               <Tooltip
-                contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
+                contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0' }}
                 formatter={(value: number | undefined, name: string | undefined) => [`${(value ?? 0).toFixed(1)}%`, name ?? '']}
                 labelFormatter={(label) => {
                   const d = new Date(label);
@@ -480,37 +489,15 @@ export default function OEE() {
               <Line type="monotone" dataKey="quality" stroke="#14b8a6" strokeWidth={1} name="Quality" dot={false} strokeDasharray="4 2" />
             </LineChart>
           </ResponsiveContainer>
-        </div>
-      )}
-
-      {/* Work Center Comparison Bar Chart */}
-      {comparisonData.length > 0 && (
-        <div className="bg-[#151b28] rounded-lg shadow p-4">
-          <h2 className="text-lg font-semibold text-white mb-3">Work Center Comparison</h2>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={comparisonData} margin={{ top: 5, right: 20, left: 10, bottom: 40 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="name" angle={-35} textAnchor="end" interval={0} height={60} tick={{ fontSize: 11, fill: '#94a3b8' }} />
-              <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#94a3b8' }} />
-              <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} formatter={(value: number | undefined) => [`${value ?? 0}%`]} />
-              <Legend />
-              <ReferenceLine y={85} stroke="#ef4444" strokeDasharray="5 5" label={{ value: '85% Target', position: 'right', fontSize: 10 }} />
-              <Bar dataKey="oee" fill="#2563eb" name="OEE" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="availability" fill="#60a5fa" name="Availability" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="performance" fill="#a78bfa" name="Performance" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="quality" fill="#2dd4bf" name="Quality" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+        </CockpitPanel>
       )}
 
       {/* OEE Records Table */}
-      <div className="bg-[#151b28] rounded-lg shadow p-4">
-        <h2 className="text-lg font-semibold text-white mb-3">OEE Records</h2>
+      <CockpitPanel title="OEE Records" footer={`${records.length} records`}>
         <div className="overflow-x-auto">
           <table className="table table-sm w-full">
             <thead>
-              <tr className="bg-slate-800">
+              <tr className="bg-fd-raised">
                 <th>Date</th>
                 <th>Work Center</th>
                 <th>Shift</th>
@@ -527,37 +514,37 @@ export default function OEE() {
             <tbody>
               {records.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="text-center text-slate-400 py-8">
+                  <td colSpan={11} className="text-center text-fd-mute py-8">
                     No OEE records found for the selected period
                   </td>
                 </tr>
               ) : (
                 records.map((rec) => (
                   <tr key={rec.id} className="hover">
-                    <td className="text-sm">{rec.record_date}</td>
+                    <td className="text-sm tabular-nums">{rec.record_date}</td>
                     <td className="font-medium text-sm">
                       {rec.work_center?.code || `WC-${rec.work_center_id}`}
                     </td>
                     <td className="text-sm">{rec.shift || '-'}</td>
                     <td>
-                      <span className={`font-bold text-sm ${oeeColor(rec.oee)}`}>
+                      <span className={`font-bold text-sm tabular-nums ${oeeColor(rec.oee)}`}>
                         {rec.oee.toFixed(1)}%
                       </span>
                     </td>
-                    <td className="text-sm">{rec.availability.toFixed(1)}%</td>
-                    <td className="text-sm">{rec.performance.toFixed(1)}%</td>
-                    <td className="text-sm">{rec.quality.toFixed(1)}%</td>
-                    <td className="text-sm">{rec.total_pieces}</td>
-                    <td className="text-sm">{rec.good_pieces}</td>
-                    <td className="text-sm">{rec.rejected_pieces}</td>
-                    <td className="text-sm text-slate-400 max-w-[200px] truncate">{rec.notes || '-'}</td>
+                    <td className="text-sm tabular-nums">{rec.availability.toFixed(1)}%</td>
+                    <td className="text-sm tabular-nums">{rec.performance.toFixed(1)}%</td>
+                    <td className="text-sm tabular-nums">{rec.quality.toFixed(1)}%</td>
+                    <td className="text-sm tabular-nums">{rec.total_pieces}</td>
+                    <td className="text-sm tabular-nums">{rec.good_pieces}</td>
+                    <td className="text-sm tabular-nums">{rec.rejected_pieces}</td>
+                    <td className="text-sm text-fd-mute max-w-[200px] truncate">{rec.notes || '-'}</td>
                   </tr>
                 ))
               )}
             </tbody>
           </table>
         </div>
-      </div>
+      </CockpitPanel>
 
       {/* Add Record Modal */}
       {showAddModal && (

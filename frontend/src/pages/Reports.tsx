@@ -1,11 +1,14 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
+import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import {
   ClockIcon,
   CurrencyDollarIcon,
   ExclamationTriangleIcon,
   CheckCircleIcon,
+  InboxArrowDownIcon,
+  ScaleIcon,
 } from '@heroicons/react/24/outline';
 
 interface ProductionSummary {
@@ -171,7 +174,7 @@ export default function Reports() {
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-slate-700">
+      <div className="border-b border-fd-line">
         <nav className="flex space-x-8">
           {[
             { id: 'dashboard', label: 'Dashboard' },
@@ -195,74 +198,94 @@ export default function Reports() {
 
       {activeTab === 'dashboard' && (
       <>
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="card bg-gradient-to-br from-blue-500 to-blue-600 text-white">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-blue-100 text-sm">On-Time Delivery</p>
-              <p className="text-3xl font-bold">{production?.on_time_delivery_pct.toFixed(1)}%</p>
-              <p className="text-blue-200 text-sm">{production?.on_time_delivery_count} of {production?.total_completed}</p>
-            </div>
-            <CheckCircleIcon className="h-12 w-12 text-blue-200" />
-          </div>
-        </div>
+      {/* KPI strip — production + quality + inventory headline metrics.
+          Scrap is shown here as the aggregate rate; the per-day scrapped
+          counts are rendered canonically in the Daily Output panel below. */}
+      <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2">
+        <MiniStat
+          icon={CheckCircleIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="On-Time Delivery"
+          value={`${production?.on_time_delivery_pct.toFixed(1) ?? '0.0'}%`}
+          subtitle={`${production?.on_time_delivery_count ?? 0} of ${production?.total_completed ?? 0}`}
+        />
+        <MiniStat
+          icon={ClockIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Hours Worked"
+          value={production?.total_hours_worked ?? 0}
+          subtitle={`Last ${period} days`}
+        />
+        <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg="bg-fd-amber/15"
+          iconColor="text-fd-amber"
+          label="Scrap Rate"
+          value={`${production?.scrap_rate_pct.toFixed(2) ?? '0.00'}%`}
+          subtitle="see Daily Output"
+        />
+        <MiniStat
+          icon={CurrencyDollarIcon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="Inventory Value"
+          value={`$${(inventory?.total_value || 0).toLocaleString()}`}
+          subtitle={`${inventory?.unique_parts ?? 0} parts`}
+        />
+        <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg="bg-fd-red/15"
+          iconColor="text-fd-red"
+          label="Total NCRs"
+          value={quality?.total_ncrs ?? 0}
+          valueColor="text-fd-red"
+          subtitle={`${quality?.open_ncrs ?? 0} open`}
+        />
+        <MiniStat
+          icon={InboxArrowDownIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Qty Received"
+          value={quality?.receiving_total_qty ?? 0}
+          subtitle={`${quality?.receiving_rejected_qty ?? 0} rejected`}
+        />
+        <MiniStat
+          icon={ScaleIcon}
+          iconBg="bg-fd-cyan/15"
+          iconColor="text-fd-cyan"
+          label="Recv Reject Rate"
+          value={`${quality?.receiving_reject_rate_pct.toFixed(2) ?? '0.00'}%`}
+          subtitle="receiving"
+        />
+      </MiniStatStrip>
 
-        <div className="card bg-gradient-to-br from-green-500 to-green-600 text-white">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-green-100 text-sm">Hours Worked</p>
-              <p className="text-3xl font-bold">{production?.total_hours_worked}</p>
-              <p className="text-green-200 text-sm">Last {period} days</p>
-            </div>
-            <ClockIcon className="h-12 w-12 text-green-200" />
-          </div>
-        </div>
-
-        <div className="card bg-gradient-to-br from-amber-500 to-amber-600 text-white">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-amber-100 text-sm">Scrap Rate</p>
-              <p className="text-3xl font-bold">{production?.scrap_rate_pct.toFixed(2)}%</p>
-              <p className="text-amber-200 text-sm">{production?.total_scrapped} scrapped</p>
-            </div>
-            <ExclamationTriangleIcon className="h-12 w-12 text-amber-200" />
-          </div>
-        </div>
-
-        <div className="card bg-gradient-to-br from-purple-500 to-purple-600 text-white">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-purple-100 text-sm">Inventory Value</p>
-              <p className="text-3xl font-bold">${(inventory?.total_value || 0).toLocaleString()}</p>
-              <p className="text-purple-200 text-sm">{inventory?.unique_parts} parts</p>
-            </div>
-            <CurrencyDollarIcon className="h-12 w-12 text-purple-200" />
-          </div>
-        </div>
-      </div>
-
-      {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Daily Output Chart */}
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Daily Production Output</h2>
+      {/* Cockpit grid: charts + tables side-by-side */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+        {/* Daily Output Chart — canonical render of per-day completed/scrapped. */}
+        <CockpitPanel
+          title="Daily Production Output"
+          subtitle="Last 14 days"
+          className="xl:col-span-7"
+          bodyClassName="lg:max-h-none"
+        >
           <div className="h-64 flex items-end gap-1">
             {dailyOutput.map((day, idx) => {
               const maxVal = Math.max(...dailyOutput.map(d => d.completed + d.scrapped), 1);
               const completedHeight = (day.completed / maxVal) * 100;
               const scrappedHeight = (day.scrapped / maxVal) * 100;
-              
+
               return (
-                <div key={idx} className="flex-1 flex flex-col items-center">
+                <div key={idx} className="flex-1 flex flex-col items-center min-w-0">
                   <div className="w-full flex flex-col-reverse" style={{ height: '200px' }}>
-                    <div 
-                      className="bg-green-500/100 rounded-t"
+                    <div
+                      className="bg-fd-green rounded-t-sm"
                       style={{ height: `${completedHeight}%` }}
                       title={`Completed: ${day.completed}`}
                     />
-                    <div 
-                      className="bg-red-400"
+                    <div
+                      className="bg-fd-red"
                       style={{ height: `${scrappedHeight}%` }}
                       title={`Scrapped: ${day.scrapped}`}
                     />
@@ -276,31 +299,34 @@ export default function Reports() {
           </div>
           <div className="flex gap-4 mt-4 justify-center text-sm">
             <span className="flex items-center gap-1">
-              <span className="w-3 h-3 bg-green-500/100 rounded"></span> Completed
+              <span className="w-3 h-3 bg-fd-green rounded-sm"></span> Completed
             </span>
             <span className="flex items-center gap-1">
-              <span className="w-3 h-3 bg-red-400 rounded"></span> Scrapped
+              <span className="w-3 h-3 bg-fd-red rounded-sm"></span> Scrapped
             </span>
           </div>
-        </div>
+        </CockpitPanel>
 
         {/* Work Center Utilization */}
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Work Center Utilization</h2>
+        <CockpitPanel
+          title="Work Center Utilization"
+          subtitle="Top 8 by hours"
+          className="xl:col-span-5"
+        >
           <div className="space-y-3">
             {utilization.slice(0, 8).map((wc) => (
-              <div key={wc.work_center_id}>
-                <div className="flex justify-between text-sm mb-1">
-                  <span className="font-medium">{wc.work_center_code}</span>
-                  <span className="text-slate-400">{wc.utilization_pct}%</span>
+              <div key={wc.work_center_id} className="min-w-0">
+                <div className="flex justify-between text-sm mb-1 gap-2">
+                  <span className="font-medium truncate">{wc.work_center_code}</span>
+                  <span className="text-slate-400 tabular-nums flex-shrink-0">{wc.utilization_pct}%</span>
                 </div>
-                <div className="h-4 bg-gray-200 rounded-full overflow-hidden">
+                <div className="h-4 bg-fd-sunken rounded-sm overflow-hidden">
                   <div
-                    className={`h-full rounded-full ${
-                      wc.utilization_pct > 80 ? 'bg-green-500/100' :
-                      wc.utilization_pct > 50 ? 'bg-blue-500/100' :
-                      wc.utilization_pct > 25 ? 'bg-yellow-500/100' :
-                      'bg-red-400'
+                    className={`h-full rounded-sm ${
+                      wc.utilization_pct > 80 ? 'bg-fd-green' :
+                      wc.utilization_pct > 50 ? 'bg-fd-blue' :
+                      wc.utilization_pct > 25 ? 'bg-fd-amber' :
+                      'bg-fd-red'
                     }`}
                     style={{ width: `${Math.min(wc.utilization_pct, 100)}%` }}
                   />
@@ -308,52 +334,18 @@ export default function Reports() {
               </div>
             ))}
           </div>
-        </div>
-      </div>
+        </CockpitPanel>
 
-      {/* Quality Metrics */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Quality Summary</h2>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-slate-800 rounded-lg p-4 text-center">
-              <p className="text-3xl font-bold text-red-600">{quality?.total_ncrs}</p>
-              <p className="text-sm text-slate-400">Total NCRs</p>
-            </div>
-            <div className="bg-slate-800 rounded-lg p-4 text-center">
-              <p className="text-3xl font-bold text-orange-600">{quality?.open_ncrs}</p>
-              <p className="text-sm text-slate-400">Open NCRs</p>
-            </div>
-            <div className="bg-slate-800 rounded-lg p-4 text-center">
-              <p className="text-3xl font-bold text-blue-600">{quality?.receiving_total_qty}</p>
-              <p className="text-sm text-slate-400">Qty Received</p>
-            </div>
-            <div className="bg-slate-800 rounded-lg p-4 text-center">
-              <p className="text-3xl font-bold text-purple-600">{quality?.receiving_reject_rate_pct.toFixed(2)}%</p>
-              <p className="text-sm text-slate-400">Receiving Reject Rate</p>
-            </div>
-          </div>
-          {quality && Object.keys(quality.ncr_by_source).length > 0 && (
-            <div className="mt-4">
-              <h3 className="text-sm font-medium text-slate-300 mb-2">NCRs by Source</h3>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(quality.ncr_by_source).map(([source, count]) => (
-                  <span key={source} className="px-3 py-1 bg-slate-800/50 rounded-full text-sm">
-                    {source.replace('_', ' ')}: {count}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Vendor Performance */}
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Top Vendor Performance</h2>
+        {/* Top Vendor Performance */}
+        <CockpitPanel
+          title="Top Vendor Performance"
+          subtitle="Last 90 days"
+          className="xl:col-span-7"
+        >
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
-                <tr className="border-b">
+                <tr className="border-b border-fd-line">
                   <th className="text-left py-2">Vendor</th>
                   <th className="text-right py-2">POs</th>
                   <th className="text-right py-2">Fill Rate</th>
@@ -362,16 +354,16 @@ export default function Reports() {
               </thead>
               <tbody>
                 {vendors.slice(0, 5).map((v) => (
-                  <tr key={v.vendor_id} className="border-b">
-                    <td className="py-2 font-medium">{v.vendor_name}</td>
-                    <td className="py-2 text-right">{v.po_count}</td>
-                    <td className="py-2 text-right">
-                      <span className={v.fill_rate_pct >= 90 ? 'text-green-600' : v.fill_rate_pct >= 70 ? 'text-yellow-600' : 'text-red-600'}>
+                  <tr key={v.vendor_id} className="border-b border-fd-line">
+                    <td className="py-2 font-medium truncate max-w-[10rem]">{v.vendor_name}</td>
+                    <td className="py-2 text-right tabular-nums">{v.po_count}</td>
+                    <td className="py-2 text-right tabular-nums">
+                      <span className={v.fill_rate_pct >= 90 ? 'text-fd-green' : v.fill_rate_pct >= 70 ? 'text-fd-amber' : 'text-fd-red'}>
                         {v.fill_rate_pct.toFixed(1)}%
                       </span>
                     </td>
-                    <td className="py-2 text-right">
-                      <span className={v.reject_rate_pct <= 2 ? 'text-green-600' : v.reject_rate_pct <= 5 ? 'text-yellow-600' : 'text-red-600'}>
+                    <td className="py-2 text-right tabular-nums">
+                      <span className={v.reject_rate_pct <= 2 ? 'text-fd-green' : v.reject_rate_pct <= 5 ? 'text-fd-amber' : 'text-fd-red'}>
                         {v.reject_rate_pct.toFixed(2)}%
                       </span>
                     </td>
@@ -383,33 +375,98 @@ export default function Reports() {
               <p className="text-center text-slate-400 py-4">No vendor data available</p>
             )}
           </div>
-        </div>
-      </div>
+        </CockpitPanel>
 
-      {/* Work Orders by Status */}
-      <div className="card">
-        <h2 className="text-lg font-semibold mb-4">Work Orders by Status</h2>
-        <div className="flex flex-wrap gap-4">
-          {production && Object.entries(production.work_orders_by_status).map(([status, count]) => (
-            <div key={status} className="bg-slate-800 rounded-lg px-6 py-4 text-center min-w-24">
-              <p className="text-2xl font-bold">{count}</p>
-              <p className="text-sm text-slate-400 capitalize">{status.replace('_', ' ')}</p>
+        {/* Quality breakdown — NCRs by source + Work Orders by status.
+            Headline NCR/receiving counts live in the KPI strip above; this
+            panel carries only the per-category breakdowns. */}
+        <CockpitPanel
+          title="Quality & Work Orders"
+          subtitle="By source / status"
+          className="xl:col-span-5"
+        >
+          {quality && Object.keys(quality.ncr_by_source).length > 0 && (
+            <div className="mb-3">
+              <h3 className="text-[10px] font-medium uppercase tracking-wide text-slate-500 mb-2">NCRs by Source</h3>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(quality.ncr_by_source).map(([source, count]) => (
+                  <span key={source} className="px-2 py-0.5 bg-fd-sunken rounded-sm text-xs tabular-nums">
+                    {source.replace('_', ' ')}: {count}
+                  </span>
+                ))}
+              </div>
             </div>
-          ))}
-        </div>
+          )}
+          <div>
+            <h3 className="text-[10px] font-medium uppercase tracking-wide text-slate-500 mb-2">Work Orders by Status</h3>
+            <div className="flex flex-wrap gap-2">
+              {production && Object.entries(production.work_orders_by_status).map(([status, count]) => (
+                <div key={status} className="bg-fd-sunken rounded-sm px-3 py-2 text-center min-w-[5rem]">
+                  <p className="text-xl font-bold tabular-nums">{count}</p>
+                  <p className="text-[10px] text-slate-400 capitalize">{status.replace('_', ' ')}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </CockpitPanel>
       </div>
       </>
       )}
 
       {/* Costing Tab */}
       {activeTab === 'costing' && (
-        <div className="space-y-6">
-          <div className="card">
-            <h2 className="text-lg font-semibold mb-4">Work Order Cost Analysis</h2>
+        <div className="space-y-4">
+          {/* Cost Summary — collapsed into a MiniStat row above the table. */}
+          {costing.length > 0 && (() => {
+            const totalEst = costing.reduce((sum, wo) => sum + wo.estimated_total, 0);
+            const totalAct = costing.reduce((sum, wo) => sum + wo.actual_total, 0);
+            const totalHrs = costing.reduce((sum, wo) => sum + wo.actual_hours, 0);
+            const totalVar = costing.reduce((sum, wo) => sum + wo.cost_variance, 0);
+            return (
+              <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                <MiniStat
+                  icon={CurrencyDollarIcon}
+                  iconBg="bg-fd-blue/15"
+                  iconColor="text-fd-blue"
+                  label="Total Estimated"
+                  value={`$${totalEst.toLocaleString()}`}
+                />
+                <MiniStat
+                  icon={CurrencyDollarIcon}
+                  iconBg="bg-fd-green/15"
+                  iconColor="text-fd-green"
+                  label="Total Actual"
+                  value={`$${totalAct.toLocaleString()}`}
+                />
+                <MiniStat
+                  icon={ClockIcon}
+                  iconBg="bg-fd-cyan/15"
+                  iconColor="text-fd-cyan"
+                  label="Total Hours"
+                  value={totalHrs.toFixed(1)}
+                />
+                <MiniStat
+                  icon={ScaleIcon}
+                  iconBg={totalVar > 0 ? 'bg-fd-red/15' : 'bg-fd-green/15'}
+                  iconColor={totalVar > 0 ? 'text-fd-red' : 'text-fd-green'}
+                  label="Total Variance"
+                  value={`$${totalVar.toLocaleString()}`}
+                  valueColor={totalVar > 0 ? 'text-fd-red' : 'text-fd-green'}
+                />
+              </MiniStatStrip>
+            );
+          })()}
+
+          <CockpitPanel
+            title="Work Order Cost Analysis"
+            subtitle={`Last ${period} days`}
+            footer={costing.length ? `${costing.length} work orders` : undefined}
+            bodyClassName="lg:max-h-none"
+          >
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
-                  <tr className="border-b bg-slate-800">
+                  <tr className="border-b border-fd-line bg-fd-sunken">
                     <th className="text-left py-3 px-4">Work Order</th>
                     <th className="text-left py-3 px-4">Part</th>
                     <th className="text-right py-3 px-4">Qty</th>
@@ -422,22 +479,22 @@ export default function Reports() {
                 </thead>
                 <tbody>
                   {costing.map((wo) => (
-                    <tr key={wo.work_order_id} className="border-b hover:bg-slate-800">
+                    <tr key={wo.work_order_id} className="border-b border-fd-line hover:bg-fd-sunken">
                       <td className="py-3 px-4">
                         <div className="font-medium text-werco-primary">{wo.work_order_number}</div>
-                        <div className="text-xs text-slate-400">{wo.customer_name || '-'}</div>
+                        <div className="text-xs text-slate-400 truncate max-w-[12rem]">{wo.customer_name || '-'}</div>
                       </td>
                       <td className="py-3 px-4">
-                        <div>{wo.part_number}</div>
-                        <div className="text-xs text-slate-400">{wo.part_name}</div>
+                        <div className="truncate max-w-[12rem]">{wo.part_number}</div>
+                        <div className="text-xs text-slate-400 truncate max-w-[12rem]">{wo.part_name}</div>
                       </td>
-                      <td className="py-3 px-4 text-right">{wo.quantity}</td>
-                      <td className="py-3 px-4 text-right">{wo.estimated_hours.toFixed(1)}</td>
-                      <td className="py-3 px-4 text-right">{wo.actual_hours.toFixed(1)}</td>
-                      <td className="py-3 px-4 text-right">${wo.estimated_total.toFixed(2)}</td>
-                      <td className="py-3 px-4 text-right">${wo.actual_total.toFixed(2)}</td>
-                      <td className={`py-3 px-4 text-right font-medium ${
-                        wo.cost_variance > 0 ? 'text-red-600' : wo.cost_variance < 0 ? 'text-green-600' : ''
+                      <td className="py-3 px-4 text-right tabular-nums">{wo.quantity}</td>
+                      <td className="py-3 px-4 text-right tabular-nums">{wo.estimated_hours.toFixed(1)}</td>
+                      <td className="py-3 px-4 text-right tabular-nums">{wo.actual_hours.toFixed(1)}</td>
+                      <td className="py-3 px-4 text-right tabular-nums">${wo.estimated_total.toFixed(2)}</td>
+                      <td className="py-3 px-4 text-right tabular-nums">${wo.actual_total.toFixed(2)}</td>
+                      <td className={`py-3 px-4 text-right font-medium tabular-nums ${
+                        wo.cost_variance > 0 ? 'text-fd-red' : wo.cost_variance < 0 ? 'text-fd-green' : ''
                       }`}>
                         {wo.cost_variance > 0 ? '+' : ''}${wo.cost_variance.toFixed(2)}
                         <div className="text-xs">({wo.variance_pct.toFixed(1)}%)</div>
@@ -450,45 +507,7 @@ export default function Reports() {
                 <p className="text-center text-slate-400 py-8">No work order costing data available</p>
               )}
             </div>
-          </div>
-
-          {/* Cost Summary */}
-          {costing.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="card bg-blue-500/10 border-blue-500/30 text-center">
-                <p className="text-sm text-blue-600">Total Estimated</p>
-                <p className="text-2xl font-bold text-blue-300">
-                  ${costing.reduce((sum, wo) => sum + wo.estimated_total, 0).toLocaleString()}
-                </p>
-              </div>
-              <div className="card bg-green-500/10 border-green-500/30 text-center">
-                <p className="text-sm text-green-600">Total Actual</p>
-                <p className="text-2xl font-bold text-emerald-300">
-                  ${costing.reduce((sum, wo) => sum + wo.actual_total, 0).toLocaleString()}
-                </p>
-              </div>
-              <div className="card bg-purple-500/10 border-purple-500/30 text-center">
-                <p className="text-sm text-purple-600">Total Hours</p>
-                <p className="text-2xl font-bold text-purple-800">
-                  {costing.reduce((sum, wo) => sum + wo.actual_hours, 0).toFixed(1)}
-                </p>
-              </div>
-              <div className={`card text-center ${
-                costing.reduce((sum, wo) => sum + wo.cost_variance, 0) > 0 
-                  ? 'bg-red-500/10 border-red-500/30' 
-                  : 'bg-green-500/10 border-green-500/30'
-              }`}>
-                <p className="text-sm text-slate-400">Total Variance</p>
-                <p className={`text-2xl font-bold ${
-                  costing.reduce((sum, wo) => sum + wo.cost_variance, 0) > 0 
-                    ? 'text-red-300' 
-                    : 'text-emerald-300'
-                }`}>
-                  ${costing.reduce((sum, wo) => sum + wo.cost_variance, 0).toLocaleString()}
-                </p>
-              </div>
-            </div>
-          )}
+          </CockpitPanel>
         </div>
       )}
 
@@ -497,21 +516,21 @@ export default function Reports() {
         <div className="space-y-6">
           <div className="card">
             <h2 className="text-lg font-semibold mb-4">Employee Time Report (Last 7 Days)</h2>
-            
+
             {timesheets.map((emp) => (
               <div key={emp.user_id} className="mb-6 last:mb-0">
-                <div className="flex justify-between items-center bg-slate-800/50 px-4 py-2 rounded-t-lg">
-                  <span className="font-semibold">{emp.employee_name}</span>
+                <div className="flex justify-between items-center bg-fd-sunken px-4 py-2 rounded-t-sm">
+                  <span className="font-semibold truncate">{emp.employee_name}</span>
                   <div className="flex flex-wrap items-center justify-end gap-3 text-sm">
-                    <span className="text-emerald-400 font-bold">{emp.completed_operations || 0} ops</span>
-                    <span className="text-slate-300 font-semibold">{emp.quantity_produced || 0} qty</span>
-                    <span className="text-werco-primary font-bold">{emp.total_hours} hrs</span>
+                    <span className="text-emerald-400 font-bold tabular-nums">{emp.completed_operations || 0} ops</span>
+                    <span className="text-slate-300 font-semibold tabular-nums">{emp.quantity_produced || 0} qty</span>
+                    <span className="text-werco-primary font-bold tabular-nums">{emp.total_hours} hrs</span>
                   </div>
                 </div>
-                <div className="border border-t-0 rounded-b-lg overflow-hidden">
+                <div className="border border-t-0 border-fd-line rounded-b-sm overflow-hidden">
                   <table className="min-w-full text-sm">
                     <thead>
-                      <tr className="bg-slate-800">
+                      <tr className="bg-fd-sunken">
                         <th className="text-left py-2 px-4">Date</th>
                         <th className="text-left py-2 px-4">Work Order</th>
                         <th className="text-left py-2 px-4">Operation</th>

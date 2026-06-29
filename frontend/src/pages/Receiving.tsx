@@ -16,6 +16,7 @@ import {
   PrinterIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface POLine {
   line_id: number;
@@ -448,44 +449,40 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
       {/* Stats Cards */}
       {stats && (
-        <div className="grid grid-cols-4 gap-4">
-          <div className="stat-card">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-slate-400">Pending Inspection</p>
-                <p className="text-2xl font-bold text-amber-600">{stats.pending_inspection}</p>
-              </div>
-              <ClockIcon className="h-10 w-10 text-amber-200" />
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-slate-400">Received (30d)</p>
-                <p className="text-2xl font-bold text-werco-primary">{stats.receipts_in_period}</p>
-              </div>
-              <InboxArrowDownIcon className="h-10 w-10 text-werco-100" />
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-slate-400">Acceptance Rate</p>
-                <p className="text-2xl font-bold text-green-600">{stats.acceptance_rate}%</p>
-              </div>
-              <DocumentCheckIcon className="h-10 w-10 text-green-200" />
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-slate-400">Rejections (30d)</p>
-                <p className="text-2xl font-bold text-red-600">{stats.rejections_in_period}</p>
-              </div>
-              <ExclamationTriangleIcon className="h-10 w-10 text-red-200" />
-            </div>
-          </div>
-        </div>
+        <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <MiniStat
+            icon={ClockIcon}
+            iconBg="bg-fd-amber/15"
+            iconColor="text-fd-amber"
+            label="Pending Inspection"
+            value={stats.pending_inspection}
+            valueColor="text-fd-amber"
+          />
+          <MiniStat
+            icon={InboxArrowDownIcon}
+            iconBg="bg-fd-blue/15"
+            iconColor="text-fd-blue"
+            label="Received (30d)"
+            value={stats.receipts_in_period}
+            valueColor="text-fd-blue"
+          />
+          <MiniStat
+            icon={DocumentCheckIcon}
+            iconBg="bg-fd-green/15"
+            iconColor="text-fd-green"
+            label="Acceptance Rate"
+            value={`${stats.acceptance_rate}%`}
+            valueColor="text-fd-green"
+          />
+          <MiniStat
+            icon={ExclamationTriangleIcon}
+            iconBg="bg-fd-red/15"
+            iconColor="text-fd-red"
+            label="Rejections (30d)"
+            value={stats.rejections_in_period}
+            valueColor="text-fd-red"
+          />
+        </MiniStatStrip>
       )}
 
       {/* Tabs */}

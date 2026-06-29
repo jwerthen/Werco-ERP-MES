@@ -11,6 +11,7 @@ import {
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
+import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface InventoryItem {
   id: number;
@@ -228,7 +229,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {!embedded && (
         <div className="flex justify-between items-center">
           <div>
@@ -248,49 +249,38 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         </div>
       )}
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="card">
-          <div className="text-2xl font-bold">{filteredSummary.length}</div>
-          <div className="text-sm text-slate-400">Unique Items</div>
-        </div>
-        <div className="card">
-          <div className="text-2xl font-bold">{summaryTotals.totalOnHand.toFixed(0)}</div>
-          <div className="text-sm text-slate-400">Total On Hand</div>
-        </div>
-        <div className="card">
-          <div className="text-2xl font-bold">{summaryTotals.totalAvailable.toFixed(0)}</div>
-          <div className="text-sm text-slate-400">Total Available</div>
-        </div>
-        <div className="card">
-          <div className="text-2xl font-bold text-amber-600">{lowStockCount}</div>
-          <div className="text-sm text-slate-400">Low Stock Alerts</div>
-        </div>
-      </div>
-
-      {/* Low Stock Alert Banner */}
-      {showLowStockOnly && (
-        <div className="flex items-center justify-between p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
-          <div className="flex items-center gap-3">
-            <ExclamationTriangleIcon className="h-5 w-5 text-amber-600" />
-            <span className="font-medium text-amber-300">
-              Showing {lowStockCount} low stock item(s)
-            </span>
-          </div>
-          <button
-            onClick={() => {
-              setShowLowStockOnly(false);
-              const nextParams = new URLSearchParams(searchParams);
-              nextParams.delete('filter');
-              setSearchParams(nextParams);
-            }}
-            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-amber-500/20 text-amber-400 rounded-full hover:bg-amber-500/30"
-          >
-            <XMarkIcon className="h-4 w-4" />
-            Clear filter
-          </button>
-        </div>
-      )}
+      {/* Summary Stats */}
+      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+        <MiniStat
+          icon={CubeIcon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Unique Items"
+          value={filteredSummary.length}
+        />
+        <MiniStat
+          icon={Squares2X2Icon}
+          iconBg="bg-fd-blue/15"
+          iconColor="text-fd-blue"
+          label="Total On Hand"
+          value={summaryTotals.totalOnHand.toFixed(0)}
+        />
+        <MiniStat
+          icon={ArrowsRightLeftIcon}
+          iconBg="bg-fd-green/15"
+          iconColor="text-fd-green"
+          label="Total Available"
+          value={summaryTotals.totalAvailable.toFixed(0)}
+        />
+        <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg="bg-fd-amber/15"
+          iconColor="text-fd-amber"
+          label="Low Stock Alerts"
+          value={lowStockCount}
+          valueColor={lowStockCount > 0 ? 'text-fd-amber' : undefined}
+        />
+      </MiniStatStrip>
 
       {/* Quick Filters */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -355,27 +345,38 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             {activeTab === 'details' ? groupInventory.length : groupSummary.length}
           </span>
           <span>items</span>
-          <button
-            type="button"
-            onClick={() => {
-              const next = !showLowStockOnly;
-              setShowLowStockOnly(next);
-              const nextParams = new URLSearchParams(searchParams);
-              if (next) {
+          {showLowStockOnly ? (
+            <span className="ml-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs font-medium border border-fd-amber/40 bg-fd-amber/10 text-fd-amber">
+              <ExclamationTriangleIcon className="h-3.5 w-3.5" />
+              Showing {lowStockCount} low stock
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLowStockOnly(false);
+                  const nextParams = new URLSearchParams(searchParams);
+                  nextParams.delete('filter');
+                  setSearchParams(nextParams);
+                }}
+                className="-mr-0.5 ml-0.5 rounded-sm hover:bg-fd-amber/20"
+                aria-label="Clear low stock filter"
+              >
+                <XMarkIcon className="h-3.5 w-3.5" />
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setShowLowStockOnly(true);
+                const nextParams = new URLSearchParams(searchParams);
                 nextParams.set('filter', 'low_stock');
-              } else {
-                nextParams.delete('filter');
-              }
-              setSearchParams(nextParams);
-            }}
-            className={`ml-2 px-3 py-1 rounded-full text-xs font-medium border ${
-              showLowStockOnly
-                ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
-                : 'bg-[#151b28] text-slate-400 border-slate-700 hover:bg-slate-800'
-            }`}
-          >
-            {showLowStockOnly ? 'Showing Low Stock' : 'Show Low Stock'}
-          </button>
+                setSearchParams(nextParams);
+              }}
+              className="ml-2 px-2.5 py-1 rounded-sm text-xs font-medium border border-fd-line bg-fd-panel text-slate-400 hover:border-fd-line-bright"
+            >
+              Show Low Stock
+            </button>
+          )}
         </div>
       </div>
 

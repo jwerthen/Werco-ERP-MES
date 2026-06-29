@@ -18,10 +18,11 @@ import {
   BeakerIcon,
 } from '@heroicons/react/24/outline';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, 
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer
 } from 'recharts';
 import { formatCentralDate } from '../utils/centralTime';
+import { MiniStatStrip, CockpitPanel } from '../components/cockpit';
 
 interface KPIValue {
   // null when the KPI is genuinely uncomputable (Batch 8 / OEE-4/OEE-6: no staffed time
@@ -411,30 +412,36 @@ export default function Analytics() {
     const max = Math.max(...data);
     const min = Math.min(...data);
     const range = max - min || 1;
-    
+
     return (
-      <div className="flex items-end h-8 gap-px">
+      <div className="flex items-end h-6 gap-px">
         {data.map((val, i) => (
           <div
             key={i}
-            className="bg-werco-primary/60 rounded-t w-2"
-            style={{ height: `${((val - min) / range) * 100}%`, minHeight: '4px' }}
+            className="bg-werco-primary/60 rounded-t w-1.5"
+            style={{ height: `${((val - min) / range) * 100}%`, minHeight: '3px' }}
           />
         ))}
       </div>
     );
   };
 
-  const KPICard = ({ 
-    title, 
-    kpi, 
-    type, 
-    icon: Icon, 
+  /**
+   * Compact instrument-panel KPI tile for the overview strip. Matches the shared
+   * MiniStat aesthetic (sharp corners, hairline border, tight padding, tabular
+   * value) while retaining the analytics-specific extras MiniStat doesn't carry:
+   * the target badge, the colored trend arrow + change-vs-prior, and the sparkline.
+   */
+  const KPICard = ({
+    title,
+    kpi,
+    type,
+    icon: Icon,
     isGoodUp = true,
-    onClick 
-  }: { 
-    title: string; 
-    kpi: KPIValue; 
+    onClick,
+  }: {
+    title: string;
+    kpi: KPIValue;
     type: string;
     icon: React.ElementType;
     isGoodUp?: boolean;
@@ -443,48 +450,64 @@ export default function Analytics() {
     const isOnTarget = kpi.target !== null && kpi.value !== null && (
       isGoodUp ? kpi.value >= kpi.target : kpi.value <= kpi.target
     );
-    
-    return (
-      <div 
-        className={`card hover:shadow-lg transition-shadow cursor-pointer ${onClick ? 'hover:border-werco-primary' : ''}`}
-        onClick={onClick}
+
+    const inner = (
+      <div
+        className={`card card-compact !p-2.5 flex flex-col gap-1 min-w-0 h-full transition-colors hover:border-fd-line-bright ${
+          onClick ? 'cursor-pointer' : ''
+        }`}
       >
-        <div className="flex justify-between items-start mb-2">
-          <div className="flex items-center gap-2">
-            <Icon className="h-5 w-5 text-slate-400" />
-            <span className="text-sm font-medium text-slate-400">{title}</span>
+        <div className="flex items-center justify-between gap-1.5">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-sm bg-werco-primary/15">
+              <Icon className="h-3.5 w-3.5 text-werco-primary" />
+            </span>
+            <p className="stat-label !text-[10px] uppercase tracking-wide truncate">{title}</p>
           </div>
           {kpi.target !== null && (
-            <span className={`text-xs px-2 py-0.5 rounded-full ${isOnTarget ? 'bg-green-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
-              Target: {formatKPIValue(kpi.target, type)}
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded-sm tabular-nums flex-shrink-0 ${
+                isOnTarget ? 'bg-green-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
+              }`}
+            >
+              tgt {formatKPIValue(kpi.target, type)}
             </span>
           )}
         </div>
-        
-        <div className="flex items-end justify-between">
-          <div>
-            <p className="text-3xl font-bold text-white">{formatKPIValue(kpi.value, type)}</p>
+
+        <div className="flex items-end justify-between gap-2">
+          <div className="min-w-0">
+            <p className="stat-value !text-xl">{formatKPIValue(kpi.value, type)}</p>
             {kpi.change_pct !== null && (
-              <div className="flex items-center gap-1 mt-1">
+              <div className="flex items-center gap-1 mt-0.5">
                 {getTrendIcon(kpi.trend, isGoodUp)}
-                <span className={`text-sm ${
-                  (isGoodUp && kpi.trend === 'up') || (!isGoodUp && kpi.trend === 'down')
-                    ? 'text-green-600' 
-                    : kpi.trend === 'flat' 
-                      ? 'text-slate-400' 
-                      : 'text-red-600'
-                }`}>
+                <span
+                  className={`text-[10px] tabular-nums ${
+                    (isGoodUp && kpi.trend === 'up') || (!isGoodUp && kpi.trend === 'down')
+                      ? 'text-green-600'
+                      : kpi.trend === 'flat'
+                        ? 'text-slate-400'
+                        : 'text-red-600'
+                  }`}
+                >
                   {Math.abs(kpi.change_pct).toFixed(1)}% vs prior
                 </span>
               </div>
             )}
           </div>
-          <div className="w-20">
-            {renderSparkline(kpi.sparkline)}
-          </div>
+          <div className="w-16 flex-shrink-0">{renderSparkline(kpi.sparkline)}</div>
         </div>
       </div>
     );
+
+    if (onClick) {
+      return (
+        <button type="button" onClick={onClick} className="block h-full w-full text-left">
+          {inner}
+        </button>
+      );
+    }
+    return inner;
   };
 
   const viewMeta = useMemo(() => {
@@ -517,14 +540,14 @@ export default function Analytics() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-bold text-white">{viewMeta.title}</h1>
-          <p className="text-slate-400 mt-1">{viewMeta.subtitle}</p>
+          <h1 className="text-2xl font-bold text-white">{viewMeta.title}</h1>
+          <p className="text-slate-400 mt-0.5 text-sm">{viewMeta.subtitle}</p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           {showPeriodSelector && (
             <select
               value={period}
@@ -544,145 +567,148 @@ export default function Analytics() {
       </div>
 
       {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
-          <ExclamationTriangleIcon className="h-5 w-5 text-red-600" />
-          <span className="text-red-300">{error}</span>
+        <div className="bg-red-500/10 border border-red-500/30 rounded-sm p-2.5 flex items-center gap-2">
+          <ExclamationTriangleIcon className="h-4 w-4 text-red-600 flex-shrink-0" />
+          <span className="text-red-300 text-sm">{error}</span>
         </div>
       )}
 
       {view === 'overview' && kpis && (
         <>
-          {/* KPI Cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <KPICard 
-              title="OEE" 
-              kpi={kpis.oee} 
-              type="percent" 
+          {/* KPI strip */}
+          <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            <KPICard
+              title="OEE"
+              kpi={kpis.oee}
+              type="percent"
               icon={ChartBarIcon}
               onClick={() => navigate('/analytics/production')}
             />
-            <KPICard 
-              title="On-Time Delivery" 
-              kpi={kpis.on_time_delivery} 
-              type="percent" 
+            <KPICard
+              title="On-Time Delivery"
+              kpi={kpis.on_time_delivery}
+              type="percent"
               icon={CalendarDaysIcon}
             />
-            <KPICard 
-              title="First Pass Yield" 
-              kpi={kpis.first_pass_yield} 
-              type="percent" 
+            <KPICard
+              title="First Pass Yield"
+              kpi={kpis.first_pass_yield}
+              type="percent"
               icon={CheckCircleIcon}
               onClick={() => navigate('/analytics/quality')}
             />
-            <KPICard 
-              title="Scrap Rate" 
-              kpi={kpis.scrap_rate} 
-              type="percent" 
+            <KPICard
+              title="Scrap Rate"
+              kpi={kpis.scrap_rate}
+              type="percent"
               icon={BeakerIcon}
               isGoodUp={false}
               onClick={() => navigate('/analytics/quality')}
             />
-            <KPICard 
-              title="Open NCRs" 
-              kpi={kpis.open_ncrs} 
-              type="count" 
+            <KPICard
+              title="Open NCRs"
+              kpi={kpis.open_ncrs}
+              type="count"
               icon={ExclamationTriangleIcon}
               isGoodUp={false}
               onClick={() => navigate('/quality?filter=open')}
             />
-            <KPICard 
-              title="Quote Win Rate" 
-              kpi={kpis.quote_win_rate} 
-              type="percent" 
+            <KPICard
+              title="Quote Win Rate"
+              kpi={kpis.quote_win_rate}
+              type="percent"
               icon={CurrencyDollarIcon}
             />
-            <KPICard 
-              title="Backlog Hours" 
-              kpi={kpis.backlog_hours} 
-              type="hours" 
+            <KPICard
+              title="Backlog Hours"
+              kpi={kpis.backlog_hours}
+              type="hours"
               icon={ClockIcon}
             />
-            <KPICard 
-              title="Inventory Turnover" 
-              kpi={kpis.inventory_turnover} 
-              type="ratio" 
+            <KPICard
+              title="Inventory Turnover"
+              kpi={kpis.inventory_turnover}
+              type="ratio"
               icon={CubeIcon}
               onClick={() => navigate('/analytics/inventory')}
             />
-          </div>
+          </MiniStatStrip>
 
-          {/* Charts Row */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Production Trends */}
-            <div className="card">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-lg font-semibold">Production Trends</h3>
-                <button 
+          {/* Charts / forecast cockpit grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+            <CockpitPanel
+              title="Production Trends"
+              className="xl:col-span-7"
+              bodyClassName="lg:max-h-none"
+              headerExtra={
+                <button
                   onClick={() => navigate('/analytics/production')}
-                  className="text-sm text-werco-primary hover:underline"
+                  className="text-xs text-werco-primary hover:underline"
                 >
                   View Details →
                 </button>
-              </div>
+              }
+            >
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={productionTrends}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                    <XAxis 
-                      dataKey="date" 
+                    <XAxis
+                      dataKey="date"
                       tick={{ fontSize: 12, fill: '#94a3b8' }}
                       tickFormatter={formatChartDate}
                     />
                     <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                     <Tooltip
-                      contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
+                      contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0' }}
                       formatter={(value: number | undefined) => [(value ?? 0).toLocaleString(), '']}
                       labelFormatter={(label) => formatCentralDate(String(label))}
                     />
-                    <Line 
-                      type="monotone" 
-                      dataKey="units_produced" 
+                    <Line
+                      type="monotone"
+                      dataKey="units_produced"
                       name="Units Produced"
-                      stroke="#1B4D9C" 
+                      stroke="#1B4D9C"
                       strokeWidth={2}
                       dot={false}
                     />
-                    <Line 
-                      type="monotone" 
-                      dataKey="units_scrapped" 
+                    <Line
+                      type="monotone"
+                      dataKey="units_scrapped"
                       name="Units Scrapped"
-                      stroke="#C8352B" 
+                      stroke="#C8352B"
                       strokeWidth={2}
                       dot={false}
                     />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-            </div>
+            </CockpitPanel>
 
-            {/* Capacity Forecast */}
-            <div className="card">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-lg font-semibold">Capacity Forecast (4 Weeks)</h3>
-                <button 
+            <CockpitPanel
+              title="Capacity Forecast (4 Weeks)"
+              className="xl:col-span-5"
+              headerExtra={
+                <button
                   onClick={() => navigate('/analytics/forecasting')}
-                  className="text-sm text-werco-primary hover:underline"
+                  className="text-xs text-werco-primary hover:underline"
                 >
                   View Details →
                 </button>
-              </div>
+              }
+            >
               {capacityForecast.length > 0 && capacityForecast[0].work_centers && (
                 <div className="space-y-3">
                   {capacityForecast[0].work_centers.map((wc) => (
                     <div key={wc.work_center_id}>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="font-medium">{wc.work_center_name}</span>
-                        <span className={wc.is_overloaded ? 'text-red-600 font-semibold' : 'text-slate-400'}>
+                      <div className="flex justify-between text-sm mb-1 gap-2">
+                        <span className="font-medium truncate">{wc.work_center_name}</span>
+                        <span className={`tabular-nums flex-shrink-0 ${wc.is_overloaded ? 'text-red-600 font-semibold' : 'text-slate-400'}`}>
                           {wc.utilization_pct.toFixed(0)}%
                         </span>
                       </div>
                       <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
-                        <div 
+                        <div
                           className={`h-full rounded-full transition-all ${
                             wc.utilization_pct > 90 ? 'bg-red-500/100' :
                             wc.utilization_pct > 75 ? 'bg-amber-500/100' : 'bg-green-500/100'
@@ -694,43 +720,7 @@ export default function Analytics() {
                   ))}
                 </div>
               )}
-            </div>
-          </div>
-
-          {/* Quick Links */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <button
-              onClick={() => navigate('/analytics/production')}
-              className="card hover:border-werco-primary transition-colors text-left"
-            >
-              <ChartBarIcon className="h-8 w-8 text-werco-primary mb-2" />
-              <h4 className="font-semibold">Production Analytics</h4>
-              <p className="text-sm text-slate-400">OEE, trends, utilization</p>
-            </button>
-            <button
-              onClick={() => navigate('/analytics/costs')}
-              className="card hover:border-werco-primary transition-colors text-left"
-            >
-              <CurrencyDollarIcon className="h-8 w-8 text-werco-primary mb-2" />
-              <h4 className="font-semibold">Cost Analysis</h4>
-              <p className="text-sm text-slate-400">Job costs, margins</p>
-            </button>
-            <button
-              onClick={() => navigate('/analytics/quality')}
-              className="card hover:border-werco-primary transition-colors text-left"
-            >
-              <BeakerIcon className="h-8 w-8 text-werco-primary mb-2" />
-              <h4 className="font-semibold">Quality Metrics</h4>
-              <p className="text-sm text-slate-400">Defects, NCRs, yield</p>
-            </button>
-            <button
-              onClick={() => navigate('/analytics/reports')}
-              className="card hover:border-werco-primary transition-colors text-left"
-            >
-              <ClockIcon className="h-8 w-8 text-werco-primary mb-2" />
-              <h4 className="font-semibold">Custom Reports</h4>
-              <p className="text-sm text-slate-400">Build & export reports</p>
-            </button>
+            </CockpitPanel>
           </div>
         </>
       )}
@@ -772,7 +762,7 @@ export default function Analytics() {
                         />
                         <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
-                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
+                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0' }}
                           formatter={(value: number | undefined) => [`${(value ?? 0).toFixed(1)}%`, '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
@@ -798,7 +788,7 @@ export default function Analytics() {
                         />
                         <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
-                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
+                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0' }}
                           formatter={(value: number | undefined) => [(value ?? 0).toLocaleString(), '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
@@ -877,7 +867,7 @@ export default function Analytics() {
                         />
                         <YAxis tick={{ fontSize: 12, fill: '#94a3b8' }} />
                         <Tooltip
-                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }}
+                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0' }}
                           formatter={(value: number | undefined) => [(value ?? 0).toLocaleString(), '']}
                           labelFormatter={(label) => formatCentralDate(String(label))}
                         />
