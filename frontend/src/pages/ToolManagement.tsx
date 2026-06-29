@@ -10,7 +10,14 @@ import {
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  ErrorState,
+  useToast,
+  StatusBadge,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+} from '../components/ui';
 
 interface Tool {
   id: number;
@@ -50,14 +57,14 @@ interface Dashboard {
 
 type Tab = 'all' | 'checked_out' | 'replacement' | 'inspection';
 
-const statusColors: Record<string, { bg: string; text: string }> = {
-  available: { bg: 'bg-green-500/20', text: 'text-emerald-300' },
-  checked_out: { bg: 'bg-blue-500/20', text: 'text-blue-300' },
-  in_use: { bg: 'bg-blue-500/20', text: 'text-blue-300' },
-  maintenance: { bg: 'bg-yellow-500/20', text: 'text-yellow-300' },
-  needs_repair: { bg: 'bg-red-500/20', text: 'text-red-300' },
-  retired: { bg: 'bg-slate-800/50', text: 'text-slate-100' },
-  lost: { bg: 'bg-red-500/20', text: 'text-red-300' },
+const statusColors: Record<string, string> = {
+  available: 'bg-green-500/20 text-emerald-300',
+  checked_out: 'bg-blue-500/20 text-blue-300',
+  in_use: 'bg-blue-500/20 text-blue-300',
+  maintenance: 'bg-yellow-500/20 text-yellow-300',
+  needs_repair: 'bg-red-500/20 text-red-300',
+  retired: 'bg-slate-800/50 text-slate-100',
+  lost: 'bg-red-500/20 text-red-300',
 };
 
 export default function ToolManagement() {
@@ -75,7 +82,8 @@ export default function ToolManagement() {
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [showCheckinModal, setShowCheckinModal] = useState(false);
   const [selectedTool, setSelectedTool] = useState<Tool | null>(null);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [detailTool, setDetailTool] = useState<Tool | null>(null);
+  const [showDetailModal, setShowDetailModal] = useState(false);
   const [toolHistory, setToolHistory] = useState<any[]>([]);
 
   const [createForm, setCreateForm] = useState({
@@ -185,17 +193,107 @@ export default function ToolManagement() {
     }
   };
 
-  const toggleExpand = async (id: number) => {
-    if (expandedId === id) {
-      setExpandedId(null);
-      return;
-    }
-    setExpandedId(id);
+  const openDetail = async (tool: Tool) => {
+    setDetailTool(tool);
+    setShowDetailModal(true);
+    setToolHistory([]);
     try {
-      const history = await api.getToolHistory(id);
+      const history = await api.getToolHistory(tool.id);
       setToolHistory(history || []);
     } catch { setToolHistory([]); }
   };
+
+  const renderRowActions = (tool: Tool) => (
+    <div className="flex gap-1">
+      {tool.status === 'available' && (
+        <button
+          onClick={(e) => { e.stopPropagation(); setSelectedTool(tool); setShowCheckoutModal(true); }}
+          className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600"
+          title="Checkout"
+          aria-label="Checkout tool"
+        >
+          <ArrowRightOnRectangleIcon className="w-4 h-4" />
+        </button>
+      )}
+      {(tool.status === 'checked_out' || tool.status === 'in_use') && (
+        <button
+          onClick={(e) => { e.stopPropagation(); setSelectedTool(tool); setShowCheckinModal(true); }}
+          className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600"
+          title="Check In"
+          aria-label="Check in tool"
+        >
+          <ArrowLeftOnRectangleIcon className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
+
+  const columns: Array<DataTableColumn<Tool>> = [
+    {
+      key: 'tool_number',
+      header: 'Tool #',
+      sortable: true,
+      accessor: (t) => t.tool_number,
+      className: 'font-medium text-blue-400',
+    },
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: true,
+      accessor: (t) => t.name,
+    },
+    {
+      key: 'tool_type',
+      header: 'Type',
+      sortable: true,
+      accessor: (t) => t.tool_type,
+      className: 'capitalize',
+      render: (t) => t.tool_type?.replace(/_/g, ' '),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (t) => t.status,
+      render: (t) => <StatusBadge status={t.status} colorMap={statusColors} />,
+    },
+    {
+      key: 'location',
+      header: 'Location',
+      sortable: true,
+      accessor: (t) => t.location ?? '',
+      render: (t) => t.location || '-',
+    },
+    {
+      key: 'uses',
+      header: 'Uses',
+      sortable: true,
+      align: 'right',
+      accessor: (t) => t.current_uses,
+      csv: (t) => `${t.current_uses}${t.max_uses ? ` / ${t.max_uses}` : ''}`,
+      render: (t) => `${t.current_uses}${t.max_uses ? ` / ${t.max_uses}` : ''}`,
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      render: (t) => renderRowActions(t),
+    },
+  ];
+
+  const renderToolCard = (tool: Tool) => (
+    <MobileDataCard
+      title={tool.tool_number}
+      subtitle={tool.name}
+      badge={<StatusBadge status={tool.status} colorMap={statusColors} />}
+      onClick={() => openDetail(tool)}
+      fields={[
+        { label: 'Type', value: <span className="capitalize">{tool.tool_type?.replace(/_/g, ' ')}</span> },
+        { label: 'Location', value: tool.location || '-' },
+        { label: 'Uses', value: `${tool.current_uses}${tool.max_uses ? ` / ${tool.max_uses}` : ''}` },
+      ]}
+      actions={renderRowActions(tool)}
+    />
+  );
 
   if (loading) {
     return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-gray-200 rounded w-1/4" /><div className="grid grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <div key={i} className="h-24 bg-gray-200 rounded" />)}</div><div className="h-64 bg-gray-200 rounded" /></div></div>;
@@ -267,123 +365,100 @@ export default function ToolManagement() {
       </div>
 
       {/* Table */}
-      <div className="bg-[#151b28] rounded-lg shadow overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-800 text-left text-xs font-medium text-slate-400 uppercase">
-            <tr>
-              <th className="px-4 py-3">Tool #</th>
-              <th className="px-4 py-3">Name</th>
-              <th className="px-4 py-3">Type</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Location</th>
-              <th className="px-4 py-3">Uses</th>
-              <th className="px-4 py-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-700">
-            {tabError ? (
-              <tr>
-                <td colSpan={7} className="px-4 py-8">
-                  <ErrorState
-                    message="Could not load tools for this view."
-                    onRetry={() => loadTabData(activeTab)}
-                  />
-                </td>
-              </tr>
-            ) : filteredTools.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-4 py-8">
-                  <EmptyState
-                    icon={WrenchScrewdriverIcon}
-                    title="No tools found"
-                    description={
-                      search || statusFilter || typeFilter
-                        ? 'No tools match the current filters.'
-                        : 'Tools and fixtures you add will appear here.'
-                    }
-                    action={{ label: 'New Tool', onClick: () => setShowCreateModal(true) }}
-                  />
-                </td>
-              </tr>
-            ) : filteredTools.map(tool => (
-              <React.Fragment key={tool.id}>
-                <tr className="hover:bg-slate-800 cursor-pointer" onClick={() => toggleExpand(tool.id)}>
-                  <td className="px-4 py-3 font-medium text-blue-600">{tool.tool_number}</td>
-                  <td className="px-4 py-3">{tool.name}</td>
-                  <td className="px-4 py-3 capitalize">{tool.tool_type?.replace(/_/g, ' ')}</td>
-                  <td className="px-4 py-3">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[tool.status]?.bg || 'bg-slate-800/50'} ${statusColors[tool.status]?.text || 'text-slate-100'}`}>
-                      {tool.status?.replace(/_/g, ' ')}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">{tool.location || '-'}</td>
-                  <td className="px-4 py-3">{tool.current_uses}{tool.max_uses ? ` / ${tool.max_uses}` : ''}</td>
-                  <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                    <div className="flex gap-1">
-                      {tool.status === 'available' && (
-                        <button onClick={() => { setSelectedTool(tool); setShowCheckoutModal(true); }}
-                          className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600" title="Checkout">
-                          <ArrowRightOnRectangleIcon className="w-4 h-4" />
-                        </button>
-                      )}
-                      {(tool.status === 'checked_out' || tool.status === 'in_use') && (
-                        <button onClick={() => { setSelectedTool(tool); setShowCheckinModal(true); }}
-                          className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600" title="Check In">
-                          <ArrowLeftOnRectangleIcon className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-                {expandedId === tool.id && (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-4 bg-slate-800">
-                      <div className="grid grid-cols-3 gap-4">
-                        <div>
-                          <h4 className="font-medium text-slate-300 mb-2">Details</h4>
-                          <div className="space-y-1 text-sm">
-                            <div><span className="text-slate-400">Manufacturer:</span> {tool.manufacturer || '-'}</div>
-                            <div><span className="text-slate-400">Model:</span> {tool.model_number || '-'}</div>
-                            <div><span className="text-slate-400">Serial:</span> {tool.serial_number || '-'}</div>
-                            <div><span className="text-slate-400">Purchase Cost:</span> {tool.purchase_cost ? `$${tool.purchase_cost.toFixed(2)}` : '-'}</div>
-                            <div><span className="text-slate-400">Purchase Date:</span> {tool.purchase_date ? new Date(tool.purchase_date).toLocaleDateString() : '-'}</div>
-                          </div>
-                        </div>
-                        <div>
-                          <h4 className="font-medium text-slate-300 mb-2">Usage & Life</h4>
-                          <div className="space-y-1 text-sm">
-                            <div><span className="text-slate-400">Uses:</span> {tool.current_uses}{tool.max_uses ? ` / ${tool.max_uses}` : ''}</div>
-                            <div><span className="text-slate-400">Life Hours:</span> {tool.current_life_hours.toFixed(1)}{tool.max_life_hours ? ` / ${tool.max_life_hours}` : ''} hrs</div>
-                            <div><span className="text-slate-400">Last Inspection:</span> {tool.last_inspection_date ? new Date(tool.last_inspection_date).toLocaleDateString() : '-'}</div>
-                            <div><span className="text-slate-400">Next Inspection:</span> {tool.next_inspection_date ? new Date(tool.next_inspection_date).toLocaleDateString() : '-'}</div>
-                            {tool.notes && <div><span className="text-slate-400">Notes:</span> {tool.notes}</div>}
-                          </div>
-                        </div>
-                        <div>
-                          <h4 className="font-medium text-slate-300 mb-2">Recent History</h4>
-                          {toolHistory.length === 0 ? (
-                            <p className="text-sm text-slate-400">No history</p>
-                          ) : (
-                            <div className="space-y-2 max-h-40 overflow-y-auto">
-                              {toolHistory.slice(0, 10).map((h: any, i: number) => (
-                                <div key={i} className="text-xs border-l-2 border-slate-600 pl-2">
-                                  <div className="font-medium">{h.action || h.event_type}</div>
-                                  <div className="text-slate-400">{h.created_at ? new Date(h.created_at).toLocaleString() : ''}</div>
-                                  {h.notes && <div className="text-slate-400">{h.notes}</div>}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
+      <DataTable
+        columns={columns}
+        data={filteredTools}
+        rowKey={(t) => t.id}
+        onRowClick={openDetail}
+        defaultSort={{ key: 'tool_number', dir: 'asc' }}
+        pageSize={25}
+        csvExport={{ filename: 'tools' }}
+        error={tabError}
+        onRetry={() => loadTabData(activeTab)}
+        empty={{
+          icon: WrenchScrewdriverIcon,
+          title: 'No tools found',
+          description:
+            search || statusFilter || typeFilter
+              ? 'No tools match the current filters.'
+              : 'Tools and fixtures you add will appear here.',
+          action: { label: 'New Tool', onClick: () => setShowCreateModal(true) },
+        }}
+        mobileCards={renderToolCard}
+      />
+
+      {/* Tool Detail Modal */}
+      <Modal
+        open={showDetailModal && !!detailTool}
+        onClose={() => setShowDetailModal(false)}
+        size="lg"
+        padded={false}
+      >
+        {detailTool && (
+          <>
+            <div className="flex justify-between items-center p-4 border-b">
+              <div className="flex items-center gap-3">
+                <h3 className="text-lg font-semibold">{detailTool.tool_number} — {detailTool.name}</h3>
+                <StatusBadge status={detailTool.status} colorMap={statusColors} />
+              </div>
+              <button onClick={() => setShowDetailModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" /></button>
+            </div>
+            <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <h4 className="font-medium text-slate-300 mb-2">Details</h4>
+                <div className="space-y-1 text-sm">
+                  <div><span className="text-slate-400">Manufacturer:</span> {detailTool.manufacturer || '-'}</div>
+                  <div><span className="text-slate-400">Model:</span> {detailTool.model_number || '-'}</div>
+                  <div><span className="text-slate-400">Serial:</span> {detailTool.serial_number || '-'}</div>
+                  <div><span className="text-slate-400">Purchase Cost:</span> {detailTool.purchase_cost ? `$${detailTool.purchase_cost.toFixed(2)}` : '-'}</div>
+                  <div><span className="text-slate-400">Purchase Date:</span> {detailTool.purchase_date ? new Date(detailTool.purchase_date).toLocaleDateString() : '-'}</div>
+                </div>
+              </div>
+              <div>
+                <h4 className="font-medium text-slate-300 mb-2">Usage &amp; Life</h4>
+                <div className="space-y-1 text-sm">
+                  <div><span className="text-slate-400">Uses:</span> {detailTool.current_uses}{detailTool.max_uses ? ` / ${detailTool.max_uses}` : ''}</div>
+                  <div><span className="text-slate-400">Life Hours:</span> {detailTool.current_life_hours.toFixed(1)}{detailTool.max_life_hours ? ` / ${detailTool.max_life_hours}` : ''} hrs</div>
+                  <div><span className="text-slate-400">Last Inspection:</span> {detailTool.last_inspection_date ? new Date(detailTool.last_inspection_date).toLocaleDateString() : '-'}</div>
+                  <div><span className="text-slate-400">Next Inspection:</span> {detailTool.next_inspection_date ? new Date(detailTool.next_inspection_date).toLocaleDateString() : '-'}</div>
+                  {detailTool.notes && <div><span className="text-slate-400">Notes:</span> {detailTool.notes}</div>}
+                </div>
+              </div>
+              <div>
+                <h4 className="font-medium text-slate-300 mb-2">Recent History</h4>
+                {toolHistory.length === 0 ? (
+                  <p className="text-sm text-slate-400">No history</p>
+                ) : (
+                  <div className="space-y-2 max-h-40 overflow-y-auto">
+                    {toolHistory.slice(0, 10).map((h: any, i: number) => (
+                      <div key={i} className="text-xs border-l-2 border-slate-600 pl-2">
+                        <div className="font-medium">{h.action || h.event_type}</div>
+                        <div className="text-slate-400">{h.created_at ? new Date(h.created_at).toLocaleString() : ''}</div>
+                        {h.notes && <div className="text-slate-400">{h.notes}</div>}
                       </div>
-                    </td>
-                  </tr>
+                    ))}
+                  </div>
                 )}
-              </React.Fragment>
-            ))}
-          </tbody>
-        </table>
-      </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 p-4 border-t">
+              {detailTool.status === 'available' && (
+                <button
+                  onClick={() => { setSelectedTool(detailTool); setShowDetailModal(false); setShowCheckoutModal(true); }}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >Checkout</button>
+              )}
+              {(detailTool.status === 'checked_out' || detailTool.status === 'in_use') && (
+                <button
+                  onClick={() => { setSelectedTool(detailTool); setShowDetailModal(false); setShowCheckinModal(true); }}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                >Check In</button>
+              )}
+              <button onClick={() => setShowDetailModal(false)} className="px-4 py-2 border rounded-lg hover:bg-slate-800">Close</button>
+            </div>
+          </>
+        )}
+      </Modal>
 
       {/* Create Tool Modal */}
       <Modal

@@ -91,9 +91,12 @@ beforeEach(() => {
 test('mounts with the heading and the Purchase Orders table after load', async () => {
   renderPurchasing();
   expect(await screen.findByRole('heading', { name: 'Purchasing & Receiving' })).toBeInTheDocument();
-  // Orders tab is the default view — its rows render.
-  expect(screen.getByText('PO-1001')).toBeInTheDocument();
-  expect(screen.getByText('PO-1002')).toBeInTheDocument();
+  // Orders tab is the default view — its rows render. The list renders both a
+  // desktop <table> and a parallel mobile-card list (DataTable.mobileCards), so
+  // each PO number appears twice in jsdom; scope to the desktop table.
+  const ordersTable = within(screen.getByTestId('data-table'));
+  expect(ordersTable.getByText('PO-1001')).toBeInTheDocument();
+  expect(ordersTable.getByText('PO-1002')).toBeInTheDocument();
 });
 
 test('MiniStat summary strip renders its derived counts', async () => {

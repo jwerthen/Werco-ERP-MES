@@ -1,7 +1,12 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  useToast,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+} from '../components/ui';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   ArrowUpTrayIcon,
@@ -52,6 +57,13 @@ const typeIcons: Record<string, string> = {
   car: '🔧',
   fai: '📊',
   other: '📄',
+};
+
+const formatFileSize = (bytes?: number) => {
+  if (!bytes) return '-';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
 export default function Documents() {
@@ -127,7 +139,7 @@ export default function Documents() {
     }
   };
 
-  const handleDownload = async (doc: Document) => {
+  const handleDownload = useCallback(async (doc: Document) => {
     try {
       const response = await api.downloadDocument(doc.id);
       const url = window.URL.createObjectURL(new Blob([response]));
@@ -140,9 +152,9 @@ export default function Documents() {
     } catch {
       showToast('error', 'Failed to download document');
     }
-  };
+  }, [showToast]);
 
-  const handleDelete = async (docId: number) => {
+  const handleDelete = useCallback(async (docId: number) => {
     if (!window.confirm('Delete this document?')) return;
     try {
       await api.deleteDocument(docId);
@@ -151,14 +163,7 @@ export default function Documents() {
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to delete');
     }
-  };
-
-  const formatFileSize = (bytes?: number) => {
-    if (!bytes) return '-';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
+  }, [showToast, loadData]);
 
   const filteredDocs = useMemo(() => {
     if (!search) return documents;
@@ -171,13 +176,119 @@ export default function Documents() {
   }, [documents, search]);
   const filteredCount = filteredDocs.length;
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
-  }
+  const partNumberFor = useCallback(
+    (doc: Document) => (doc.part_id ? partsById.get(doc.part_id)?.part_number || '-' : '-'),
+    [partsById]
+  );
+
+  const columns = useMemo<Array<DataTableColumn<Document>>>(() => [
+    {
+      key: 'document',
+      header: 'Document',
+      sortable: true,
+      accessor: (doc) => doc.title,
+      csv: (doc) => `${doc.title} (${doc.document_number} Rev ${doc.revision})`,
+      render: (doc) => (
+        <div className="flex items-center">
+          <span className="text-2xl mr-3">{typeIcons[doc.document_type] || '📄'}</span>
+          <div>
+            <div className="font-medium">{doc.title}</div>
+            <div className="text-sm text-slate-400">{doc.document_number} Rev {doc.revision}</div>
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      sortable: true,
+      accessor: (doc) => doc.document_type,
+      csv: (doc) => doc.document_type.replace(/_/g, ' '),
+      render: (doc) => <span className="capitalize">{doc.document_type.replace('_', ' ')}</span>,
+    },
+    {
+      key: 'file',
+      header: 'File',
+      sortable: true,
+      accessor: (doc) => doc.file_name ?? '',
+      csv: (doc) => doc.file_name ?? '',
+      render: (doc) => (
+        <>
+          <div className="text-sm">{doc.file_name || '-'}</div>
+          <div className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</div>
+        </>
+      ),
+    },
+    {
+      key: 'part',
+      header: 'Part',
+      sortable: true,
+      accessor: (doc) => partNumberFor(doc),
+      render: (doc) => <span className="text-sm">{partNumberFor(doc)}</span>,
+    },
+    {
+      key: 'uploaded',
+      header: 'Uploaded',
+      sortable: true,
+      accessor: (doc) => doc.created_at,
+      csv: (doc) => formatCentralDate(doc.created_at),
+      render: (doc) => <span className="text-sm">{formatCentralDate(doc.created_at)}</span>,
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: (doc) => (
+        <div className="flex justify-center gap-2">
+          <button
+            onClick={(e) => { e.stopPropagation(); handleDownload(doc); }}
+            className="text-werco-primary hover:text-blue-400"
+            title="Download"
+          >
+            <ArrowDownTrayIcon className="h-5 w-5" />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleDelete(doc.id); }}
+            className="text-red-500 hover:text-red-400"
+            title="Delete"
+          >
+            <TrashIcon className="h-5 w-5" />
+          </button>
+        </div>
+      ),
+    },
+  ], [partNumberFor, handleDownload, handleDelete]);
+
+  const renderMobileCard = useCallback((doc: Document) => (
+    <MobileDataCard
+      title={doc.title}
+      subtitle={`${doc.document_number} Rev ${doc.revision}`}
+      badge={<span className="text-xl">{typeIcons[doc.document_type] || '📄'}</span>}
+      fields={[
+        { label: 'Type', value: <span className="capitalize">{doc.document_type.replace('_', ' ')}</span> },
+        { label: 'Part', value: partNumberFor(doc) },
+        { label: 'File', value: doc.file_name || '-', fullWidth: true },
+        { label: 'Size', value: formatFileSize(doc.file_size) },
+        { label: 'Uploaded', value: formatCentralDate(doc.created_at) },
+      ]}
+      actions={
+        <>
+          <button
+            onClick={() => handleDownload(doc)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-werco-primary border border-fd-line rounded-sm hover:bg-slate-700/40"
+          >
+            <ArrowDownTrayIcon className="h-4 w-4" /> Download
+          </button>
+          <button
+            onClick={() => handleDelete(doc.id)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-500 border border-fd-line rounded-sm hover:bg-slate-700/40"
+          >
+            <TrashIcon className="h-4 w-4" /> Delete
+          </button>
+        </>
+      }
+    />
+  ), [partNumberFor, handleDownload, handleDelete]);
 
   return (
     <div className="space-y-6">
@@ -221,90 +332,30 @@ export default function Documents() {
       </div>
 
       {/* Documents Table */}
-      <div className="card overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Document</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">File</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Uploaded</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="bg-[#151b28] divide-y divide-slate-700">
-              {filteredDocs.map((doc) => (
-                <tr key={doc.id} className="hover:bg-slate-800">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center">
-                      <span className="text-2xl mr-3">{typeIcons[doc.document_type] || '📄'}</span>
-                      <div>
-                        <div className="font-medium">{doc.title}</div>
-                        <div className="text-sm text-slate-400">{doc.document_number} Rev {doc.revision}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className="capitalize">{doc.document_type.replace('_', ' ')}</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="text-sm">{doc.file_name || '-'}</div>
-                    <div className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</div>
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    {doc.part_id ? partsById.get(doc.part_id)?.part_number || '-' : '-'}
-                  </td>
-                  <td className="px-4 py-3 text-sm">
-                    {formatCentralDate(doc.created_at)}
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    <div className="flex justify-center gap-2">
-                      <button
-                        onClick={() => handleDownload(doc)}
-                        className="text-werco-primary hover:text-blue-400"
-                        title="Download"
-                      >
-                        <ArrowDownTrayIcon className="h-5 w-5" />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(doc.id)}
-                        className="text-red-500 hover:text-red-400"
-                        title="Delete"
-                      >
-                        <TrashIcon className="h-5 w-5" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {loadError ? (
-            <ErrorState
-              message="Could not load documents."
-              onRetry={loadData}
-              className="py-8"
-            />
-          ) : filteredDocs.length === 0 ? (
-            <EmptyState
-              icon={DocumentTextIcon}
-              title={search || filterType ? 'No matching documents' : 'No documents'}
-              description={
-                search || filterType
-                  ? 'Try adjusting your search or type filter.'
-                  : 'Upload a document to get started.'
-              }
-              action={
-                search || filterType
-                  ? undefined
-                  : { label: 'Upload Document', onClick: () => setShowUploadModal(true) }
-              }
-            />
-          ) : null}
-        </div>
-      </div>
+      <DataTable
+        columns={columns}
+        data={filteredDocs}
+        rowKey={(doc) => doc.id}
+        defaultSort={{ key: 'uploaded', dir: 'desc' }}
+        pageSize={25}
+        loading={loading}
+        error={loadError}
+        onRetry={loadData}
+        csvExport={{ filename: 'documents' }}
+        mobileCards={renderMobileCard}
+        empty={{
+          icon: DocumentTextIcon,
+          title: search || filterType ? 'No matching documents' : 'No documents',
+          description:
+            search || filterType
+              ? 'Try adjusting your search or type filter.'
+              : 'Upload a document to get started.',
+          action:
+            search || filterType
+              ? undefined
+              : { label: 'Upload Document', onClick: () => setShowUploadModal(true) },
+        }}
+      />
 
       {/* Upload Modal */}
       <Modal open={showUploadModal} onClose={() => setShowUploadModal(false)} size="md" closeOnBackdrop={false}>

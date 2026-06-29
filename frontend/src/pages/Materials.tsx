@@ -7,8 +7,13 @@ import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/Toast';
 import { Modal } from '../components/ui/Modal';
 import {
-  ArrowDownTrayIcon,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+} from '../components/ui';
+import {
   ArrowUpTrayIcon,
+  CubeIcon,
   MagnifyingGlassIcon,
   PencilIcon,
   PlusIcon,
@@ -58,6 +63,7 @@ export default function MaterialsPage() {
 
   const [materials, setMaterials] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
@@ -69,12 +75,14 @@ export default function MaterialsPage() {
   const loadMaterials = useCallback(async () => {
     try {
       setLoading(true);
+      setLoadError(false);
       const params: any = {};
       if (typeFilter) params.part_type = typeFilter;
       if (search.trim()) params.search = search.trim();
       const data = await api.getMaterials(params);
       setMaterials(data);
     } catch {
+      setLoadError(true);
       showToast('error', 'Failed to load materials and supplies');
     } finally {
       setLoading(false);
@@ -179,33 +187,143 @@ export default function MaterialsPage() {
     }
   };
 
-  const exportCsv = () => {
-    const headers = ['part_number', 'name', 'part_type', 'unit_of_measure', 'status', 'standard_cost', 'requires_inspection', 'description'];
-    const escapeCell = (value: unknown) => {
-      const text = String(value ?? '');
-      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-    };
-    const csv = [
-      headers.join(','),
-      ...visibleMaterials.map(material => headers.map(header => escapeCell((material as unknown as Record<string, unknown>)[header])).join(',')),
-    ].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `werco-materials-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
+  const columns = useMemo<Array<DataTableColumn<Part>>>(() => [
+    {
+      key: 'part_number',
+      header: 'Item #',
+      sortable: true,
+      accessor: material => material.part_number,
+      render: material => <span className="font-medium text-werco-navy-600">{material.part_number}</span>,
+    },
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: true,
+      accessor: material => material.name,
+      csv: material => material.description ? `${material.name} — ${material.description}` : material.name,
+      render: material => (
+        <div>
+          <div className="text-sm text-white">{material.name}</div>
+          {material.description && <div className="text-xs text-slate-500 line-clamp-1">{material.description}</div>}
+        </div>
+      ),
+    },
+    {
+      key: 'part_type',
+      header: 'Type',
+      sortable: true,
+      accessor: material => typeLabel(material.part_type),
+      render: material => (
+        <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${partTypeColors[material.part_type]}`}>
+          {typeLabel(material.part_type)}
+        </span>
+      ),
+    },
+    {
+      key: 'unit_of_measure',
+      header: 'UOM',
+      sortable: true,
+      className: 'text-slate-300',
+      accessor: material => material.unit_of_measure ?? '',
+    },
+    {
+      key: 'standard_cost',
+      header: 'Cost',
+      sortable: true,
+      align: 'right',
+      accessor: material => Number(material.standard_cost || 0),
+      csv: material => Number(material.standard_cost || 0).toFixed(2),
+      render: material => `$${Number(material.standard_cost || 0).toFixed(2)}`,
+    },
+    {
+      key: 'requires_inspection',
+      header: 'Inspection',
+      sortable: true,
+      align: 'center',
+      className: 'text-slate-300',
+      accessor: material => (material.requires_inspection ? 'Required' : 'Not required'),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      align: 'center',
+      accessor: material => material.status,
+      render: material => <StatusBadge status={material.status} />,
+    },
+    {
+      key: 'actions',
+      header: '',
+      align: 'right',
+      render: material => (
+        <div className="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={event => { event.stopPropagation(); openEdit(material); }}
+            className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-200"
+            title={`Edit ${material.part_number}`}
+            aria-label={`Edit ${material.part_number}`}
+          >
+            <PencilIcon className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={event => { event.stopPropagation(); handleDelete(material); }}
+            className="rounded-lg p-1.5 text-slate-500 hover:bg-red-500/10 hover:text-red-400"
+            title={`Delete ${material.part_number}`}
+            aria-label={`Delete ${material.part_number}`}
+          >
+            <TrashIcon className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    },
+  ], []);
 
-  if (loading) {
-    return (
-      <div className="space-y-5">
-        <div className="h-10 w-72 bg-slate-700 rounded animate-pulse" />
-        <div className="card h-64 animate-pulse" />
-      </div>
-    );
-  }
+  const renderMobileCard = useCallback((material: Part) => (
+    <MobileDataCard
+      title={material.part_number}
+      subtitle={material.name}
+      badge={<StatusBadge status={material.status} />}
+      onClick={() => openEdit(material)}
+      fields={[
+        {
+          label: 'Type',
+          value: (
+            <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${partTypeColors[material.part_type]}`}>
+              {typeLabel(material.part_type)}
+            </span>
+          ),
+        },
+        { label: 'UOM', value: material.unit_of_measure || '—' },
+        { label: 'Cost', value: `$${Number(material.standard_cost || 0).toFixed(2)}` },
+        { label: 'Inspection', value: material.requires_inspection ? 'Required' : 'Not required' },
+        ...(material.description ? [{ label: 'Description', value: material.description, fullWidth: true }] : []),
+      ]}
+      actions={(
+        <>
+          <button
+            type="button"
+            onClick={event => { event.stopPropagation(); openEdit(material); }}
+            className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-200"
+            aria-label={`Edit ${material.part_number}`}
+          >
+            <PencilIcon className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={event => { event.stopPropagation(); handleDelete(material); }}
+            className="rounded-lg p-1.5 text-slate-500 hover:bg-red-500/10 hover:text-red-400"
+            aria-label={`Delete ${material.part_number}`}
+          >
+            <TrashIcon className="h-4 w-4" />
+          </button>
+        </>
+      )}
+    />
+  ), []);
+
+  const hasFilters = Boolean(search || typeFilter || statusFilter);
 
   return (
     <div className="space-y-5">
@@ -221,10 +339,6 @@ export default function MaterialsPage() {
           <button type="button" onClick={() => importInputRef.current?.click()} className="btn-secondary flex items-center gap-2">
             <ArrowUpTrayIcon className="h-4 w-4" />
             Import CSV
-          </button>
-          <button type="button" onClick={exportCsv} className="btn-secondary flex items-center gap-2">
-            <ArrowDownTrayIcon className="h-4 w-4" />
-            Export
           </button>
           <button type="button" onClick={openCreate} className="btn-primary flex items-center gap-2">
             <PlusIcon className="h-4 w-4" />
@@ -274,77 +388,29 @@ export default function MaterialsPage() {
         </div>
       </div>
 
-      <div className="card overflow-hidden p-0">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800/50">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Item #</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">UOM</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Cost</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Inspection</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Status</th>
-                <th className="px-4 py-3 w-24" />
-              </tr>
-            </thead>
-            <tbody className="bg-[#151b28] divide-y divide-slate-700">
-              {visibleMaterials.map(material => (
-                <tr key={material.id} className="hover:bg-slate-800/50 transition-colors">
-                  <td className="px-4 py-3">
-                    <span className="font-medium text-werco-navy-600">{material.part_number}</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="text-sm text-white">{material.name}</div>
-                    {material.description && <div className="text-xs text-slate-500 line-clamp-1">{material.description}</div>}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${partTypeColors[material.part_type]}`}>
-                      {typeLabel(material.part_type)}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-sm text-slate-300">{material.unit_of_measure}</td>
-                  <td className="px-4 py-3 text-right text-sm">${Number(material.standard_cost || 0).toFixed(2)}</td>
-                  <td className="px-4 py-3 text-center text-sm text-slate-300">
-                    {material.requires_inspection ? 'Required' : 'Not required'}
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    <StatusBadge status={material.status} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={() => openEdit(material)}
-                        className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-200"
-                        title={`Edit ${material.part_number}`}
-                        aria-label={`Edit ${material.part_number}`}
-                      >
-                        <PencilIcon className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(material)}
-                        className="rounded-lg p-1.5 text-slate-500 hover:bg-red-500/10 hover:text-red-400"
-                        title={`Delete ${material.part_number}`}
-                        aria-label={`Delete ${material.part_number}`}
-                      >
-                        <TrashIcon className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {visibleMaterials.length === 0 && (
-          <div className="text-center py-12 text-slate-400">
-            <p className="text-sm">No materials or supplies found matching your filters</p>
-          </div>
-        )}
-      </div>
+      <DataTable
+        columns={columns}
+        data={visibleMaterials}
+        rowKey={material => material.id}
+        onRowClick={openEdit}
+        loading={loading}
+        error={loadError}
+        onRetry={loadMaterials}
+        defaultSort={{ key: 'part_number', dir: 'asc' }}
+        pageSize={25}
+        csvExport={{ filename: `werco-materials-${new Date().toISOString().slice(0, 10)}` }}
+        mobileCards={renderMobileCard}
+        empty={{
+          icon: CubeIcon,
+          title: hasFilters ? 'No matching materials or supplies' : 'No materials or supplies yet',
+          description: hasFilters
+            ? 'No materials or supplies match your current filters.'
+            : 'Add your first item or import a CSV to get started.',
+          action: hasFilters
+            ? { label: 'Clear filters', onClick: () => { setSearch(''); setTypeFilter(''); setStatusFilter(''); } }
+            : { label: 'New Item', onClick: openCreate },
+        }}
+      />
 
       <Modal open={showModal} onClose={closeModal} size="lg">
             <div className="flex items-center justify-between mb-4">

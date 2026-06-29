@@ -1,10 +1,17 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import api from '../services/api';
 import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon, UserGroupIcon } from '@heroicons/react/24/outline';
-import { SkeletonTable } from '../components/ui/Skeleton';
 import { Modal } from '../components/ui/Modal';
 import { LoadingButton } from '../components/ui/LoadingButton';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  EmptyState,
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+  StatusBadge,
+  MobileDataCard,
+} from '../components/ui';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
 interface Customer {
@@ -262,19 +269,129 @@ export default function Customers() {
     });
   };
 
-  if (loading) {
-    return (
-      <div className="space-y-6">
-        <div className="flex justify-between items-center">
-          <div className="h-8 w-32 bg-slate-700 rounded animate-pulse" />
-          <div className="h-10 w-36 bg-slate-700 rounded animate-pulse" />
+  const statusColorMap = useMemo(
+    () => ({
+      active: 'bg-green-500/20 text-green-300',
+      inactive: 'bg-slate-800 text-slate-400',
+    }),
+    []
+  );
+
+  const renderRequirements = (customer: Customer) => (
+    <div className="flex gap-1">
+      {customer.requires_coc && (
+        <span className="px-2 py-0.5 bg-blue-500/20 text-blue-300 text-xs rounded">COC</span>
+      )}
+      {customer.requires_fai && (
+        <span className="px-2 py-0.5 bg-purple-500/20 text-purple-300 text-xs rounded">FAI</span>
+      )}
+      {!customer.requires_coc && !customer.requires_fai && (
+        <span className="text-slate-500 text-xs">-</span>
+      )}
+    </div>
+  );
+
+  const columns = useMemo<Array<DataTableColumn<Customer>>>(() => [
+    {
+      key: 'code',
+      header: 'Code',
+      sortable: true,
+      className: 'font-mono',
+      accessor: (c) => c.code ?? '',
+    },
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: true,
+      className: 'font-medium text-werco-primary',
+      accessor: (c) => c.name,
+    },
+    {
+      key: 'contact',
+      header: 'Contact',
+      sortable: true,
+      accessor: (c) => c.contact_name ?? '',
+      csv: (c) => [c.contact_name, c.email].filter(Boolean).join(' '),
+      render: (c) => (
+        <div>
+          <div className="text-sm">{c.contact_name || '-'}</div>
+          {c.email && <div className="text-xs text-slate-400">{c.email}</div>}
         </div>
-        <div className="card overflow-hidden">
-          <SkeletonTable rows={8} columns={6} />
-        </div>
-      </div>
-    );
-  }
+      ),
+    },
+    {
+      key: 'location',
+      header: 'Location',
+      sortable: true,
+      accessor: (c) => (c.city && c.state ? `${c.city}, ${c.state}` : ''),
+      render: (c) => (c.city && c.state ? `${c.city}, ${c.state}` : '-'),
+    },
+    {
+      key: 'terms',
+      header: 'Terms',
+      sortable: true,
+      accessor: (c) => c.payment_terms ?? '',
+      render: (c) => c.payment_terms || '-',
+    },
+    {
+      key: 'requirements',
+      header: 'Requirements',
+      csv: (c) => [c.requires_coc ? 'COC' : '', c.requires_fai ? 'FAI' : ''].filter(Boolean).join(' '),
+      render: renderRequirements,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (c) => (c.is_active ? 'active' : 'inactive'),
+      render: (c) => (
+        <StatusBadge status={c.is_active ? 'active' : 'inactive'} colorMap={statusColorMap} />
+      ),
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'center',
+      render: (c) => (
+        <button
+          onClick={(e) => { e.stopPropagation(); handleEdit(c); }}
+          className="text-slate-500 hover:text-slate-400"
+          aria-label={`Edit ${c.name}`}
+        >
+          <PencilIcon className="h-5 w-5" />
+        </button>
+      ),
+    },
+  ], [statusColorMap]);
+
+  const renderMobileCard = (customer: Customer) => (
+    <MobileDataCard
+      title={customer.name}
+      subtitle={customer.code ? `Code: ${customer.code}` : undefined}
+      badge={<StatusBadge status={customer.is_active ? 'active' : 'inactive'} colorMap={statusColorMap} />}
+      onClick={() => viewCustomerDetails(customer)}
+      className={!customer.is_active ? 'opacity-60' : ''}
+      fields={[
+        { label: 'Contact', value: customer.contact_name || '-' },
+        { label: 'Email', value: customer.email || '-' },
+        {
+          label: 'Location',
+          value: customer.city && customer.state ? `${customer.city}, ${customer.state}` : '-',
+        },
+        { label: 'Terms', value: customer.payment_terms || '-' },
+        { label: 'Requirements', value: renderRequirements(customer), fullWidth: true },
+      ]}
+      actions={
+        <button
+          onClick={(e) => { e.stopPropagation(); handleEdit(customer); }}
+          className="inline-flex items-center gap-1 text-sm text-slate-300 hover:text-slate-100"
+        >
+          <PencilIcon className="h-4 w-4" />
+          Edit
+        </button>
+      }
+    />
+  );
 
   return (
     <div className="space-y-6">
@@ -313,83 +430,25 @@ export default function Customers() {
       </div>
 
       {/* Customers Table */}
-      <div className="card overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-700">
-            <thead className="bg-slate-800/50">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Code</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Name</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Contact</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Location</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Terms</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Requirements</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="bg-[#151b28] divide-y divide-slate-700">
-              {filteredCustomers.map((customer) => (
-                <tr 
-                  key={customer.id} 
-                  className={`hover:bg-slate-800/50 cursor-pointer ${!customer.is_active ? 'opacity-60' : ''}`}
-                  onClick={() => viewCustomerDetails(customer)}
-                >
-                  <td className="px-4 py-4 font-mono text-sm">{customer.code}</td>
-                  <td className="px-4 py-4 font-medium text-werco-primary">{customer.name}</td>
-                  <td className="px-4 py-4">
-                    <div>
-                      <div className="text-sm">{customer.contact_name || '-'}</div>
-                      {customer.email && (
-                        <div className="text-xs text-slate-400">{customer.email}</div>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-4 text-sm">
-                    {customer.city && customer.state ? `${customer.city}, ${customer.state}` : '-'}
-                  </td>
-                  <td className="px-4 py-4 text-sm">{customer.payment_terms || '-'}</td>
-                  <td className="px-4 py-4">
-                    <div className="flex gap-1">
-                      {customer.requires_coc && (
-                        <span className="px-2 py-0.5 bg-blue-500/20 text-blue-300 text-xs rounded">COC</span>
-                      )}
-                      {customer.requires_fai && (
-                        <span className="px-2 py-0.5 bg-purple-500/20 text-purple-300 text-xs rounded">FAI</span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-4">
-                    <span className={`inline-flex px-2 py-1 rounded text-xs font-medium ${
-                      customer.is_active ? 'bg-green-500/20 text-green-300' : 'bg-slate-800 text-slate-400'
-                    }`}>
-                      {customer.is_active ? 'Active' : 'Inactive'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-4 text-center">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleEdit(customer); }}
-                      className="text-slate-500 hover:text-slate-400"
-                    >
-                      <PencilIcon className="h-5 w-5" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {loadError ? (
-          <ErrorState message="Could not load customers." onRetry={loadCustomers} />
-        ) : filteredCustomers.length === 0 && (
-          <EmptyState
-            icon={UserGroupIcon}
-            title="No customers found"
-            description={search ? 'No customers match your search.' : 'Add your first customer to get started.'}
-            action={search ? undefined : { label: 'Add your first customer', onClick: () => { resetForm(); setShowModal(true); } }}
-          />
-        )}
-      </div>
+      <DataTable
+        columns={columns}
+        data={filteredCustomers}
+        rowKey={(customer) => customer.id}
+        onRowClick={(customer) => viewCustomerDetails(customer)}
+        defaultSort={{ key: 'name', dir: 'asc' }}
+        pageSize={25}
+        loading={loading}
+        error={loadError}
+        onRetry={loadCustomers}
+        csvExport={{ filename: 'customers' }}
+        mobileCards={renderMobileCard}
+        empty={{
+          icon: UserGroupIcon,
+          title: 'No customers found',
+          description: search ? 'No customers match your search.' : 'Add your first customer to get started.',
+          action: search ? undefined : { label: 'Add your first customer', onClick: () => { resetForm(); setShowModal(true); } },
+        }}
+      />
 
       {/* Add/Edit Modal */}
       <Modal

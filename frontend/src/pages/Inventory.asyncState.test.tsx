@@ -106,7 +106,11 @@ describe('Inventory async-state (Batch 3)', () => {
     renderPage();
 
     // The Summary tab is the default; with no rows it shows the shared EmptyState.
-    const empty = await screen.findByTestId('empty-state');
+    // DataTable.mobileCards renders a parallel mobile EmptyState (md:hidden), so
+    // there are two in the jsdom DOM — scope to the desktop one (hidden md:block).
+    const empties = await screen.findAllByTestId('empty-state');
+    const empty =
+      empties.find((el) => el.closest('.md\\:block') !== null) ?? empties[0];
     expect(within(empty).getByText('No inventory on hand')).toBeInTheDocument();
     // It offers the Receive Inventory CTA.
     expect(

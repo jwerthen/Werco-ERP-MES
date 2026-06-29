@@ -1,8 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+  StatusBadge,
+  MobileDataCard,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
 import {
@@ -191,13 +198,185 @@ export default function QualityPage() {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
-  }
+  const priorityLabel = (p: number) => (p === 1 ? 'Critical' : p === 2 ? 'Major' : 'Minor');
+
+  const filteredNcrs = useMemo(
+    () => (ncrStatusFilter ? ncrs.filter((ncr) => ncr.status === ncrStatusFilter) : ncrs),
+    [ncrs, ncrStatusFilter]
+  );
+
+  const ncrColumns = useMemo<Array<DataTableColumn<NCR>>>(() => [
+    {
+      key: 'ncr_number',
+      header: 'NCR #',
+      sortable: true,
+      className: 'font-medium',
+      accessor: (ncr) => ncr.ncr_number,
+    },
+    {
+      key: 'part',
+      header: 'Part',
+      sortable: true,
+      accessor: (ncr) => ncr.part?.part_number ?? '',
+      render: (ncr) => ncr.part?.part_number || '-',
+    },
+    {
+      key: 'title',
+      header: 'Title',
+      sortable: true,
+      accessor: (ncr) => ncr.title,
+    },
+    {
+      key: 'source',
+      header: 'Source',
+      sortable: true,
+      accessor: (ncr) => ncr.source,
+      render: (ncr) => <span className="capitalize">{ncr.source.replace(/_/g, ' ')}</span>,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (ncr) => ncr.status,
+      csv: (ncr) => ncr.status.replace(/_/g, ' '),
+      render: (ncr) => <StatusBadge status={ncr.status} colorMap={statusColors} />,
+    },
+    {
+      key: 'disposition',
+      header: 'Disposition',
+      sortable: true,
+      accessor: (ncr) => ncr.disposition,
+      csv: (ncr) => ncr.disposition.replace(/_/g, ' '),
+      render: (ncr) => <StatusBadge status={ncr.disposition} colorMap={dispositionColors} />,
+    },
+    {
+      key: 'created_at',
+      header: 'Date',
+      sortable: true,
+      accessor: (ncr) => ncr.created_at,
+      csv: (ncr) => formatCentralDate(ncr.created_at),
+      render: (ncr) => <span className="text-sm">{formatCentralDate(ncr.created_at)}</span>,
+    },
+  ], []);
+
+  const carColumns = useMemo<Array<DataTableColumn<CAR>>>(() => [
+    {
+      key: 'car_number',
+      header: 'CAR #',
+      sortable: true,
+      className: 'font-medium',
+      accessor: (car) => car.car_number,
+    },
+    {
+      key: 'car_type',
+      header: 'Type',
+      sortable: true,
+      accessor: (car) => car.car_type,
+      render: (car) => <span className="capitalize">{car.car_type}</span>,
+    },
+    {
+      key: 'title',
+      header: 'Title',
+      sortable: true,
+      accessor: (car) => car.title,
+    },
+    {
+      key: 'priority',
+      header: 'Priority',
+      sortable: true,
+      align: 'center',
+      headerClassName: 'text-center',
+      accessor: (car) => car.priority,
+      csv: (car) => priorityLabel(car.priority),
+      render: (car) => (
+        <span className={`px-2 py-1 rounded text-xs font-medium ${
+          car.priority === 1 ? 'bg-red-500/20 text-red-300' :
+          car.priority === 2 ? 'bg-yellow-500/20 text-yellow-300' :
+          'bg-slate-800 text-slate-100'
+        }`}>
+          {priorityLabel(car.priority)}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (car) => car.status,
+      csv: (car) => car.status.replace(/_/g, ' '),
+      render: (car) => <StatusBadge status={car.status} colorMap={statusColors} />,
+    },
+    {
+      key: 'due_date',
+      header: 'Due Date',
+      sortable: true,
+      accessor: (car) => car.due_date ?? '',
+      csv: (car) => (car.due_date ? formatCentralDate(car.due_date) : ''),
+      render: (car) => <span className="text-sm">{car.due_date ? formatCentralDate(car.due_date) : '-'}</span>,
+    },
+  ], []);
+
+  const faiColumns = useMemo<Array<DataTableColumn<FAI>>>(() => [
+    {
+      key: 'fai_number',
+      header: 'FAI #',
+      sortable: true,
+      className: 'font-medium',
+      accessor: (fai) => fai.fai_number,
+    },
+    {
+      key: 'part',
+      header: 'Part',
+      sortable: true,
+      accessor: (fai) => fai.part?.part_number ?? '',
+      csv: (fai) => `${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`.trim(),
+      render: (fai) => (
+        <span>
+          {fai.part?.part_number}
+          {fai.part_revision && <span className="text-slate-500 ml-1">Rev {fai.part_revision}</span>}
+        </span>
+      ),
+    },
+    {
+      key: 'fai_type',
+      header: 'Type',
+      sortable: true,
+      accessor: (fai) => fai.fai_type,
+      render: (fai) => <span className="capitalize">{fai.fai_type}</span>,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (fai) => fai.status,
+      render: (fai) => <StatusBadge status={fai.status} colorMap={statusColors} />,
+    },
+    {
+      key: 'pass_fail',
+      header: 'Pass/Fail',
+      align: 'center',
+      headerClassName: 'text-center',
+      accessor: (fai) => fai.characteristics_passed,
+      csv: (fai) => `${fai.characteristics_passed}/${fai.characteristics_failed}/${fai.total_characteristics}`,
+      render: (fai) => (
+        <span className="text-sm">
+          <span className="text-green-600">{fai.characteristics_passed}</span>
+          {' / '}
+          <span className="text-red-600">{fai.characteristics_failed}</span>
+          {' / '}
+          <span className="text-slate-400">{fai.total_characteristics}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'due_date',
+      header: 'Due Date',
+      sortable: true,
+      accessor: (fai) => fai.due_date ?? '',
+      csv: (fai) => (fai.due_date ? formatCentralDate(fai.due_date) : ''),
+      render: (fai) => <span className="text-sm">{fai.due_date ? formatCentralDate(fai.due_date) : '-'}</span>,
+    },
+  ], []);
 
   if (loadError) {
     return (
@@ -328,50 +507,34 @@ export default function QualityPage() {
                 <PlusIcon className="h-5 w-5 mr-1" /> New NCR
               </button>
             </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800/50">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">NCR #</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Title</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Source</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Disposition</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Date</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                  {(ncrStatusFilter ? ncrs.filter(ncr => ncr.status === ncrStatusFilter) : ncrs).map((ncr) => (
-                    <tr key={ncr.id} className="hover:bg-slate-800/50 cursor-pointer">
-                      <td className="px-4 py-3 font-medium">{ncr.ncr_number}</td>
-                      <td className="px-4 py-3">{ncr.part?.part_number || '-'}</td>
-                      <td className="px-4 py-3">{ncr.title}</td>
-                      <td className="px-4 py-3 text-sm">{ncr.source.replace(/_/g, ' ')}</td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[ncr.status] || 'bg-slate-800'}`}>
-                          {ncr.status.replace(/_/g, ' ')}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${dispositionColors[ncr.disposition] || 'bg-slate-800'}`}>
-                          {ncr.disposition.replace(/_/g, ' ')}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm">{formatCentralDate(ncr.created_at)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {ncrs.length === 0 && (
-                <EmptyState
-                  icon={ExclamationTriangleIcon}
-                  title="No NCRs found"
-                  description="Non-conformance reports will appear here once they are created."
-                  action={{ label: 'New NCR', onClick: () => setShowNCRModal(true) }}
+            <DataTable
+              columns={ncrColumns}
+              data={filteredNcrs}
+              rowKey={(ncr) => ncr.id}
+              loading={loading}
+              defaultSort={{ key: 'created_at', dir: 'desc' }}
+              pageSize={25}
+              csvExport={{ filename: 'ncrs' }}
+              empty={{
+                icon: ExclamationTriangleIcon,
+                title: 'No NCRs found',
+                description: 'Non-conformance reports will appear here once they are created.',
+                action: { label: 'New NCR', onClick: () => setShowNCRModal(true) },
+              }}
+              mobileCards={(ncr) => (
+                <MobileDataCard
+                  title={ncr.ncr_number}
+                  subtitle={ncr.title}
+                  badge={<StatusBadge status={ncr.status} colorMap={statusColors} />}
+                  fields={[
+                    { label: 'Part', value: ncr.part?.part_number || '-' },
+                    { label: 'Source', value: <span className="capitalize">{ncr.source.replace(/_/g, ' ')}</span> },
+                    { label: 'Disposition', value: <StatusBadge status={ncr.disposition} colorMap={dispositionColors} /> },
+                    { label: 'Date', value: formatCentralDate(ncr.created_at) },
+                  ]}
                 />
               )}
-            </div>
+            />
           </>
         )}
 
@@ -384,52 +547,44 @@ export default function QualityPage() {
                 <PlusIcon className="h-5 w-5 mr-1" /> New CAR
               </button>
             </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800/50">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">CAR #</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Title</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Priority</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due Date</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                  {cars.map((car) => (
-                    <tr key={car.id} className="hover:bg-slate-800/50 cursor-pointer">
-                      <td className="px-4 py-3 font-medium">{car.car_number}</td>
-                      <td className="px-4 py-3 text-sm capitalize">{car.car_type}</td>
-                      <td className="px-4 py-3">{car.title}</td>
-                      <td className="px-4 py-3 text-center">
+            <DataTable
+              columns={carColumns}
+              data={cars}
+              rowKey={(car) => car.id}
+              loading={loading}
+              defaultSort={{ key: 'car_number', dir: 'desc' }}
+              pageSize={25}
+              csvExport={{ filename: 'cars' }}
+              empty={{
+                icon: ClipboardDocumentCheckIcon,
+                title: 'No CARs found',
+                description: 'Corrective action requests will appear here once they are created.',
+                action: { label: 'New CAR', onClick: () => setShowCARModal(true) },
+              }}
+              mobileCards={(car) => (
+                <MobileDataCard
+                  title={car.car_number}
+                  subtitle={car.title}
+                  badge={<StatusBadge status={car.status} colorMap={statusColors} />}
+                  fields={[
+                    { label: 'Type', value: <span className="capitalize">{car.car_type}</span> },
+                    {
+                      label: 'Priority',
+                      value: (
                         <span className={`px-2 py-1 rounded text-xs font-medium ${
                           car.priority === 1 ? 'bg-red-500/20 text-red-300' :
                           car.priority === 2 ? 'bg-yellow-500/20 text-yellow-300' :
                           'bg-slate-800 text-slate-100'
                         }`}>
-                          {car.priority === 1 ? 'Critical' : car.priority === 2 ? 'Major' : 'Minor'}
+                          {priorityLabel(car.priority)}
                         </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[car.status] || 'bg-slate-800'}`}>
-                          {car.status.replace(/_/g, ' ')}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm">{car.due_date ? formatCentralDate(car.due_date) : '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {cars.length === 0 && (
-                <EmptyState
-                  icon={ClipboardDocumentCheckIcon}
-                  title="No CARs found"
-                  description="Corrective action requests will appear here once they are created."
-                  action={{ label: 'New CAR', onClick: () => setShowCARModal(true) }}
+                      ),
+                    },
+                    { label: 'Due Date', value: car.due_date ? formatCentralDate(car.due_date) : '-' },
+                  ]}
                 />
               )}
-            </div>
+            />
           </>
         )}
 
@@ -442,53 +597,44 @@ export default function QualityPage() {
                 <PlusIcon className="h-5 w-5 mr-1" /> New FAI
               </button>
             </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800/50">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">FAI #</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Pass/Fail</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Due Date</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                  {fais.map((fai) => (
-                    <tr key={fai.id} className="hover:bg-slate-800/50 cursor-pointer">
-                      <td className="px-4 py-3 font-medium">{fai.fai_number}</td>
-                      <td className="px-4 py-3">
-                        {fai.part?.part_number}
-                        {fai.part_revision && <span className="text-slate-500 ml-1">Rev {fai.part_revision}</span>}
-                      </td>
-                      <td className="px-4 py-3 text-sm capitalize">{fai.fai_type}</td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[fai.status] || 'bg-slate-800'}`}>
-                          {fai.status}
+            <DataTable
+              columns={faiColumns}
+              data={fais}
+              rowKey={(fai) => fai.id}
+              loading={loading}
+              defaultSort={{ key: 'fai_number', dir: 'desc' }}
+              pageSize={25}
+              csvExport={{ filename: 'fais' }}
+              empty={{
+                icon: DocumentMagnifyingGlassIcon,
+                title: 'No FAIs found',
+                description: 'First article inspections will appear here once they are created.',
+                action: { label: 'New FAI', onClick: () => setShowFAIModal(true) },
+              }}
+              mobileCards={(fai) => (
+                <MobileDataCard
+                  title={fai.fai_number}
+                  subtitle={`${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`}
+                  badge={<StatusBadge status={fai.status} colorMap={statusColors} />}
+                  fields={[
+                    { label: 'Type', value: <span className="capitalize">{fai.fai_type}</span> },
+                    {
+                      label: 'Pass/Fail',
+                      value: (
+                        <span>
+                          <span className="text-green-600">{fai.characteristics_passed}</span>
+                          {' / '}
+                          <span className="text-red-600">{fai.characteristics_failed}</span>
+                          {' / '}
+                          <span className="text-slate-400">{fai.total_characteristics}</span>
                         </span>
-                      </td>
-                      <td className="px-4 py-3 text-center text-sm">
-                        <span className="text-green-600">{fai.characteristics_passed}</span>
-                        {' / '}
-                        <span className="text-red-600">{fai.characteristics_failed}</span>
-                        {' / '}
-                        <span className="text-slate-400">{fai.total_characteristics}</span>
-                      </td>
-                      <td className="px-4 py-3 text-sm">{fai.due_date ? formatCentralDate(fai.due_date) : '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {fais.length === 0 && (
-                <EmptyState
-                  icon={DocumentMagnifyingGlassIcon}
-                  title="No FAIs found"
-                  description="First article inspections will appear here once they are created."
-                  action={{ label: 'New FAI', onClick: () => setShowFAIModal(true) }}
+                      ),
+                    },
+                    { label: 'Due Date', value: fai.due_date ? formatCentralDate(fai.due_date) : '-' },
+                  ]}
                 />
               )}
-            </div>
+            />
           </>
         )}
       </div>

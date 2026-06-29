@@ -16,7 +16,12 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  useToast,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface DashboardStats {
@@ -83,6 +88,63 @@ const statusBadge = (status: string) => {
   if (s === 'suspended' || s === 'at_risk') return 'bg-red-500/20 text-red-300';
   return 'bg-slate-800/50 text-slate-100';
 };
+
+const StatusPill = ({ status }: { status: string }) => (
+  <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${statusBadge(status)}`}>
+    {status}
+  </span>
+);
+
+const ScorePill = ({ score }: { score: number }) => (
+  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${scoreBadge(score)}`}>
+    {score}
+  </span>
+);
+
+const ScoreBar = ({ score }: { score: number }) => (
+  <div className="flex items-center gap-2 min-w-[7rem]">
+    <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+      <div className={`h-full rounded-full ${scoreColor(score)}`} style={{ width: `${score}%` }} />
+    </div>
+    <ScorePill score={score} />
+  </div>
+);
+
+const radarData = (sc: Scorecard) => [
+  { dimension: 'Quality', score: sc.quality_score },
+  { dimension: 'Delivery', score: sc.delivery_score },
+  { dimension: 'Cost', score: sc.cost_score },
+  { dimension: 'Responsiveness', score: sc.responsiveness_score },
+];
+
+const ScorecardCharts = ({ sc }: { sc: Scorecard }) => (
+  <div className="flex flex-col lg:flex-row gap-6">
+    <div className="w-full lg:w-1/2 h-64">
+      <h4 className="text-sm font-semibold text-slate-300 mb-2">Score Breakdown</h4>
+      <ResponsiveContainer width="100%" height="100%">
+        <RadarChart data={radarData(sc)}>
+          <PolarGrid />
+          <PolarAngleAxis dataKey="dimension" tick={{ fontSize: 12, fill: '#94a3b8' }} />
+          <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+          <Radar name="Score" dataKey="score" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.3} />
+        </RadarChart>
+      </ResponsiveContainer>
+    </div>
+    <div className="w-full lg:w-1/2 h-64">
+      <h4 className="text-sm font-semibold text-slate-300 mb-2">Dimension Comparison</h4>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={radarData(sc)}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+          <XAxis dataKey="dimension" tick={{ fontSize: 12, fill: '#94a3b8' }} />
+          <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+          <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} />
+          <Legend />
+          <Bar dataKey="score" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  </div>
+);
 
 const SupplierScorecards = () => {
   const { showToast } = useToast();
@@ -187,13 +249,6 @@ const SupplierScorecards = () => {
     }
   }, [auditForm, fetchData, showToast]);
 
-  const radarData = useCallback((sc: Scorecard) => [
-    { dimension: 'Quality', score: sc.quality_score },
-    { dimension: 'Delivery', score: sc.delivery_score },
-    { dimension: 'Cost', score: sc.cost_score },
-    { dimension: 'Responsiveness', score: sc.responsiveness_score },
-  ], []);
-
   const toggleExpand = useCallback((id: number) => {
     setExpandedRow(prev => prev === id ? null : id);
   }, []);
@@ -204,6 +259,211 @@ const SupplierScorecards = () => {
     { label: 'At-Risk Suppliers', value: stats.at_risk_count, icon: ExclamationTriangleIcon, iconBg: 'bg-fd-red/15', iconColor: 'text-fd-red', valueColor: stats.at_risk_count > 0 ? 'text-fd-red' : undefined },
     { label: 'Audits Due Soon', value: stats.audits_due_soon, icon: CalendarDaysIcon, iconBg: 'bg-fd-amber/15', iconColor: 'text-fd-amber', valueColor: stats.audits_due_soon > 0 ? 'text-fd-amber' : undefined },
   ], [stats]);
+
+  // ---- Scorecards table columns ----
+  const scorecardColumns = useMemo<Array<DataTableColumn<Scorecard>>>(() => [
+    {
+      key: 'expand',
+      header: '',
+      headerClassName: 'w-10',
+      className: 'w-10',
+      render: (sc) => (
+        expandedRow === sc.id
+          ? <ChevronUpIcon className="w-4 h-4 text-slate-400" />
+          : <ChevronDownIcon className="w-4 h-4 text-slate-400" />
+      ),
+    },
+    {
+      key: 'vendor_name',
+      header: 'Vendor',
+      sortable: true,
+      accessor: (sc) => sc.vendor_name,
+      render: (sc) => <span className="font-medium text-white">{sc.vendor_name}</span>,
+    },
+    {
+      key: 'overall_score',
+      header: 'Overall Score',
+      sortable: true,
+      accessor: (sc) => sc.overall_score,
+      render: (sc) => <ScoreBar score={sc.overall_score} />,
+    },
+    {
+      key: 'quality_score',
+      header: 'Quality',
+      sortable: true,
+      align: 'center',
+      accessor: (sc) => sc.quality_score,
+    },
+    {
+      key: 'delivery_score',
+      header: 'Delivery',
+      sortable: true,
+      align: 'center',
+      accessor: (sc) => sc.delivery_score,
+    },
+    {
+      key: 'cost_score',
+      header: 'Cost',
+      sortable: true,
+      align: 'center',
+      accessor: (sc) => sc.cost_score,
+    },
+    {
+      key: 'period',
+      header: 'Period',
+      sortable: true,
+      accessor: (sc) => sc.period,
+      render: (sc) => <span className="text-slate-400">{sc.period}</span>,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (sc) => sc.status,
+      render: (sc) => <StatusPill status={sc.status} />,
+    },
+  ], [expandedRow]);
+
+  const scorecardMobileCard = useCallback((sc: Scorecard) => (
+    <MobileDataCard
+      title={sc.vendor_name}
+      subtitle={sc.period}
+      badge={<StatusPill status={sc.status} />}
+      onClick={() => toggleExpand(sc.id)}
+      fields={[
+        { label: 'Overall', value: <ScoreBar score={sc.overall_score} />, fullWidth: true },
+        { label: 'Quality', value: sc.quality_score },
+        { label: 'Delivery', value: sc.delivery_score },
+        { label: 'Cost', value: sc.cost_score },
+        { label: 'Responsiveness', value: sc.responsiveness_score },
+        ...(expandedRow === sc.id
+          ? [{ label: 'Breakdown', value: <ScorecardCharts sc={sc} />, fullWidth: true }]
+          : []),
+      ]}
+    />
+  ), [expandedRow, toggleExpand]);
+
+  // ---- Approved Supplier List columns ----
+  const aslColumns = useMemo<Array<DataTableColumn<ApprovedSupplier>>>(() => [
+    {
+      key: 'vendor_name',
+      header: 'Vendor',
+      sortable: true,
+      accessor: (s) => s.vendor_name,
+      render: (s) => <span className="font-medium text-white">{s.vendor_name}</span>,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (s) => s.status,
+      render: (s) => <StatusPill status={s.status} />,
+    },
+    {
+      key: 'approved_date',
+      header: 'Approved Date',
+      sortable: true,
+      accessor: (s) => s.approved_date,
+      render: (s) => <span className="text-slate-400">{s.approved_date}</span>,
+    },
+    {
+      key: 'commodity',
+      header: 'Commodity',
+      sortable: true,
+      accessor: (s) => s.commodity,
+      render: (s) => <span className="text-slate-400">{s.commodity}</span>,
+    },
+    {
+      key: 'notes',
+      header: 'Notes',
+      accessor: (s) => s.notes,
+      render: (s) => <span className="text-slate-400 max-w-xs truncate block">{s.notes}</span>,
+    },
+  ], []);
+
+  const aslMobileCard = useCallback((s: ApprovedSupplier) => (
+    <MobileDataCard
+      title={s.vendor_name}
+      badge={<StatusPill status={s.status} />}
+      fields={[
+        { label: 'Approved', value: s.approved_date || '—' },
+        { label: 'Commodity', value: s.commodity || '—' },
+        { label: 'Notes', value: s.notes || '—', fullWidth: true },
+      ]}
+    />
+  ), []);
+
+  // ---- Audits columns ----
+  const auditColumns = useMemo<Array<DataTableColumn<Audit>>>(() => [
+    {
+      key: 'vendor_name',
+      header: 'Vendor',
+      sortable: true,
+      accessor: (a) => a.vendor_name,
+      render: (a) => <span className="font-medium text-white">{a.vendor_name}</span>,
+    },
+    {
+      key: 'audit_date',
+      header: 'Audit Date',
+      sortable: true,
+      accessor: (a) => a.audit_date,
+      render: (a) => <span className="text-slate-400">{a.audit_date}</span>,
+    },
+    {
+      key: 'audit_type',
+      header: 'Type',
+      sortable: true,
+      accessor: (a) => a.audit_type,
+      render: (a) => <span className="text-slate-400 capitalize">{a.audit_type}</span>,
+    },
+    {
+      key: 'score',
+      header: 'Score',
+      sortable: true,
+      align: 'center',
+      accessor: (a) => a.score,
+      render: (a) => <ScorePill score={a.score} />,
+    },
+    {
+      key: 'findings',
+      header: 'Findings',
+      accessor: (a) => a.findings,
+      render: (a) => <span className="text-slate-400 max-w-xs truncate block">{a.findings}</span>,
+    },
+    {
+      key: 'next_audit_due',
+      header: 'Next Audit Due',
+      sortable: true,
+      accessor: (a) => a.next_audit_due,
+      render: (a) => <span className="text-slate-400">{a.next_audit_due}</span>,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (a) => a.status,
+      render: (a) => <StatusPill status={a.status} />,
+    },
+  ], []);
+
+  const auditMobileCard = useCallback((a: Audit) => (
+    <MobileDataCard
+      title={a.vendor_name}
+      subtitle={a.audit_type}
+      badge={<StatusPill status={a.status} />}
+      fields={[
+        { label: 'Audit Date', value: a.audit_date || '—' },
+        { label: 'Score', value: <ScorePill score={a.score} /> },
+        { label: 'Next Due', value: a.next_audit_due || '—' },
+        { label: 'Findings', value: a.findings || '—', fullWidth: true },
+      ]}
+    />
+  ), []);
+
+  const expandedScorecard = useMemo(
+    () => filteredScorecards.find(sc => sc.id === expandedRow) ?? null,
+    [filteredScorecards, expandedRow]
+  );
 
   return (
     <div className="p-4 space-y-4">
@@ -263,206 +523,90 @@ const SupplierScorecards = () => {
         </div>
       </div>
 
-      {loading ? (
-        <div className="flex justify-center py-12">
-          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600" />
+      {/* Scorecards Tab */}
+      {activeTab === 'Scorecards' && (
+        <div className="space-y-4">
+          <DataTable<Scorecard>
+            columns={scorecardColumns}
+            data={filteredScorecards}
+            rowKey={(sc) => sc.id}
+            onRowClick={(sc) => toggleExpand(sc.id)}
+            defaultSort={{ key: 'overall_score', dir: 'desc' }}
+            pageSize={25}
+            csvExport={{ filename: 'supplier-scorecards' }}
+            loading={loading}
+            error={loadError}
+            onRetry={fetchData}
+            mobileCards={scorecardMobileCard}
+            empty={{
+              icon: ChartBarIcon,
+              title: 'No scorecards found',
+              description: search ? 'No scorecards match your search.' : 'Rated suppliers will appear here once you create a scorecard.',
+              action: search ? undefined : { label: 'New Scorecard', onClick: () => setShowScorecardModal(true) },
+            }}
+          />
+          {/* Expanded score breakdown (desktop) — preserves the click-to-expand charts. */}
+          {expandedScorecard && (
+            <div className="hidden md:block bg-[#151b28] rounded-xl border border-slate-700 px-6 py-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-white">
+                  {expandedScorecard.vendor_name} — {expandedScorecard.period}
+                </h3>
+                <button
+                  onClick={() => setExpandedRow(null)}
+                  className="text-slate-400 hover:text-slate-200"
+                  aria-label="Close breakdown"
+                >
+                  <XMarkIcon className="w-5 h-5" />
+                </button>
+              </div>
+              <ScorecardCharts sc={expandedScorecard} />
+            </div>
+          )}
         </div>
-      ) : loadError ? (
-        <ErrorState
-          message="Could not load supplier scorecard data."
+      )}
+
+      {/* Approved Supplier List Tab */}
+      {activeTab === 'Approved Supplier List' && (
+        <DataTable<ApprovedSupplier>
+          columns={aslColumns}
+          data={filteredASL}
+          rowKey={(s) => s.id}
+          defaultSort={{ key: 'vendor_name', dir: 'asc' }}
+          pageSize={25}
+          csvExport={{ filename: 'approved-suppliers' }}
+          loading={loading}
+          error={loadError}
           onRetry={fetchData}
+          mobileCards={aslMobileCard}
+          empty={{
+            icon: ShieldCheckIcon,
+            title: 'No approved suppliers found',
+            description: search ? 'No approved suppliers match your search.' : 'Approved suppliers will appear here.',
+          }}
         />
-      ) : (
-        <>
-          {/* Scorecards Tab */}
-          {activeTab === 'Scorecards' && (
-            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800">
-                  <tr>
-                    <th className="w-10 px-4 py-3" />
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Overall Score</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Quality</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Delivery</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Cost</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Period</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-700">
-                  {filteredScorecards.length === 0 ? (
-                    <tr>
-                      <td colSpan={8} className="px-4 py-8">
-                        <EmptyState
-                          icon={ChartBarIcon}
-                          title="No scorecards found"
-                          description={search ? 'No scorecards match your search.' : 'Rated suppliers will appear here once you create a scorecard.'}
-                          action={search ? undefined : { label: 'New Scorecard', onClick: () => setShowScorecardModal(true) }}
-                        />
-                      </td>
-                    </tr>
-                  ) : filteredScorecards.map(sc => (
-                    <React.Fragment key={sc.id}>
-                      <tr className="hover:bg-slate-800 cursor-pointer" onClick={() => toggleExpand(sc.id)}>
-                        <td className="px-4 py-3">
-                          {expandedRow === sc.id
-                            ? <ChevronUpIcon className="w-4 h-4 text-slate-400" />
-                            : <ChevronDownIcon className="w-4 h-4 text-slate-400" />}
-                        </td>
-                        <td className="px-4 py-3 text-sm font-medium text-white">{sc.vendor_name}</td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
-                              <div className={`h-full rounded-full ${scoreColor(sc.overall_score)}`} style={{ width: `${sc.overall_score}%` }} />
-                            </div>
-                            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${scoreBadge(sc.overall_score)}`}>
-                              {sc.overall_score}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-center text-sm">{sc.quality_score}</td>
-                        <td className="px-4 py-3 text-center text-sm">{sc.delivery_score}</td>
-                        <td className="px-4 py-3 text-center text-sm">{sc.cost_score}</td>
-                        <td className="px-4 py-3 text-sm text-slate-400">{sc.period}</td>
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${statusBadge(sc.status)}`}>
-                            {sc.status}
-                          </span>
-                        </td>
-                      </tr>
-                      {expandedRow === sc.id && (
-                        <tr>
-                          <td colSpan={8} className="px-6 py-4 bg-slate-800">
-                            <div className="flex flex-col lg:flex-row gap-6">
-                              <div className="w-full lg:w-1/2 h-64">
-                                <h4 className="text-sm font-semibold text-slate-300 mb-2">Score Breakdown</h4>
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <RadarChart data={radarData(sc)}>
-                                    <PolarGrid />
-                                    <PolarAngleAxis dataKey="dimension" tick={{ fontSize: 12, fill: '#94a3b8' }} />
-                                    <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                                    <Radar name="Score" dataKey="score" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.3} />
-                                  </RadarChart>
-                                </ResponsiveContainer>
-                              </div>
-                              <div className="w-full lg:w-1/2 h-64">
-                                <h4 className="text-sm font-semibold text-slate-300 mb-2">Dimension Comparison</h4>
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <BarChart data={radarData(sc)}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                                    <XAxis dataKey="dimension" tick={{ fontSize: 12, fill: '#94a3b8' }} />
-                                    <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                                    <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '12px', color: '#e2e8f0' }} />
-                                    <Legend />
-                                    <Bar dataKey="score" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                                  </BarChart>
-                                </ResponsiveContainer>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+      )}
 
-          {/* Approved Supplier List Tab */}
-          {activeTab === 'Approved Supplier List' && (
-            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Approved Date</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Commodity</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Notes</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-700">
-                  {filteredASL.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="px-4 py-8">
-                        <EmptyState
-                          icon={ShieldCheckIcon}
-                          title="No approved suppliers found"
-                          description={search ? 'No approved suppliers match your search.' : 'Approved suppliers will appear here.'}
-                        />
-                      </td>
-                    </tr>
-                  ) : filteredASL.map(s => (
-                    <tr key={s.id} className="hover:bg-slate-800">
-                      <td className="px-4 py-3 text-sm font-medium text-white">{s.vendor_name}</td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${statusBadge(s.status)}`}>
-                          {s.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-slate-400">{s.approved_date}</td>
-                      <td className="px-4 py-3 text-sm text-slate-400">{s.commodity}</td>
-                      <td className="px-4 py-3 text-sm text-slate-400 max-w-xs truncate">{s.notes}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* Audits Tab */}
-          {activeTab === 'Audits' && (
-            <div className="bg-[#151b28] rounded-xl shadow-sm border border-slate-700 overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Vendor</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Audit Date</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Type</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Score</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Findings</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Next Audit Due</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-700">
-                  {filteredAudits.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="px-4 py-8">
-                        <EmptyState
-                          icon={CalendarDaysIcon}
-                          title="No audits found"
-                          description={search ? 'No audits match your search.' : 'Supplier audits will appear here once you log one.'}
-                          action={search ? undefined : { label: 'New Audit', onClick: () => setShowAuditModal(true) }}
-                        />
-                      </td>
-                    </tr>
-                  ) : filteredAudits.map(a => (
-                    <tr key={a.id} className="hover:bg-slate-800">
-                      <td className="px-4 py-3 text-sm font-medium text-white">{a.vendor_name}</td>
-                      <td className="px-4 py-3 text-sm text-slate-400">{a.audit_date}</td>
-                      <td className="px-4 py-3 text-sm text-slate-400 capitalize">{a.audit_type}</td>
-                      <td className="px-4 py-3 text-center">
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${scoreBadge(a.score)}`}>
-                          {a.score}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-slate-400 max-w-xs truncate">{a.findings}</td>
-                      <td className="px-4 py-3 text-sm text-slate-400">{a.next_audit_due}</td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${statusBadge(a.status)}`}>
-                          {a.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </>
+      {/* Audits Tab */}
+      {activeTab === 'Audits' && (
+        <DataTable<Audit>
+          columns={auditColumns}
+          data={filteredAudits}
+          rowKey={(a) => a.id}
+          defaultSort={{ key: 'audit_date', dir: 'desc' }}
+          pageSize={25}
+          csvExport={{ filename: 'supplier-audits' }}
+          loading={loading}
+          error={loadError}
+          onRetry={fetchData}
+          mobileCards={auditMobileCard}
+          empty={{
+            icon: CalendarDaysIcon,
+            title: 'No audits found',
+            description: search ? 'No audits match your search.' : 'Supplier audits will appear here once you log one.',
+            action: search ? undefined : { label: 'New Audit', onClick: () => setShowAuditModal(true) },
+          }}
+        />
       )}
 
       {/* Create Scorecard Modal */}

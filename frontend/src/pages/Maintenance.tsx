@@ -1,7 +1,15 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  EmptyState,
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+  StatusBadge,
+  MobileDataCard,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import {
   PlusIcon,
@@ -77,6 +85,15 @@ const priorityColors: Record<string, { bg: string; text: string }> = {
   critical: { bg: 'bg-red-500/20', text: 'text-red-400' },
   emergency: { bg: 'bg-red-200', text: 'text-red-300' },
 };
+
+// StatusBadge colorMap form (single class string per key) derived from the
+// {bg,text} maps above, so the badge palette stays identical after migration.
+const statusBadgeColors: Record<string, string> = Object.fromEntries(
+  Object.entries(statusColors).map(([k, v]) => [k, `${v.bg} ${v.text}`]),
+);
+const priorityBadgeColors: Record<string, string> = Object.fromEntries(
+  Object.entries(priorityColors).map(([k, v]) => [k, `${v.bg} ${v.text}`]),
+);
 
 export default function Maintenance() {
   const { showToast } = useToast();
@@ -182,6 +199,196 @@ export default function Maintenance() {
       loadData();
     } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to complete'); }
   };
+
+  const woRowActions = useCallback((wo: MaintenanceWorkOrder) => (
+    <div className="flex gap-1">
+      {wo.status === 'open' && (
+        <button onClick={(e) => { e.stopPropagation(); handleStart(wo); }} className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600" title="Start">
+          <PlayIcon className="w-4 h-4" />
+        </button>
+      )}
+      {wo.status === 'in_progress' && (
+        <button onClick={(e) => { e.stopPropagation(); setSelectedWO(wo); setShowCompleteModal(true); }} className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600" title="Complete">
+          <CheckCircleIcon className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  ), [handleStart]);
+
+  // ---- Work Orders tab columns ----
+  const woColumns = useMemo<Array<DataTableColumn<MaintenanceWorkOrder>>>(() => [
+    {
+      key: 'title',
+      header: 'Title',
+      sortable: true,
+      className: 'font-medium',
+      accessor: (wo) => wo.title,
+    },
+    {
+      key: 'work_center',
+      header: 'Work Center',
+      sortable: true,
+      accessor: (wo) => wo.work_center_name || '',
+      render: (wo) => wo.work_center_name || '-',
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      sortable: true,
+      className: 'capitalize',
+      accessor: (wo) => wo.maintenance_type,
+    },
+    {
+      key: 'priority',
+      header: 'Priority',
+      sortable: true,
+      accessor: (wo) => wo.priority,
+      render: (wo) => <StatusBadge status={wo.priority} colorMap={priorityBadgeColors} />,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      accessor: (wo) => wo.status,
+      render: (wo) => <StatusBadge status={wo.status} colorMap={statusBadgeColors} />,
+    },
+    {
+      key: 'scheduled',
+      header: 'Scheduled',
+      sortable: true,
+      accessor: (wo) => wo.scheduled_date || '',
+      csv: (wo) => (wo.scheduled_date ? new Date(wo.scheduled_date).toLocaleDateString() : ''),
+      render: (wo) => (wo.scheduled_date ? new Date(wo.scheduled_date).toLocaleDateString() : '-'),
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      render: woRowActions,
+    },
+  ], [woRowActions]);
+
+  const renderWOCard = useCallback((wo: MaintenanceWorkOrder) => (
+    <MobileDataCard
+      title={wo.title}
+      subtitle={wo.work_center_name || undefined}
+      badge={<StatusBadge status={wo.status} colorMap={statusBadgeColors} />}
+      fields={[
+        { label: 'Type', value: <span className="capitalize">{wo.maintenance_type}</span> },
+        { label: 'Priority', value: <StatusBadge status={wo.priority} colorMap={priorityBadgeColors} /> },
+        { label: 'Scheduled', value: wo.scheduled_date ? new Date(wo.scheduled_date).toLocaleDateString() : '-' },
+      ]}
+      actions={
+        (wo.status === 'open' || wo.status === 'in_progress') ? woRowActions(wo) : undefined
+      }
+    />
+  ), [woRowActions]);
+
+  // ---- Schedules tab columns ----
+  const scheduleColumns = useMemo<Array<DataTableColumn<MaintenanceSchedule>>>(() => [
+    {
+      key: 'work_center',
+      header: 'Work Center',
+      sortable: true,
+      className: 'font-medium',
+      accessor: (s) => s.work_center_name || `WC #${s.work_center_id}`,
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      sortable: true,
+      className: 'capitalize',
+      accessor: (s) => s.maintenance_type,
+    },
+    {
+      key: 'frequency',
+      header: 'Frequency',
+      sortable: true,
+      className: 'capitalize',
+      accessor: (s) => s.frequency,
+      csv: (s) => `${s.frequency}${s.frequency_value ? ` (${s.frequency_value})` : ''}`,
+      render: (s) => `${s.frequency}${s.frequency_value ? ` (${s.frequency_value})` : ''}`,
+    },
+    {
+      key: 'description',
+      header: 'Description',
+      accessor: (s) => s.description,
+      className: 'max-w-xs truncate',
+      render: (s) => <span className="block max-w-xs truncate">{s.description}</span>,
+    },
+    {
+      key: 'duration',
+      header: 'Est. Duration',
+      sortable: true,
+      align: 'right',
+      accessor: (s) => s.estimated_duration_hours,
+      csv: (s) => `${s.estimated_duration_hours}h`,
+      render: (s) => `${s.estimated_duration_hours}h`,
+    },
+    {
+      key: 'last_performed',
+      header: 'Last Performed',
+      sortable: true,
+      accessor: (s) => s.last_performed_at || '',
+      csv: (s) => (s.last_performed_at ? new Date(s.last_performed_at).toLocaleDateString() : ''),
+      render: (s) => (s.last_performed_at ? new Date(s.last_performed_at).toLocaleDateString() : '-'),
+    },
+    {
+      key: 'next_due',
+      header: 'Next Due',
+      sortable: true,
+      accessor: (s) => s.next_due_date || '',
+      csv: (s) => (s.next_due_date ? new Date(s.next_due_date).toLocaleDateString() : ''),
+      render: (s) =>
+        s.next_due_date ? (
+          <span className={new Date(s.next_due_date) < new Date() ? 'text-red-600 font-medium' : ''}>
+            {new Date(s.next_due_date).toLocaleDateString()}
+          </span>
+        ) : (
+          '-'
+        ),
+    },
+    {
+      key: 'active',
+      header: 'Active',
+      sortable: true,
+      accessor: (s) => (s.is_active ? 1 : 0),
+      csv: (s) => (s.is_active ? 'Yes' : 'No'),
+      render: (s) =>
+        s.is_active ? (
+          <CheckCircleIcon className="w-5 h-5 text-green-500" />
+        ) : (
+          <XMarkIcon className="w-5 h-5 text-slate-400" />
+        ),
+    },
+  ], []);
+
+  const renderScheduleCard = useCallback((s: MaintenanceSchedule) => (
+    <MobileDataCard
+      title={s.work_center_name || `WC #${s.work_center_id}`}
+      subtitle={s.description || undefined}
+      badge={
+        <StatusBadge
+          status={s.is_active ? 'active' : 'inactive'}
+          colorMap={{ active: 'bg-green-500/20 text-green-300', inactive: 'bg-slate-800/50 text-slate-400' }}
+        />
+      }
+      fields={[
+        { label: 'Type', value: <span className="capitalize">{s.maintenance_type}</span> },
+        { label: 'Frequency', value: <span className="capitalize">{s.frequency}{s.frequency_value ? ` (${s.frequency_value})` : ''}</span> },
+        { label: 'Est. Duration', value: `${s.estimated_duration_hours}h` },
+        {
+          label: 'Next Due',
+          value: s.next_due_date ? (
+            <span className={new Date(s.next_due_date) < new Date() ? 'text-red-600 font-medium' : ''}>
+              {new Date(s.next_due_date).toLocaleDateString()}
+            </span>
+          ) : (
+            '-'
+          ),
+        },
+      ]}
+    />
+  ), []);
 
   if (loading) {
     return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-gray-200 rounded w-1/4" /><div className="grid grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <div key={i} className="h-24 bg-gray-200 rounded" />)}</div><div className="h-64 bg-gray-200 rounded" /></div></div>;
@@ -323,55 +530,21 @@ export default function Maintenance() {
 
       {/* Schedules Tab */}
       {activeTab === 'schedules' && (
-        <div className="bg-[#151b28] rounded-lg shadow overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-800 text-left text-xs font-medium text-slate-400 uppercase">
-              <tr>
-                <th className="px-4 py-3">Work Center</th>
-                <th className="px-4 py-3">Type</th>
-                <th className="px-4 py-3">Frequency</th>
-                <th className="px-4 py-3">Description</th>
-                <th className="px-4 py-3">Est. Duration</th>
-                <th className="px-4 py-3">Last Performed</th>
-                <th className="px-4 py-3">Next Due</th>
-                <th className="px-4 py-3">Active</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700">
-              {schedules.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-4 py-8">
-                    <EmptyState
-                      icon={CalendarDaysIcon}
-                      title="No schedules configured"
-                      description="Create a maintenance schedule to track recurring upkeep."
-                      action={{ label: 'New Schedule', onClick: () => setShowCreateScheduleModal(true) }}
-                    />
-                  </td>
-                </tr>
-              ) : schedules.map(s => (
-                <tr key={s.id} className="hover:bg-slate-800">
-                  <td className="px-4 py-3 font-medium">{s.work_center_name || `WC #${s.work_center_id}`}</td>
-                  <td className="px-4 py-3 capitalize">{s.maintenance_type}</td>
-                  <td className="px-4 py-3 capitalize">{s.frequency}{s.frequency_value ? ` (${s.frequency_value})` : ''}</td>
-                  <td className="px-4 py-3 max-w-xs truncate">{s.description}</td>
-                  <td className="px-4 py-3">{s.estimated_duration_hours}h</td>
-                  <td className="px-4 py-3">{s.last_performed_at ? new Date(s.last_performed_at).toLocaleDateString() : '-'}</td>
-                  <td className="px-4 py-3">
-                    {s.next_due_date ? (
-                      <span className={new Date(s.next_due_date) < new Date() ? 'text-red-600 font-medium' : ''}>
-                        {new Date(s.next_due_date).toLocaleDateString()}
-                      </span>
-                    ) : '-'}
-                  </td>
-                  <td className="px-4 py-3">
-                    {s.is_active ? <CheckCircleIcon className="w-5 h-5 text-green-500" /> : <XMarkIcon className="w-5 h-5 text-slate-400" />}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          columns={scheduleColumns}
+          data={schedules}
+          rowKey={(s) => s.id}
+          defaultSort={{ key: 'next_due', dir: 'asc' }}
+          pageSize={25}
+          csvExport={{ filename: 'maintenance-schedules' }}
+          mobileCards={renderScheduleCard}
+          empty={{
+            icon: CalendarDaysIcon,
+            title: 'No schedules configured',
+            description: 'Create a maintenance schedule to track recurring upkeep.',
+            action: { label: 'New Schedule', onClick: () => setShowCreateScheduleModal(true) },
+          }}
+        />
       )}
 
       {/* Work Orders Tab */}
@@ -392,74 +565,27 @@ export default function Maintenance() {
             </select>
           </div>
 
-          <div className="bg-[#151b28] rounded-lg shadow overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-800 text-left text-xs font-medium text-slate-400 uppercase">
-                <tr>
-                  <th className="px-4 py-3">Title</th>
-                  <th className="px-4 py-3">Work Center</th>
-                  <th className="px-4 py-3">Type</th>
-                  <th className="px-4 py-3">Priority</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Scheduled</th>
-                  <th className="px-4 py-3">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-700">
-                {filteredWOs.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-8">
-                      <EmptyState
-                        icon={PlusIcon}
-                        title="No work orders found"
-                        description={
-                          search || statusFilter
-                            ? 'No maintenance work orders match your search or filter.'
-                            : 'Create a maintenance work order to get started.'
-                        }
-                        action={
-                          search || statusFilter
-                            ? undefined
-                            : { label: 'New Work Order', onClick: () => setShowCreateWOModal(true) }
-                        }
-                      />
-                    </td>
-                  </tr>
-                ) : filteredWOs.map(wo => (
-                  <tr key={wo.id} className="hover:bg-slate-800">
-                    <td className="px-4 py-3 font-medium">{wo.title}</td>
-                    <td className="px-4 py-3">{wo.work_center_name || '-'}</td>
-                    <td className="px-4 py-3 capitalize">{wo.maintenance_type}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${priorityColors[wo.priority]?.bg || ''} ${priorityColors[wo.priority]?.text || ''}`}>
-                        {wo.priority}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[wo.status]?.bg || ''} ${statusColors[wo.status]?.text || ''}`}>
-                        {wo.status?.replace(/_/g, ' ')}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">{wo.scheduled_date ? new Date(wo.scheduled_date).toLocaleDateString() : '-'}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex gap-1">
-                        {wo.status === 'open' && (
-                          <button onClick={() => handleStart(wo)} className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600" title="Start">
-                            <PlayIcon className="w-4 h-4" />
-                          </button>
-                        )}
-                        {wo.status === 'in_progress' && (
-                          <button onClick={() => { setSelectedWO(wo); setShowCompleteModal(true); }} className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600" title="Complete">
-                            <CheckCircleIcon className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={woColumns}
+            data={filteredWOs}
+            rowKey={(wo) => wo.id}
+            defaultSort={{ key: 'scheduled', dir: 'desc' }}
+            pageSize={25}
+            csvExport={{ filename: 'maintenance-work-orders' }}
+            mobileCards={renderWOCard}
+            empty={{
+              icon: PlusIcon,
+              title: 'No work orders found',
+              description:
+                search || statusFilter
+                  ? 'No maintenance work orders match your search or filter.'
+                  : 'Create a maintenance work order to get started.',
+              action:
+                search || statusFilter
+                  ? undefined
+                  : { label: 'New Work Order', onClick: () => setShowCreateWOModal(true) },
+            }}
+          />
         </div>
       )}
 

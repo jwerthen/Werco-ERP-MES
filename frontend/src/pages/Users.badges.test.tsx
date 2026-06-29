@@ -90,20 +90,25 @@ describe('Users badge printing', () => {
     );
 
     renderUsers();
-    await waitFor(() => expect(screen.getByText('Rosa Vega')).toBeInTheDocument());
+    // The user list renders both a desktop <table> and a parallel mobile-card
+    // list (DataTable.mobileCards), so each name appears twice in jsdom; assert
+    // on presence/absence across all matches rather than a single element.
+    await waitFor(() => expect(screen.getAllByText('Rosa Vega').length).toBeGreaterThan(0));
 
-    const selectAll = screen.getByLabelText('Select all users for badge printing') as HTMLInputElement;
+    // Badge selection is backed by DataTable's selection prop; the select-all
+    // control is the shared table-header checkbox ("Select all rows").
+    const selectAll = screen.getByLabelText('Select all rows') as HTMLInputElement;
     fireEvent.click(selectAll);
     expect(selectAll.checked).toBe(true);
     expect(screen.getByRole('button', { name: /Print Badges \(2\)/ })).toBeInTheDocument();
 
     // Trigger a refetch that no longer contains USER_2.
     fireEvent.click(screen.getByLabelText('Show inactive users'));
-    await waitFor(() => expect(screen.queryByText('Sam Lee')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryAllByText('Sam Lee')).toHaveLength(0));
 
     // Stale id pruned; select-all stays checked because every VISIBLE user is selected.
     expect(screen.getByRole('button', { name: /Print Badges \(1\)/ })).toBeInTheDocument();
-    expect((screen.getByLabelText('Select all users for badge printing') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText('Select all rows') as HTMLInputElement).checked).toBe(true);
 
     // The badge sheet only ever receives ids that are still in the list.
     fireEvent.click(screen.getByRole('button', { name: /Print Badges \(1\)/ }));
@@ -116,14 +121,17 @@ describe('Users badge printing', () => {
     );
 
     renderUsers();
-    await waitFor(() => expect(screen.getByText('Rosa Vega')).toBeInTheDocument());
+    // The user list renders both a desktop <table> and a parallel mobile-card
+    // list (DataTable.mobileCards), so each name appears twice in jsdom; assert
+    // on presence/absence across all matches rather than a single element.
+    await waitFor(() => expect(screen.getAllByText('Rosa Vega').length).toBeGreaterThan(0));
 
-    fireEvent.click(screen.getByLabelText('Select all users for badge printing'));
+    fireEvent.click(screen.getByLabelText('Select all rows'));
     fireEvent.click(screen.getByLabelText('Show inactive users'));
-    await waitFor(() => expect(screen.getByText('Sam Lee')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('Sam Lee').length).toBeGreaterThan(0));
 
     // Only 1 of the 2 now-visible users is selected: select-all must be unchecked.
-    expect((screen.getByLabelText('Select all users for badge printing') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText('Select all rows') as HTMLInputElement).checked).toBe(false);
     expect(screen.getByRole('button', { name: /Print Badges \(1\)/ })).toBeInTheDocument();
   });
 
@@ -131,7 +139,10 @@ describe('Users badge printing', () => {
     mockAuthUser = { id: 99, role, is_superuser: false };
 
     renderUsers();
-    await waitFor(() => expect(screen.getByText('Rosa Vega')).toBeInTheDocument());
+    // The user list renders both a desktop <table> and a parallel mobile-card
+    // list (DataTable.mobileCards), so each name appears twice in jsdom; assert
+    // on presence/absence across all matches rather than a single element.
+    await waitFor(() => expect(screen.getAllByText('Rosa Vega').length).toBeGreaterThan(0));
 
     expect(screen.getByRole('button', { name: /Print Badges/ })).toBeInTheDocument();
   });
@@ -140,7 +151,10 @@ describe('Users badge printing', () => {
     mockAuthUser = { id: 99, role: 'supervisor', is_superuser: false };
 
     renderUsers();
-    await waitFor(() => expect(screen.getByText('Rosa Vega')).toBeInTheDocument());
+    // The user list renders both a desktop <table> and a parallel mobile-card
+    // list (DataTable.mobileCards), so each name appears twice in jsdom; assert
+    // on presence/absence across all matches rather than a single element.
+    await waitFor(() => expect(screen.getAllByText('Rosa Vega').length).toBeGreaterThan(0));
 
     expect(screen.queryByRole('button', { name: /Print Badges/ })).not.toBeInTheDocument();
   });

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -16,7 +16,15 @@ import {
   PrinterIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  EmptyState,
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+  StatusBadge,
+  MobileDataCard,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface POLine {
@@ -80,7 +88,47 @@ interface ReceiveFormData {
   over_receive_approved: boolean;
 }
 
+interface InspectionQueueItem {
+  receipt_id: number;
+  receipt_number: string;
+  po_number: string;
+  vendor_name: string;
+  part_number: string;
+  part_name: string;
+  quantity_received: number;
+  lot_number: string;
+  coc_attached: boolean;
+  received_at: string;
+  days_pending: number;
+}
+
+interface HistoryItem {
+  receipt_id: number;
+  receipt_number: string;
+  po_number: string;
+  part_number: string;
+  quantity_received: number;
+  quantity_accepted: number;
+  quantity_rejected: number;
+  lot_number: string;
+  inspection_status?: string;
+  status: string;
+  received_at: string;
+}
+
 type TabType = 'receive' | 'queue' | 'history';
+
+const QUEUE_DAYS_BADGE: Record<string, string> = {
+  urgent: 'bg-red-500/20 text-red-300',
+  warn: 'bg-amber-500/20 text-amber-300',
+  ok: 'bg-green-500/20 text-emerald-300',
+};
+
+const HISTORY_STATUS_COLORS: Record<string, string> = {
+  passed: 'bg-green-500/20 text-emerald-300',
+  failed: 'bg-red-500/20 text-red-300',
+  partial: 'bg-amber-500/20 text-amber-300',
+};
 
 export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -99,9 +147,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [loadError, setLoadError] = useState(false);
   const [stats, setStats] = useState<any>(null);
 
-  const [inspectionQueue, setInspectionQueue] = useState<any[]>([]);
+  const [inspectionQueue, setInspectionQueue] = useState<InspectionQueueItem[]>([]);
   const [queueError, setQueueError] = useState(false);
-  const [history, setHistory] = useState<any[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyError, setHistoryError] = useState(false);
   
   const [showReceiveModal, setShowReceiveModal] = useState(false);
@@ -328,7 +376,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     }
   };
 
-  const handleOpenInspection = async (receipt: any) => {
+  const handleOpenInspection = async (receipt: InspectionQueueItem) => {
     try {
       const detail = await api.getReceiptDetail(receipt.receipt_id);
       setReceiptDetail(detail);
@@ -413,6 +461,272 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     { value: 'non_destructive', label: 'Non-Destructive Testing' },
     { value: 'destructive', label: 'Destructive Testing' },
   ];
+
+  const renderDaysBadge = (days: number) => {
+    const tone = days > 3 ? 'urgent' : days > 1 ? 'warn' : 'ok';
+    return (
+      <span className={`px-2 py-1 rounded text-xs font-medium ${QUEUE_DAYS_BADGE[tone]}`}>
+        {days}d
+      </span>
+    );
+  };
+
+  const queueColumns = useMemo<Array<DataTableColumn<InspectionQueueItem>>>(() => [
+    {
+      key: 'receipt_number',
+      header: 'Receipt',
+      sortable: true,
+      className: 'font-mono',
+      accessor: (item) => item.receipt_number,
+    },
+    {
+      key: 'po_number',
+      header: 'PO / Vendor',
+      sortable: true,
+      accessor: (item) => item.po_number,
+      csv: (item) => `${item.po_number} / ${item.vendor_name}`,
+      render: (item) => (
+        <div>
+          <p className="font-medium">{item.po_number}</p>
+          <p className="text-xs text-slate-400">{item.vendor_name}</p>
+        </div>
+      ),
+    },
+    {
+      key: 'part_number',
+      header: 'Part',
+      sortable: true,
+      accessor: (item) => item.part_number,
+      csv: (item) => `${item.part_number} ${item.part_name}`.trim(),
+      render: (item) => (
+        <div>
+          <p className="font-mono">{item.part_number}</p>
+          <p className="text-xs text-slate-400 truncate max-w-[200px]">{item.part_name}</p>
+        </div>
+      ),
+    },
+    {
+      key: 'quantity_received',
+      header: 'Qty',
+      sortable: true,
+      align: 'right',
+      className: 'font-medium',
+      accessor: (item) => item.quantity_received,
+    },
+    {
+      key: 'lot_number',
+      header: 'Lot #',
+      sortable: true,
+      className: 'font-mono',
+      accessor: (item) => item.lot_number,
+    },
+    {
+      key: 'coc_attached',
+      header: 'CoC',
+      align: 'center',
+      accessor: (item) => (item.coc_attached ? 'Yes' : 'No'),
+      render: (item) =>
+        item.coc_attached ? (
+          <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" />
+        ) : (
+          <span className="text-gray-300">-</span>
+        ),
+    },
+    {
+      key: 'received_at',
+      header: 'Received',
+      sortable: true,
+      accessor: (item) => item.received_at,
+      render: (item) =>
+        formatCentralDateTime(item.received_at, {
+          year: undefined,
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        }),
+    },
+    {
+      key: 'days_pending',
+      header: 'Days',
+      sortable: true,
+      align: 'center',
+      accessor: (item) => item.days_pending,
+      render: (item) => renderDaysBadge(item.days_pending),
+    },
+    {
+      key: 'actions',
+      header: 'Action',
+      align: 'right',
+      render: (item) => (
+        <div className="flex items-center justify-end gap-2">
+          {canPrintLabel && (
+            <button
+              onClick={(e) => { e.stopPropagation(); handlePrintLabel(item.receipt_id); }}
+              disabled={printingReceiptId === item.receipt_id}
+              title="Print 4×6 receiving label"
+              className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors disabled:opacity-50"
+            >
+              <PrinterIcon className="h-4 w-4" />
+              {printingReceiptId === item.receipt_id ? 'Printing…' : 'Label'}
+            </button>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); handleOpenInspection(item); }}
+            className="btn-primary text-sm px-3 py-1"
+          >
+            Inspect
+          </button>
+        </div>
+      ),
+    },
+  ], [canPrintLabel, printingReceiptId]);
+
+  const renderQueueCard = (item: InspectionQueueItem) => (
+    <MobileDataCard
+      key={item.receipt_id}
+      title={item.receipt_number}
+      subtitle={`${item.po_number} · ${item.vendor_name}`}
+      badge={renderDaysBadge(item.days_pending)}
+      highlight={item.days_pending > 3}
+      fields={[
+        { label: 'Part', value: item.part_number, fullWidth: true },
+        { label: 'Qty', value: item.quantity_received },
+        { label: 'Lot #', value: <span className="font-mono">{item.lot_number}</span> },
+        {
+          label: 'CoC',
+          value: item.coc_attached ? (
+            <CheckCircleIcon className="h-5 w-5 text-green-500" />
+          ) : (
+            <span className="text-gray-300">-</span>
+          ),
+        },
+        {
+          label: 'Received',
+          value: formatCentralDateTime(item.received_at, {
+            year: undefined,
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          }),
+        },
+      ]}
+      actions={
+        <>
+          {canPrintLabel && (
+            <button
+              onClick={() => handlePrintLabel(item.receipt_id)}
+              disabled={printingReceiptId === item.receipt_id}
+              className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors disabled:opacity-50"
+            >
+              <PrinterIcon className="h-4 w-4" />
+              {printingReceiptId === item.receipt_id ? 'Printing…' : 'Label'}
+            </button>
+          )}
+          <button
+            onClick={() => handleOpenInspection(item)}
+            className="btn-primary text-sm px-3 py-1"
+          >
+            Inspect
+          </button>
+        </>
+      }
+    />
+  );
+
+  const historyColumns = useMemo<Array<DataTableColumn<HistoryItem>>>(() => [
+    {
+      key: 'receipt_number',
+      header: 'Receipt',
+      sortable: true,
+      className: 'font-mono',
+      accessor: (item) => item.receipt_number,
+    },
+    {
+      key: 'po_number',
+      header: 'PO',
+      sortable: true,
+      accessor: (item) => item.po_number,
+    },
+    {
+      key: 'part_number',
+      header: 'Part',
+      sortable: true,
+      className: 'font-mono',
+      accessor: (item) => item.part_number,
+    },
+    {
+      key: 'quantity_received',
+      header: "Recv'd",
+      sortable: true,
+      align: 'right',
+      accessor: (item) => item.quantity_received,
+    },
+    {
+      key: 'quantity_accepted',
+      header: 'Accepted',
+      sortable: true,
+      align: 'right',
+      className: 'text-green-600',
+      accessor: (item) => item.quantity_accepted,
+    },
+    {
+      key: 'quantity_rejected',
+      header: 'Rejected',
+      sortable: true,
+      align: 'right',
+      className: 'text-red-600',
+      accessor: (item) => item.quantity_rejected ?? 0,
+      render: (item) => item.quantity_rejected || '-',
+    },
+    {
+      key: 'lot_number',
+      header: 'Lot #',
+      sortable: true,
+      className: 'font-mono',
+      accessor: (item) => item.lot_number,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: true,
+      align: 'center',
+      accessor: (item) => item.inspection_status || item.status,
+      render: (item) => (
+        <StatusBadge
+          status={item.inspection_status || item.status}
+          colorMap={HISTORY_STATUS_COLORS}
+        />
+      ),
+    },
+    {
+      key: 'received_at',
+      header: 'Date',
+      sortable: true,
+      accessor: (item) => item.received_at,
+      render: (item) => formatCentralDate(item.received_at),
+    },
+  ], []);
+
+  const renderHistoryCard = (item: HistoryItem) => (
+    <MobileDataCard
+      key={item.receipt_id}
+      title={item.receipt_number}
+      subtitle={`${item.po_number} · ${item.part_number}`}
+      badge={
+        <StatusBadge
+          status={item.inspection_status || item.status}
+          colorMap={HISTORY_STATUS_COLORS}
+        />
+      }
+      fields={[
+        { label: "Recv'd", value: item.quantity_received },
+        { label: 'Lot #', value: <span className="font-mono">{item.lot_number}</span> },
+        { label: 'Accepted', value: <span className="text-green-600">{item.quantity_accepted}</span> },
+        { label: 'Rejected', value: <span className="text-red-600">{item.quantity_rejected || '-'}</span> },
+        { label: 'Date', value: formatCentralDate(item.received_at), fullWidth: true },
+      ]}
+    />
+  );
 
   if (loading) {
     return (
@@ -780,97 +1094,22 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         {activeTab === 'queue' && (
           <div>
             <h2 className="text-lg font-semibold mb-4">Items Pending Inspection</h2>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Receipt</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO / Vendor</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Qty</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Lot #</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">CoC</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Received</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Days</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                  {inspectionQueue.map((item) => (
-                    <tr key={item.receipt_id} className={`hover:bg-slate-800 ${item.days_pending > 3 ? 'bg-amber-500/10' : ''}`}>
-                      <td className="px-4 py-3 font-mono text-sm">{item.receipt_number}</td>
-                      <td className="px-4 py-3">
-                        <p className="font-medium text-sm">{item.po_number}</p>
-                        <p className="text-xs text-slate-400">{item.vendor_name}</p>
-                      </td>
-                      <td className="px-4 py-3">
-                        <p className="font-mono text-sm">{item.part_number}</p>
-                        <p className="text-xs text-slate-400 truncate max-w-[200px]">{item.part_name}</p>
-                      </td>
-                      <td className="px-4 py-3 text-right font-medium">{item.quantity_received}</td>
-                      <td className="px-4 py-3 font-mono text-sm">{item.lot_number}</td>
-                      <td className="px-4 py-3 text-center">
-                        {item.coc_attached ? (
-                          <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" />
-                        ) : (
-                          <span className="text-gray-300">-</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-sm">
-                        {formatCentralDateTime(item.received_at, {
-                          year: undefined,
-                          hour: '2-digit',
-                          minute: '2-digit',
-                          hour12: false,
-                        })}
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          item.days_pending > 3 ? 'bg-red-500/20 text-red-300' :
-                          item.days_pending > 1 ? 'bg-amber-500/20 text-amber-300' :
-                          'bg-green-500/20 text-emerald-300'
-                        }`}>
-                          {item.days_pending}d
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          {canPrintLabel && (
-                            <button
-                              onClick={() => handlePrintLabel(item.receipt_id)}
-                              disabled={printingReceiptId === item.receipt_id}
-                              title="Print 4×6 receiving label"
-                              className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors disabled:opacity-50"
-                            >
-                              <PrinterIcon className="h-4 w-4" />
-                              {printingReceiptId === item.receipt_id ? 'Printing…' : 'Label'}
-                            </button>
-                          )}
-                          <button
-                            onClick={() => handleOpenInspection(item)}
-                            className="btn-primary text-sm px-3 py-1"
-                          >
-                            Inspect
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {queueError ? (
-                <ErrorState
-                  message="Could not load the inspection queue."
-                  onRetry={loadInspectionQueue}
-                />
-              ) : inspectionQueue.length === 0 ? (
-                <EmptyState
-                  icon={ClipboardDocumentCheckIcon}
-                  title="No items pending inspection"
-                  description="Received material requiring inspection will appear here."
-                />
-              ) : null}
-            </div>
+            <DataTable
+              columns={queueColumns}
+              data={inspectionQueue}
+              rowKey={(item) => item.receipt_id}
+              defaultSort={{ key: 'days_pending', dir: 'desc' }}
+              pageSize={25}
+              csvExport={{ filename: 'inspection-queue' }}
+              error={queueError}
+              onRetry={loadInspectionQueue}
+              empty={{
+                icon: ClipboardDocumentCheckIcon,
+                title: 'No items pending inspection',
+                description: 'Received material requiring inspection will appear here.',
+              }}
+              mobileCards={renderQueueCard}
+            />
           </div>
         )}
 
@@ -878,63 +1117,22 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         {activeTab === 'history' && (
           <div>
             <h2 className="text-lg font-semibold mb-4">Receiving History (Last 30 Days)</h2>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Receipt</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">PO</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Recv'd</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Accepted</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase">Rejected</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Lot #</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Date</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-[#151b28] divide-y divide-slate-700">
-                  {history.map((item) => (
-                    <tr key={item.receipt_id} className="hover:bg-slate-800">
-                      <td className="px-4 py-3 font-mono text-sm">{item.receipt_number}</td>
-                      <td className="px-4 py-3 text-sm">{item.po_number}</td>
-                      <td className="px-4 py-3">
-                        <p className="font-mono text-sm">{item.part_number}</p>
-                      </td>
-                      <td className="px-4 py-3 text-right">{item.quantity_received}</td>
-                      <td className="px-4 py-3 text-right text-green-600">{item.quantity_accepted}</td>
-                      <td className="px-4 py-3 text-right text-red-600">{item.quantity_rejected || '-'}</td>
-                      <td className="px-4 py-3 font-mono text-sm">{item.lot_number}</td>
-                      <td className="px-4 py-3 text-center">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          item.inspection_status === 'passed' ? 'bg-green-500/20 text-emerald-300' :
-                          item.inspection_status === 'failed' ? 'bg-red-500/20 text-red-300' :
-                          item.inspection_status === 'partial' ? 'bg-amber-500/20 text-amber-300' :
-                          'bg-slate-800/50 text-slate-100'
-                        }`}>
-                          {item.inspection_status?.replace(/_/g, ' ') || item.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm">
-                        {formatCentralDate(item.received_at)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {historyError ? (
-                <ErrorState
-                  message="Could not load receiving history."
-                  onRetry={loadHistory}
-                />
-              ) : history.length === 0 ? (
-                <EmptyState
-                  icon={ClockIcon}
-                  title="No receiving history"
-                  description="Receipts from the last 30 days will appear here."
-                />
-              ) : null}
-            </div>
+            <DataTable
+              columns={historyColumns}
+              data={history}
+              rowKey={(item) => item.receipt_id}
+              defaultSort={{ key: 'received_at', dir: 'desc' }}
+              pageSize={25}
+              csvExport={{ filename: 'receiving-history' }}
+              error={historyError}
+              onRetry={loadHistory}
+              empty={{
+                icon: ClockIcon,
+                title: 'No receiving history',
+                description: 'Receipts from the last 30 days will appear here.',
+              }}
+              mobileCards={renderHistoryCard}
+            />
           </div>
         )}
       </div>

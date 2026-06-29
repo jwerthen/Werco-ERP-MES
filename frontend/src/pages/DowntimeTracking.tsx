@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
 import { formatCentralDate } from '../utils/centralTime';
 import {
@@ -24,7 +24,14 @@ import {
   Cell,
 } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
-import { EmptyState, ErrorState, useToast } from '../components/ui';
+import {
+  EmptyState,
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+  MobileDataCard,
+} from '../components/ui';
 
 // ============== Types ==============
 
@@ -253,11 +260,138 @@ export default function DowntimeTracking() {
     }
   };
 
-  const openResolveModal = (event: DowntimeEvent) => {
+  const openResolveModal = useCallback((event: DowntimeEvent) => {
     setResolvingEvent(event);
     setResolveForm({ resolution: '' });
     setShowResolveModal(true);
-  };
+  }, []);
+
+  // Shared cell helpers (used by both the table and the mobile cards)
+  const eventDuration = (evt: DowntimeEvent): string =>
+    evt.duration_minutes
+      ? formatDuration(evt.duration_minutes)
+      : evt.end_time
+      ? '-'
+      : formatDuration(getElapsedMinutes(evt.start_time));
+
+  const renderTypeBadge = (evt: DowntimeEvent) => (
+    <span
+      className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+        evt.planned_type === 'planned'
+          ? 'bg-blue-500/20 text-blue-300'
+          : 'bg-red-500/20 text-red-300'
+      }`}
+    >
+      {evt.planned_type === 'planned' ? 'Planned' : 'Unplanned'}
+    </span>
+  );
+
+  const renderStatus = (evt: DowntimeEvent) =>
+    evt.end_time ? (
+      <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-300">
+        Resolved
+      </span>
+    ) : (
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          openResolveModal(evt);
+        }}
+        className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 hover:bg-red-200 cursor-pointer"
+      >
+        Active
+      </button>
+    );
+
+  // ---- Downtime Log table columns ----
+  const logColumns = useMemo<Array<DataTableColumn<DowntimeEvent>>>(
+    () => [
+      {
+        key: 'work_center',
+        header: 'Work Center',
+        sortable: true,
+        className: 'font-medium',
+        accessor: (evt) => evt.work_center?.code || `WC-${evt.work_center_id}`,
+      },
+      {
+        key: 'start',
+        header: 'Start',
+        sortable: true,
+        className: 'text-sm',
+        accessor: (evt) => evt.start_time,
+        render: (evt) => formatCentralDate(evt.start_time),
+        csv: (evt) => formatCentralDate(evt.start_time),
+      },
+      {
+        key: 'end',
+        header: 'End',
+        sortable: true,
+        className: 'text-sm',
+        accessor: (evt) => evt.end_time ?? '',
+        render: (evt) => (evt.end_time ? formatCentralDate(evt.end_time) : '-'),
+        csv: (evt) => (evt.end_time ? formatCentralDate(evt.end_time) : ''),
+      },
+      {
+        key: 'duration',
+        header: 'Duration',
+        sortable: true,
+        className: 'text-sm font-mono',
+        // Sort/CSV by raw minutes so live elapsed compares correctly.
+        accessor: (evt) =>
+          evt.duration_minutes ?? (evt.end_time ? 0 : getElapsedMinutes(evt.start_time)),
+        render: (evt) => eventDuration(evt),
+        csv: (evt) => eventDuration(evt),
+      },
+      {
+        key: 'category',
+        header: 'Category',
+        sortable: true,
+        accessor: (evt) => categoryLabel(evt.category),
+        render: (evt) => <span className="text-xs">{categoryLabel(evt.category)}</span>,
+      },
+      {
+        key: 'reason',
+        header: 'Reason',
+        sortable: true,
+        className: 'text-sm text-slate-400 max-w-[200px] truncate',
+        accessor: (evt) => evt.reason_code || evt.description || '',
+        render: (evt) => evt.reason_code || evt.description || '-',
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        sortable: true,
+        accessor: (evt) => evt.planned_type,
+        render: (evt) => renderTypeBadge(evt),
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: (evt) => (evt.end_time ? 'Resolved' : 'Active'),
+        render: (evt) => renderStatus(evt),
+      },
+    ],
+    [openResolveModal]
+  );
+
+  const renderLogCard = useCallback(
+    (evt: DowntimeEvent) => (
+      <MobileDataCard
+        title={evt.work_center?.code || `WC-${evt.work_center_id}`}
+        subtitle={categoryLabel(evt.category)}
+        badge={renderTypeBadge(evt)}
+        fields={[
+          { label: 'Start', value: formatCentralDate(evt.start_time) },
+          { label: 'End', value: evt.end_time ? formatCentralDate(evt.end_time) : '-' },
+          { label: 'Duration', value: eventDuration(evt), className: 'font-mono' },
+          { label: 'Reason', value: evt.reason_code || evt.description || '-' },
+          { label: 'Status', value: renderStatus(evt) },
+        ]}
+      />
+    ),
+    [openResolveModal]
+  );
 
   // Determine which work centers currently have active downtime
   const activeWcIds = new Set(activeEvents.map((e: DowntimeEvent) => e.work_center_id));
@@ -591,92 +725,28 @@ export default function DowntimeTracking() {
         </div>
 
         {/* Downtime Log Table */}
-        <div className="overflow-x-auto">
-          <table className="table table-sm w-full">
-            <thead>
-              <tr className="bg-fd-panel">
-                <th>Work Center</th>
-                <th>Start</th>
-                <th>End</th>
-                <th>Duration</th>
-                <th>Category</th>
-                <th>Reason</th>
-                <th>Type</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {allEvents.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="py-4">
-                    <EmptyState
-                      icon={ClockIcon}
-                      title="No downtime events found"
-                      description="No events match the current filters. Log a downtime event to start tracking."
-                      action={{
-                        label: 'Log Downtime',
-                        onClick: () => {
-                          setNewForm({ work_center_id: 0, category: 'other', planned_type: 'unplanned', reason_code: '', description: '' });
-                          setShowNewModal(true);
-                        },
-                      }}
-                    />
-                  </td>
-                </tr>
-              ) : (
-                allEvents.map((evt) => (
-                  <tr key={evt.id} className="hover">
-                    <td className="font-medium">
-                      {evt.work_center?.code || `WC-${evt.work_center_id}`}
-                    </td>
-                    <td className="text-sm">{formatCentralDate(evt.start_time)}</td>
-                    <td className="text-sm">
-                      {evt.end_time ? formatCentralDate(evt.end_time) : '-'}
-                    </td>
-                    <td className="text-sm font-mono">
-                      {evt.duration_minutes
-                        ? formatDuration(evt.duration_minutes)
-                        : evt.end_time
-                        ? '-'
-                        : formatDuration(getElapsedMinutes(evt.start_time))}
-                    </td>
-                    <td>
-                      <span className="text-xs">{categoryLabel(evt.category)}</span>
-                    </td>
-                    <td className="text-sm text-slate-400 max-w-[200px] truncate">
-                      {evt.reason_code || evt.description || '-'}
-                    </td>
-                    <td>
-                      <span
-                        className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                          evt.planned_type === 'planned'
-                            ? 'bg-blue-500/20 text-blue-300'
-                            : 'bg-red-500/20 text-red-300'
-                        }`}
-                      >
-                        {evt.planned_type === 'planned' ? 'Planned' : 'Unplanned'}
-                      </span>
-                    </td>
-                    <td>
-                      {evt.end_time ? (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-300">
-                          Resolved
-                        </span>
-                      ) : (
-                        <button
-                          onClick={() => openResolveModal(evt)}
-                          className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 hover:bg-red-200 cursor-pointer"
-                        >
-                          Active
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          columns={logColumns}
+          data={allEvents}
+          rowKey={(evt) => evt.id}
+          defaultSort={{ key: 'start', dir: 'desc' }}
+          pageSize={25}
+          csvExport={{ filename: 'downtime-log' }}
+          mobileCards={renderLogCard}
+          empty={{
+            icon: ClockIcon,
+            title: 'No downtime events found',
+            description:
+              'No events match the current filters. Log a downtime event to start tracking.',
+            action: {
+              label: 'Log Downtime',
+              onClick: () => {
+                setNewForm({ work_center_id: 0, category: 'other', planned_type: 'unplanned', reason_code: '', description: '' });
+                setShowNewModal(true);
+              },
+            },
+          }}
+        />
       </div>
 
       {/* New Downtime Modal */}
