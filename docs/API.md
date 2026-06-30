@@ -61,6 +61,18 @@ long-lived JWT with `type="display"` that authenticates **only** `GET /shop-floo
 > not past its DB `expires_at`) on **every** request, so a revoked or expired token stops working
 > on the TV's next poll (~30s) even though the JWT itself is still signature-valid.
 
+### Station signin tokens (visitor sign-in tablet)
+
+Scoped, revocable credentials for an unattended lobby **visitor sign-in tablet**. A signin token is a
+JWT with `type="signin"`, **24 h** TTL, minted by the shared station **PIN** via
+`POST /visitor-logs/station-login` (see Visitor Logs below). It authenticates **only**
+`POST /visitor-logs/sign-in` and `POST /visitor-logs/sign-out` (via the dedicated
+`get_signin_principal` dependency) — every other endpoint rejects it with **401** (`verify_token`
+accepts only `type="access"` JWTs). It carries no user identity; the active company is taken from the
+`signin_stations` DB row (never the JWT's `cid`), and the row's `revoked` flag is re-checked on every
+request, so a revoked station's tokens die on the next call. See
+[docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md).
+
 ## Core Endpoints
 
 ### Work Orders
@@ -1795,6 +1807,114 @@ tenants, so the aggregate chain-verification endpoints are **platform-admin only
 > global sequence spanning every tenant, so its stats/issues (record counts, sequence ranges,
 > record ids) can't be scoped to a single company without leaking other tenants' data. A company
 > Admin's "are my records intact?" need is served by the per-record endpoint above.
+
+### Visitor Logs
+
+Lobby **visitor sign-in tablet** + admin visitor log (`/api/v1/visitor-logs`). The two write
+endpoints (`/sign-in`, `/sign-out`) accept **either** a normal staff access token **or** a
+PIN-minted station signin token (`type="signin"`, via `get_signin_principal`); everything else is
+staff-only RBAC. All queries are tenant-scoped; visitor records are soft-deleted, never hard-deleted.
+See [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/visitor-logs/station-login` | Unlock a tablet with the shared station PIN. Body `{"station_id", "pin"}` (PIN 4–8 digits) → `{"token", "station_label", "expires_in"}` (24 h scoped `type="signin"` JWT, returned once). Bad/revoked station or wrong PIN → **401** (indistinguishable; failed attempt audited) | **Public** (PIN-gated)¹ |
+| POST | `/visitor-logs/sign-in` | Record a visitor sign-in → **201** `VisitorLogResponse`. Best-effort host email on a matched internal host | Station token **or** any authenticated user |
+| POST | `/visitor-logs/sign-out` | Sign out an open visit by `{"visitor_log_id"}` or `{"name"}` → `VisitorLogResponse`. Name with >1 open match → **409** disambiguation; no open match → **404** | Station token **or** any authenticated user |
+| GET | `/visitor-logs/` | List visitor records for the active company (filters + offset paging) → `{"items", "total"}` | Admin / Manager / Supervisor |
+| GET | `/visitor-logs/export.csv` | Stream the visitor log as CSV (audits an `EXPORT` action) | Admin / Manager |
+| DELETE | `/visitor-logs/{id}` | Soft-delete a visitor record → **204** | Admin / Manager |
+| POST | `/visitor-logs/stations` | Create a PIN-protected sign-in station. Body `{"label", "pin"}` → **201** `SigninStationResponse` (PIN hashed, never echoed) | Admin / Manager |
+| GET | `/visitor-logs/stations` | List this company's sign-in stations (no PIN/`pin_hash`) → `{"stations"}` | Admin / Manager |
+| POST | `/visitor-logs/stations/{id}/revoke` | Revoke a station (idempotent status flip; tablet loses access next request) → `SigninStationResponse` | Admin / Manager |
+| POST | `/visitor-logs/stations/{id}/reset-pin` | Re-hash a station's shared PIN. Body `{"pin"}` → `SigninStationResponse` | Admin / Manager |
+
+> ¹ **Rate limit not yet enforced.** `station-login` is registered in `main.py`'s `AUTH_RATE_LIMITS`
+> as `5/minute`, but the per-path auth limiter currently only **logs** sensitive paths — only the
+> app-wide default limit applies. This is a tracked, separate fix; provision **6–8 digit** PINs in
+> the interim (see [docs/VISITOR_SIGNIN.md](VISITOR_SIGNIN.md) → Security note).
+
+**`GET /visitor-logs/` query params:** `status` (`signed_in` / `signed_out`), `q` (matches visitor
+name / company / host), `date_from`, `date_to` (filter on `signed_in_at`), `on_site_only` (bool —
+overrides `status`), `skip` (default 0), `limit` (default 50, **max 200**). Newest first.
+
+#### Visitor sign-in request (`POST /visitor-logs/sign-in`)
+
+```json
+{
+  "visitor_name": "Jane Smith",
+  "visitor_company": "Acme Corp",
+  "visitor_phone": "(555) 123-4567",
+  "host_name": "John Doe",
+  "purpose": "meeting",
+  "purpose_note": null,
+  "safety_acknowledged": true
+}
+```
+
+- `purpose` is one of `meeting` · `delivery` · `contractor` · `interview` · `audit` · `other`.
+- `purpose_note` is **required when `purpose == "other"`** (server-validated); `safety_acknowledged`
+  **must be `true`** to sign in. `visitor_company` / `visitor_phone` / `host_name` are optional.
+
+#### Visitor log schema (`VisitorLogResponse`)
+
+```json
+{
+  "id": 42,
+  "visitor_name": "Jane Smith",
+  "visitor_company": "Acme Corp",
+  "visitor_phone": "(555) 123-4567",
+  "host_name": "John Doe",
+  "host_user_id": 7,
+  "purpose": "meeting",
+  "purpose_note": null,
+  "safety_acknowledged": true,
+  "status": "signed_in",
+  "signed_in_at": "2026-06-30T14:05:00",
+  "signed_out_at": null,
+  "signin_station_id": 1,
+  "station_label": "Lobby Tablet"
+}
+```
+
+`signed_out_at: null` means the visitor is **still on-site**. `signin_station_id` / `station_label`
+are `null` for a staff-created row. `host_user_id` is set only when the typed host best-effort-matched
+exactly one active internal user in the company.
+
+#### Sign-out 409 disambiguation
+
+Signing out by `name` when more than one open visit shares that name returns **409** with a minimal
+list (no PII beyond company) so the tablet can show a picker, then re-POST by `visitor_log_id`:
+
+```json
+{
+  "detail": {
+    "message": "Multiple visitors signed in under that name — choose one to sign out",
+    "matches": [
+      { "id": 42, "visitor_company": "Acme Corp", "signed_in_at": "2026-06-30T14:05:00" },
+      { "id": 51, "visitor_company": "Globex", "signed_in_at": "2026-06-30T15:20:00" }
+    ]
+  }
+}
+```
+
+#### Sign-in station schema (`SigninStationResponse`)
+
+```json
+{
+  "id": 1,
+  "label": "Lobby Tablet",
+  "revoked": false,
+  "revoked_at": null,
+  "revoked_by": null,
+  "last_used_at": "2026-06-30T08:00:00",
+  "created_by": 3,
+  "created_at": "2026-06-29T17:00:00"
+}
+```
+
+The PIN and its `pin_hash` are never returned. The tablet URL for a station is
+`/visitor-signin?station=<id>`.
 
 ## Real-time Updates (WebSocket)
 

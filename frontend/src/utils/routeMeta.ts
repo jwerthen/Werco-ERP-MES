@@ -93,6 +93,8 @@ export const routeTitles: Record<string, string> = {
   '/admin/settings': 'Admin Settings',
   '/platform': 'Platform Overview',
   '/audit-log': 'Audit Log',
+  '/visitor-log': 'Visitor Log',
+  '/visitor-signin': 'Visitor Sign-In',
 };
 
 /**

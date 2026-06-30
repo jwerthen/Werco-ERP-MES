@@ -75,6 +75,8 @@ const ToolManagement = lazyWithRetry(() => import('./pages/ToolManagement'));
 const SupplierScorecards = lazyWithRetry(() => import('./pages/SupplierScorecards'));
 const QMSStandards = lazyWithRetry(() => import('./pages/QMSStandards'));
 const PlatformOverview = lazyWithRetry(() => import('./pages/PlatformOverview'));
+const VisitorSignIn = lazyWithRetry(() => import('./pages/VisitorSignIn'));
+const VisitorLog = lazyWithRetry(() => import('./pages/VisitorLog'));
 
 // Loading fallback for lazy-loaded pages
 const PageLoader = () => (
@@ -107,6 +109,7 @@ interface RouteAccessRequirement {
 const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/admin/settings', permission: 'admin:settings' },
   { prefix: '/audit-log', permission: 'admin:audit_logs' },
+  { prefix: '/visitor-log', permission: 'visitor_logs:view' },
   { prefix: '/users', permission: 'users:view' },
   { prefix: '/work-orders/new', permission: 'work_orders:create' },
   { prefix: '/work-orders', permission: 'work_orders:view' },
@@ -277,6 +280,11 @@ function AppRoutes() {
           Auth is a scoped display token via ?token= (or a signed-in session);
           the backend endpoint rejects anything else. */}
       <Route path="/wallboard" element={<LazyRoute><Wallboard /></LazyRoute>} />
+
+      {/* Visitor sign-in tablet — full-screen, NO Layout chrome, NO PrivateRoute.
+          Auth is a shared-PIN station token minted via POST /visitor-logs/station-login;
+          the backend write endpoints reject anything else. */}
+      <Route path="/visitor-signin" element={<LazyRoute><VisitorSignIn /></LazyRoute>} />
 
       {/* Platform Administration (platform admin only) */}
       <Route path="/platform" element={
@@ -618,6 +626,15 @@ function AppRoutes() {
         <PrivateRoute>
           <Layout>
             <LazyRoute><AuditLog /></LazyRoute>
+          </Layout>
+        </PrivateRoute>
+      } />
+
+      {/* Visitor Log (admin) */}
+      <Route path="/visitor-log" element={
+        <PrivateRoute>
+          <Layout>
+            <LazyRoute><VisitorLog /></LazyRoute>
           </Layout>
         </PrivateRoute>
       } />

@@ -115,6 +115,51 @@ def verify_display_token(token: str) -> Optional[dict]:
         return None
 
 
+def create_signin_token(station_id: int, company_id: int, label: str, ttl_hours: int = 24) -> str:
+    """Create a scope-limited token for an unattended visitor sign-in tablet.
+
+    Twin of ``create_display_token``: the ``type`` claim is ``"signin"`` — NOT
+    ``"access"`` — so ``verify_token`` (and therefore ``get_current_user`` and
+    every dependency built on it) rejects it. Signin tokens only authenticate
+    via the dedicated ``get_signin_principal`` dependency on the two visitor
+    write endpoints. ``sid`` ties the JWT to a ``signin_stations`` row so admins
+    can revoke it; ``cid`` is cross-checked against that row (the DB row is
+    authoritative).
+    """
+    expire = datetime.utcnow() + timedelta(hours=ttl_hours)
+    to_encode = {
+        "exp": expire,
+        "sub": f"signin:{station_id}",
+        "type": "signin",
+        "sid": station_id,
+        "cid": company_id,
+        "label": label,
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def verify_signin_token(token: str) -> Optional[dict]:
+    """Verify a station signin token and return its claims, or None.
+
+    Twin of ``verify_display_token``: only checks signature/expiry/type. The
+    caller MUST additionally check the ``signin_stations`` row (exists, not
+    revoked, ``cid`` matches the row's ``company_id``) — the DB row is the
+    revocation authority and the tenant-scoping source of truth.
+    """
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        if payload.get("type") != "signin":
+            return None
+        return {
+            "station_id": payload.get("sid"),
+            "company_id": payload.get("cid"),
+            "label": payload.get("label"),
+        }
+    except JWTError:
+        return None
+
+
 def verify_token(token: str) -> Optional[dict]:
     """Verify an access token and return user context claims.
 

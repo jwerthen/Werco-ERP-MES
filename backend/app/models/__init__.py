@@ -126,12 +126,14 @@ from .shipping import (
     ShipmentStatus,
     ShipmentTrackingEvent,
 )
+from .signin_station import SigninStation
 from .spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
 from .supplier_part import SupplierPartMapping
 from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from .time_entry import TimeEntry
 from .tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsageLog
 from .user import User, UserRole
+from .visitor_log import VisitorLog, VisitorPurpose, VisitorStatus
 from .webhook import Webhook, WebhookDelivery
 from .work_center import WorkCenter
 from .work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
@@ -318,4 +320,8 @@ __all__ = [
     "CompanyShippingProfile",
     "CompanyPrintProfile",
     "SupplierPartMapping",
+    "SigninStation",
+    "VisitorLog",
+    "VisitorStatus",
+    "VisitorPurpose",
 ]

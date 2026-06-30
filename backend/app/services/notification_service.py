@@ -25,6 +25,7 @@ class NotificationEvent:
     CALIBRATION_DUE = "CALIBRATION_DUE"
     QUOTE_EXPIRING = "QUOTE_EXPIRING"
     CAPACITY_OVERLOAD = "CAPACITY_OVERLOAD"
+    VISITOR_CHECK_IN = "VISITOR_CHECK_IN"
 
 
 class NotificationService:
@@ -43,6 +44,7 @@ class NotificationService:
         NotificationEvent.CALIBRATION_DUE: {"email": True, "digest": False},
         NotificationEvent.QUOTE_EXPIRING: {"email": True, "digest": False},
         NotificationEvent.CAPACITY_OVERLOAD: {"email": True, "digest": False},
+        NotificationEvent.VISITOR_CHECK_IN: {"email": True, "digest": False},
     }
 
     def __init__(self, db: Session):

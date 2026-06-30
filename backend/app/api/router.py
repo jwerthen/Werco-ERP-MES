@@ -57,6 +57,7 @@ from app.api.endpoints import (
     tool_management,
     traceability,
     users,
+    visitor_logs,
     work_centers,
     work_order_blockers,
     work_orders,
@@ -122,4 +123,5 @@ api_router.include_router(companies.router, prefix="/companies", tags=["Company 
 api_router.include_router(platform.router, prefix="/platform", tags=["Platform Administration"])
 api_router.include_router(setup.router, prefix="/setup", tags=["Setup & Readiness"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
+api_router.include_router(visitor_logs.router, prefix="/visitor-logs", tags=["Visitor Logs"])
 api_router.include_router(errors.router, tags=["Error Logging"])

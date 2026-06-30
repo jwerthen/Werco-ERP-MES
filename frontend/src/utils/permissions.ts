@@ -68,7 +68,8 @@ export type Permission =
   // Admin
   | 'admin:settings'
   | 'admin:audit_logs'
-  | 'admin:system';
+  | 'admin:system'
+  | 'visitor_logs:view';
 
 /**
  * Permission matrix defining which roles have which permissions.
@@ -97,6 +98,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'users:view', 'users:create', 'users:edit', 'users:delete', 'users:roles',
     'analytics:view', 'analytics:export',
     'admin:settings', 'admin:audit_logs', 'admin:system',
+    'visitor_logs:view',
   ],
   admin: [
     // Admin has ALL permissions
@@ -112,6 +114,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'users:view', 'users:create', 'users:edit', 'users:delete', 'users:roles',
     'analytics:view', 'analytics:export',
     'admin:settings', 'admin:audit_logs', 'admin:system',
+    'visitor_logs:view',
   ],
   
   manager: [
@@ -127,6 +130,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'users:view', 'users:create', 'users:edit',
     'analytics:view', 'analytics:export',
     'admin:audit_logs',
+    'visitor_logs:view',
   ],
   
   supervisor: [
@@ -141,6 +145,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'quality:view', 'quality:inspect',
     'users:view',
     'analytics:view',
+    'visitor_logs:view',
   ],
   
   operator: [
